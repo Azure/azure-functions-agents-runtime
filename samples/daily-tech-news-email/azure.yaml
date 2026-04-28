@@ -1,0 +1,6 @@
+name: daily-tech-news-email
+services:
+  api:
+    project: ./src
+    language: python
+    host: function

@@ -1,0 +1,6 @@
+name: daily-azure-report
+services:
+  api:
+    project: ./src
+    language: python
+    host: function

@@ -1,0 +1,1504 @@
+<!doctype html>
+<html lang="en">
+<head>
+	<meta charset="UTF-8" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+	<title>Copilot Chat</title>
+	<style>
+		:root {
+			--bg: #f5f7fb;
+			--panel: #ffffff;
+			--border: #d8dce8;
+			--text: #111827;
+			--muted: #6b7280;
+			--you: #2563eb;
+			--copilot: #e8eefc;
+			--danger: #b91c1c;
+		}
+
+		* { box-sizing: border-box; }
+
+		body {
+			margin: 0;
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+			color: var(--text);
+			background: var(--bg);
+			min-height: 100vh;
+			display: flex;
+			justify-content: center;
+			padding: 16px;
+		}
+
+		.app {
+			width: min(900px, 100%);
+			height: calc(100vh - 32px);
+			background: var(--panel);
+			border: 1px solid var(--border);
+			border-radius: 14px;
+			display: flex;
+			flex-direction: column;
+			overflow: hidden;
+		}
+
+		.topbar {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding: 10px 14px;
+			border-bottom: 1px solid var(--border);
+			background: #fff;
+		}
+
+		.topbar-title {
+			font-size: 14px;
+			font-weight: 600;
+		}
+
+		.topbar-actions {
+			display: flex;
+			gap: 8px;
+		}
+
+		button {
+			border: 1px solid var(--border);
+			background: white;
+			color: var(--text);
+			border-radius: 8px;
+			padding: 8px 10px;
+			cursor: pointer;
+			font-size: 13px;
+		}
+
+		button:hover { background: #f9fafb; }
+		button:disabled { opacity: 0.6; cursor: not-allowed; }
+
+		.gear-btn {
+			width: 36px;
+			height: 36px;
+			display: grid;
+			place-items: center;
+			padding: 0;
+			font-size: 16px;
+		}
+
+		.chat {
+			flex: 1;
+			overflow: auto;
+			padding: 14px;
+			display: flex;
+			flex-direction: column;
+			gap: 10px;
+			background: linear-gradient(180deg, #ffffff, #f8faff 70%);
+		}
+
+		.bubble-wrap {
+			display: flex;
+			width: 100%;
+		}
+
+		.bubble-wrap.you { justify-content: flex-end; }
+		.bubble-wrap.copilot { justify-content: flex-start; }
+
+		.bubble {
+			max-width: min(75ch, 85%);
+			padding: 10px 12px;
+			border-radius: 12px;
+			line-height: 1.4;
+			font-size: 14px;
+			white-space: pre-wrap;
+			word-break: break-word;
+			border: 1px solid var(--border);
+			box-shadow: 0 1px 1px rgba(15, 23, 42, 0.03);
+		}
+
+		.bubble p {
+			margin: 0;
+		}
+
+		.bubble p + p,
+		.bubble p + ul,
+		.bubble p + ol,
+		.bubble ul + p,
+		.bubble ol + p,
+		.bubble ul + ul,
+		.bubble ol + ol,
+		.bubble pre + p,
+		.bubble p + pre,
+		.bubble pre + ul,
+		.bubble pre + ol {
+			margin-top: 8px;
+		}
+
+		.bubble ul,
+		.bubble ol {
+			margin: 0;
+			padding-left: 22px;
+		}
+
+		.bubble li + li {
+			margin-top: 4px;
+		}
+
+		.bubble-intermediates {
+			display: none;
+			margin-top: 8px;
+			padding-top: 8px;
+			border-top: 1px dashed var(--border);
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.bubble-intermediates.open {
+			display: block;
+		}
+
+		.bubble-intermediates-title {
+			font-weight: 600;
+			margin-bottom: 4px;
+		}
+
+		.bubble-intermediates-text {
+			white-space: pre-wrap;
+			word-break: break-word;
+		}
+
+		.bubble a {
+			color: inherit;
+			text-decoration: underline;
+		}
+
+		.bubble .md-inline-code {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+			font-size: 0.92em;
+			padding: 1px 5px;
+			border-radius: 6px;
+			background: rgba(15, 23, 42, 0.1);
+		}
+
+		.bubble .md-pre {
+			margin: 0;
+			padding: 9px 10px;
+			border-radius: 10px;
+			border: 1px solid var(--border);
+			background: #f8fafc;
+			overflow-x: auto;
+		}
+
+		.bubble .md-pre code {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+			font-size: 12px;
+			line-height: 1.45;
+		}
+
+		.bubble .md-table-wrap {
+			overflow-x: auto;
+		}
+
+		.bubble .md-table {
+			width: 100%;
+			border-collapse: collapse;
+			font-size: 13px;
+		}
+
+		.bubble .md-table th,
+		.bubble .md-table td {
+			border: 1px solid var(--border);
+			padding: 6px 8px;
+			text-align: left;
+			vertical-align: top;
+		}
+
+		.bubble .md-table thead th {
+			background: #f8fafc;
+			font-weight: 600;
+		}
+
+		.bubble.you {
+			background: var(--you);
+			color: #fff;
+			border-color: #1d4ed8;
+			border-bottom-right-radius: 4px;
+		}
+
+		.bubble.copilot {
+			background: var(--copilot);
+			border-bottom-left-radius: 4px;
+		}
+
+		.bubble.copilot.has-details {
+			cursor: pointer;
+		}
+
+		.bubble.copilot.has-details:hover {
+			background: #dce7ff;
+		}
+
+		.meta {
+			margin-top: 4px;
+			font-size: 11px;
+			color: var(--muted);
+		}
+
+		.bubble.you .meta {
+			color: rgba(255, 255, 255, 0.92);
+		}
+
+		.composer {
+			border-top: 1px solid var(--border);
+			background: #fff;
+			padding: 10px;
+			display: grid;
+			grid-template-columns: 1fr auto;
+			gap: 8px;
+		}
+
+		textarea {
+			width: 100%;
+			min-height: 42px;
+			max-height: 160px;
+			resize: vertical;
+			border: 1px solid var(--border);
+			border-radius: 10px;
+			padding: 10px;
+			font-size: 14px;
+			font-family: inherit;
+			outline: none;
+		}
+
+		textarea:focus { border-color: #93c5fd; }
+
+		.send-btn {
+			min-width: 88px;
+			background: #111827;
+			color: white;
+			border-color: #111827;
+		}
+
+		.send-btn:hover { background: #1f2937; }
+
+		.status {
+			padding: 0 12px 10px 12px;
+			font-size: 12px;
+			color: var(--muted);
+			min-height: 20px;
+		}
+
+		.status.error { color: var(--danger); }
+
+		.typing {
+			display: inline-flex;
+			gap: 4px;
+			align-items: center;
+		}
+
+		.typing-dot {
+			width: 6px;
+			height: 6px;
+			border-radius: 50%;
+			background: #64748b;
+			animation: pulse 1.2s infinite;
+		}
+
+		.typing-dot:nth-child(2) { animation-delay: 0.2s; }
+		.typing-dot:nth-child(3) { animation-delay: 0.4s; }
+
+		@keyframes pulse {
+			0%, 80%, 100% { transform: translateY(0); opacity: 0.35; }
+			40% { transform: translateY(-2px); opacity: 1; }
+		}
+
+		.settings-backdrop {
+			position: fixed;
+			inset: 0;
+			background: rgba(17, 24, 39, 0.45);
+			display: none;
+			align-items: center;
+			justify-content: center;
+			padding: 16px;
+			z-index: 10;
+		}
+
+		.settings-backdrop.open { display: flex; }
+
+		.settings-modal {
+			width: min(500px, 100%);
+			background: #fff;
+			border-radius: 14px;
+			border: 1px solid var(--border);
+			padding: 14px;
+		}
+
+		.settings-modal h2 {
+			margin: 0 0 8px;
+			font-size: 16px;
+		}
+
+		.settings-help {
+			margin: 0 0 12px;
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.field {
+			display: grid;
+			gap: 6px;
+			margin-bottom: 10px;
+		}
+
+		label { font-size: 12px; color: var(--muted); }
+
+		input {
+			width: 100%;
+			border: 1px solid var(--border);
+			border-radius: 10px;
+			padding: 9px 10px;
+			font-size: 14px;
+			outline: none;
+		}
+
+		input:focus { border-color: #93c5fd; }
+
+		.settings-actions {
+			display: flex;
+			justify-content: flex-end;
+			gap: 8px;
+			margin-top: 4px;
+		}
+
+		.details-backdrop {
+			position: fixed;
+			inset: 0;
+			background: rgba(17, 24, 39, 0.45);
+			display: none;
+			align-items: center;
+			justify-content: center;
+			padding: 16px;
+			z-index: 11;
+		}
+
+		.details-backdrop.open { display: flex; }
+
+		.details-modal {
+			width: min(900px, 100%);
+			max-height: 85vh;
+			background: #fff;
+			border-radius: 14px;
+			border: 1px solid var(--border);
+			display: flex;
+			flex-direction: column;
+			overflow: hidden;
+		}
+
+		.details-header {
+			display: flex;
+			align-items: center;
+			justify-content: space-between;
+			padding: 12px 14px;
+			border-bottom: 1px solid var(--border);
+		}
+
+		.details-title {
+			margin: 0;
+			font-size: 15px;
+		}
+
+		.details-content {
+			overflow: auto;
+			padding: 12px 14px;
+			display: grid;
+			gap: 14px;
+		}
+
+		.details-section h3 {
+			margin: 0 0 8px;
+			font-size: 14px;
+		}
+
+		.details-item {
+			border: 1px solid var(--border);
+			border-radius: 10px;
+			padding: 9px 10px;
+			background: #f8fafc;
+			font-size: 13px;
+			line-height: 1.45;
+			white-space: pre-wrap;
+			word-break: break-word;
+		}
+
+		.details-item + .details-item { margin-top: 8px; }
+
+		.details-item-title {
+			font-size: 12px;
+			color: var(--muted);
+			margin-bottom: 6px;
+		}
+
+		.details-pre {
+			margin: 0;
+			font-size: 12px;
+			line-height: 1.35;
+			white-space: pre-wrap;
+			word-break: break-word;
+		}
+
+		.details-empty {
+			font-size: 12px;
+			color: var(--muted);
+		}
+	</style>
+</head>
+<body>
+	<main class="app">
+		<header class="topbar">
+			<div class="topbar-title">Copilot Chat</div>
+			<div class="topbar-actions">
+				<button id="newSessionBtn" type="button">New session</button>
+				<button id="settingsBtn" class="gear-btn" type="button" aria-label="Settings">⚙️</button>
+			</div>
+		</header>
+
+		<section id="chat" class="chat" aria-live="polite"></section>
+
+		<form id="composer" class="composer">
+			<textarea id="promptInput" placeholder="Type your message..." required></textarea>
+			<button id="sendBtn" class="send-btn" type="submit">Send</button>
+		</form>
+
+		<div id="status" class="status"></div>
+	</main>
+
+	<div id="settingsBackdrop" class="settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
+		<section class="settings-modal">
+			<h2 id="settingsTitle">Connection settings</h2>
+			<p class="settings-help">These are saved locally in your browser and can be edited any time from the gear icon.</p>
+			<div class="field">
+				<label for="baseUrlInput">Base URL</label>
+				<input id="baseUrlInput" type="url" placeholder="https://your-function-app.azurewebsites.net" />
+			</div>
+			<div class="field">
+				<label for="keyInput">Function key</label>
+				<input id="keyInput" type="password" placeholder="Enter your key (optional on localhost)" />
+			</div>
+			<div class="settings-actions">
+				<button id="cancelSettingsBtn" type="button">Cancel</button>
+				<button id="saveSettingsBtn" type="button">Save</button>
+			</div>
+		</section>
+	</div>
+
+	<div id="detailsBackdrop" class="details-backdrop" role="dialog" aria-modal="true" aria-labelledby="detailsTitle">
+		<section class="details-modal">
+			<header class="details-header">
+				<h2 id="detailsTitle" class="details-title">Copilot details</h2>
+				<button id="closeDetailsBtn" type="button">Close</button>
+			</header>
+			<div id="detailsContent" class="details-content"></div>
+		</section>
+	</div>
+
+	<script>
+		const STORAGE_KEYS = {
+			baseUrl: "chat.baseUrl",
+			key: "chat.key"
+		};
+
+		const chatEl = document.getElementById("chat");
+		const composerEl = document.getElementById("composer");
+		const promptInputEl = document.getElementById("promptInput");
+		const sendBtnEl = document.getElementById("sendBtn");
+		const statusEl = document.getElementById("status");
+		const newSessionBtnEl = document.getElementById("newSessionBtn");
+		const settingsBtnEl = document.getElementById("settingsBtn");
+
+		const settingsBackdropEl = document.getElementById("settingsBackdrop");
+		const baseUrlInputEl = document.getElementById("baseUrlInput");
+		const keyInputEl = document.getElementById("keyInput");
+		const saveSettingsBtnEl = document.getElementById("saveSettingsBtn");
+		const cancelSettingsBtnEl = document.getElementById("cancelSettingsBtn");
+		const detailsBackdropEl = document.getElementById("detailsBackdrop");
+		const detailsContentEl = document.getElementById("detailsContent");
+		const closeDetailsBtnEl = document.getElementById("closeDetailsBtn");
+		let currentDetailsSource = null;
+
+		const defaultBaseUrl = `${location.protocol}//${location.host}`;
+
+		const state = {
+			baseUrl: "",
+			key: "",
+			sessionId: null,
+			loading: false,
+			loadingTimer: null,
+			loadingSeconds: 0
+		};
+
+		function escapeHtml(value) {
+			return value
+				.replaceAll("&", "&amp;")
+				.replaceAll("<", "&lt;")
+				.replaceAll(">", "&gt;")
+				.replaceAll('"', "&quot;")
+				.replaceAll("'", "&#039;");
+		}
+
+		function renderInlineMarkdown(text) {
+			let content = text;
+			content = content.replace(/`([^`]+)`/g, '<code class="md-inline-code">$1</code>');
+			content = content.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+			content = content.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+			content = content.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+			return content;
+		}
+
+		function renderMarkdownBasic(markdown) {
+			const safeMarkdown = escapeHtml(String(markdown || "")).replace(/\r\n?/g, "\n");
+			const codeBlocks = [];
+
+			const withPlaceholders = safeMarkdown.replace(/```[^\n]*\n?([\s\S]*?)```/g, (_match, code) => {
+				const token = `@@CODEBLOCK_${codeBlocks.length}@@`;
+				codeBlocks.push(`<pre class="md-pre"><code>${code.trimEnd()}</code></pre>`);
+				return token;
+			});
+
+			const lines = withPlaceholders.split("\n");
+			const html = [];
+			let inUnorderedList = false;
+			let inOrderedList = false;
+
+			const splitTableRow = (line) => {
+				const normalized = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+				if (!normalized.includes("|")) return null;
+				return normalized.split("|").map((cell) => cell.trim());
+			};
+
+			const isTableSeparator = (line) => {
+				const cells = splitTableRow(line);
+				if (!cells || cells.length < 2) return false;
+				return cells.every((cell) => /^:?-{3,}:?$/.test(cell));
+			};
+
+			const renderTable = (headerCells, bodyRows) => {
+				const thead = `<thead><tr>${headerCells.map((cell) => `<th>${renderInlineMarkdown(cell)}</th>`).join("")}</tr></thead>`;
+				const tbodyRows = bodyRows
+					.map((row) => `<tr>${row.map((cell) => `<td>${renderInlineMarkdown(cell)}</td>`).join("")}</tr>`)
+					.join("");
+				return `<div class="md-table-wrap"><table class="md-table">${thead}<tbody>${tbodyRows}</tbody></table></div>`;
+			};
+
+			const closeLists = () => {
+				if (inUnorderedList) {
+					html.push("</ul>");
+					inUnorderedList = false;
+				}
+				if (inOrderedList) {
+					html.push("</ol>");
+					inOrderedList = false;
+				}
+			};
+
+			for (let i = 0; i < lines.length; i += 1) {
+				const rawLine = lines[i];
+				const line = rawLine.trim();
+
+				if (!line) {
+					closeLists();
+					continue;
+				}
+
+				if (/^@@CODEBLOCK_\d+@@$/.test(line)) {
+					closeLists();
+					html.push(line);
+					continue;
+				}
+
+				const headingMatch = line.match(/^(#{1,6})\s+(.+)$/);
+				if (headingMatch) {
+					closeLists();
+					const level = headingMatch[1].length;
+					html.push(`<h${level}>${renderInlineMarkdown(headingMatch[2])}</h${level}>`);
+					continue;
+				}
+
+				const nextLine = (lines[i + 1] || "").trim();
+				const headerCells = splitTableRow(line);
+				if (headerCells && isTableSeparator(nextLine) && headerCells.length >= 2) {
+					closeLists();
+					const bodyRows = [];
+					i += 2;
+					for (; i < lines.length; i += 1) {
+						const rowLine = lines[i].trim();
+						if (!rowLine) {
+							break;
+						}
+						const rowCells = splitTableRow(rowLine);
+						if (!rowCells) {
+							i -= 1;
+							break;
+						}
+						bodyRows.push(rowCells);
+					}
+
+					html.push(renderTable(headerCells, bodyRows));
+					continue;
+				}
+
+				const unorderedMatch = line.match(/^[-*]\s+(.+)$/);
+				if (unorderedMatch) {
+					if (inOrderedList) {
+						html.push("</ol>");
+						inOrderedList = false;
+					}
+					if (!inUnorderedList) {
+						html.push("<ul>");
+						inUnorderedList = true;
+					}
+					html.push(`<li>${renderInlineMarkdown(unorderedMatch[1])}</li>`);
+					continue;
+				}
+
+				const orderedMatch = line.match(/^\d+\.\s+(.+)$/);
+				if (orderedMatch) {
+					if (inUnorderedList) {
+						html.push("</ul>");
+						inUnorderedList = false;
+					}
+					if (!inOrderedList) {
+						html.push("<ol>");
+						inOrderedList = true;
+					}
+					html.push(`<li>${renderInlineMarkdown(orderedMatch[1])}</li>`);
+					continue;
+				}
+
+				closeLists();
+				html.push(`<p>${renderInlineMarkdown(line)}</p>`);
+			}
+
+			closeLists();
+
+			const rendered = html.join("").replace(/@@CODEBLOCK_(\d+)@@/g, (_match, index) => {
+				return codeBlocks[Number(index)] || "";
+			});
+
+			return rendered || "<p></p>";
+		}
+
+		function setStatus(message = "", isError = false) {
+			statusEl.textContent = message;
+			statusEl.classList.toggle("error", Boolean(isError));
+		}
+
+		function scrollChatToBottom() {
+			chatEl.scrollTop = chatEl.scrollHeight;
+		}
+
+		function scrollToBubbleTop(bubbleWrapEl) {
+			if (!bubbleWrapEl) return;
+			const topOffset = bubbleWrapEl.offsetTop - chatEl.offsetTop;
+			chatEl.scrollTop = Math.max(0, topOffset - 8);
+		}
+
+		function renderDetailsSection(title) {
+			const section = document.createElement("section");
+			section.className = "details-section";
+			const heading = document.createElement("h3");
+			heading.textContent = title;
+			section.appendChild(heading);
+			return section;
+		}
+
+		function toPrettyJson(value) {
+			try {
+				return JSON.stringify(value ?? {}, null, 2);
+			} catch {
+				return String(value);
+			}
+		}
+
+		function normalizeIntermediateResponses(values) {
+			const input = Array.isArray(values) ? values : [];
+			const seen = new Set();
+			const result = [];
+
+			for (const value of input) {
+				if (typeof value !== "string") continue;
+				const text = value.trim();
+				if (!text) continue;
+				if (seen.has(text)) continue;
+				seen.add(text);
+				result.push(text);
+			}
+
+			return result;
+		}
+
+		function getToolCallKey(toolCall) {
+			if (toolCall?.event_id) return `event:${toolCall.event_id}`;
+			const argsKey = toPrettyJson(toolCall?.arguments || {});
+			return [
+				toolCall?.tool_call_id || "",
+				toolCall?.parent_tool_call_id || "",
+				toolCall?.tool_name || "",
+				toolCall?.timestamp || "",
+				argsKey
+			].join("|");
+		}
+
+		function normalizeToolCalls(values) {
+			const input = Array.isArray(values) ? values : [];
+			const seen = new Set();
+			const result = [];
+
+			for (const item of input) {
+				const key = getToolCallKey(item);
+				if (seen.has(key)) continue;
+				seen.add(key);
+				result.push(item);
+			}
+
+			return result;
+		}
+
+		function normalizeDetails(details) {
+			return {
+				responseIntermediate: normalizeIntermediateResponses(details?.responseIntermediate),
+				toolCalls: normalizeToolCalls(details?.toolCalls)
+			};
+		}
+
+		function hasDetails(details) {
+			if (!details) return false;
+			const normalized = normalizeDetails(details);
+			const intermediates = normalized.responseIntermediate;
+			const toolCalls = normalized.toolCalls;
+			return intermediates.length > 0 || toolCalls.length > 0;
+		}
+
+		function showDetails(details) {
+			currentDetailsSource = details;
+			detailsContentEl.innerHTML = "";
+			const normalized = normalizeDetails(details);
+
+			const intermediates = normalized.responseIntermediate;
+			const toolCalls = normalized.toolCalls;
+
+			const intermediatesSection = renderDetailsSection("Reasoning");
+			if (intermediates.length === 0) {
+				const empty = document.createElement("div");
+				empty.className = "details-empty";
+				empty.textContent = "No reasoning trace in this message.";
+				intermediatesSection.appendChild(empty);
+			} else {
+				const item = document.createElement("div");
+				item.className = "details-item";
+				const content = document.createElement("div");
+				content.style.whiteSpace = "pre-wrap";
+				content.textContent = intermediates.join("");
+				item.appendChild(content);
+				intermediatesSection.appendChild(item);
+			}
+
+			const toolsSection = renderDetailsSection("Tool calls");
+			if (toolCalls.length === 0) {
+				const empty = document.createElement("div");
+				empty.className = "details-empty";
+				empty.textContent = "No tool calls in this message.";
+				toolsSection.appendChild(empty);
+			} else {
+				toolCalls.forEach((toolCall, index) => {
+					const item = document.createElement("div");
+					item.className = "details-item";
+
+					const ts = toolCall?.timestamp ? ` • ${toolCall.timestamp}` : "";
+					const title = document.createElement("div");
+					title.className = "details-item-title";
+					title.textContent = `${index + 1}. ${toolCall?.tool_name || "(unknown tool)"}${ts}`;
+
+					const pre = document.createElement("pre");
+					pre.className = "details-pre";
+					pre.textContent = toPrettyJson({
+						tool_call_id: toolCall?.tool_call_id || null,
+						parent_tool_call_id: toolCall?.parent_tool_call_id || null,
+						arguments: toolCall?.arguments || {}
+					});
+
+					item.appendChild(title);
+					item.appendChild(pre);
+					toolsSection.appendChild(item);
+				});
+			}
+
+			detailsContentEl.appendChild(intermediatesSection);
+			detailsContentEl.appendChild(toolsSection);
+			detailsBackdropEl.classList.add("open");
+		}
+
+		function hideDetails() {
+			currentDetailsSource = null;
+			detailsBackdropEl.classList.remove("open");
+		}
+
+		function refreshOpenDetails(details) {
+			if (!detailsBackdropEl.classList.contains("open")) return;
+			if (currentDetailsSource !== details) return;
+			showDetails(details);
+		}
+
+		function renderBubbleContent(role, text) {
+			return role === "copilot" ? renderMarkdownBasic(text) : escapeHtml(text);
+		}
+
+		function setBubbleText(bubble, role, text) {
+			const contentEl = bubble.querySelector(".bubble-content");
+			if (!contentEl) return;
+			contentEl.innerHTML = renderBubbleContent(role, text);
+		}
+
+		function setBubbleMeta(bubble, meta = "") {
+			let metaEl = bubble.querySelector(".meta");
+			if (!meta) {
+				if (metaEl) metaEl.remove();
+				return;
+			}
+
+			if (!metaEl) {
+				metaEl = document.createElement("div");
+				metaEl.className = "meta";
+				bubble.appendChild(metaEl);
+			}
+			metaEl.textContent = meta;
+		}
+
+		function setBubbleIntermediates(bubble, responses = []) {
+			const intermediatesEl = bubble.querySelector(".bubble-intermediates");
+			if (!intermediatesEl) return;
+
+			const items = Array.isArray(responses)
+				? responses.filter((item) => typeof item === "string" && item.length > 0)
+				: [];
+
+			if (items.length === 0) {
+				intermediatesEl.classList.remove("open");
+				intermediatesEl.innerHTML = "";
+				return;
+			}
+
+			intermediatesEl.classList.add("open");
+			intermediatesEl.innerHTML = "";
+
+			const title = document.createElement("div");
+			title.className = "bubble-intermediates-title";
+			title.textContent = "Reasoning";
+			intermediatesEl.appendChild(title);
+
+			const text = document.createElement("div");
+			text.className = "bubble-intermediates-text";
+			text.textContent = items.join("");
+			intermediatesEl.appendChild(text);
+		}
+
+		function attachBubbleDetails(bubble, details) {
+			bubble.classList.remove("has-details");
+			bubble.title = "";
+			bubble.onclick = null;
+
+			if (!hasDetails(details)) {
+				return;
+			}
+
+			bubble.classList.add("has-details");
+			bubble.title = "Click to view tool calls and intermediate responses";
+			bubble.onclick = (event) => {
+				if (event.target instanceof Element && event.target.closest("a")) {
+					return;
+				}
+				showDetails(details);
+			};
+		}
+
+		function renderBubble(role, text, meta = "", details = null) {
+			const wrap = document.createElement("div");
+			wrap.className = `bubble-wrap ${role}`;
+
+			const bubble = document.createElement("div");
+			bubble.className = `bubble ${role}`;
+
+			const contentEl = document.createElement("div");
+			contentEl.className = "bubble-content";
+			contentEl.innerHTML = renderBubbleContent(role, text);
+			bubble.appendChild(contentEl);
+
+			const intermediatesEl = document.createElement("div");
+			intermediatesEl.className = "bubble-intermediates";
+			bubble.appendChild(intermediatesEl);
+
+			setBubbleMeta(bubble, meta);
+			if (role === "copilot") {
+				attachBubbleDetails(bubble, details);
+			}
+
+			wrap.appendChild(bubble);
+			chatEl.appendChild(wrap);
+			scrollToBubbleTop(wrap);
+			return { wrap, bubble, contentEl, intermediatesEl };
+		}
+
+		function renderWaitingBubble() {
+			const wrap = document.createElement("div");
+			wrap.className = "bubble-wrap copilot";
+			wrap.id = "waitingBubble";
+
+			const bubble = document.createElement("div");
+			bubble.className = "bubble copilot";
+			bubble.innerHTML = `
+				<span class="typing" aria-label="Waiting for response">
+					<span class="typing-dot"></span>
+					<span class="typing-dot"></span>
+					<span class="typing-dot"></span>
+				</span>
+			`;
+
+			wrap.appendChild(bubble);
+			chatEl.appendChild(wrap);
+			scrollChatToBottom();
+		}
+
+		function clearWaitingBubble() {
+			document.getElementById("waitingBubble")?.remove();
+		}
+
+		function setLoading(loading, options = {}) {
+			const showWaitingBubble = options.showWaitingBubble !== false;
+			state.loading = loading;
+			sendBtnEl.disabled = loading;
+			promptInputEl.disabled = loading;
+
+			if (loading) {
+				if (showWaitingBubble) {
+					renderWaitingBubble();
+				}
+				state.loadingSeconds = 0;
+				setStatus("Waiting for Copilot...");
+				state.loadingTimer = window.setInterval(() => {
+					state.loadingSeconds += 1;
+					setStatus(`Waiting for Copilot... ${state.loadingSeconds}s`);
+				}, 1000);
+			} else {
+				clearWaitingBubble();
+				if (state.loadingTimer) {
+					clearInterval(state.loadingTimer);
+					state.loadingTimer = null;
+				}
+			}
+		}
+
+		function showSettings(force = false) {
+			baseUrlInputEl.value = state.baseUrl || defaultBaseUrl;
+			keyInputEl.value = state.key || "";
+			cancelSettingsBtnEl.style.display = force ? "none" : "inline-block";
+			settingsBackdropEl.classList.add("open");
+			baseUrlInputEl.focus();
+		}
+
+		function hideSettings() {
+			settingsBackdropEl.classList.remove("open");
+		}
+
+		function loadSettings() {
+			state.baseUrl = (localStorage.getItem(STORAGE_KEYS.baseUrl) || "").trim();
+			state.key = (localStorage.getItem(STORAGE_KEYS.key) || "").trim();
+		}
+
+		function loadSettingsFromHash() {
+			const rawHash = window.location.hash ? window.location.hash.slice(1) : "";
+			if (!rawHash) {
+				return false;
+			}
+
+			const params = new URLSearchParams(rawHash);
+			const hashBaseUrl = (params.get("baseUrl") || "").trim().replace(/\/+$/, "");
+			const hashKey = (params.get("key") || "").trim();
+
+			if (!hashBaseUrl && !hashKey) {
+				return false;
+			}
+
+			if (hashBaseUrl) {
+				state.baseUrl = hashBaseUrl;
+				localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
+			}
+
+			if (hashKey) {
+				state.key = hashKey;
+				localStorage.setItem(STORAGE_KEYS.key, state.key);
+			}
+
+			history.replaceState(null, "", `${location.pathname}${location.search}`);
+			return true;
+		}
+
+		function isLocalBaseUrl(baseUrl) {
+			if (!baseUrl) return false;
+			try {
+				const parsed = new URL(baseUrl);
+				const hostname = (parsed.hostname || "").toLowerCase();
+				if (!hostname) return false;
+				return (
+					hostname === "localhost" ||
+					hostname === "127.0.0.1" ||
+					hostname === "::1" ||
+					hostname.endsWith(".localhost")
+				);
+			} catch {
+				return false;
+			}
+		}
+
+		function requiresFunctionKey(baseUrl) {
+			return !isLocalBaseUrl(baseUrl);
+		}
+
+		function saveSettings() {
+			state.baseUrl = baseUrlInputEl.value.trim().replace(/\/+$/, "");
+			state.key = keyInputEl.value.trim();
+
+			if (!state.baseUrl) {
+				setStatus("Base URL is required.", true);
+				baseUrlInputEl.focus();
+				return false;
+			}
+
+			if (requiresFunctionKey(state.baseUrl) && !state.key) {
+				setStatus("Key is required for non-localhost URLs.", true);
+				keyInputEl.focus();
+				return false;
+			}
+
+			localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
+			localStorage.setItem(STORAGE_KEYS.key, state.key);
+			setStatus("Settings saved.");
+			hideSettings();
+			promptInputEl.focus();
+			return true;
+		}
+
+		function getMessageFromBody(body) {
+			if (!body) return "(No response body)";
+			if (typeof body === "string") return body;
+
+			const candidates = [
+				body.response,
+				body.answer,
+				body.message,
+				body.text,
+				body.output,
+				body.content,
+				body.result,
+				body?.data?.response,
+				body?.data?.message,
+				body?.choices?.[0]?.message?.content
+			];
+
+			for (const value of candidates) {
+				if (typeof value === "string" && value.trim()) {
+					return value;
+				}
+			}
+
+			return JSON.stringify(body, null, 2);
+		}
+
+		function getSessionId(response, body) {
+			return (
+				response.headers.get("x-ms-session-id") ||
+				body?.session_id ||
+				body?.sessionId ||
+				body?.session?.id ||
+				null
+			);
+		}
+
+		async function sendMessage(prompt, callbacks = {}) {
+			const authQuery = state.key ? `?code=${encodeURIComponent(state.key)}` : "";
+			const endpoint = `${state.baseUrl}/agent/chatstream${authQuery}`;
+			const headers = {
+				"Content-Type": "application/json",
+				"Accept": "text/event-stream"
+			};
+
+			if (state.sessionId) {
+				headers["x-ms-session-id"] = state.sessionId;
+			}
+
+			const response = await fetch(endpoint, {
+				method: "POST",
+				headers,
+				body: JSON.stringify({ prompt })
+			});
+
+			if (!response.ok) {
+				const raw = await response.text();
+				let body;
+				try {
+					body = raw ? JSON.parse(raw) : null;
+				} catch {
+					body = raw;
+				}
+				const message = getMessageFromBody(body);
+				throw new Error(`HTTP ${response.status}: ${message}`);
+			}
+
+			if (!response.body) {
+				throw new Error("Streaming response body is empty.");
+			}
+
+			const reader = response.body.getReader();
+			const decoder = new TextDecoder();
+			let buffer = "";
+			let streamText = "";
+			let finalMessage = "";
+			let doneReceived = false;
+			const intermediateResponses = [];
+			const toolCalls = [];
+			const seenToolStartKeys = new Set();
+			let pendingIntermediateLineBreak = false;
+			let lastStreamEventKey = null;
+
+			const getStreamEventKey = (event) => {
+				const type = event?.type || "";
+				if (!type) return null;
+
+				if (event?.event_id) {
+					return `${type}|event:${event.event_id}`;
+				}
+
+				if (event?.tool_call_id) {
+					return `${type}|tool:${event.tool_call_id}`;
+				}
+
+				if (type === "delta" || type === "message" || type === "intermediate") {
+					return `${type}|content:${String(event?.content || "")}`;
+				}
+
+				if (type === "session") {
+					return `${type}|session:${String(event?.session_id || "")}`;
+				}
+
+				if (type === "done" || type === "error") {
+					return `${type}|${String(event?.content || "")}`;
+				}
+
+				return `${type}|${JSON.stringify(event)}`;
+			};
+
+			const handleEvent = (event) => {
+				const type = event?.type;
+
+				if (type === "session" && typeof event.session_id === "string" && event.session_id.trim()) {
+					state.sessionId = event.session_id;
+					return;
+				}
+
+				if (type === "delta" && typeof event.content === "string") {
+					streamText += event.content;
+					if (typeof callbacks.onDelta === "function") {
+						callbacks.onDelta(streamText);
+					}
+					return;
+				}
+
+				if (type === "message" && typeof event.content === "string") {
+					finalMessage = event.content;
+					if (!event.content) {
+						pendingIntermediateLineBreak = true;
+					}
+					return;
+				}
+
+				if (type === "intermediate" && typeof event.content === "string") {
+					const content = event.content;
+					if (content.length > 0) {
+						if (pendingIntermediateLineBreak && intermediateResponses.length > 0) {
+							intermediateResponses.push("\n");
+						}
+						pendingIntermediateLineBreak = false;
+						intermediateResponses.push(content);
+						if (typeof callbacks.onIntermediate === "function") {
+							callbacks.onIntermediate(intermediateResponses.length, intermediateResponses);
+						}
+						if (typeof callbacks.onDetailsUpdate === "function") {
+							callbacks.onDetailsUpdate({
+								responseIntermediate: intermediateResponses,
+								toolCalls
+							});
+						}
+					}
+					return;
+				}
+
+				if (type === "tool_start") {
+					const toolStartKey = [
+						event?.event_id || "",
+						event?.tool_call_id || "",
+						event?.tool_name || ""
+					].join("|");
+					if (seenToolStartKeys.has(toolStartKey)) {
+						return;
+					}
+					seenToolStartKeys.add(toolStartKey);
+
+					toolCalls.push({
+						event_id: event?.event_id || null,
+						tool_name: event?.tool_name || "(unknown tool)",
+						tool_call_id: event?.tool_call_id || null,
+						parent_tool_call_id: event?.parent_tool_call_id || null,
+						arguments: event?.arguments || {},
+						timestamp: event?.timestamp || new Date().toISOString()
+					});
+					if (typeof callbacks.onToolCount === "function") {
+						callbacks.onToolCount(toolCalls.length);
+					}
+					if (typeof callbacks.onDetailsUpdate === "function") {
+						callbacks.onDetailsUpdate({
+							responseIntermediate: intermediateResponses,
+							toolCalls
+						});
+					}
+					return;
+				}
+
+				if (type === "tool_end") {
+					const toolCallId = event?.tool_call_id || null;
+					if (toolCallId) {
+						const existing = toolCalls.find((item) => item?.tool_call_id === toolCallId);
+						if (existing) {
+							existing.result = event?.result ?? null;
+							existing.timestamp = event?.timestamp || existing.timestamp;
+						}
+					}
+					if (typeof callbacks.onDetailsUpdate === "function") {
+						callbacks.onDetailsUpdate({
+							responseIntermediate: intermediateResponses,
+							toolCalls
+						});
+					}
+					return;
+				}
+
+				if (type === "error") {
+					throw new Error(typeof event?.content === "string" && event.content.trim() ? event.content : "Streaming request failed.");
+				}
+
+				if (type === "done") {
+					doneReceived = true;
+				}
+			};
+
+			while (!doneReceived) {
+				const { value, done } = await reader.read();
+				if (done) break;
+
+				buffer += decoder.decode(value, { stream: true });
+				let boundary = buffer.indexOf("\n\n");
+				while (boundary !== -1) {
+					const block = buffer.slice(0, boundary);
+					buffer = buffer.slice(boundary + 2);
+
+					const lines = block.split("\n");
+					for (const line of lines) {
+						if (!line.startsWith("data:")) continue;
+						const payload = line.slice(5).trim();
+						if (!payload) continue;
+
+						let event;
+						try {
+							event = JSON.parse(payload);
+						} catch {
+							continue;
+						}
+
+						const eventKey = getStreamEventKey(event);
+						if (eventKey && eventKey === lastStreamEventKey) {
+							continue;
+						}
+						lastStreamEventKey = eventKey;
+
+						handleEvent(event);
+						if (doneReceived) break;
+					}
+
+					if (doneReceived) break;
+					boundary = buffer.indexOf("\n\n");
+				}
+			}
+
+			const finalTrimmed = typeof finalMessage === "string" ? finalMessage.trim() : "";
+			const filteredIntermediateResponses = intermediateResponses.filter((item) => {
+				if (typeof item !== "string") return false;
+				const value = item.trim();
+				if (!value) return false;
+				if (finalTrimmed && value === finalTrimmed) return false;
+				return true;
+			});
+
+			const details = normalizeDetails({
+				responseIntermediate: filteredIntermediateResponses,
+				toolCalls
+			});
+
+			return {
+				text: finalMessage || streamText || "(No response body)",
+				sessionId: state.sessionId,
+				details
+			};
+		}
+
+		composerEl.addEventListener("submit", async (event) => {
+			event.preventDefault();
+
+			if (!state.baseUrl || (requiresFunctionKey(state.baseUrl) && !state.key)) {
+				showSettings(true);
+				setStatus("Set your base URL and key before chatting.", true);
+				return;
+			}
+
+			const prompt = promptInputEl.value.trim();
+			if (!prompt || state.loading) return;
+
+			renderBubble("you", prompt, "You");
+			promptInputEl.value = "";
+			setLoading(true, { showWaitingBubble: false });
+			const streamingBubble = renderBubble("copilot", "", "Copilot • streaming...");
+			const liveDetails = {
+				responseIntermediate: [],
+				toolCalls: []
+			};
+
+			try {
+				let currentToolCount = 0;
+				let currentIntermediateCount = 0;
+				const updateStreamingMeta = () => {
+					const segments = ["Copilot", "streaming..."];
+					if (currentToolCount > 0) {
+						segments.push(`${currentToolCount} tool call${currentToolCount === 1 ? "" : "s"}`);
+					}
+					if (currentIntermediateCount > 0) {
+						segments.push(`${currentIntermediateCount} intermediate${currentIntermediateCount === 1 ? "" : "s"}`);
+					}
+					setBubbleMeta(streamingBubble.bubble, segments.join(" • "));
+				};
+
+				const result = await sendMessage(prompt, {
+					onDelta: (text) => {
+						setBubbleText(streamingBubble.bubble, "copilot", text);
+						scrollChatToBottom();
+					},
+					onToolCount: (count) => {
+						currentToolCount = count;
+						updateStreamingMeta();
+					},
+					onIntermediate: (count, responses) => {
+						currentIntermediateCount = count;
+						updateStreamingMeta();
+						setBubbleIntermediates(streamingBubble.bubble, responses);
+						scrollChatToBottom();
+					},
+					onDetailsUpdate: (detailsSnapshot) => {
+						const normalizedLive = normalizeDetails(detailsSnapshot);
+						liveDetails.responseIntermediate = normalizedLive.responseIntermediate;
+						liveDetails.toolCalls = normalizedLive.toolCalls;
+						attachBubbleDetails(streamingBubble.bubble, liveDetails);
+						refreshOpenDetails(liveDetails);
+					}
+				});
+				const copilotMeta = hasDetails(result.details)
+					? "Copilot • click bubble for details"
+					: "Copilot";
+				setBubbleText(streamingBubble.bubble, "copilot", result.text);
+				setBubbleIntermediates(streamingBubble.bubble, []);
+				setBubbleMeta(streamingBubble.bubble, copilotMeta);
+				liveDetails.responseIntermediate = result.details.responseIntermediate;
+				liveDetails.toolCalls = result.details.toolCalls;
+				attachBubbleDetails(streamingBubble.bubble, liveDetails);
+				refreshOpenDetails(liveDetails);
+				if (result.sessionId) {
+					setStatus(`Connected • Session ${result.sessionId}`);
+				} else {
+					setStatus("Connected");
+				}
+			} catch (error) {
+				setBubbleText(streamingBubble.bubble, "copilot", `Request failed. ${error.message}`);
+				setBubbleIntermediates(streamingBubble.bubble, []);
+				setBubbleMeta(streamingBubble.bubble, "Copilot");
+				attachBubbleDetails(streamingBubble.bubble, null);
+				setStatus(error.message, true);
+			} finally {
+				setLoading(false);
+				promptInputEl.focus();
+			}
+		});
+
+		promptInputEl.addEventListener("keydown", (event) => {
+			if (event.key === "Enter" && !event.shiftKey) {
+				event.preventDefault();
+				composerEl.requestSubmit();
+			}
+		});
+
+		newSessionBtnEl.addEventListener("click", () => {
+			state.sessionId = null;
+			chatEl.innerHTML = "";
+			hideDetails();
+			setStatus("Started a new session. Next message will not send a session id.");
+			promptInputEl.focus();
+		});
+
+		settingsBtnEl.addEventListener("click", () => {
+			showSettings(false);
+			setStatus("Editing connection settings.");
+		});
+
+		saveSettingsBtnEl.addEventListener("click", () => {
+			saveSettings();
+		});
+
+		cancelSettingsBtnEl.addEventListener("click", () => {
+			hideSettings();
+			setStatus("Settings unchanged.");
+		});
+
+		settingsBackdropEl.addEventListener("click", (event) => {
+			if (event.target === settingsBackdropEl && cancelSettingsBtnEl.style.display !== "none") {
+				hideSettings();
+			}
+		});
+
+		closeDetailsBtnEl.addEventListener("click", () => {
+			hideDetails();
+		});
+
+		detailsBackdropEl.addEventListener("click", (event) => {
+			if (event.target === detailsBackdropEl) {
+				hideDetails();
+			}
+		});
+
+		document.addEventListener("keydown", (event) => {
+			if (event.key === "Escape") {
+				hideDetails();
+			}
+		});
+
+		loadSettings();
+		loadSettingsFromHash();
+		if (!state.baseUrl || (requiresFunctionKey(state.baseUrl) && !state.key)) {
+			state.baseUrl = state.baseUrl || defaultBaseUrl;
+			showSettings(true);
+			setStatus("Enter your base URL and key to begin.");
+		} else {
+			setStatus("Ready.");
+			renderBubble("copilot", "Hi! Send a message to start chatting.", "Copilot");
+			promptInputEl.focus();
+		}
+	</script>
+</body>
+</html>

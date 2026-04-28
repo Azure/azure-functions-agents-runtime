@@ -1,0 +1,12 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "PYTHON_ENABLE_INIT_INDEXING": "1",
+    "GITHUB_TOKEN": "",
+    "ACA_SESSION_POOL_ENDPOINT": "",
+    "O365_CONNECTION_ID": "",
+    "TO_EMAIL": ""
+  }
+}
