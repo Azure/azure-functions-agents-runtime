@@ -3,7 +3,13 @@ import logging
 import os
 from typing import Any, Dict, Optional
 
-from copilot.session import MCPLocalServerConfig, MCPRemoteServerConfig, MCPServerConfig
+try:
+    from copilot.session import MCPLocalServerConfig, MCPRemoteServerConfig, MCPServerConfig
+except ImportError:
+    # github-copilot-sdk>=0.3 renamed MCP config types.
+    from copilot.session import MCPStdioServerConfig as MCPLocalServerConfig
+    from copilot.session import MCPHTTPServerConfig as MCPRemoteServerConfig
+    from copilot.session import MCPServerConfig
 
 from .config import get_app_root
 
