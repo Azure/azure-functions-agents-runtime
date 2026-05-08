@@ -3,8 +3,8 @@ requires = ["setuptools>=68.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "azure-functions-agents"
-version = "1.0.0"
+name = "azurefunctions-agents-runtime"
+version = "0.0.0dev3"
 description = "A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework."
 readme = "README.md"
 license = {text = "MIT"}
@@ -24,7 +24,7 @@ dependencies = [
 
 [project.optional-dependencies]
 connectors = [
-    "azure-functions-connectors @ https://github.com/anthonychu/azure-functions-connectors-python/releases/download/v0.1.0b2/azure_functions_connectors-0.1.0b2-py3-none-any.whl",
+    "azure-connectors",
 ]
 
 [tool.setuptools.packages.find]
