@@ -1,24 +1,77 @@
+"""Skill discovery — read project markdown files into a single instructions block.
+
+The runtime supports an optional ``skills/`` directory under the app root. Any
+markdown files inside (recursively) are loaded once at app startup, sorted by
+path, and concatenated. The combined text is intended to be appended to the
+agent's ``instructions`` so that every turn sees the same skill content
+without per-call file I/O.
+
+Skills are an opt-in convention — if no skills directory exists, this module
+returns an empty string and contributes nothing.
+"""
+
+from __future__ import annotations
+
 import logging
 import os
-from typing import Optional
+from pathlib import Path
+from typing import List, Optional
 
 from .config import get_app_root
 
 
-def resolve_session_directory_for_skills() -> Optional[str]:
-    """
-    Resolve the skills directory at {app_root}/skills.
-    """
-    app_root = str(get_app_root())
-    env_session_dir = os.environ.get("COPILOT_SESSION_DIRECTORY")
-    if env_session_dir:
-        resolved = os.path.expanduser(env_session_dir)
-        if os.path.isdir(resolved):
-            return resolved
-
+def _resolve_skills_dir() -> Optional[Path]:
+    """Find ``{app_root}/skills`` (or ``Skills``) if it exists."""
+    app_root = Path(get_app_root())
     for name in ("skills", "Skills"):
-        skill_path = os.path.join(app_root, name)
-        if os.path.isdir(skill_path):
-            return skill_path
-
+        candidate = app_root / name
+        if candidate.is_dir():
+            return candidate
     return None
+
+
+def _collect_skill_files(skills_dir: Path) -> List[Path]:
+    """Return a deterministic, sorted list of every ``*.md`` file under ``skills_dir``."""
+    files = [p for p in skills_dir.rglob("*.md") if p.is_file()]
+    files.sort(key=lambda p: str(p).lower())
+    return files
+
+
+def load_skills_text() -> str:
+    """Return the concatenated text of every skill markdown file, sorted by path.
+
+    Each file is preceded by a small header so the agent can see where the
+    content came from. If the skills directory does not exist, returns an
+    empty string.
+    """
+    skills_dir = _resolve_skills_dir()
+    if skills_dir is None:
+        return ""
+
+    files = _collect_skill_files(skills_dir)
+    if not files:
+        logging.info(f"No skill markdown files found in {skills_dir}")
+        return ""
+
+    parts: List[str] = []
+    for path in files:
+        try:
+            text = path.read_text(encoding="utf-8")
+        except Exception as exc:
+            logging.warning(f"Failed to read skill file {path}: {exc}")
+            continue
+        rel = path.relative_to(skills_dir)
+        parts.append(f"## skill: {rel.as_posix()}\n\n{text.rstrip()}")
+
+    logging.info(f"Loaded {len(files)} skill file(s) from {skills_dir}")
+    return "\n\n".join(parts)
+
+
+# Cached at module load — skills are static for the life of the process.
+_SKILLS_TEXT_CACHE: str = load_skills_text()
+
+
+def get_cached_skills_text() -> str:
+    """Return the cached skills text computed at app startup."""
+    return _SKILLS_TEXT_CACHE
+

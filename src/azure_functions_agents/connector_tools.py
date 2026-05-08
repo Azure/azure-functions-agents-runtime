@@ -5,7 +5,7 @@ import logging
 import re
 from urllib.parse import quote
 
-from copilot.tools import Tool, ToolInvocation, ToolResult
+from agent_framework import FunctionTool
 
 from .arm import ArmClient, DataPlaneClient
 from .connectors import ConnectionInfo, ParsedOperation, ParsedParameter
@@ -67,16 +67,21 @@ def generate_tools(
     arm: ArmClient, connection: ConnectionInfo,
     prefix: str | None = None,
     data_plane_client: DataPlaneClient | None = None,
-) -> list[Tool]:
-    """Generate Copilot SDK Tool objects for each operation in a connection.
+) -> list[FunctionTool]:
+    """Generate MAF :class:`FunctionTool` objects for each operation in a connection.
+
+    The tools' parameter schemas are built as raw OpenAPI-style dicts and passed
+    to :class:`FunctionTool` via ``input_model=``. MAF surfaces them to the LLM
+    using its standard function-calling envelope.
 
     Tool names are ``{effective_prefix}_{api_name}_{operation_id}`` where:
+
     - ``prefix`` from frontmatter overrides the default
     - Default prefix is the connection resource name (from ARM ID)
     - If effective_prefix == api_name, collapse to ``{api_name}_{operation_id}``
     - Truncated to 64 chars (prefix shrinks first to preserve operation clarity)
     """
-    tools = []
+    tools: list[FunctionTool] = []
     api_name = connection.api_name
 
     # Determine effective prefix
@@ -137,9 +142,7 @@ def generate_tools(
         description = " — ".join(desc_parts)
 
         def make_handler(op=op, connection=connection, all_params=all_params):
-            async def handler(invocation: ToolInvocation) -> ToolResult:
-                args = invocation.arguments or {}
-
+            async def handler(**args) -> str:
                 # V2 uses direct HTTP URLs (need encoding); V1 uses JSON path field (no encoding)
                 is_v2 = bool(data_plane_client and connection.connection_runtime_url)
                 invoke_path = _build_invoke_path(op, args, all_params, url_encode=is_v2)
@@ -157,7 +160,7 @@ def generate_tools(
                         if param.name not in queries:
                             queries[param.name] = param.default
 
-                body = {}
+                body: dict = {}
                 for param in op.body_properties:
                     key = _sanitize_name(param.name)
                     if key in args:
@@ -192,76 +195,114 @@ def generate_tools(
                             params=queries or None,
                             body=body or None,
                         )
-                        return ToolResult(
-                            text_result_for_llm=json.dumps(result, indent=2, default=str),
-                            result_type="success",
-                        )
-                    else:
-                        # V1: dynamicInvoke via ARM
-                        request_body: dict = {
-                            "request": {
-                                "method": op.method,
-                                "path": invoke_path,
-                            }
+                        return json.dumps(result, indent=2, default=str)
+
+                    # V1: dynamicInvoke via ARM
+                    request_body: dict = {
+                        "request": {
+                            "method": op.method,
+                            "path": invoke_path,
                         }
-                        if queries:
-                            request_body["request"]["queries"] = queries
-                        if body:
-                            request_body["request"]["body"] = body
+                    }
+                    if queries:
+                        request_body["request"]["queries"] = queries
+                    if body:
+                        request_body["request"]["body"] = body
 
-                        result = await arm.post(
-                            f"{connection.resource_id}/dynamicInvoke",
-                            body=request_body,
-                        )
-                        response = result.get("response", {})
-                        response_body = response.get("body", result)
-                        raw_status = response.get("statusCode", 200)
-                        try:
-                            status_code = int(raw_status)
-                        except (ValueError, TypeError):
-                            # statusCode can be a string like "NotFound", "Created", etc.
-                            status_str = str(raw_status).lower()
-                            if status_str in ("notfound",):
-                                status_code = 404
-                            elif status_str in ("badrequest",):
-                                status_code = 400
-                            elif status_str in ("unauthorized",):
-                                status_code = 401
-                            elif status_str in ("forbidden",):
-                                status_code = 403
-                            elif status_str in ("internalservererror",):
-                                status_code = 500
-                            elif status_str in ("created",):
-                                status_code = 201
-                            elif status_str in ("ok", "accepted", "nocontent"):
-                                status_code = 200
-                            else:
-                                status_code = 500  # unknown status, treat as error
+                    result = await arm.post(
+                        f"{connection.resource_id}/dynamicInvoke",
+                        body=request_body,
+                    )
+                    response = result.get("response", {})
+                    response_body = response.get("body", result)
+                    raw_status = response.get("statusCode", 200)
+                    try:
+                        status_code = int(raw_status)
+                    except (ValueError, TypeError):
+                        status_str = str(raw_status).lower()
+                        status_code = {
+                            "notfound": 404,
+                            "badrequest": 400,
+                            "unauthorized": 401,
+                            "forbidden": 403,
+                            "internalservererror": 500,
+                            "created": 201,
+                            "ok": 200,
+                            "accepted": 200,
+                            "nocontent": 200,
+                        }.get(status_str, 500)
 
-                        if status_code >= 400:
-                            return ToolResult(
-                                text_result_for_llm=f"Error ({status_code}): {json.dumps(response_body)}",
-                                result_type="error",
-                            )
+                    if status_code >= 400:
+                        return f"Error ({status_code}): {json.dumps(response_body)}"
 
-                        return ToolResult(
-                            text_result_for_llm=json.dumps(response_body, indent=2, default=str),
-                            result_type="success",
-                        )
+                    return json.dumps(response_body, indent=2, default=str)
                 except Exception as e:
                     error_type = type(e).__name__
-                    return ToolResult(
-                        text_result_for_llm=f"Error invoking {op.operation_id}: {error_type}: {e}",
-                        result_type="error",
-                    )
+                    return f"Error invoking {op.operation_id}: {error_type}: {e}"
 
             return handler
 
-        tools.append(Tool(
-            name=tool_name,
-            description=description,
-            parameters=parameters_schema,
-            handler=make_handler(),
-        ))
+        tools.append(
+            FunctionTool(
+                name=tool_name,
+                description=description,
+                func=make_handler(),
+                input_model=parameters_schema,
+            )
+        )
 
     return tools
+
+
+
+def _sanitize_name(name: str) -> str:
+    """Sanitize parameter name to match ^[a-zA-Z0-9_.-]{1,64}$."""
+    sanitized = re.sub(r"[^a-zA-Z0-9_.\-]", "_", name)
+    return sanitized[:64]
+
+
+def _to_snake_case(name: str) -> str:
+    """Convert operationId to snake_case."""
+    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
+    s = re.sub(r"[^a-zA-Z0-9]", "_", s)
+    s = re.sub(r"_+", "_", s)
+    return s.strip("_").lower()
+
+
+def _param_to_json_schema(param: ParsedParameter) -> dict:
+    """Convert a ParsedParameter to a JSON Schema property."""
+    type_map = {"integer": "integer", "number": "number", "boolean": "boolean"}
+    schema: dict = {"type": type_map.get(param.type, "string")}
+    if param.description:
+        schema["description"] = param.description
+    if param.enum:
+        schema["enum"] = param.enum
+    if param.default is not None:
+        schema["default"] = param.default
+    return schema
+
+
+def _build_invoke_path(op: ParsedOperation, args: dict, all_params: list[ParsedParameter], url_encode: bool = True) -> str:
+    """Build the invoke path by stripping /{connectionId} and substituting path params.
+
+    When url_encode is False (V1 dynamicInvoke), path param values are inserted
+    as-is since the path is a JSON field, not a real URL.  When True (V2 data
+    plane), values are percent-encoded for use in an HTTP URL.
+    """
+    path = re.sub(r"^/\{connectionId\}", "", op.path, flags=re.IGNORECASE)
+    for param in all_params:
+        if param.location == "path":
+            sanitized = _sanitize_name(param.name)
+            value = args.get(sanitized)
+            if value is None:
+                raise ValueError(f"Missing required path parameter: {param.name}")
+            replacement = quote(str(value), safe="") if url_encode else str(value)
+            path = path.replace(f"{{{param.name}}}", replacement)
+    # Substitute internal path params with their defaults
+    for param in op.internal_params:
+        if param.location == "path" and param.default is not None:
+            replacement = quote(str(param.default), safe="") if url_encode else str(param.default)
+            path = path.replace(f"{{{param.name}}}", replacement)
+    return path
+

@@ -1,0 +1,30 @@
+@baseUrl = http://localhost:7071
+@contentType = application/json
+
+### Chat API
+POST {{baseUrl}}/agent/chat
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Say hello in one sentence"
+}
+
+### Streaming Chat API (SSE)
+POST {{baseUrl}}/agent/chatstream
+Content-Type: {{contentType}}
+Accept: text/event-stream
+
+{
+  "prompt": "Tell me three quick facts about Azure Functions"
+}
+
+### MCP Webhook
+POST {{baseUrl}}/runtime/webhooks/mcp
+Content-Type: {{contentType}}
+
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "tools/list",
+  "params": {}
+}

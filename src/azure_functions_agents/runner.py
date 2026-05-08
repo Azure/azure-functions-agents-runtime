@@ -1,85 +1,66 @@
+"""Agent execution layer — runs prompts through the Microsoft Agent Framework.
+
+This module is the single entry point for "execute a prompt against an agent".
+Both the HTTP chat endpoints and triggered-agent handlers go through
+:func:`run_agent` (one-shot) or :func:`run_agent_stream` (SSE).
+
+Architecture
+------------
+
+* The chat client comes from a pluggable :class:`ClientManager` (today: only
+  :class:`MAFClientManager` — see :mod:`.client_manager`).
+* For each call we build a fresh :class:`agent_framework.Agent` so that
+  per-request tool sets (sandbox, connectors) and the resolved session id are
+  closed over correctly. Building an Agent is cheap because the underlying
+  chat client is reused across requests.
+* Sessions are persisted as JSONL files under
+  ``{config_dir}/agent-sessions/{session_id}.jsonl`` via MAF's
+  :class:`FileHistoryProvider`.
+* Streaming maps MAF's :class:`AgentResponseUpdate` content items into the
+  existing SSE vocabulary (``session`` / ``delta`` / ``message`` /
+  ``intermediate`` / ``tool_start`` / ``tool_end`` / ``done`` / ``error``)
+  so the chat UI doesn't change.
+
+Concurrency
+-----------
+
+Two simultaneous turns against the same session would race writes to the same
+JSONL file. We serialize them with a per-session :class:`asyncio.Lock` keyed
+by the session id. Cross-instance distributed locking is intentionally out of
+scope — the documented contract is "one active turn per session id".
+"""
+
+from __future__ import annotations
+
 import asyncio
 import json
 import logging
 import os
+import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from pathlib import Path
+from typing import Any, AsyncIterator, Dict, List, Optional
 
-from copilot.session import ProviderConfig, PermissionHandler
-import frontmatter
-
-from .client_manager import CopilotClientManager, _is_byok_mode
-from .config import get_app_root, resolve_config_dir, session_exists, substitute_env_vars_in_text, _to_bool
+from .client_manager import get_client_manager
+from .config import resolve_config_dir
 from .connector_tool_cache import get_connector_tools
-from .mcp import get_cached_mcp_servers
-from .skills import resolve_session_directory_for_skills
+from .mcp import get_cached_mcp_tools
+from .skills import get_cached_skills_text
 from .tools import _REGISTERED_TOOLS_CACHE
 
-DEFAULT_TIMEOUT = float(os.environ.get("COPILOT_AGENT_TIMEOUT", "900"))
+logger = logging.getLogger(__name__)
 
 
-@dataclass
-class AgentResult:
-    session_id: str
-    content: str
-    content_intermediate: List[str]
-    tool_calls: List[Dict[str, Any]]
-    reasoning: Optional[str] = None
-    events: List[Dict[str, Any]] = field(default_factory=list)
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
+DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "900"))
+DEFAULT_MODEL: Optional[str] = os.environ.get("MAF_MODEL")
 
-def _load_agents_md_content() -> str:
-    """Load main.agent.md content from disk (called once at module load)."""
-    app_root = str(get_app_root())
-    agents_md_path = os.path.join(app_root, "main.agent.md")
-    logging.info(f"Loading main.agent.md from: {agents_md_path}")
-    if not os.path.exists(agents_md_path):
-        logging.warning(f"No main.agent.md found at {agents_md_path}")
-        return ""
-
-    try:
-        with open(agents_md_path, "r", encoding="utf-8") as f:
-            raw_content = f.read()
-
-        parsed = frontmatter.loads(raw_content)
-        content = (parsed.content or "").strip()
-        metadata = parsed.metadata if isinstance(parsed.metadata, dict) else {}
-        metadata_count = len(metadata)
-
-        # Apply inline env-var substitution unless explicitly disabled
-        if _to_bool(metadata.get("substitute_variables"), default=True):
-            content = substitute_env_vars_in_text(content)
-
-        logging.info(
-            f"Loaded main.agent.md ({len(raw_content)} chars, frontmatter keys={metadata_count}, body chars={len(content)})"
-        )
-        return content
-    except Exception as e:
-        logging.warning(f"Failed to read main.agent.md: {e}")
-        return ""
-
-
-# Cache main.agent.md content at module load time (won't change during runtime)
-_AGENTS_MD_CONTENT_CACHE = _load_agents_md_content()
-
-DEFAULT_MODEL = os.environ.get("COPILOT_MODEL", "claude-sonnet-4")
-
-# Built-in CLI tools to disable for security.
-# These are blocked regardless of whether MCP servers are configured.
-_EXCLUDED_BUILTIN_TOOLS = [
-    # Shell access
-    "bash", "read_bash", "write_bash", "stop_bash", "list_bash",
-    # Built-in file tools (we provide our own scoped implementations)
-    "create", "edit", "glob",
-    # Built-in SQL (conflicts with connector SQL tools)
-    "sql",
-    # Sub-agents
-    "task", "read_agent", "list_agents",
-    # Web fetching (use MCP or execute_python instead)
-    "web_fetch",
-    # Not needed
-    "report_intent", "store_memory", "fetch_copilot_cli_documentation",
-]
+# Validated session-id pattern. The id is used as a filename component, so
+# refuse anything that could escape the session directory.
+_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
 
 _TOOL_RESTRICTION_PREFIX = (
     "IMPORTANT: Your capabilities are entirely defined by the tools in your"
@@ -91,316 +72,379 @@ _TOOL_RESTRICTION_PREFIX = (
 )
 
 
-_default_permission_handler = PermissionHandler.approve_all
+# ---------------------------------------------------------------------------
+# Per-session locks (single-process scope)
+# ---------------------------------------------------------------------------
+
+_SESSION_LOCKS: Dict[str, asyncio.Lock] = {}
+_SESSION_LOCKS_GUARD = asyncio.Lock()
 
 
-def _build_base_kwargs(
-    model: str = DEFAULT_MODEL,
-    streaming: bool = False,
-    extra_tools: Optional[list] = None,
-) -> Dict[str, Any]:
-    """Build kwargs shared by both session creation and resume."""
-    all_tools = list(_REGISTERED_TOOLS_CACHE)
-    if extra_tools:
-        all_tools.extend(extra_tools)
+async def _get_session_lock(session_id: str) -> asyncio.Lock:
+    async with _SESSION_LOCKS_GUARD:
+        lock = _SESSION_LOCKS.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            _SESSION_LOCKS[session_id] = lock
+        return lock
 
-    system_content = _TOOL_RESTRICTION_PREFIX + _AGENTS_MD_CONTENT_CACHE
 
-    kwargs: Dict[str, Any] = {
-        "model": model,
-        "streaming": streaming,
-        "tools": all_tools,
-        "excluded_tools": _EXCLUDED_BUILTIN_TOOLS,
-        "enable_config_discovery": False,
-        "system_message": {"mode": "replace", "content": system_content},
-        "on_permission_request": _default_permission_handler,
+# ---------------------------------------------------------------------------
+# Result type
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class AgentResult:
+    """Result of a non-streaming agent run."""
+
+    session_id: str
+    content: str
+    content_intermediate: List[str] = field(default_factory=list)
+    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
+    reasoning: Optional[str] = None
+    events: List[Dict[str, Any]] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Session id validation + path resolution
+# ---------------------------------------------------------------------------
+
+
+def _validate_session_id(session_id: Optional[str]) -> Optional[str]:
+    """Return ``session_id`` if it matches the safe pattern; raise on invalid input."""
+    if session_id is None:
+        return None
+    if not isinstance(session_id, str) or not _SESSION_ID_PATTERN.match(session_id):
+        raise ValueError(
+            f"Invalid session_id (must match {_SESSION_ID_PATTERN.pattern})"
+        )
+    return session_id
+
+
+def _default_history_root() -> str:
+    """Default location for session JSONL files when no override is configured."""
+    base = os.path.expanduser("~/.azure-functions-agents")
+    return base
+
+
+def _resolve_session_path(session_id: str) -> Path:
+    """Resolve ``{config_dir}/agent-sessions/{session_id}.jsonl`` and assert containment."""
+    config_dir = resolve_config_dir() or _default_history_root()
+    base = Path(config_dir).resolve() / "agent-sessions"
+    base.mkdir(parents=True, exist_ok=True)
+    candidate = (base / f"{session_id}.jsonl").resolve()
+    try:
+        candidate.relative_to(base)
+    except ValueError as exc:
+        raise ValueError(f"Session path escapes session directory: {candidate}") from exc
+    return candidate
+
+
+# ---------------------------------------------------------------------------
+# Instructions assembly
+# ---------------------------------------------------------------------------
+
+
+def _compose_instructions(agent_instructions: Optional[str]) -> Optional[str]:
+    """Combine the tool-restriction prefix, agent instructions, and skills text."""
+    parts: List[str] = [_TOOL_RESTRICTION_PREFIX.rstrip()]
+    if agent_instructions and agent_instructions.strip():
+        parts.append(agent_instructions.strip())
+    skills_text = get_cached_skills_text()
+    if skills_text:
+        parts.append("# Project skills\n\n" + skills_text)
+    composed = "\n\n".join(parts).strip()
+    return composed or None
+
+
+# ---------------------------------------------------------------------------
+# Agent + session construction
+# ---------------------------------------------------------------------------
+
+
+async def _build_agent_session_history(
+    *,
+    instructions: Optional[str],
+    session_id: Optional[str],
+    sandbox_tools: Optional[list],
+    model: Optional[str],
+):
+    """Construct the chat client, agent, AgentSession, and history provider.
+
+    Returns ``(agent, session, resolved_session_id)``.
+    """
+    # Imported here so a missing optional dependency surfaces only when actually
+    # needed (e.g. tests that don't run the runtime path).
+    from agent_framework import Agent, AgentSession, FileHistoryProvider
+
+    # Build the chat client first so configuration errors surface BEFORE any
+    # filesystem state is created.
+    client_manager = get_client_manager()
+    chat_client = client_manager.build_chat_client(model)
+
+    # Validate / generate session id.
+    validated_id = _validate_session_id(session_id)
+    if validated_id is None:
+        session = AgentSession()
+        resolved_id = session.session_id
+    else:
+        resolved_id = validated_id
+        session = AgentSession(session_id=resolved_id)
+
+    history_path = _resolve_session_path(resolved_id)
+    history_provider = FileHistoryProvider(storage_path=history_path)
+
+    # Tool list: built-ins + user tools from tools/ + connector tools + per-call
+    # sandbox tools + MCP servers from mcp.json. Order chosen so that the most
+    # general/safe tools appear first; LLMs that ignore order are unaffected.
+    tools: List[Any] = list(_REGISTERED_TOOLS_CACHE)
+    connectors = await get_connector_tools()
+    if connectors:
+        tools.extend(connectors)
+    if sandbox_tools:
+        tools.extend(sandbox_tools)
+    mcp_tools = get_cached_mcp_tools()
+    if mcp_tools:
+        tools.extend(mcp_tools)
+
+    agent = Agent(
+        chat_client,
+        instructions=_compose_instructions(instructions),
+        tools=tools,
+        context_providers=[history_provider],
+    )
+
+    return agent, session, resolved_id
+
+
+# ---------------------------------------------------------------------------
+# Content-item classification helpers (MAF AgentResponseUpdate.contents)
+# ---------------------------------------------------------------------------
+
+
+def _content_type(item: Any) -> str:
+    """Return the ``type`` of a Content item, defaulting to ''."""
+    return str(getattr(item, "type", "") or "")
+
+
+def _content_text(item: Any) -> str:
+    return str(getattr(item, "text", "") or "")
+
+
+def _function_call_event(item: Any) -> Dict[str, Any]:
+    return {
+        "type": "tool_start",
+        "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
+        "tool_name": getattr(item, "name", None),
+        "arguments": getattr(item, "arguments", None),
     }
 
-    # If Microsoft Foundry BYOK is configured, add provider config
-    if _is_byok_mode():
-        foundry_endpoint = os.environ["AZURE_AI_FOUNDRY_ENDPOINT"]
-        foundry_key = os.environ["AZURE_AI_FOUNDRY_API_KEY"]
-        foundry_model = os.environ.get("AZURE_AI_FOUNDRY_MODEL", model)
-        wire_api = "responses" if foundry_model.startswith("gpt-5") else "completions"
-        kwargs["model"] = foundry_model
-        kwargs["provider"] = ProviderConfig(
-            type="openai",
-            base_url=foundry_endpoint,
-            api_key=foundry_key,
-            wire_api=wire_api,
-        )
-        logging.info(f"BYOK mode: using Microsoft Foundry endpoint={foundry_endpoint}, model={foundry_model}, wire_api={wire_api}")
 
-    mcp_servers = get_cached_mcp_servers()
-    if mcp_servers:
-        kwargs["mcp_servers"] = mcp_servers
-
-    return kwargs
+def _function_result_event(item: Any) -> Dict[str, Any]:
+    return {
+        "type": "tool_end",
+        "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
+        "tool_name": getattr(item, "name", None),
+        "result": getattr(item, "result", None),
+    }
 
 
-def _build_session_kwargs(
-    model: str = DEFAULT_MODEL,
-    session_id: Optional[str] = None,
-    streaming: bool = False,
-    extra_tools: Optional[list] = None,
-) -> Dict[str, Any]:
-    kwargs = _build_base_kwargs(model=model, streaming=streaming, extra_tools=extra_tools)
-
-    if session_id:
-        kwargs["session_id"] = session_id
-
-    session_directory = resolve_session_directory_for_skills()
-    if session_directory:
-        kwargs["skill_directories"] = [session_directory]
-        logging.info(f"Using skill_directories for skills discovery: {session_directory}")
-
-    return kwargs
+# ---------------------------------------------------------------------------
+# Public API: run_agent (non-streaming)
+# ---------------------------------------------------------------------------
 
 
-def _build_resume_kwargs(
-    model: str = DEFAULT_MODEL,
-    streaming: bool = False,
-    extra_tools: Optional[list] = None,
-) -> Dict[str, Any]:
-    return _build_base_kwargs(model=model, streaming=streaming, extra_tools=extra_tools)
-
-
-async def _disable_non_project_skills(session) -> None:
-    """Disable skills not from the project's skill_directories.
-
-    The CLI loads global skills from ~/.agents/skills/ and other paths which
-    are not relevant for serverless function apps. This uses the experimental
-    session.rpc.skills API to list all discovered skills and disable any that
-    aren't sourced from the project.
-
-    Workaround for https://github.com/github/copilot-sdk/issues/695
-    """
-    app_root = str(get_app_root())
-    skills_dir = os.path.join(app_root, "skills")
-    try:
-        from copilot.generated.rpc import SessionSkillsDisableParams
-        result = await session.rpc.skills.list()
-        for skill in result.skills:
-            if not skill.enabled:
-                continue
-            # Keep skills whose path is under {approot}/skills/
-            if skill.path and os.path.commonpath([skill.path, skills_dir]) == skills_dir:
-                continue
-            await session.rpc.skills.disable(SessionSkillsDisableParams(name=skill.name))
-            logging.debug(f"Disabled non-project skill: {skill.name} (source={skill.source})")
-    except Exception as e:
-        logging.warning(f"Could not filter skills (experimental API): {e}")
-
-
-async def run_copilot_agent(
+async def run_agent(
     prompt: str,
-    timeout: float = DEFAULT_TIMEOUT,
-    model: str = DEFAULT_MODEL,
+    *,
+    instructions: Optional[str] = None,
+    timeout: Optional[float] = None,
+    model: Optional[str] = None,
     session_id: Optional[str] = None,
     sandbox_tools: Optional[list] = None,
 ) -> AgentResult:
-    config_dir = resolve_config_dir()
-    client = await CopilotClientManager.get_client()
+    """Execute a single prompt against the configured agent backend.
 
-    # Discover connector tools (lazy-init, cached after first call)
-    connector_tools = await get_connector_tools()
-    extra_tools = connector_tools + (sandbox_tools or [])
+    Parameters
+    ----------
+    prompt:
+        Prompt text. Sent as a user message.
+    instructions:
+        Per-call agent instructions (typically the body of an ``*.agent.md``
+        file). Combined with the tool-restriction prefix and any skills text.
+    timeout:
+        Maximum time to wait for the agent response, in seconds. Defaults to
+        :data:`DEFAULT_TIMEOUT`.
+    model:
+        Optional model/deployment override. When omitted the
+        :class:`ClientManager` resolves the value from environment variables.
+    session_id:
+        Optional session id for resuming a prior conversation. Must match
+        ``[A-Za-z0-9._-]{1,128}``. When omitted, a fresh session is created
+        and its id is returned in :class:`AgentResult`.
+    sandbox_tools:
+        Optional list of tools created via :func:`create_sandbox_tools` —
+        bound to a specific ACA session pool. Per-call because the ACA
+        session id is baked into each tool's closure.
+    """
+    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
-    # Resume existing session or create a new one
-    if session_id and session_exists(config_dir, session_id):
-        logging.info(f"Resuming existing session: {session_id}")
-        resume_kwargs = _build_resume_kwargs(model=model, extra_tools=extra_tools)
+    agent, session, resolved_id = await _build_agent_session_history(
+        instructions=instructions,
+        session_id=session_id,
+        sandbox_tools=sandbox_tools,
+        model=model,
+    )
+
+    lock = await _get_session_lock(resolved_id)
+    async with lock:
         try:
-            session = await client.resume_session(session_id, **resume_kwargs)
-            logging.info(f"Successfully resumed session: {session_id}")
-        except Exception as e:
-            logging.error(f"Failed to resume session '{session_id}': {e}", exc_info=True)
-            raise
-    else:
-        if session_id:
-            logging.info(f"Creating new session with provided ID: {session_id}")
-        session_kwargs = _build_session_kwargs(
-            model=model, session_id=session_id, extra_tools=extra_tools
-        )
-        session = await client.create_session(**session_kwargs)
-        logging.info(f"Created new session: {session.session_id}")
-        await _disable_non_project_skills(session)
-
-    response_content: List[str] = []
-    tool_calls: List[Dict[str, Any]] = []
-    reasoning_content: List[str] = []
-    events_log: List[Dict[str, Any]] = []
-
-    done = asyncio.Event()
-
-    def on_event(event):
-        event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
-        events_log.append({"type": event_type, "data": str(event.data) if event.data else None})
-
-        if event_type == "assistant.message":
-            response_content.append(event.data.content)
-        elif event_type == "tool.execution_start":
-            tool_calls.append(
-                {
-                    "event_id": str(event.id) if hasattr(event, "id") and event.id else None,
-                    "timestamp": event.timestamp.isoformat() if hasattr(event, "timestamp") and event.timestamp else None,
-                    "tool_call_id": getattr(event.data, "tool_call_id", None),
-                    "tool_name": getattr(event.data, "tool_name", None),
-                    "arguments": getattr(event.data, "arguments", None),
-                    "parent_tool_call_id": getattr(event.data, "parent_tool_call_id", None),
-                }
+            response = await asyncio.wait_for(
+                agent.run(prompt, session=session), timeout=timeout
             )
-        elif event_type == "session.idle":
-            done.set()
+        except asyncio.TimeoutError:
+            raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
-    session.on(on_event)
-
+    # Extract assistant text from the final response.
+    text = ""
     try:
-        await session.send_and_wait(prompt, timeout=timeout)
-
-        return AgentResult(
-            session_id=session.session_id,
-            content=response_content[-1] if response_content else "",
-            content_intermediate=response_content[-6:-1] if len(response_content) > 1 else [],
-            tool_calls=tool_calls,
-            reasoning="".join(reasoning_content) if reasoning_content else None,
-            events=events_log,
-        )
-    finally:
-        # Disconnect the session to release the in-memory lock and flush state to disk.
-        # This allows any process (including on a different instance) to resume later.
+        text = str(getattr(response, "text", "") or "")
+    except Exception:
+        text = ""
+    if not text:
+        # Fallback: walk messages → contents and pick out text items.
         try:
-            await session.disconnect()
-            logging.info(f"Disconnected session: {session.session_id}")
-        except Exception as e:
-            logging.warning(f"Failed to disconnect session {session.session_id}: {e}")
+            for msg in getattr(response, "messages", None) or []:
+                for item in getattr(msg, "contents", None) or []:
+                    if _content_type(item) == "text":
+                        text += _content_text(item)
+        except Exception as exc:
+            logger.debug("Failed to extract response text: %s", exc)
+
+    # Walk content items for tool-call records (best-effort metadata for callers).
+    tool_calls: List[Dict[str, Any]] = []
+    try:
+        for msg in getattr(response, "messages", None) or []:
+            for item in getattr(msg, "contents", None) or []:
+                ctype = _content_type(item)
+                if ctype == "function_call":
+                    tool_calls.append(_function_call_event(item))
+                elif ctype == "function_result":
+                    # Attach result to most recent matching tool_start
+                    call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                    matched = next(
+                        (tc for tc in reversed(tool_calls) if tc.get("tool_call_id") == call_id),
+                        None,
+                    )
+                    if matched is not None:
+                        matched["result"] = getattr(item, "result", None)
+    except Exception as exc:
+        logger.debug("Failed to extract tool_calls: %s", exc)
+
+    return AgentResult(
+        session_id=resolved_id,
+        content=text,
+        tool_calls=tool_calls,
+    )
 
 
-_STREAM_SENTINEL = object()
+# ---------------------------------------------------------------------------
+# Public API: run_agent_stream (SSE)
+# ---------------------------------------------------------------------------
 
 
-async def run_copilot_agent_stream(
+async def run_agent_stream(
     prompt: str,
-    timeout: float = DEFAULT_TIMEOUT,
-    model: str = DEFAULT_MODEL,
+    *,
+    instructions: Optional[str] = None,
+    timeout: Optional[float] = None,
+    model: Optional[str] = None,
     session_id: Optional[str] = None,
     sandbox_tools: Optional[list] = None,
-):
-    """Async generator that yields SSE-formatted events as the agent streams a response.
+) -> AsyncIterator[str]:
+    """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
-    Yields strings like 'data: {"type": "delta", ...}\\n\\n' suitable for StreamingResponse.
+    Event vocabulary (kept stable for the chat UI):
+
+    * ``session``      — first event; includes the resolved session id
+    * ``delta``        — incremental assistant text token(s)
+    * ``message``      — full assistant message (rare; emitted when MAF returns
+                          a non-streaming text item mid-stream)
+    * ``intermediate`` — reasoning text (best-effort; some providers emit none)
+    * ``tool_start``   — function call about to execute
+    * ``tool_end``     — function call result
+    * ``done``         — stream completed normally
+    * ``error``        — terminal error message
     """
-    config_dir = resolve_config_dir()
-    client = await CopilotClientManager.get_client()
+    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
-    queue: asyncio.Queue = asyncio.Queue()
-    seen_event_ids: set[str] = set()
-    has_received_turn_start = False
-    has_active_tools = False
-
-    def on_event(event):
-        nonlocal has_received_turn_start, has_active_tools
-        event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
-        event_id = str(event.id) if hasattr(event, "id") and event.id else None
-
-        if event_id:
-            if event_id in seen_event_ids:
-                return
-            seen_event_ids.add(event_id)
-
-        if event_type == "assistant.turn_start":
-            has_received_turn_start = True
-
-        if event_type == "assistant.message_delta":
-            delta = getattr(event.data, "delta_content", None)
-            if delta:
-                queue.put_nowait({"type": "delta", "content": delta})
-        elif event_type == "assistant.reasoning_delta":
-            reasoning_delta = getattr(event.data, "delta_content", None)
-            if reasoning_delta:
-                queue.put_nowait({"type": "intermediate", "content": reasoning_delta})
-        elif event_type == "assistant.message":
-            message_content = getattr(event.data, "content", "")
-            if message_content:
-                queue.put_nowait({"type": "message", "content": message_content})
-        elif event_type == "tool.execution_start":
-            has_active_tools = True
-            queue.put_nowait({
-                "type": "tool_start",
-                "event_id": str(event.id) if hasattr(event, "id") and event.id else None,
-                "timestamp": event.timestamp.isoformat() if hasattr(event, "timestamp") and event.timestamp else None,
-                "tool_name": getattr(event.data, "tool_name", None),
-                "tool_call_id": getattr(event.data, "tool_call_id", None),
-                "parent_tool_call_id": getattr(event.data, "parent_tool_call_id", None),
-                "arguments": getattr(event.data, "arguments", None),
-            })
-        elif event_type == "tool.execution_end":
-            queue.put_nowait({
-                "type": "tool_end",
-                "event_id": str(event.id) if hasattr(event, "id") and event.id else None,
-                "timestamp": event.timestamp.isoformat() if hasattr(event, "timestamp") and event.timestamp else None,
-                "tool_name": getattr(event.data, "tool_name", None),
-                "tool_call_id": getattr(event.data, "tool_call_id", None),
-                "parent_tool_call_id": getattr(event.data, "parent_tool_call_id", None),
-                "result": getattr(event.data, "result", None),
-            })
-        elif event_type == "session.idle":
-            if has_received_turn_start:
-                queue.put_nowait(_STREAM_SENTINEL)
-        elif event_type == "session.error":
-            error_msg = getattr(event.data, "message", "Unknown error")
-            logging.error(f"[stream] Session error: {error_msg}")
-            queue.put_nowait({"type": "error", "content": error_msg})
-
-    connector_tools = await get_connector_tools()
-    extra_tools = connector_tools + (sandbox_tools or [])
-
-    if session_id and session_exists(config_dir, session_id):
-        logging.info(f"[stream] Resuming existing session: {session_id}")
-        resume_kwargs = _build_resume_kwargs(model=model, streaming=True, extra_tools=extra_tools)
-        try:
-            session = await client.resume_session(session_id, **resume_kwargs, on_event=on_event)
-            logging.info(f"[stream] Successfully resumed session: {session_id}")
-        except Exception as e:
-            logging.error(f"[stream] Failed to resume session '{session_id}': {e}", exc_info=True)
-            raise
-    else:
-        if session_id:
-            logging.info(f"[stream] Creating new session with provided ID: {session_id}")
-        session_kwargs = _build_session_kwargs(
-            model=model, session_id=session_id, streaming=True, extra_tools=extra_tools
-        )
-        session = await client.create_session(**session_kwargs, on_event=on_event)
-        logging.info(f"[stream] Created new session: {session.session_id}")
-        await _disable_non_project_skills(session)
-
-    # Yield the session ID first so the client knows it immediately
-    yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id})}\n\n"
-
-    # Send the prompt, events arrive via on_event callback
-    await session.send(prompt)
-
-    # Drain the queue until session.idle sentinel arrives or timeout
     try:
-        deadline = asyncio.get_event_loop().time() + timeout
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout waiting for response'})}\n\n"
-                break
+        agent, session, resolved_id = await _build_agent_session_history(
+            instructions=instructions,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+            model=model,
+        )
+    except Exception as exc:
+        logger.error("Failed to build agent session: %s", exc, exc_info=True)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        return
 
-            item = await asyncio.wait_for(queue.get(), timeout=remaining)
-            if item is _STREAM_SENTINEL:
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                break
+    yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
 
-            yield f"data: {json.dumps(item)}\n\n"
-    except asyncio.TimeoutError:
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout waiting for response'})}\n\n"
-    finally:
-        # Disconnect the session to release the in-memory lock and flush state to disk.
+    lock = await _get_session_lock(resolved_id)
+    async with lock:
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + timeout
         try:
-            await session.disconnect()
-            logging.info(f"[stream] Disconnected session: {session.session_id}")
-        except Exception as e:
-            logging.warning(f"[stream] Failed to disconnect session {session.session_id}: {e}")
+            stream = agent.run(prompt, stream=True, session=session)
+            async for update in stream:
+                if loop.time() > deadline:
+                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                    return
+                for item in getattr(update, "contents", None) or []:
+                    ctype = _content_type(item)
+                    if ctype == "text":
+                        text = _content_text(item)
+                        if text:
+                            yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                    elif ctype == "text_reasoning":
+                        text = _content_text(item)
+                        if text:
+                            yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
+                    elif ctype == "function_call":
+                        yield f"data: {json.dumps(_function_call_event(item))}\n\n"
+                    elif ctype == "function_result":
+                        yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
+                    # Unknown content types are intentionally ignored — the
+                    # SSE vocabulary is fixed and the UI doesn't render them.
+            yield f"data: {json.dumps({'type': 'done'})}\n\n"
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+        except Exception as exc:
+            logger.error("Agent stream failed: %s", exc, exc_info=True)
+            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+
+
+# ---------------------------------------------------------------------------
+# Removed-API stubs (one release of clear errors before symbol removal)
+# ---------------------------------------------------------------------------
+
+
+def run_copilot_agent(*_args, **_kwargs):  # pragma: no cover - stub
+    """Removed in 1.0.0. Use :func:`run_agent` instead."""
+    raise RuntimeError(
+        "run_copilot_agent was removed in azure-functions-agents 1.0.0. "
+        "The runtime now uses the Microsoft Agent Framework. Migrate to "
+        "azure_functions_agents.run_agent."
+    )
+
+
+def run_copilot_agent_stream(*_args, **_kwargs):  # pragma: no cover - stub
+    """Removed in 1.0.0. Use :func:`run_agent_stream` instead."""
+    raise RuntimeError(
+        "run_copilot_agent_stream was removed in azure-functions-agents 1.0.0. "
+        "The runtime now uses the Microsoft Agent Framework. Migrate to "
+        "azure_functions_agents.run_agent_stream."
+    )

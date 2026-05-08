@@ -18,7 +18,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
 - Python 3.12+
-- A [GitHub Personal Access Token](../README.md#github-token) with **Copilot** scope
+- an OpenAI API key (https://platform.openai.com/api-keys) 
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
 ### 1. Install dependencies
@@ -61,21 +61,19 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 ### 3. Set required environment variables
 
-**GitHub Token (required for all samples):**
+**Model provider (required for all samples):**
 
-You need a GitHub Personal Access Token with **Copilot** scope:
+The Microsoft Agent Framework supports Azure OpenAI, OpenAI, and Azure AI Foundry. The samples default to Azure OpenAI.
 
-**Option 1 - Using GitHub CLI**:
+| Provider       | `MAF_PROVIDER`  | Required env vars                                                                  |
+| -------------- | --------------- | ---------------------------------------------------------------------------------- |
+| Azure OpenAI   | `azure_openai`  | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential`) |
+| OpenAI         | `openai`        | `OPENAI_API_KEY`                                                                   |
+| Azure Foundry  | `foundry`       | `FOUNDRY_PROJECT_ENDPOINT` (uses `DefaultAzureCredential`)                          |
 
-```bash
-gh auth token
-```
+If `MAF_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
 
-Then paste the token into `local.settings.json` as `GITHUB_TOKEN`.
-
-**Option 2 - Create PAT manually**:
-
-See [GitHub's Personal Access Token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens#creating-a-fine-grained-personal-access-token) for instructions. Choose "Fine-grained personal access tokens" and enable the **Copilot** scope.
+For Azure OpenAI, set `AZURE_OPENAI_ENDPOINT` to your resource endpoint (e.g. `https://<name>.openai.azure.com/`) and `AZURE_OPENAI_DEPLOYMENT` to your model deployment name (e.g. `gpt-5.2`). Authentication uses `DefaultAzureCredential` — run `az login` locally.
 
 **Sample-specific variables:**
 

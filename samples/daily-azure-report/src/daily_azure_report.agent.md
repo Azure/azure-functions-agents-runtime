@@ -4,7 +4,8 @@ description: Lists resources created or changed in the last 24 hours and emails 
 
 trigger:
   type: timer_trigger
-  schedule: "0 0 7 * * *"
+  schedule: "*/5 * * * *"
+  run_on_start: true
 
 tools_from_connections:
   - connection_id: $O365_CONNECTION_ID

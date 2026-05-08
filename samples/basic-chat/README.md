@@ -18,7 +18,7 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, a
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- A [GitHub Personal Access Token](../../README.md#github-token) with **Copilot** scope
+- an Azure OpenAI resource with a model deployment (e.g. `gpt-5.2`)
 - An Azure subscription
 
 ## Deploy
@@ -28,13 +28,8 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, a
    ```bash
    cd samples/basic-chat
    azd init
-   azd env set GITHUB_TOKEN <your-github-pat>
-   ```
-
-   Optional:
-
-   ```bash
-   azd env set COPILOT_MODEL claude-opus-4.6     # default
+   azd env set AZURE_OPENAI_ENDPOINT <your-azure-openai-endpoint>
+   azd env set AZURE_OPENAI_DEPLOYMENT gpt-5.2
    ```
 
 2. **Deploy to Azure:**
@@ -53,7 +48,8 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 ### Local settings
 
-- `GITHUB_TOKEN`: required (see shared guide)
+- `AZURE_OPENAI_ENDPOINT`: required — your Azure OpenAI resource endpoint
+- `AZURE_OPENAI_DEPLOYMENT`: required — model deployment name (e.g. `gpt-5.2`)
 - `ACA_SESSION_POOL_ENDPOINT`: optional; if empty, chat works but code execution (Python/Playwright) is unavailable
 
 ### Testing endpoints
