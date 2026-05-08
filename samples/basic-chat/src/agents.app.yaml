@@ -1,0 +1,9 @@
+# Global configuration for all agents in this function app
+
+# Shared infrastructure
+execution_sandbox:
+  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+
+# Default runtime configuration
+model: claude-sonnet-4
+timeout: 900

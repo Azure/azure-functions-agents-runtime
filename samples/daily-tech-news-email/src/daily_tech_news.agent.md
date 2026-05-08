@@ -4,13 +4,8 @@ description: Fetches top tech news and emails a summary daily.
 
 trigger:
   type: timer_trigger
-  schedule: "0 0 15 * * *"
-
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-
-tools_from_connections:
-  - connection_id: $O365_CONNECTION_ID
+  args:
+    schedule: "0 0 15 * * *"
 ---
 
 You are a news assistant. When triggered, do the following:

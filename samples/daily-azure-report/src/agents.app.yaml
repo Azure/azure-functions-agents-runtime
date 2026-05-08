@@ -1,0 +1,19 @@
+# Global configuration for all agents in this function app
+
+# Shared infrastructure - Email capabilities via Office 365 connector
+tools_from_connections:
+  - connection_id: $O365_CONNECTION_ID
+
+# Default runtime configuration
+model: gpt-4o
+timeout: 900
+
+# Available skills
+skills:
+  - azure-resources
+
+# Default retry behavior for all agents
+retry:
+  max_attempts: 3
+  backoff: exponential
+  retry_on: ["timeout", "error"]

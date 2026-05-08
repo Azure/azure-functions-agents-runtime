@@ -4,10 +4,8 @@ description: Lists resources created or changed in the last 24 hours and emails 
 
 trigger:
   type: timer_trigger
-  schedule: "0 0 7 * * *"
-
-tools_from_connections:
-  - connection_id: $O365_CONNECTION_ID
+  args:
+    schedule: "0 0 7 * * *"
 ---
 
 You are an Azure infrastructure reporting assistant. When triggered, do the following:
