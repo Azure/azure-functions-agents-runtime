@@ -4,36 +4,79 @@
 
 Azure Functions agents use a **two-tier configuration system**:
 
-1. **Global Configuration** (`agents.app.yaml`) — Shared settings, defaults, and infrastructure configuration for all agents
-2. **Agent-Specific Configuration** (`.agent.md` front matter) — Individual agent overrides, trigger definitions, and filtering
+1. **Global Configuration** (`agents.app.yaml`) — Infrastructure and capabilities available to all agents
+2. **Agent-Specific Configuration** (`.agent.md` front matter) — Agent behavior, triggers, and capability filtering
 
-Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt. Global configuration in `agents.app.yaml` provides defaults and shared infrastructure settings.
+Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
+
+### Configuration Model
+
+**Global configuration defines infrastructure:**
+- MCP servers (defined in `mcp.json`, referenced in `agents.app.yaml`)
+- Skills (auto-discovered from `skills/` directory)
+- Custom tools (auto-discovered from `tools/` directory)
+- Code execution sandbox configuration
+- Connector tools
+- Default runtime settings (model, timeout)
+
+**Agent front matter:**
+- **Inherits all auto-discovered capabilities by default**
+- Can apply **allow/deny lists** to filter which MCP servers, skills, or tools are available
+- Can **override** runtime settings (model, timeout)
+- Must define **trigger** (how the agent is invoked)
+- Can enable **HTTP/MCP endpoints** for testing and composition
 
 ### Configuration Precedence
 
-Settings follow this precedence order (highest to lowest):
-1. **Agent front matter** — Explicit values in `.agent.md` files
+For runtime settings (model, timeout):
+1. **Agent front matter** — Explicit overrides in `.agent.md` files
 2. **Global configuration** — Values in `agents.app.yaml`
 3. **Environment variables** — App settings and env vars
 4. **Framework defaults** — Built-in default values
+
+For capabilities (MCP, skills, tools):
+1. **Auto-discovered and referenced** — MCP servers referenced in `agents.app.yaml` (defined in `mcp.json`), skills and tools auto-discovered from their directories
+2. **Filtered per-agent** using allow/deny lists in agent front matter
 
 ---
 
 ## Configuration Files
 
 ### Global Configuration (`agents.app.yaml`)
-Optional file in `src/` directory that defines shared settings for all agents. Use this to set defaults and shared infrastructure (execution sandbox, connectors, model, timeout, etc.).
+Optional file in `src/` directory that defines infrastructure and capabilities available to all agents.
 
-**Key principle:** Any field in `agents.app.yaml` can be overridden in individual agent front matter.
+**What goes in global configuration:**
+- MCP server references (servers defined in `mcp.json`)
+- Code execution sandbox endpoints
+- Connector tool configurations
+- Default runtime settings (model, timeout)
+
+**Note:** Skills (from `skills/` directory) and custom tools (from `tools/` directory) are automatically discovered and do not need to be listed in global configuration. Agents can filter them using allow/deny lists.
+
+**Key principle:** Global config defines **what's available**. Agents filter **what they use**.
 
 ### Agent Configuration (`.agent.md` front matter)
-YAML front matter at the top of each agent file. Use this for agent-specific settings, trigger configuration, and to override global defaults.
+YAML front matter at the top of each agent file.
+
+**What goes in agent front matter:**
+- `name` and `description` (required)
+- `trigger` — How the agent is invoked (required, except for `main.agent.md`)
+- `enable-http` / `enable-mcp` — Enable testing/composition endpoints
+- **Allow/deny lists** for `mcp`, `skills`, `tools` (filters global capabilities)
+- **Runtime overrides** for `model`, `timeout`
+- **HTTP-specific** fields like `input_schema`, `response_schema`, `response_example`
+
+**Special file: `main.agent.md`**
+- Optional primary agent with HTTP chat UI and MCP tool enabled by default
+- No `trigger` required (uses HTTP endpoints automatically)
+- See [File Naming Conventions](#file-naming-conventions) for details
 
 **File structure:**
 ```
 src/
   agents.app.yaml          # Optional: Global defaults
-  *.agent.md               # Agent with front matter
+  main.agent.md            # Optional: Main agent (HTTP + MCP enabled)
+  another_agent.agent.md   # Other agents (require trigger)
   ...
 ```
 
@@ -41,15 +84,31 @@ src/
 
 ## Field Reference
 
-**All fields** documented below can be used in either `agents.app.yaml` (global defaults) or `.agent.md` front matter (agent-specific). Agent front matter always takes precedence.
+Fields are organized into categories based on how they can be used:
 
-Each field includes:
-- **Typical location:** Where this field is commonly used
-- **Can override:** Whether agent front matter can override global config
+### Field Categories
 
-### Required Fields
+**Infrastructure (Global only, filtered in agents):**
+- `mcp` — MCP server references (global) or allow/deny lists (agent)
+- `skills` — Auto-discovered from `skills/` directory, allow/deny lists (agent only)
+- `tools` — Auto-discovered from `tools/` directory, allow/deny lists (agent only)
+- `execution_sandbox` — Sandbox configuration (global), opt-out (agent)
+- `tools_from_connections` — Connector tools (global only)
 
-These fields are **required in every `.agent.md` file** and cannot be set globally.
+**Runtime Settings (Global defaults, overridable in agents):**
+- `model` — LLM selection
+- `timeout` — Execution time limit
+
+**Agent-Specific (Agent front matter only):**
+- `name`, `description` — Agent identity (required)
+- `trigger` — Invocation method (required for non-main agents)
+- `enable-http`, `enable-mcp` — Testing/composition endpoints
+- `input_schema`, `response_schema`, `response_example` — HTTP validation
+- `metadata` — Organizational metadata
+
+---
+
+### Required Fields (Agent Front Matter Only)
 
 #### `name`
 - **Type:** `string`
@@ -140,76 +199,139 @@ trigger:
 
 ---
 
-#### `enable-debug-http`
+#### `enable-http`
 - **Type:** `boolean`
 - **Typical location:** Agent only
 - **Can override:** N/A (agent-specific only)
 - **Default:** `false`
-- **Description:** Automatically create an HTTP debug endpoint for non-HTTP agents (timer, queue, etc.). Alternative to defining an explicit HTTP trigger.
-- **Applies to:** Non-HTTP triggered agents
+- **Description:** Enable HTTP chat endpoints for the agent. When enabled, creates interactive chat endpoints for testing and usage.
+- **Applies to:** All agents (especially useful for non-HTTP triggered agents)
+
+**Endpoints created when enabled:**
+- `POST /agent/chat` — Non-streaming chat endpoint
+- `POST /agent/chatstream` — Server-sent events streaming chat endpoint
+- `GET /` — Chat UI page
 
 **Example:**
 ```yaml
-enable-debug-http: true  # Creates debug HTTP endpoint for testing
+trigger:
+  type: timer_trigger
+  args:
+    schedule: "0 0 7 * * *"
+enable-http: true  # Enable HTTP chat endpoints for manual testing
+```
+
+**Use case:** Test timer or queue-triggered agents via HTTP during development without waiting for the schedule or adding messages to queues. Also useful for providing a chat interface to any agent.
+
+---
+
+#### `enable-mcp`
+- **Type:** `boolean`
+- **Typical location:** Agent only
+- **Can override:** N/A (agent-specific only)
+- **Default:** `false`
+- **Description:** Enable MCP (Model Context Protocol) tool registration for the agent. When enabled, the agent is exposed as an MCP tool that can be called by other agents or MCP clients.
+- **Applies to:** All agents
+
+**MCP tool created when enabled:**
+- Tool name: Derived from agent `name` field (e.g., "Daily Azure Report" → `daily_azure_report`)
+- Tool description: From agent `description` field
+- Tool trigger type: `mcpToolTrigger`
+- Input: `{"prompt": "string"}` — The prompt to send to the agent
+- Output: JSON with `session_id`, `response`, `response_intermediate`, `tool_calls`
+
+**Example:**
+```yaml
+name: Daily Azure Report
+description: Lists resources created or changed in the last 24 hours and emails a report
+trigger:
+  type: timer_trigger
+  args:
+    schedule: "0 0 7 * * *"
+enable-mcp: true  # Expose as MCP tool
+```
+
+**Use case:** Allow other agents to invoke this agent as a tool, enabling agent-to-agent communication and composition.
+
+**MCP tool registration example:**
+```
+daily_azure_report: mcpToolTrigger
 ```
 
 ---
 
 #### `model`
-- **Type:** `string` or `object`
-- **Typical location:** Global (shared default) or Agent (override)
+- **Type:** `string`
+- **Location:** Global (`agents.app.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
-- **Default:** Value of `COPILOT_MODEL` env var, or `"claude-sonnet-4"`
-- **Description:** Specifies which LLM to use. Agent value overrides global value, which overrides env var.
+- **Description:** Specifies which LLM to use for the agent. Valid model identifiers include `claude-sonnet-4`, `gpt-4o`, `gpt-4o-mini`, `o1`, `o1-mini`.
+- **Precedence:** Agent front matter → Global `agents.app.yaml` → `COPILOT_MODEL` env var → `"claude-sonnet-4"` (default)
 
-**Simple syntax:**
+**Global default:**
 ```yaml
 model: gpt-4o
 ```
 
-**Advanced syntax with parameters:**
+**Agent override:**
 ```yaml
-model:
-  name: claude-sonnet-4
-  temperature: 0.7
-  max_tokens: 4000
+model: gpt-4o-mini  # Use faster model for this agent
 ```
+
+**Note:** Model parameters (temperature, max_tokens, etc.) are configured globally via environment variables or SDK configuration, not in the front matter.
 
 ---
 
 #### `timeout`
 - **Type:** `number`
-- **Typical location:** Global (shared default) or Agent (override)
+- **Location:** Global (`agents.app.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
-- **Default:** Value of `COPILOT_AGENT_TIMEOUT` env var, or `900` (15 minutes)
 - **Description:** Maximum execution time in seconds for the agent.
+- **Precedence:** Agent front matter → Global `agents.app.yaml` → `COPILOT_AGENT_TIMEOUT` env var → `900` seconds (default)
 
-**Example:**
+**Global default:**
 ```yaml
-timeout: 300  # 5 minutes
+timeout: 900  # 15 minutes
+```
+
+**Agent override:**
+```yaml
+timeout: 60  # 1 minute for fast agent
 ```
 
 ---
 
 #### `execution_sandbox`
-- **Type:** `object`
-- **Typical location:** Global (shared infrastructure) or Agent (override)
-- **Can override:** Yes
-- **Description:** Configures Python code execution environment using Azure Container Apps dynamic sessions
+- **Type:** `object` (global), `boolean` (agent)
+- **Location:** Global (`agents.app.yaml`) for configuration, Agent (front matter) for opt-out
+- **Can override:** No, but agents can opt out by setting to `false`
+- **Description:** Configures Python code execution environment using Azure Container Apps dynamic sessions. Defined globally in `agents.app.yaml`. All agents inherit sandbox access by default. Agents can opt out by setting `execution_sandbox: false`.
 
-**Example:**
+**Global configuration (in `agents.app.yaml`):**
 ```yaml
 execution_sandbox:
   session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 ```
 
+**Agent opt-out (in agent front matter):**
+```yaml
+---
+name: Simple Agent
+description: An agent that doesn't need code execution
+
+execution_sandbox: false  # Opt out of code execution capabilities
+---
+```
+
+**Note:** Future versions may support multiple sandbox types with allow/deny lists similar to MCP servers, skills, and tools.
+
 ---
 
 #### `tools_from_connections`
 - **Type:** `array`
-- **Typical location:** Global (shared infrastructure) or Agent (override)
-- **Can override:** Yes
-- **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors
+- **Location:** Global only (`agents.app.yaml`)
+- **Can override:** No (global infrastructure only)
+- **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors as dynamic tools. All agents inherit these tools.
+- **Status:** ⚠️ Under review — May be deprecated in favor of MCP-based connector integration
 
 **Example:**
 ```yaml
@@ -218,120 +340,118 @@ tools_from_connections:
   - connection_id: $OUTLOOK_CONNECTION_ID
 ```
 
+**Note:** This field enables dynamic tool generation from connector APIs. An alternative approach is to use connectors via their MCP (Model Context Protocol) servers through the `mcp` field, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
+
+**MCP alternative:**
+```yaml
+mcp:
+  - office365-connector  # Use connector via MCP instead
+```
+
 ---
 
 #### `tools`
 - **Type:** `object`
-- **Typical location:** Global (shared default) or Agent (override)
-- **Can override:** Yes
-- **Description:** Controls which tools are available. By default, all tools from `tools/` directory and built-in tools are loaded.
+- **Location:** Global (`agents.app.yaml`) for configuration, Agent (front matter) for filtering
+- **Description:** Controls which tools are available. All tools from `tools/` directory and built-in tools are auto-discovered. Use global config to set defaults, agent config to apply allow/deny lists.
 
-**Structure:**
+**Global configuration (optional) - Set defaults:**
 ```yaml
 tools:
-  include: string[]      # Optional. Only load these specific tools
-  exclude: string[]      # Optional. Block these tools from being loaded
-  only_custom: boolean   # Optional. If true, only load custom tools from tools/, no built-ins
+  exclude: ["bash", "execute_shell"]  # Exclude dangerous tools by default
 ```
 
-**Examples:**
+**Agent filtering - Override with allow/deny lists:**
 ```yaml
 # Include only specific tools
 tools:
   include: ["azure_rest", "send_email"]
 
-# Exclude specific tools
+# Exclude specific tools (in addition to global excludes)
 tools:
-  exclude: ["web_fetch", "bash", "execute_shell"]
+  exclude: ["web_fetch"]
 
-# Only custom tools
+# Only custom tools (no built-ins)
 tools:
-  only_custom: true
+  custom_only: true
 ```
+
+**Note:** Agents inherit all globally available tools by default. Use `include`/`exclude` to filter.
 
 ---
 
 #### `mcp`
 - **Type:** `array` or `object`
-- **Typical location:** Global (all available servers) or Agent (allow-list filter)
-- **Can override:** Yes (agent value filters/overrides global)
-- **Description:** MCP servers configuration. In `agents.app.yaml`, defines all available MCP servers. In agent front matter, acts as an allow-list filter.
+- **Location:** Global (`agents.app.yaml`) for references, Agent (front matter) for filtering
+- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.app.yaml`, list which servers are available to agents. Agents inherit all listed servers by default or can use allow/deny lists to filter.
 
-**Global configuration - Define all available servers:**
+**Global configuration (in `agents.app.yaml`) - List available servers:**
 ```yaml
 mcp:
   - microsoft-learn
   - azure-devops
+  - custom-api
+```
+*Note: These server names must be defined in `mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.*
+
+**Agent filtering - Override with allow/deny lists:**
+```yaml
+# Include only specific MCP servers (shorthand)
+mcp:
+  - microsoft-learn
+
+# Include only specific MCP servers (explicit)
+mcp:
+  include: ["microsoft-learn", "azure-devops"]
+
+# Exclude specific MCP servers
+mcp:
+  exclude: ["custom-api"]
 ```
 
-**Agent front matter - Filter to specific servers:**
+**Disable all MCP servers for an agent:**
 ```yaml
+mcp: []
+# or
 mcp:
-  - microsoft-learn  # Only load this MCP server
+  include: []
 ```
 
-**Object syntax (inline definition):**
-```yaml
-mcp:
-  custom-api:
-    type: http
-    url: https://api.example.com/mcp
-```
+**Note:** Agents inherit all globally defined MCP servers by default. Use `include`/`exclude` to filter.
 
 ---
 
 #### `skills`
-- **Type:** `array` or `boolean`
-- **Typical location:** Global (all available skills) or Agent (allow-list filter)
-- **Can override:** Yes (agent value filters/overrides global)
-- **Description:** Skills configuration. In `agents.app.yaml`, defines all available skills. In agent front matter, acts as an allow-list filter.
+- **Type:** `array`, `object`, or `boolean`
+- **Location:** Agent (front matter) for filtering only
+- **Description:** Skills configuration. All skills in `skills/` directory are automatically discovered and available to all agents by default. Use allow/deny lists in agent front matter to filter which skills each agent can access.
 
-**Global configuration - Define all available skills:**
+**Agent filtering - Override with allow/deny lists:**
 ```yaml
+# Include only specific skills (shorthand)
 skills:
   - azure-resources
-  - cost-optimization
-```
 
-**Agent front matter - Filter to specific skills:**
-```yaml
+# Include only specific skills (explicit)
 skills:
-  - azure-resources  # Only load this skill
+  include: ["azure-resources", "cost-optimization"]
+
+# Exclude specific skills
+skills:
+  exclude: ["security-review"]
 ```
 
-**Disable all skills:**
+**Disable all skills for an agent:**
 ```yaml
 skills: false
 # or
 skills: []
+# or
+skills:
+  include: []
 ```
 
----
-
-#### `retry`
-- **Type:** `object`
-- **Typical location:** Global (shared default) or Agent (override)
-- **Can override:** Yes
-- **Default:** No automatic retries
-- **Description:** Configures automatic retry behavior for failed agent executions
-
-**Structure:**
-```yaml
-retry:
-  max_attempts: number     # Required. Maximum number of retry attempts
-  backoff: string          # Optional. "linear" or "exponential". Default: "exponential"
-  retry_on: string[]       # Optional. Conditions to retry on. Default: ["timeout", "error"]
-  initial_delay: number    # Optional. Initial delay in seconds. Default: 1
-  max_delay: number        # Optional. Maximum delay in seconds. Default: 60
-```
-
-**Example:**
-```yaml
-retry:
-  max_attempts: 3
-  backoff: exponential
-  retry_on: ["timeout", "rate_limit", "service_unavailable"]
-```
+**Note:** All skills in the `skills/` directory are auto-discovered and available to all agents by default. Use `include`/`exclude` to filter.
 
 ---
 
@@ -435,12 +555,15 @@ Use `$VARIABLE_NAME` syntax in any field value for runtime substitution from app
 
 ### Example 1: Multi-Agent Application with Global Configuration
 
+This example demonstrates the recommended pattern: define all infrastructure globally and filter per-agent as needed.
+
 **Global Configuration (`agents.app.yaml`):**
 ```yaml
 # Shared infrastructure
 execution_sandbox:
   session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
+# Connector tools (may be replaced by MCP in future)
 tools_from_connections:
   - connection_id: $O365_CONNECTION_ID
 
@@ -453,21 +576,9 @@ mcp:
   - microsoft-learn
   - azure-devops
 
-# Available skills
-skills:
-  - azure-resources
-  - cost-optimization
-  - security-review
-
 # Global tool configuration
 tools:
   exclude: ["bash", "execute_shell"]
-
-# Default retry behavior
-retry:
-  max_attempts: 3
-  backoff: exponential
-  retry_on: ["timeout", "error"]
 ```
 
 **Chat Agent (`chat.agent.md`):**
@@ -479,6 +590,7 @@ description: A helpful assistant with Python code execution capabilities
 
 You are a helpful assistant. If you need to get up to date information, browse the web for it.
 ```
+*Note: This agent inherits all global capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools, model, timeout).*
 
 **Resource Summary Agent (`resource_summary.agent.md`):**
 ```yaml
@@ -494,7 +606,7 @@ trigger:
     auth_level: function
 
 skills:
-  - azure-resources  # Only load azure-resources skill
+  - azure-resources  # Filter: only use azure-resources (from global config)
 
 input_schema:
   type: object
@@ -518,6 +630,7 @@ response_schema:
 
 Given the subscription ID in the request body, list all resources and return a structured summary.
 ```
+*Note: This agent filters global skills to only `azure-resources`. Inherits all other global capabilities.*
 
 **Daily Report Agent (`daily_report.agent.md`):**
 ```yaml
@@ -531,14 +644,41 @@ trigger:
     schedule: "0 0 7 * * *"
 
 mcp:
-  - microsoft-learn  # Only load Microsoft Learn MCP server
+  - microsoft-learn  # Include only: microsoft-learn (shorthand for include)
 
 skills:
-  - azure-resources  # Only load azure-resources skill
+  - azure-resources  # Include only: azure-resources (shorthand for include)
 ---
 
 When triggered, list all resources in subscription $SUBSCRIPTION_ID, filter for changes in the last 24 hours, and email a report to $TO_EMAIL.
 ```
+*Note: This agent filters global MCP servers to only `microsoft-learn` and global skills to only `azure-resources`. Inherits all other global capabilities.*
+
+**Timer Agent with HTTP and MCP Endpoints (`scheduled_task.agent.md`):**
+```yaml
+---
+name: Scheduled Task
+description: A timer-triggered agent with HTTP and MCP access for testing
+
+trigger:
+  type: timer_trigger
+  args:
+    schedule: "0 0 * * * *"  # Every hour
+
+enable-http: true  # Enable HTTP chat endpoints for manual testing
+enable-mcp: true   # Expose as MCP tool for other agents
+
+skills:
+  - azure-resources
+---
+
+Run scheduled Azure resource checks. Can be triggered on schedule, via HTTP endpoints, or called as a tool by other agents.
+```
+
+This creates:
+- Timer trigger: Runs every hour automatically
+- HTTP endpoints: `POST /agent/chat`, `POST /agent/chatstream` for testing
+- MCP tool: `scheduled_task` tool callable by other agents
 
 ### Example 2: Simple Single-Agent Application
 
@@ -547,10 +687,7 @@ When triggered, list all resources in subscription $SUBSCRIPTION_ID, filter for 
 execution_sandbox:
   session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
-model:
-  name: claude-sonnet-4
-  temperature: 0.7
-
+model: claude-sonnet-4
 timeout: 600
 ```
 
@@ -564,19 +701,21 @@ description: A helpful assistant with Python code execution capabilities
 You are a helpful assistant. If you need to run Python code or perform calculations, use the code execution sandbox.
 ```
 
-### Example 3: Agent with Overrides
+### Example 3: Agent with Runtime Overrides and Capability Filtering
+
+This example shows how to override runtime settings and filter capabilities per-agent.
 
 **Global Configuration (`agents.app.yaml`):**
 ```yaml
+execution_sandbox:
+  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+
 model: gpt-4o
 timeout: 900
 
 mcp:
   - microsoft-learn
   - azure-devops
-
-skills:
-  - azure-resources
 ```
 
 **Agent with Overrides (`fast_agent.agent.md`):**
@@ -588,17 +727,62 @@ description: A fast agent that uses a different model
 trigger:
   type: http_trigger
 
-model: gpt-4o-mini  # Override global model
-timeout: 60         # Override global timeout
+# Runtime overrides
+model: gpt-4o-mini  # Override: use faster model instead of global default
+timeout: 60         # Override: shorter timeout instead of global default
 
-mcp: []            # Disable all MCP servers
+# Capability filters
+execution_sandbox: false  # Opt out of code execution for security/performance
+mcp: []            # Disable all MCP servers (empty include list)
 skills: false      # Disable all skills
 ---
 
 You are a fast agent optimized for simple queries.
 ```
+*Note: This agent overrides runtime settings (model, timeout) and opts out of the sandbox and filters out all MCP servers and skills for maximum performance.*
 
-### Example 4: Minimal Configuration
+### Example 4: Agent Using Exclude Pattern
+
+**Global Configuration (`agents.app.yaml`):**
+```yaml
+execution_sandbox:
+  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+
+mcp:
+  - microsoft-learn
+  - azure-devops
+  - github-copilot
+  - custom-api
+
+tools:
+  exclude: ["bash", "execute_shell"]  # Exclude dangerous tools globally
+```
+
+**Agent with Exclusions (`basic_agent.agent.md`):**
+```yaml
+---
+name: Basic Agent
+description: A basic agent that excludes certain capabilities
+
+trigger:
+  type: http_trigger
+
+# Exclude specific capabilities (inherit all others)
+mcp:
+  exclude: ["custom-api"]  # Use all MCP servers except custom-api
+
+skills:
+  exclude: ["compliance-checker", "security-review"]  # Exclude these auto-discovered skills
+
+tools:
+  exclude: ["web_fetch"]  # Also exclude web_fetch (in addition to global excludes)
+---
+
+You are a basic agent with most capabilities but some exclusions for security.
+```
+*Note: This agent demonstrates the exclude pattern, which is consistent across `mcp`, `skills`, and `tools`.*
+
+### Example 5: Minimal Configuration
 
 **No global configuration file** (`agents.app.yaml` omitted)
 
@@ -630,19 +814,31 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 10. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
 11. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
 12. **Tool references:** Tools in `tools.include` must exist in `tools/` directory or be built-in tools
-13. **MCP server references:** Servers in `mcp` array must be defined in `agents.app.yaml`, `mcp.json`, or inline
-14. **Skill references:** Skills in `skills` array must exist in `agents.app.yaml` or as directories under `skills/`
-15. **Retry attempts:** `retry.max_attempts` must be >= 1 and <= 10 (recommended)
-16. **Retry backoff:** `retry.backoff` must be either `"linear"` or `"exponential"`
-17. **Configuration file location:** `agents.app.yaml` must be in the same directory as agent `.md` files (typically `src/`)
+13. **MCP server references:** Servers in `mcp` array must be defined in `mcp.json`
+14. **Skill references:** Skills in `skills` array must exist as directories under `skills/`
+15. **Configuration file location:** `agents.app.yaml` must be in the same directory as agent `.md` files (typically `src/`)
 
 ---
 
 ## File Naming Conventions
 
 - **Global configuration:** `agents.app.yaml` (in `src/` directory)
+- **Main agent:** `main.agent.md` (optional) — Special agent with HTTP chat UI and MCP tool enabled by default
 - **Named agents:** `{agent-name}.agent.md` (e.g., `daily_azure_report.agent.md`)
 - **Skills:** `skills/{skill-name}/SKILL.md`
+
+**Main agent behavior:**
+The `main.agent.md` file is special:
+- **HTTP endpoints enabled by default** (`enable-http: true`):
+  - `GET /` — Chat UI page
+  - `POST /agent/chat` — Non-streaming chat endpoint
+  - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
+- **MCP tool enabled by default** (`enable-mcp: true`):
+  - Tool name derived from `name` field in front matter
+  - Exposed as `mcpToolTrigger` for other agents to call
+- **No trigger required** — Uses HTTP by default; can be omitted from front matter
+
+Other agents require an explicit `trigger` definition and have `enable-http: false` and `enable-mcp: false` by default.
 
 **Example project structure:**
 ```

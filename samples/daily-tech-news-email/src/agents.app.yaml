@@ -10,9 +10,3 @@ tools_from_connections:
 # Default runtime configuration
 model: gpt-4o
 timeout: 900
-
-# Default retry behavior
-retry:
-  max_attempts: 3
-  backoff: exponential
-  retry_on: ["timeout", "error"]
