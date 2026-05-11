@@ -13,7 +13,6 @@ returns an empty string and contributes nothing.
 from __future__ import annotations
 
 import logging
-import os
 from pathlib import Path
 from typing import List, Optional
 

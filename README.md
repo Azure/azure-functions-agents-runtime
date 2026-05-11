@@ -35,12 +35,6 @@ Connector tools (Teams, Office 365, SQL, Salesforce, etc.) require an optional e
 pip install "azurefunctions-agents-runtime[connectors]"
 ```
 
-### From source (development)
-
-```bash
-pip install azurefunctions-agents-runtime @ git+https://github.com/anthonychu/azure-functions-agents.git
-```
-
 ## Model Provider Configuration
 
 The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Azure AI Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
