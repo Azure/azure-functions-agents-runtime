@@ -15,13 +15,14 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - MCP servers (defined in `mcp.json`, referenced in `agents.app.yaml`)
 - Skills (auto-discovered from `skills/` directory)
 - Custom tools (auto-discovered from `tools/` directory)
-- Code execution sandbox configuration
-- Connector tools
+- System tools (`system_tools`)
+  - Code execution sandbox configuration
+  - Connector tools
 - Default runtime settings (model, timeout)
 
 **Agent front matter:**
 - **Inherits all auto-discovered capabilities by default**
-- Can apply **allow/deny lists** to filter which MCP servers, skills, or tools are available
+- Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
@@ -36,7 +37,15 @@ For runtime settings (model, timeout):
 
 For capabilities (MCP, skills, tools):
 1. **Auto-discovered and referenced** — MCP servers referenced in `agents.app.yaml` (defined in `mcp.json`), skills and tools auto-discovered from their directories
-2. **Filtered per-agent** using allow/deny lists in agent front matter
+2. **Filtered per-agent** using exclude lists in agent front matter
+
+### Quick Reference: Required vs Optional
+
+| Level | Required Properties | Optional Properties |
+|-------|-------------------|-------------------|
+| **Global** (`agents.app.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `model`, `timeout`, `tools` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+
 
 ---
 
@@ -45,38 +54,48 @@ For capabilities (MCP, skills, tools):
 ### Global Configuration (`agents.app.yaml`)
 Optional file in `src/` directory that defines infrastructure and capabilities available to all agents.
 
-**What goes in global configuration:**
-- MCP server references (servers defined in `mcp.json`)
-- Code execution sandbox endpoints
-- Connector tool configurations
-- Default runtime settings (model, timeout)
+**Required properties:** None (entire file is optional)
 
-**Note:** Skills (from `skills/` directory) and custom tools (from `tools/` directory) are automatically discovered and do not need to be listed in global configuration. Agents can filter them using allow/deny lists.
+**Supported properties:**
+- `mcp` — Array of MCP server names (servers must be defined in `mcp.json`)
+- `system_tools` — Object containing system-level tools configuration
+  - `execute_in_sessions` — Object with code execution sandbox configuration
+  - `tools_from_connections` — Array of connector configurations
+- `model` — String specifying default LLM model identifier
+- `timeout` — Number specifying default execution timeout in seconds
+- `tools` — Object for tool filtering configuration
+
+**Note:** Skills (from `skills/` directory) and custom tools (from `tools/` directory) are automatically discovered and do not need to be listed in global configuration. Agents can filter them out using exclude lists.
 
 **Key principle:** Global config defines **what's available**. Agents filter **what they use**.
 
 ### Agent Configuration (`.agent.md` front matter)
 YAML front matter at the top of each agent file.
 
-**What goes in agent front matter:**
-- `name` and `description` (required)
-- `trigger` — How the agent is invoked (required, except for `main.agent.md`)
-- `enable-http` / `enable-mcp` — Enable testing/composition endpoints
-- **Allow/deny lists** for `mcp`, `skills`, `tools` (filters global capabilities)
-- **Runtime overrides** for `model`, `timeout`
-- **HTTP-specific** fields like `input_schema`, `response_schema`, `response_example`
+**Required properties:**
+- `name` — String, display name for the agent
+- `description` — String, brief description of the agent's purpose
+- `trigger` — Object defining how the agent is invoked (optional for `main.agent.md` only)
 
-**Special file: `main.agent.md`**
-- Optional primary agent with HTTP chat UI and MCP tool enabled by default
-- No `trigger` required (uses HTTP endpoints automatically)
-- See [File Naming Conventions](#file-naming-conventions) for details
+**Optional properties:**
+- `debug` — Object or boolean for enabling debugging/testing endpoints
+- `model` — String to override global default model
+- `timeout` — Number to override global default timeout
+- `system_tools` — Object to opt out of system tools
+- `mcp` — Object with exclude lists to filter MCP servers
+- `skills` — Object with exclude lists or false to filter skills
+- `tools` — Object with exclude lists or false to filter tools
+- `input_schema` — Object, JSON Schema for HTTP request validation
+- `response_schema` — Object, JSON Schema for response validation
+- `response_example` — String, example response for documentation
+- `metadata` — Object, additional organizational metadata
+
 
 **File structure:**
 ```
 src/
   agents.app.yaml          # Optional: Global defaults
-  main.agent.md            # Optional: Main agent (HTTP + MCP enabled)
-  another_agent.agent.md   # Other agents (require trigger)
+  *_agent.agent.md   # Other agents (require trigger)
   ...
 ```
 
@@ -89,11 +108,12 @@ Fields are organized into categories based on how they can be used:
 ### Field Categories
 
 **Infrastructure (Global only, filtered in agents):**
-- `mcp` — MCP server references (global) or allow/deny lists (agent)
-- `skills` — Auto-discovered from `skills/` directory, allow/deny lists (agent only)
-- `tools` — Auto-discovered from `tools/` directory, allow/deny lists (agent only)
-- `execution_sandbox` — Sandbox configuration (global), opt-out (agent)
-- `tools_from_connections` — Connector tools (global only)
+- `mcp` — MCP server references (global) or exclude lists (agent)
+- `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
+- `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
+- `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
+  - `execute_in_sessions` — Code execution sandbox
+  - `tools_from_connections` — Connector-based tools
 
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
@@ -102,13 +122,15 @@ Fields are organized into categories based on how they can be used:
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
 - `trigger` — Invocation method (required for non-main agents)
-- `enable-http`, `enable-mcp` — Testing/composition endpoints
+- `debug` — Debugging and testing endpoints
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
 - `metadata` — Organizational metadata
 
 ---
 
 ### Required Fields (Agent Front Matter Only)
+
+**Summary:** Every `.agent.md` file must have `name`, `description`, and `trigger` (except `main.agent.md` where `trigger` is optional).
 
 #### `name`
 - **Type:** `string`
@@ -199,63 +221,89 @@ trigger:
 
 ---
 
-#### `enable-http`
-- **Type:** `boolean`
-- **Typical location:** Agent only
+#### `debug`
+- **Type:** `object`
+- **Location:** Agent only (front matter)
 - **Can override:** N/A (agent-specific only)
-- **Default:** `false`
-- **Description:** Enable HTTP chat endpoints for the agent. When enabled, creates interactive chat endpoints for testing and usage.
-- **Applies to:** All agents (especially useful for non-HTTP triggered agents)
+- **Default:** All disabled (`false`) for regular agents; all enabled (`true`) for `main.agent.md`
+- **Description:** Enables debugging and testing endpoints for the agent. Useful for development, testing, and agent composition.
 
-**Endpoints created when enabled:**
-- `POST /agent/chat` — Non-streaming chat endpoint
-- `POST /agent/chatstream` — Server-sent events streaming chat endpoint
-- `GET /` — Chat UI page
+**Structure:**
+```yaml
+debug:
+  chat: boolean   # Enable chat UI endpoint (GET /)
+  http: boolean   # Enable REST API endpoints (POST /agent/chat, POST /agent/chatstream)
+  mcp: boolean    # Enable MCP tool registration for agent-to-agent calls
+```
 
-**Example:**
+**Endpoint Details:**
+
+**`chat: true`** — Interactive Chat UI
+- **Endpoint:** `GET /`
+- **Purpose:** Browser-based chat interface for manual testing and interaction
+- **Use case:** Test any agent (timer, queue, HTTP) via a web UI during development
+
+**`http: true`** — REST API Endpoints
+- **Endpoints:**
+  - `POST /agent/chat` — Non-streaming chat endpoint (returns full response)
+  - `POST /agent/chatstream` — Streaming chat endpoint (Server-Sent Events)
+- **Request body:** `{"prompt": "your question or instruction"}`
+- **Response:** JSON with `session_id`, `response`, `tool_calls`, etc.
+- **Use case:** Programmatic access to the agent, integration testing, API clients
+
+**`mcp: true`** — MCP Tool Registration
+- **Tool name:** Derived from agent `name` field (e.g., "Daily Azure Report" → `daily_azure_report`)
+- **Tool description:** From agent `description` field
+- **Tool trigger:** `mcpToolTrigger`
+- **Input:** `{"prompt": "string"}`
+- **Output:** JSON response from the agent
+- **Use case:** Enable agent-to-agent communication — other agents can invoke this agent as a tool
+
+**Examples:**
+
+**Enable all debug endpoints:**
 ```yaml
 trigger:
   type: timer_trigger
   args:
     schedule: "0 0 7 * * *"
-enable-http: true  # Enable HTTP chat endpoints for manual testing
+
+debug:
+  chat: true   # Enable UI for manual testing
+  http: true   # Enable REST API for integration tests
+  mcp: true    # Expose as MCP tool for other agents
 ```
 
-**Use case:** Test timer or queue-triggered agents via HTTP during development without waiting for the schedule or adding messages to queues. Also useful for providing a chat interface to any agent.
-
----
-
-#### `enable-mcp`
-- **Type:** `boolean`
-- **Typical location:** Agent only
-- **Can override:** N/A (agent-specific only)
-- **Default:** `false`
-- **Description:** Enable MCP (Model Context Protocol) tool registration for the agent. When enabled, the agent is exposed as an MCP tool that can be called by other agents or MCP clients.
-- **Applies to:** All agents
-
-**MCP tool created when enabled:**
-- Tool name: Derived from agent `name` field (e.g., "Daily Azure Report" → `daily_azure_report`)
-- Tool description: From agent `description` field
-- Tool trigger type: `mcpToolTrigger`
-- Input: `{"prompt": "string"}` — The prompt to send to the agent
-- Output: JSON with `session_id`, `response`, `response_intermediate`, `tool_calls`
-
-**Example:**
+**Enable only HTTP API (no UI, no MCP):**
 ```yaml
-name: Daily Azure Report
-description: Lists resources created or changed in the last 24 hours and emails a report
+trigger:
+  type: queue_trigger
+  args:
+    queue_name: "tasks"
+
+debug:
+  http: true   # Enable REST API only
+```
+
+**Enable only MCP tool (for agent composition):**
+```yaml
 trigger:
   type: timer_trigger
   args:
     schedule: "0 0 7 * * *"
-enable-mcp: true  # Expose as MCP tool
+
+debug:
+  mcp: true   # Expose as tool for other agents to call
 ```
 
-**Use case:** Allow other agents to invoke this agent as a tool, enabling agent-to-agent communication and composition.
-
-**MCP tool registration example:**
+**Shorthand for enabling all:**
+```yaml
+debug: true   # Equivalent to chat: true, http: true, mcp: true
 ```
-daily_azure_report: mcpToolTrigger
+
+**Shorthand for disabling all:**
+```yaml
+debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 ```
 
 ---
@@ -300,16 +348,31 @@ timeout: 60  # 1 minute for fast agent
 
 ---
 
-#### `execution_sandbox`
-- **Type:** `object` (global), `boolean` (agent)
+#### `system_tools`
+- **Type:** `object`
 - **Location:** Global (`agents.app.yaml`) for configuration, Agent (front matter) for opt-out
-- **Can override:** No, but agents can opt out by setting to `false`
-- **Description:** Configures Python code execution environment using Azure Container Apps dynamic sessions. Defined globally in `agents.app.yaml`. All agents inherit sandbox access by default. Agents can opt out by setting `execution_sandbox: false`.
+- **Description:** Configures system-level tools and capabilities provided by the Azure Functions agent runtime. Defined globally, inherited by all agents, with opt-out capability at the agent level.
+
+**Structure:**
+```yaml
+system_tools:
+  execute_in_sessions:      # Code execution sandbox configuration
+    session_pool_management_endpoint: string
+  tools_from_connections:   # Connector-based tools
+    - connection_id: string
+```
+
+---
+
+##### `system_tools.execute_in_sessions`
+- **Type:** `object` (global), `boolean` (agent)
+- **Description:** Configures Python code execution environment using Azure Container Apps dynamic sessions. All agents inherit sandbox access by default. Agents can opt out by setting to `false`.
 
 **Global configuration (in `agents.app.yaml`):**
 ```yaml
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 ```
 
 **Agent opt-out (in agent front matter):**
@@ -318,26 +381,26 @@ execution_sandbox:
 name: Simple Agent
 description: An agent that doesn't need code execution
 
-execution_sandbox: false  # Opt out of code execution capabilities
+system_tools:
+  execute_in_sessions: false  # Opt out of code execution capabilities
 ---
 ```
 
-**Note:** Future versions may support multiple sandbox types with allow/deny lists similar to MCP servers, skills, and tools.
+**Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
 
 ---
 
-#### `tools_from_connections`
+##### `system_tools.tools_from_connections`
 - **Type:** `array`
-- **Location:** Global only (`agents.app.yaml`)
-- **Can override:** No (global infrastructure only)
-- **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors as dynamic tools. All agents inherit these tools.
+- **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors as dynamic tools. All agents inherit these tools by default.
 - **Status:** ⚠️ Under review — May be deprecated in favor of MCP-based connector integration
 
-**Example:**
+**Global configuration (in `agents.app.yaml`):**
 ```yaml
-tools_from_connections:
-  - connection_id: $O365_CONNECTION_ID
-  - connection_id: $OUTLOOK_CONNECTION_ID
+system_tools:
+  tools_from_connections:
+    - connection_id: $O365_CONNECTION_ID
+    - connection_id: $OUTLOOK_CONNECTION_ID
 ```
 
 **Note:** This field enables dynamic tool generation from connector APIs. An alternative approach is to use connectors via their MCP (Model Context Protocol) servers through the `mcp` field, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
@@ -361,29 +424,30 @@ tools:
   exclude: ["bash", "execute_shell"]  # Exclude dangerous tools by default
 ```
 
-**Agent filtering - Override with allow/deny lists:**
+**Agent filtering - Use exclude lists:**
 ```yaml
-# Include only specific tools
-tools:
-  include: ["azure_rest", "send_email"]
-
 # Exclude specific tools (in addition to global excludes)
 tools:
-  exclude: ["web_fetch"]
+  exclude: ["web_fetch", "http_request"]
 
 # Only custom tools (no built-ins)
 tools:
   custom_only: true
 ```
 
-**Note:** Agents inherit all globally available tools by default. Use `include`/`exclude` to filter.
+**Disable all tools for an agent:**
+```yaml
+tools: false
+```
+
+**Note:** Agents inherit all globally available tools by default. Use `exclude` to filter out unwanted tools.
 
 ---
 
 #### `mcp`
 - **Type:** `array` or `object`
 - **Location:** Global (`agents.app.yaml`) for references, Agent (front matter) for filtering
-- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.app.yaml`, list which servers are available to agents. Agents inherit all listed servers by default or can use allow/deny lists to filter.
+- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.app.yaml`, list which servers are available to agents. Agents inherit all listed servers by default and can use exclude lists to filter.
 
 **Global configuration (in `agents.app.yaml`) - List available servers:**
 ```yaml
@@ -394,64 +458,40 @@ mcp:
 ```
 *Note: These server names must be defined in `mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.*
 
-**Agent filtering - Override with allow/deny lists:**
+**Agent filtering - Use exclude lists:**
 ```yaml
-# Include only specific MCP servers (shorthand)
-mcp:
-  - microsoft-learn
-
-# Include only specific MCP servers (explicit)
-mcp:
-  include: ["microsoft-learn", "azure-devops"]
-
 # Exclude specific MCP servers
 mcp:
-  exclude: ["custom-api"]
+  exclude: ["custom-api", "experimental-server"]
 ```
 
 **Disable all MCP servers for an agent:**
 ```yaml
-mcp: []
-# or
-mcp:
-  include: []
+mcp: false
 ```
 
-**Note:** Agents inherit all globally defined MCP servers by default. Use `include`/`exclude` to filter.
+**Note:** Agents inherit all globally defined MCP servers by default. Use `exclude` to filter out unwanted servers.
 
 ---
 
 #### `skills`
 - **Type:** `array`, `object`, or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skills configuration. All skills in `skills/` directory are automatically discovered and available to all agents by default. Use allow/deny lists in agent front matter to filter which skills each agent can access.
+- **Description:** Skills configuration. All skills in `skills/` directory are automatically discovered and available to all agents by default. Use exclude lists in agent front matter to filter out unwanted skills.
 
-**Agent filtering - Override with allow/deny lists:**
+**Agent filtering - Use exclude lists:**
 ```yaml
-# Include only specific skills (shorthand)
-skills:
-  - azure-resources
-
-# Include only specific skills (explicit)
-skills:
-  include: ["azure-resources", "cost-optimization"]
-
 # Exclude specific skills
 skills:
-  exclude: ["security-review"]
+  exclude: ["security-review", "compliance-checker"]
 ```
 
 **Disable all skills for an agent:**
 ```yaml
 skills: false
-# or
-skills: []
-# or
-skills:
-  include: []
 ```
 
-**Note:** All skills in the `skills/` directory are auto-discovered and available to all agents by default. Use `include`/`exclude` to filter.
+**Note:** All skills in the `skills/` directory are auto-discovered and available to all agents by default. Use `exclude` to filter out unwanted skills.
 
 ---
 
@@ -560,12 +600,11 @@ This example demonstrates the recommended pattern: define all infrastructure glo
 **Global Configuration (`agents.app.yaml`):**
 ```yaml
 # Shared infrastructure
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-
-# Connector tools (may be replaced by MCP in future)
-tools_from_connections:
-  - connection_id: $O365_CONNECTION_ID
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  tools_from_connections:
+    - connection_id: $O365_CONNECTION_ID
 
 # Global defaults
 model: gpt-4o
@@ -605,9 +644,6 @@ trigger:
     methods: ["POST"]
     auth_level: function
 
-skills:
-  - azure-resources  # Filter: only use azure-resources (from global config)
-
 input_schema:
   type: object
   required: ["subscription_id"]
@@ -630,7 +666,7 @@ response_schema:
 
 Given the subscription ID in the request body, list all resources and return a structured summary.
 ```
-*Note: This agent filters global skills to only `azure-resources`. Inherits all other global capabilities.*
+*Note: This agent inherits all global capabilities.*
 
 **Daily Report Agent (`daily_report.agent.md`):**
 ```yaml
@@ -642,17 +678,11 @@ trigger:
   type: timer_trigger
   args:
     schedule: "0 0 7 * * *"
-
-mcp:
-  - microsoft-learn  # Include only: microsoft-learn (shorthand for include)
-
-skills:
-  - azure-resources  # Include only: azure-resources (shorthand for include)
 ---
 
 When triggered, list all resources in subscription $SUBSCRIPTION_ID, filter for changes in the last 24 hours, and email a report to $TO_EMAIL.
 ```
-*Note: This agent filters global MCP servers to only `microsoft-learn` and global skills to only `azure-resources`. Inherits all other global capabilities.*
+*Note: This agent inherits all global capabilities.*
 
 **Timer Agent with HTTP and MCP Endpoints (`scheduled_task.agent.md`):**
 ```yaml
@@ -665,11 +695,10 @@ trigger:
   args:
     schedule: "0 0 * * * *"  # Every hour
 
-enable-http: true  # Enable HTTP chat endpoints for manual testing
-enable-mcp: true   # Expose as MCP tool for other agents
-
-skills:
-  - azure-resources
+debug:
+  chat: true   # Enable chat UI for manual testing
+  http: true   # Enable REST API endpoints for integration tests
+  mcp: true    # Expose as MCP tool for other agents
 ---
 
 Run scheduled Azure resource checks. Can be triggered on schedule, via HTTP endpoints, or called as a tool by other agents.
@@ -677,15 +706,17 @@ Run scheduled Azure resource checks. Can be triggered on schedule, via HTTP endp
 
 This creates:
 - Timer trigger: Runs every hour automatically
-- HTTP endpoints: `POST /agent/chat`, `POST /agent/chatstream` for testing
+- Chat UI: `GET /` for browser-based testing
+- HTTP endpoints: `POST /agent/chat`, `POST /agent/chatstream` for programmatic access
 - MCP tool: `scheduled_task` tool callable by other agents
 
 ### Example 2: Simple Single-Agent Application
 
 **Global Configuration (`agents.app.yaml`):**
 ```yaml
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 model: claude-sonnet-4
 timeout: 600
@@ -707,8 +738,9 @@ This example shows how to override runtime settings and filter capabilities per-
 
 **Global Configuration (`agents.app.yaml`):**
 ```yaml
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 model: gpt-4o
 timeout: 900
@@ -732,21 +764,25 @@ model: gpt-4o-mini  # Override: use faster model instead of global default
 timeout: 60         # Override: shorter timeout instead of global default
 
 # Capability filters
-execution_sandbox: false  # Opt out of code execution for security/performance
-mcp: []            # Disable all MCP servers (empty include list)
-skills: false      # Disable all skills
+system_tools:
+  execute_in_sessions: false  # Opt out of code execution for security/performance
+mcp:
+  exclude: ["experimental-server"]  # Exclude specific MCP servers
+skills:
+  exclude: ["admin-tools"]  # Exclude specific skills
 ---
 
 You are a fast agent optimized for simple queries.
 ```
-*Note: This agent overrides runtime settings (model, timeout) and opts out of the sandbox and filters out all MCP servers and skills for maximum performance.*
+*Note: This agent overrides runtime settings (model, timeout), opts out of the sandbox, and excludes specific MCP servers and skills.*
 
 ### Example 4: Agent Using Exclude Pattern
 
 **Global Configuration (`agents.app.yaml`):**
 ```yaml
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 mcp:
   - microsoft-learn
@@ -802,20 +838,44 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 
 ## Validation Rules
 
-1. **Required fields:** `name` and `description` must always be present in agent front matter
-2. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
-3. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
-4. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
-5. **Environment variables:** `$VARIABLE_NAME` references must be defined in app settings at runtime
-6. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
-7. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
-8. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
-9. **Schema validation:** `input_schema` and `response_schema` must be valid JSON Schema (draft-07 or later)
-10. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
-11. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
-12. **Tool references:** Tools in `tools.include` must exist in `tools/` directory or be built-in tools
-13. **MCP server references:** Servers in `mcp` array must be defined in `mcp.json`
-14. **Skill references:** Skills in `skills` array must exist as directories under `skills/`
+### Required Properties
+
+**Agent Front Matter (`.agent.md`):**
+1. **`name`** — Must always be present (string)
+2. **`description`** — Must always be present (string)
+3. **`trigger`** — Required for all agents except `main.agent.md` (object with `type` field)
+
+**Global Configuration (`agents.app.yaml`):**
+- **No required properties** — The entire file is optional
+
+### Supported Properties
+
+**Global Configuration (`agents.app.yaml`) — Exact property names:**
+- `mcp` (array of strings)
+- `system_tools` (object)
+  - `execute_in_sessions` (object)
+  - `tools_from_connections` (array)
+- `model` (string)
+- `timeout` (number)
+- `tools` (object)
+
+**Agent Front Matter (`.agent.md`) — All properties from Field Reference section**
+
+### Field Validation Rules
+
+1. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
+2. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
+3. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
+4. **Environment variables:** `$VARIABLE_NAME` references must be defined in app settings at runtime
+5. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
+6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
+7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
+8. **Schema validation:** `input_schema` and `response_schema` must be valid JSON Schema (draft-07 or later)
+9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
+10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
+11. **Tool references:** Tools in `tools.exclude` must exist in `tools/` directory or be built-in tools
+12. **MCP server references:** Servers in `mcp.exclude` must be defined in the global `mcp` list in `agents.app.yaml`
+13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
 15. **Configuration file location:** `agents.app.yaml` must be in the same directory as agent `.md` files (typically `src/`)
 
 ---
@@ -829,16 +889,14 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 
 **Main agent behavior:**
 The `main.agent.md` file is special:
-- **HTTP endpoints enabled by default** (`enable-http: true`):
+- **Debug endpoints enabled by default** (`debug: true`):
   - `GET /` — Chat UI page
   - `POST /agent/chat` — Non-streaming chat endpoint
   - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
-- **MCP tool enabled by default** (`enable-mcp: true`):
-  - Tool name derived from `name` field in front matter
-  - Exposed as `mcpToolTrigger` for other agents to call
+  - MCP tool registration — Tool name derived from `name` field, exposed as `mcpToolTrigger`
 - **No trigger required** — Uses HTTP by default; can be omitted from front matter
 
-Other agents require an explicit `trigger` definition and have `enable-http: false` and `enable-mcp: false` by default.
+Other agents require an explicit `trigger` definition and have `debug: false` (all debug endpoints disabled) by default.
 
 **Example project structure:**
 ```
