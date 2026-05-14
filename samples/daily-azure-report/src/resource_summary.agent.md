@@ -4,9 +4,10 @@ description: Returns a structured summary of Azure resources.
 
 trigger:
   type: http_trigger
-  route: resource-summary
-  methods: ["POST"]
-  auth_level: FUNCTION
+  args:
+    route: resource-summary
+    methods: ["POST"]
+    auth_level: FUNCTION
 
 response_example: |
   {

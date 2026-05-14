@@ -195,14 +195,13 @@ Agent files use YAML frontmatter + markdown body:
 name: Agent Name
 description: What this agent does
 
-# Optional: connector tools
-tools_from_connections:
-  - connection_id: $SQL_CONNECTION_ID
-    prefix: sales_db      # optional
-
-# Optional: code interpreter
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+# Optional: system tools (connectors and code execution)
+system_tools:
+  tools_from_connections:
+    - connection_id: $SQL_CONNECTION_ID
+      prefix: sales_db      # optional
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 # For triggered agents only (not `main.agent.md`):
 trigger:
@@ -285,7 +284,7 @@ The agent receives the HTTP request body as input and is instructed to return JS
 
 #### Frontmatter values
 
-String values in `trigger.*` (except `type`), `tools_from_connections[].connection_id`, and `execution_sandbox.session_pool_management_endpoint` support `$VAR` or `%VAR%` syntax (full-string match only).
+String values in `trigger.*` (except `type`), `system_tools.tools_from_connections[].connection_id`, and `system_tools.execute_in_sessions.session_pool_management_endpoint` support `$VAR` or `%VAR%` syntax (full-string match only).
 
 #### Agent instructions (markdown body)
 
