@@ -4,7 +4,7 @@
 
 Azure Functions agents use a **two-tier configuration system**:
 
-1. **Global Configuration** (`agents.app.yaml`) — Infrastructure and capabilities available to all agents
+1. **Global Configuration** (`agents.config.yaml`) — Infrastructure and capabilities available to all agents
 2. **Agent-Specific Configuration** (`.agent.md` front matter) — Agent behavior, triggers, and capability filtering
 
 Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
@@ -12,7 +12,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 ### Configuration Model
 
 **Global configuration defines infrastructure:**
-- MCP servers (defined in `mcp.json`, referenced in `agents.app.yaml`)
+- MCP servers (defined in `mcp.json`, referenced in `agents.config.yaml`)
 - Skills (auto-discovered from `skills/` directory)
 - Custom tools (auto-discovered from `tools/` directory)
 - System tools (`system_tools`)
@@ -31,19 +31,19 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 
 For runtime settings (model, timeout):
 1. **Agent front matter** — Explicit overrides in `.agent.md` files
-2. **Global configuration** — Values in `agents.app.yaml`
+2. **Global configuration** — Values in `agents.config.yaml`
 3. **Environment variables** — App settings and env vars
 4. **Framework defaults** — Built-in default values
 
 For capabilities (MCP, skills, tools):
-1. **Auto-discovered and referenced** — MCP servers referenced in `agents.app.yaml` (defined in `mcp.json`), skills and tools auto-discovered from their directories
+1. **Auto-discovered and referenced** — MCP servers referenced in `agents.config.yaml` (defined in `mcp.json`), skills and tools auto-discovered from their directories
 2. **Filtered per-agent** using exclude lists in agent front matter
 
 ### Quick Reference: Required vs Optional
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.app.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `model`, `timeout`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `model`, `timeout`, `tools` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -51,8 +51,8 @@ For capabilities (MCP, skills, tools):
 
 ## Configuration Files
 
-### Global Configuration (`agents.app.yaml`)
-Optional file in `src/` directory that defines infrastructure and capabilities available to all agents.
+### Global Configuration (`agents.config.yaml`)
+Optional file in the root directory that defines infrastructure and capabilities available to all agents.
 
 **Required properties:** None (entire file is optional)
 
@@ -93,9 +93,9 @@ YAML front matter at the top of each agent file.
 
 **File structure:**
 ```
-src/
-  agents.app.yaml          # Optional: Global defaults
-  *_agent.agent.md   # Other agents (require trigger)
+/
+  agents.config.yaml          # Optional: Global defaults
+  *.agent.md               # Agents (require trigger)
   ...
 ```
 
@@ -310,10 +310,10 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 
 #### `model`
 - **Type:** `string`
-- **Location:** Global (`agents.app.yaml`) for default, Agent (front matter) for override
+- **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Specifies which LLM to use for the agent. Valid model identifiers include `claude-sonnet-4`, `gpt-4o`, `gpt-4o-mini`, `o1`, `o1-mini`.
-- **Precedence:** Agent front matter → Global `agents.app.yaml` → `COPILOT_MODEL` env var → `"claude-sonnet-4"` (default)
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `COPILOT_MODEL` env var → `"claude-sonnet-4"` (default)
 
 **Global default:**
 ```yaml
@@ -331,10 +331,10 @@ model: gpt-4o-mini  # Use faster model for this agent
 
 #### `timeout`
 - **Type:** `number`
-- **Location:** Global (`agents.app.yaml`) for default, Agent (front matter) for override
+- **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Maximum execution time in seconds for the agent.
-- **Precedence:** Agent front matter → Global `agents.app.yaml` → `COPILOT_AGENT_TIMEOUT` env var → `900` seconds (default)
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `COPILOT_AGENT_TIMEOUT` env var → `900` seconds (default)
 
 **Global default:**
 ```yaml
@@ -350,7 +350,7 @@ timeout: 60  # 1 minute for fast agent
 
 #### `system_tools`
 - **Type:** `object`
-- **Location:** Global (`agents.app.yaml`) for configuration, Agent (front matter) for opt-out
+- **Location:** Global (`agents.config.yaml`) for configuration, Agent (front matter) for opt-out
 - **Description:** Configures system-level tools and capabilities provided by the Azure Functions agent runtime. Defined globally, inherited by all agents, with opt-out capability at the agent level.
 
 **Structure:**
@@ -368,7 +368,7 @@ system_tools:
 - **Type:** `object` (global), `boolean` (agent)
 - **Description:** Configures Python code execution environment using Azure Container Apps dynamic sessions. All agents inherit sandbox access by default. Agents can opt out by setting to `false`.
 
-**Global configuration (in `agents.app.yaml`):**
+**Global configuration (in `agents.config.yaml`):**
 ```yaml
 system_tools:
   execute_in_sessions:
@@ -395,7 +395,7 @@ system_tools:
 - **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors as dynamic tools. All agents inherit these tools by default.
 - **Status:** ⚠️ Under review — May be deprecated in favor of MCP-based connector integration
 
-**Global configuration (in `agents.app.yaml`):**
+**Global configuration (in `agents.config.yaml`):**
 ```yaml
 system_tools:
   tools_from_connections:
@@ -415,7 +415,7 @@ mcp:
 
 #### `tools`
 - **Type:** `object`
-- **Location:** Global (`agents.app.yaml`) for configuration, Agent (front matter) for filtering
+- **Location:** Global (`agents.config.yaml`) for configuration, Agent (front matter) for filtering
 - **Description:** Controls which tools are available. All tools from `tools/` directory and built-in tools are auto-discovered. Use global config to set defaults, agent config to apply allow/deny lists.
 
 **Global configuration (optional) - Set defaults:**
@@ -446,10 +446,10 @@ tools: false
 
 #### `mcp`
 - **Type:** `array` or `object`
-- **Location:** Global (`agents.app.yaml`) for references, Agent (front matter) for filtering
-- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.app.yaml`, list which servers are available to agents. Agents inherit all listed servers by default and can use exclude lists to filter.
+- **Location:** Global (`agents.config.yaml`) for references, Agent (front matter) for filtering
+- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.config.yaml`, list which servers are available to agents. Agents inherit all listed servers by default and can use exclude lists to filter.
 
-**Global configuration (in `agents.app.yaml`) - List available servers:**
+**Global configuration (in `agents.config.yaml`) - List available servers:**
 ```yaml
 mcp:
   - microsoft-learn
@@ -597,7 +597,7 @@ Use `$VARIABLE_NAME` syntax in any field value for runtime substitution from app
 
 This example demonstrates the recommended pattern: define all infrastructure globally and filter per-agent as needed.
 
-**Global Configuration (`agents.app.yaml`):**
+**Global Configuration (`agents.config.yaml`):**
 ```yaml
 # Shared infrastructure
 system_tools:
@@ -712,7 +712,7 @@ This creates:
 
 ### Example 2: Simple Single-Agent Application
 
-**Global Configuration (`agents.app.yaml`):**
+**Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
   execute_in_sessions:
@@ -736,7 +736,7 @@ You are a helpful assistant. If you need to run Python code or perform calculati
 
 This example shows how to override runtime settings and filter capabilities per-agent.
 
-**Global Configuration (`agents.app.yaml`):**
+**Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
   execute_in_sessions:
@@ -778,7 +778,7 @@ You are a fast agent optimized for simple queries.
 
 ### Example 4: Agent Using Exclude Pattern
 
-**Global Configuration (`agents.app.yaml`):**
+**Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
   execute_in_sessions:
@@ -820,7 +820,7 @@ You are a basic agent with most capabilities but some exclusions for security.
 
 ### Example 5: Minimal Configuration
 
-**No global configuration file** (`agents.app.yaml` omitted)
+**No global configuration file** (`agents.config.yaml` omitted)
 
 **Agent (`main.agent.md`):**
 ```yaml
@@ -845,12 +845,12 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 2. **`description`** — Must always be present (string)
 3. **`trigger`** — Required for all agents except `main.agent.md` (object with `type` field)
 
-**Global Configuration (`agents.app.yaml`):**
+**Global Configuration (`agents.config.yaml`):**
 - **No required properties** — The entire file is optional
 
 ### Supported Properties
 
-**Global Configuration (`agents.app.yaml`) — Exact property names:**
+**Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `mcp` (array of strings)
 - `system_tools` (object)
   - `execute_in_sessions` (object)
@@ -874,15 +874,15 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
 10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
 11. **Tool references:** Tools in `tools.exclude` must exist in `tools/` directory or be built-in tools
-12. **MCP server references:** Servers in `mcp.exclude` must be defined in the global `mcp` list in `agents.app.yaml`
+12. **MCP server references:** Servers in `mcp.exclude` must be defined in the global `mcp` list in `agents.config.yaml`
 13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
-15. **Configuration file location:** `agents.app.yaml` must be in the same directory as agent `.md` files (typically `src/`)
+15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 
 ---
 
 ## File Naming Conventions
 
-- **Global configuration:** `agents.app.yaml` (in `src/` directory)
+- **Global configuration:** `agents.config.yaml` (in root directory)
 - **Main agent:** `main.agent.md` (optional) — Special agent with HTTP chat UI and MCP tool enabled by default
 - **Named agents:** `{agent-name}.agent.md` (e.g., `daily_azure_report.agent.md`)
 - **Skills:** `skills/{skill-name}/SKILL.md`
@@ -900,8 +900,8 @@ Other agents require an explicit `trigger` definition and have `debug: false` (a
 
 **Example project structure:**
 ```
-src/
-  agents.app.yaml           # Global configuration
+/
+  agents.config.yaml           # Global configuration
   main.agent.md             # Default HTTP agent
   daily_report.agent.md     # Timer-triggered agent
   resource_summary.agent.md # Custom HTTP agent
