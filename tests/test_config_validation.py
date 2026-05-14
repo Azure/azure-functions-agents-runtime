@@ -133,3 +133,97 @@ def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
     )
     with pytest.raises(ValueError, match=r"mcp\.exclude"):
         validate_resolved_agent(resolved, all_global_mcp=["known"], discovered_skills=[])
+
+
+def test_validate_global_mcp_references_no_missing_is_silent() -> None:
+    """Defensive happy path: when every global MCP name is discovered, no error is raised."""
+    validate_global_mcp_references(["a", "b"], ["a", "b", "c"], source_file="agents.config.yaml")
+
+
+def test_validate_global_mcp_references_default_source_label() -> None:
+    """Default source_file=None falls back to a <unknown> placeholder in the error."""
+    with pytest.raises(ValueError) as exc_info:
+        validate_global_mcp_references(["typo"], ["known"])
+    assert "<unknown>" in str(exc_info.value)
+    assert "typo" in str(exc_info.value)
+
+
+def test_validate_resolved_agent_warns_on_unknown_skill_exclude(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Defensive: an unknown name in skills.exclude logs a warning (does NOT raise) so users
+    catch typos without breaking startup."""
+    source = tmp_path / "agent.agent.md"
+    resolved = ResolvedAgent(
+        name="A",
+        description="d",
+        trigger=None,
+        instructions="x",
+        is_main=True,
+        debug=DebugConfig(),
+        model=None,
+        timeout=1.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        skills_exclude_names=["missing-skill"],
+        tool_filter=ToolsFilter(),
+        sandbox_config=None,
+        connector_specs=[],
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file=str(source),
+    )
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        validate_resolved_agent(
+            resolved,
+            all_global_mcp=[],
+            discovered_skills=["other-skill"],
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("missing-skill" in msg for msg in messages)
+    assert any("skills.exclude" in msg for msg in messages)
+
+
+def test_validate_resolved_agent_warns_on_tool_exclude(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """Defensive: tool excludes are warned (not validated) since tool registry is dynamic."""
+    source = tmp_path / "agent.agent.md"
+    resolved = ResolvedAgent(
+        name="A",
+        description="d",
+        trigger=None,
+        instructions="x",
+        is_main=True,
+        debug=DebugConfig(),
+        model=None,
+        timeout=1.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(exclude=["bash"]),
+        tool_exclude_names=["bash"],
+        sandbox_config=None,
+        connector_specs=[],
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file=str(source),
+    )
+
+    import logging
+
+    with caplog.at_level(logging.WARNING):
+        validate_resolved_agent(
+            resolved,
+            all_global_mcp=[],
+            discovered_skills=[],
+        )
+
+    assert any("bash" in record.getMessage() for record in caplog.records)

@@ -133,3 +133,116 @@ def test_load_agent_specs_missing_name_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match=r"name"):
         load_agent_specs(tmp_path)
+
+
+def test_load_global_config_empty_file_returns_empty(tmp_path: Path) -> None:
+    """Defensive: an empty agents.config.yaml (only comments / whitespace) is a valid edge
+    case and yields an empty GlobalConfig — does not crash on `data is None` from yaml.safe_load."""
+    (tmp_path / "agents.config.yaml").write_text("# only comments\n\n", encoding="utf-8")
+    config = load_global_config(tmp_path)
+    assert config.model is None
+    assert config.mcp == []
+
+
+def test_load_global_config_non_mapping_root_raises(tmp_path: Path) -> None:
+    """Defensive: a YAML file whose root is a list/scalar must produce a clear error."""
+    source = tmp_path / "agents.config.yaml"
+    source.write_text("- not\n- a\n- mapping\n", encoding="utf-8")
+    with pytest.raises(ValueError) as exc_info:
+        load_global_config(tmp_path)
+    message = str(exc_info.value)
+    assert str(source) in message
+    assert "mapping" in message
+    assert "docs/front-matter-spec.md" in message
+
+
+def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
+    """Defensive: pydantic ValidationError on a malformed field surfaces with file path + spec link."""
+    source = tmp_path / "agents.config.yaml"
+    source.write_text("mcp: 42\n", encoding="utf-8")  # mcp must be list[str]
+    with pytest.raises(ValueError) as exc_info:
+        load_global_config(tmp_path)
+    message = str(exc_info.value)
+    assert str(source) in message
+    assert "mcp" in message
+    assert "docs/front-matter-spec.md" in message
+
+
+def test_load_global_config_resolves_numeric_and_bool_values(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Defensive: _resolve_strings passes through non-string scalars (numbers, bools) untouched."""
+    monkeypatch.setenv("ENDPOINT", "https://example.test")
+    (tmp_path / "agents.config.yaml").write_text(
+        textwrap.dedent(
+            """
+            timeout: 60
+            system_tools:
+              execute_in_sessions:
+                session_pool_management_endpoint: $ENDPOINT
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    config = load_global_config(tmp_path)
+    assert config.timeout == 60  # numeric value passed through unchanged
+    assert config.system_tools is not None
+    assert config.system_tools.execute_in_sessions is not None
+    # Env var resolved on the string field
+    assert (
+        config.system_tools.execute_in_sessions.session_pool_management_endpoint
+        == "https://example.test"
+    )
+
+
+def test_load_agent_specs_malformed_frontmatter_yaml_raises(tmp_path: Path) -> None:
+    """Defensive: malformed YAML *inside* an agent file's frontmatter produces a clear error."""
+    source = tmp_path / "main.agent.md"
+    source.write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: bad
+            trigger: [unclosed
+            ---
+            body
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError) as exc_info:
+        load_agent_specs(tmp_path)
+    message = str(exc_info.value)
+    assert str(source) in message
+    assert "frontmatter" in message.lower() or "yaml" in message.lower()
+
+
+def test_load_agent_specs_resolves_strings_passes_through_non_string_scalars(
+    tmp_path: Path,
+) -> None:
+    """Defensive: _resolve_strings must passthrough numeric/bool values inside trigger.args
+    without crashing (env-var resolution only applies to strings)."""
+    (tmp_path / "report.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report
+            description: d
+            trigger:
+              type: timer_trigger
+              args:
+                schedule: "0 0 * * * *"
+                run_on_start: true
+                priority: 5
+            ---
+            body
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    [spec] = load_agent_specs(tmp_path)
+    assert spec.trigger is not None
+    assert spec.trigger.args["run_on_start"] is True  # bool passthrough
+    assert spec.trigger.args["priority"] == 5  # int passthrough
+    assert spec.trigger.args["schedule"] == "0 0 * * * *"  # str preserved

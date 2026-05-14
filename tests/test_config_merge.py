@@ -159,3 +159,66 @@ def test_compose_end_to_end() -> None:
     assert resolved.sandbox_config == global_config.system_tools.execute_in_sessions
     assert resolved.connector_specs == global_config.system_tools.tools_from_connections
     assert resolved.metadata == {"team": "x"}
+
+
+def test_resolve_debug_explicit_false() -> None:
+    """Defensive: explicit debug: false returns an all-disabled DebugConfig (overrides the
+    is_main default-true behavior)."""
+    spec = AgentSpec(name="Main", description="d", debug=False, is_main=True)
+    debug = _resolve_debug(spec)
+    assert debug.chat is False
+    assert debug.http is False
+    assert debug.mcp is False
+
+
+def test_resolve_timeout_garbage_env_falls_back_to_default(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Defensive: a non-numeric AGENT_TIMEOUT env var must NOT crash; falls through to the
+    framework default."""
+    monkeypatch.setenv("AGENT_TIMEOUT", "not-a-number")
+    spec = AgentSpec(name="A", description="d")
+    global_config = GlobalConfig()
+    assert _resolve_timeout(spec, global_config) == DEFAULT_TIMEOUT
+
+
+def test_resolve_sandbox_no_global_returns_none() -> None:
+    """Defensive: when the global config has no system_tools block, sandbox is None."""
+    spec = AgentSpec(name="A", description="d")
+    assert _resolve_sandbox(spec, GlobalConfig()) is None
+
+
+def test_resolve_connectors_no_global_returns_empty() -> None:
+    """Defensive: when the global config has no system_tools block, connectors list is empty."""
+    from azure_functions_agents.config.merge import _resolve_connectors
+
+    assert _resolve_connectors(GlobalConfig()) == []
+
+
+def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:
+    """Defensive: when an agent doesn't specify tools, it inherits the global filter as-is."""
+    global_filter = ToolsFilter(exclude=["bash"], custom_only=False)
+    effective, disabled = apply_tools_filter(None, global_filter)
+    assert disabled is False
+    assert effective.exclude == ["bash"]
+    assert effective.custom_only is False
+    # Returned object is a deep copy — mutating it must not affect the caller's filter
+    effective.exclude.append("new")
+    assert global_filter.exclude == ["bash"]
+
+
+def test_apply_tools_filter_true_inherits_global() -> None:
+    """`tools: true` shorthand also inherits the global filter."""
+    global_filter = ToolsFilter(exclude=["bash"])
+    effective, disabled = apply_tools_filter(True, global_filter)
+    assert disabled is False
+    assert effective.exclude == ["bash"]
+
+
+def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
+    """Defensive: when neither agent nor global declares a tools filter, an empty (allow-all)
+    filter is returned."""
+    effective, disabled = apply_tools_filter(None, None)
+    assert disabled is False
+    assert effective.exclude == []
+    assert effective.custom_only is False
