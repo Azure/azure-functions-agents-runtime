@@ -21,7 +21,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- A [GitHub Personal Access Token](../../README.md#github-token) with **Copilot** scope
+- an Azure OpenAI resource with a model deployment (e.g. `gpt-5.2`)
 - An Azure subscription
 
 ## Deploy
@@ -31,14 +31,9 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    ```bash
    cd samples/daily-azure-report
    azd init
-   azd env set GITHUB_TOKEN <your-github-pat>
+   azd env set AZURE_OPENAI_ENDPOINT <your-azure-openai-endpoint>
+   azd env set AZURE_OPENAI_DEPLOYMENT gpt-5.2
    azd env set TO_EMAIL <recipient@example.com>
-   ```
-
-   Optional:
-
-   ```bash
-   azd env set COPILOT_MODEL claude-opus-4.6     # default
    ```
 
 2. **Deploy to Azure:**
@@ -84,7 +79,8 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 Required:
 
-- `GITHUB_TOKEN` (see shared guide)
+- `AZURE_OPENAI_ENDPOINT`: your Azure OpenAI resource endpoint
+- `AZURE_OPENAI_DEPLOYMENT`: model deployment name (e.g. `gpt-5.2`)
 - `SUBSCRIPTION_ID`: Azure subscription ID (for querying resources)
 - `TO_EMAIL`: recipient email address
 - `O365_CONNECTION_ID`: Office 365 connector ID

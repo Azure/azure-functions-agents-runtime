@@ -4,7 +4,7 @@ description: Fetches top tech news and emails a summary daily.
 
 trigger:
   type: timer_trigger
-  schedule: "0 0 15 * * *"
+  schedule: "0 * * * *"
 
 execution_sandbox:
   session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT

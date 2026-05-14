@@ -1,27 +1,30 @@
 """
 ACA Dynamic Sessions sandbox — execute_python tool.
 
-Provides an ``execute_python`` Copilot SDK tool backed by Azure Container Apps
-dynamic sessions (code-interpreter pools).  Configured via the
-``execution_sandbox`` block in agent frontmatter.
+Provides an ``execute_python`` tool backed by Azure Container Apps dynamic
+sessions (code-interpreter pools). Configured via the ``execution_sandbox``
+block in agent frontmatter.
 
-Each agent can have its own session pool endpoint.  Within a conversation,
-the ACA session ID is derived from the Copilot session ID so that state
-(variables, imports, files, browser pages) persists across calls.
+Each agent can have its own session pool endpoint. The ACA session id is
+derived from the runtime's ``session_id`` (passed in by the runner via
+``fallback_session_id``) so REPL state — variables, imports, files, browser
+pages — persists across calls within a conversation.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
 import aiohttp
+from agent_framework import FunctionTool, tool
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
-from copilot.tools import Tool, ToolInvocation, ToolResult
+
+from ._logger import logger
+from pydantic import BaseModel, Field
 
 from .config import resolve_env_var
 
@@ -56,7 +59,7 @@ async def launch_browser(width=1280, height=800):
 """
 
 # ---------------------------------------------------------------------------
-# Tool description (ported from reference main.py)
+# Tool description
 # ---------------------------------------------------------------------------
 
 _EXECUTE_PYTHON_DESCRIPTION = (
@@ -65,7 +68,7 @@ _EXECUTE_PYTHON_DESCRIPTION = (
     "\n"
     "IMPORTANT: This runs in an ISOLATED SANDBOX with its own file system."
     " DO NOT use it to read or process files from the local system,"
-    " such as copilot large tool outputs. Use the view, head, tail, grep,"
+    " such as agent runtime tool outputs. Use the view, head, tail, grep,"
     " or jq tools instead.\n"
     "\n"
     "Only use this tool when you need to actually run code,"
@@ -120,6 +123,15 @@ _EXECUTE_PYTHON_DESCRIPTION = (
     "- Use CSS selectors and aria attributes to find and interact\n"
     "  with elements.\n"
 )
+
+# ---------------------------------------------------------------------------
+# Pydantic param schema
+# ---------------------------------------------------------------------------
+
+
+class ExecutePythonParams(BaseModel):
+    code: str = Field(description="Python code to execute")
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -185,7 +197,9 @@ async def _execute_code(
 # Factory: create per-agent execute_python tool
 # ---------------------------------------------------------------------------
 
-# Shared credential and HTTP session (created lazily, reused across agents)
+# Shared credential and HTTP session (created lazily, reused across agents).
+# These are process-wide because building credentials and aiohttp sessions is
+# expensive — one is enough for the entire app.
 _credential: Optional[DefaultAzureCredential] = None
 _token_provider = None
 _http_session: Optional[aiohttp.ClientSession] = None
@@ -209,80 +223,86 @@ async def _ensure_shared_resources():
             _credential, "https://dynamicsessions.io/.default"
         )
         _http_session = aiohttp.ClientSession()
-        logging.info("execution_sandbox: shared credential, token provider, and HTTP session initialized")
+        logger.debug(
+            "execution_sandbox: shared credential, token provider, and HTTP session initialized"
+        )
 
 
-def create_sandbox_tools(config: Dict[str, Any]) -> List[Tool]:
-    """Create an execute_python tool for a specific agent's sandbox config.
+def create_sandbox_tools(
+    config: Dict[str, Any],
+    *,
+    fallback_session_id: str = "default",
+) -> List[FunctionTool]:
+    """Create an ``execute_python`` tool bound to a specific ACA session pool.
 
-    Returns a list with one Tool, or an empty list if the config is invalid.
-    The endpoint is baked into the tool's closure.
+    Parameters
+    ----------
+    config:
+        The ``execution_sandbox`` block from agent frontmatter. Must contain
+        ``session_pool_management_endpoint``.
+    fallback_session_id:
+        Used as the ACA session identifier so the REPL state persists across
+        ``execute_python`` calls within the same conversation. The runner
+        passes the resolved agent-runtime session id here. MAF does not
+        currently expose the active session id to tools, so the runner bakes
+        it into the tool closure on every request.
+
+    Returns a list with one tool, or an empty list if the config is invalid.
     """
     raw_endpoint = config.get("session_pool_management_endpoint", "")
     if not raw_endpoint:
-        logging.warning("execution_sandbox: missing 'session_pool_management_endpoint', skipping")
+        logger.warning("execution_sandbox: missing 'session_pool_management_endpoint', skipping")
         return []
 
     endpoint = resolve_env_var(str(raw_endpoint))
     if not endpoint or endpoint.startswith("$") or endpoint.startswith("%"):
-        logging.warning(f"execution_sandbox: could not resolve endpoint '{raw_endpoint}', skipping")
+        logger.warning("execution_sandbox: could not resolve endpoint '%s', skipping", raw_endpoint)
         return []
 
-    logging.info(f"execution_sandbox: creating tool with endpoint {endpoint}")
+    aca_session_id = fallback_session_id or "default"
+    logger.info(
+        f"execution_sandbox: creating tool with endpoint {endpoint} (aca_session={aca_session_id})"
+    )
 
-    async def _handle_execute_python(invocation: ToolInvocation) -> ToolResult:
+    @tool(
+        name="execute_python",
+        description=_EXECUTE_PYTHON_DESCRIPTION,
+        schema=ExecutePythonParams,
+    )
+    async def execute_python(params: ExecutePythonParams) -> str:
         await _ensure_shared_resources()
 
-        args = invocation.arguments or {}
-        code = args.get("code", "")
+        code = params.code or ""
         if not code.strip():
-            return ToolResult(
-                text_result_for_llm='{"error": "No code provided"}',
-                result_type="failure",
-            )
+            return json.dumps({"error": "No code provided"})
 
-        # Use the Copilot session ID as the ACA session ID
-        # so state persists across execute_python calls in the same conversation
-        aca_session_id = invocation.session_id or "default"
-        logging.info(
-            f"execution_sandbox: executing code in ACA session {aca_session_id} "
-            f"(tool_call={invocation.tool_call_id})"
+        logger.info(
+            f"execution_sandbox: executing code in ACA session {aca_session_id}"
         )
 
         try:
             # Pre-load Playwright helper on first call per session
             async with _setup_lock:
                 if aca_session_id not in _setup_sessions:
-                    await _execute_code(endpoint, _ACA_SESSION_SETUP, aca_session_id, _token_provider, _http_session)
+                    await _execute_code(
+                        endpoint, _ACA_SESSION_SETUP, aca_session_id, _token_provider, _http_session
+                    )
                     _setup_sessions.add(aca_session_id)
 
-            # Execute the user's code
-            result = await _execute_code(endpoint, code, aca_session_id, _token_provider, _http_session)
-            logging.info(f"execution_sandbox: ACA session {aca_session_id} completed successfully")
-            return ToolResult(text_result_for_llm=result, result_type="success")
+            result = await _execute_code(
+                endpoint, code, aca_session_id, _token_provider, _http_session
+            )
+            logger.info(
+                f"execution_sandbox: ACA session {aca_session_id} completed successfully"
+            )
+            return result
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
-            logging.error(f"execution_sandbox: ACA session {aca_session_id} failed: {error_msg}")
-            return ToolResult(
-                text_result_for_llm=json.dumps({"error": error_msg}),
-                result_type="failure",
+            logger.error(
+                f"execution_sandbox: ACA session {aca_session_id} failed: {error_msg}"
             )
+            return json.dumps({"error": error_msg})
 
-    tool = Tool(
-        name="execute_python",
-        description=_EXECUTE_PYTHON_DESCRIPTION,
-        parameters={
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Python code to execute",
-                },
-            },
-            "required": ["code"],
-        },
-        handler=_handle_execute_python,
-    )
+    logger.info("execution_sandbox: execute_python tool created")
+    return [execute_python]
 
-    logging.info("execution_sandbox: execute_python tool created")
-    return [tool]

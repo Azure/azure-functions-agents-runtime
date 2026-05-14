@@ -1,30 +1,40 @@
 import importlib.util
 import inspect
 import json
-import logging
 import os
 import re
 import sys
 import tempfile
-from typing import Callable, List, Optional
+from typing import Any, List, Optional
 
-from copilot import define_tool
+from ._logger import logger
+
+from agent_framework import FunctionTool, tool
 from pydantic import BaseModel, Field
 
 from .config import get_app_root
 
 
-def discover_tools() -> List[Callable]:
+def discover_tools() -> List[FunctionTool]:
     """
-    Dynamically discover and load tools from the `tools` folder.
+    Dynamically discover and load tools from the project's ``tools/`` folder.
+
+    Tool modules may either:
+
+    * decorate functions with ``@tool`` from :mod:`agent_framework`, in which
+      case the resulting :class:`FunctionTool` instances are picked up
+      directly, or
+    * expose plain ``async def`` (or ``def``) functions, which are wrapped in
+      :class:`FunctionTool` automatically with the docstring as the
+      description.
+
+    The first matching object per file is registered (preserving the previous
+    behavior of the runtime).
     """
-    tools: List[Callable] = []
+    tools: List[FunctionTool] = []
     project_src_dir = str(get_app_root())
     tools_dir = os.path.join(project_src_dir, "tools")
 
-    # Add tools dir to sys.path so tool modules can import shared helpers
-    # (e.g. _patterns.py, _utils.py — files prefixed with _ that are skipped
-    # during tool registration but may be imported by tool modules)
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
 
@@ -35,7 +45,9 @@ def discover_tools() -> List[Callable]:
         print(f"[Tool Discovery] WARNING: Tools directory not found: {tools_dir}")
         return tools
 
-    files = [f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_")]
+    files = sorted(
+        f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_")
+    )
     print(f"[Tool Discovery] Python files found: {files}")
 
     for filename in files:
@@ -51,26 +63,40 @@ def discover_tools() -> List[Callable]:
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
 
-            members = inspect.getmembers(module, inspect.isfunction)
-            local_functions = [
-                (name, obj)
-                for name, obj in members
-                if obj.__module__ == module_name and not name.startswith("_")
-            ]
-            print(f"[Tool Discovery] Local functions in {filename}: {[m[0] for m in local_functions]}")
+            picked: Optional[FunctionTool] = None
 
-            for name, obj in local_functions:
-                description = (obj.__doc__ or f"Tool: {name}").strip()
-                tools.append(define_tool(description=description)(obj))
-                print(f"[Tool Discovery] Loaded: {name}")
-                print(f"[Tool Discovery]   Description: {description}")
-                break
+            # Prefer module-level ``@tool``-decorated values (FunctionTool
+            # instances) — they carry their own name/description/schema.
+            for name, obj in inspect.getmembers(module):
+                if name.startswith("_"):
+                    continue
+                if isinstance(obj, FunctionTool):
+                    picked = obj
+                    print(f"[Tool Discovery] Loaded (FunctionTool): {obj.name}")
+                    break
+
+            # Fallback: first plain function defined in the module.
+            if picked is None:
+                local_functions = [
+                    (name, obj)
+                    for name, obj in inspect.getmembers(module, inspect.isfunction)
+                    if obj.__module__ == module_name and not name.startswith("_")
+                ]
+                if local_functions:
+                    name, fn = local_functions[0]
+                    description = (fn.__doc__ or f"Tool: {name}").strip()
+                    picked = tool(fn, name=name, description=description)
+                    print(f"[Tool Discovery] Loaded (auto-wrapped): {name}")
+                    print(f"[Tool Discovery]   Description: {description}")
+
+            if picked is not None:
+                tools.append(picked)
         except Exception as e:
             import traceback
 
             print(f"[Tool Discovery] ERROR loading {filename}: {e}")
             traceback.print_exc()
-            logging.error(f"Failed to load tool from {filename}: {e}")
+            logger.error("Failed to load tool from %s: %s", filename, e)
 
     return tools
 
@@ -118,13 +144,14 @@ class ViewParams(BaseModel):
     end_line: Optional[int] = Field(default=None, description="1-based end line number (inclusive). If omitted, reads to the end.")
 
 
-@define_tool(
+@tool(
+    name="view",
     description=(
         "View a file on the local system by absolute path. Use view_range"
         " (start_line/end_line) to read specific sections. Use this to read"
         " files that other tools have saved to the temp directory."
     ),
-    overrides_built_in_tool=True,
+    schema=ViewParams,
 )
 async def view(params: ViewParams) -> str:
     err = _check_access(params.path)
@@ -153,7 +180,11 @@ class HeadParams(BaseModel):
     lines: Optional[int] = Field(default=10, description="Number of lines to return from the start (default 10)")
 
 
-@define_tool(description="Show the first N lines of a file on the local system (default 10).")
+@tool(
+    name="head",
+    description="Show the first N lines of a file on the local system (default 10).",
+    schema=HeadParams,
+)
 async def head(params: HeadParams) -> str:
     err = _check_access(params.path)
     if err:
@@ -175,7 +206,11 @@ class TailParams(BaseModel):
     lines: Optional[int] = Field(default=10, description="Number of lines to return from the end (default 10)")
 
 
-@define_tool(description="Show the last N lines of a file on the local system (default 10).")
+@tool(
+    name="tail",
+    description="Show the last N lines of a file on the local system (default 10).",
+    schema=TailParams,
+)
 async def tail(params: TailParams) -> str:
     err = _check_access(params.path)
     if err:
@@ -201,12 +236,13 @@ class GrepParams(BaseModel):
     max_results: Optional[int] = Field(default=50, description="Maximum number of matching lines to return (default 50)")
 
 
-@define_tool(
+@tool(
+    name="grep",
     description=(
         "Search for a pattern in a file on the local system. Returns matching"
         " lines with line numbers. Supports plain text and regex patterns."
     ),
-    overrides_built_in_tool=True,
+    schema=GrepParams,
 )
 async def grep(params: GrepParams) -> str:
     err = _check_access(params.path)
@@ -251,10 +287,14 @@ class JqParams(BaseModel):
     max_items: Optional[int] = Field(default=20, description="If the result is an array, return at most this many items (default 20)")
 
 
-@define_tool(description=(
-    "Query a JSON file on the local system using a dot-path expression."
-    " Examples: '.' (entire doc), '.key', '.items.[0].name', '.data.results'."
-))
+@tool(
+    name="jq",
+    description=(
+        "Query a JSON file on the local system using a dot-path expression."
+        " Examples: '.' (entire doc), '.key', '.items.[0].name', '.data.results'."
+    ),
+    schema=JqParams,
+)
 async def jq(params: JqParams) -> str:
     err = _check_access(params.path)
     if err:
@@ -268,7 +308,7 @@ async def jq(params: JqParams) -> str:
 
     # Navigate the dot-path
     query = params.query.strip().lstrip(".")
-    current = data
+    current: Any = data
     if query:
         for part in query.split("."):
             if not part:
@@ -295,6 +335,7 @@ async def jq(params: JqParams) -> str:
     # Truncate arrays
     limit = max(1, params.max_items or 20)
     truncated = False
+    total_items: Optional[int]
     if isinstance(current, list) and len(current) > limit:
         total_items = len(current)
         current = current[:limit]
@@ -302,7 +343,7 @@ async def jq(params: JqParams) -> str:
     else:
         total_items = len(current) if isinstance(current, list) else None
 
-    result = {"result": current}
+    result: dict = {"result": current}
     if total_items is not None:
         result["total_items"] = total_items
     if truncated:
@@ -311,6 +352,8 @@ async def jq(params: JqParams) -> str:
     return json.dumps(result, indent=2, default=str)
 
 
-_BUILTIN_TOOLS = [view, head, tail, grep, jq]
+_BUILTIN_TOOLS: List[FunctionTool] = [view, head, tail, grep, jq]
 
-_REGISTERED_TOOLS_CACHE = discover_tools() + _BUILTIN_TOOLS
+# Discovered project tools + built-ins. Computed once at import.
+_REGISTERED_TOOLS_CACHE: List[FunctionTool] = discover_tools() + _BUILTIN_TOOLS
+
