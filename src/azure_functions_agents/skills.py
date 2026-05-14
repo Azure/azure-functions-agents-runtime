@@ -12,11 +12,11 @@ returns an empty string and contributes nothing.
 
 from __future__ import annotations
 
-import logging
 import os
 from pathlib import Path
 from typing import List, Optional
 
+from ._logger import logger
 from .config import get_app_root
 
 
@@ -50,7 +50,7 @@ def load_skills_text() -> str:
 
     files = _collect_skill_files(skills_dir)
     if not files:
-        logging.info(f"No skill markdown files found in {skills_dir}")
+        logger.info("No skill markdown files found in %s", skills_dir)
         return ""
 
     parts: List[str] = []
@@ -58,12 +58,12 @@ def load_skills_text() -> str:
         try:
             text = path.read_text(encoding="utf-8")
         except Exception as exc:
-            logging.warning(f"Failed to read skill file {path}: {exc}")
+            logger.warning("Failed to read skill file %s: %s", path, exc)
             continue
         rel = path.relative_to(skills_dir)
         parts.append(f"## skill: {rel.as_posix()}\n\n{text.rstrip()}")
 
-    logging.info(f"Loaded {len(files)} skill file(s) from {skills_dir}")
+    logger.info("Loaded %d skill file(s) from %s", len(files), skills_dir)
     return "\n\n".join(parts)
 
 

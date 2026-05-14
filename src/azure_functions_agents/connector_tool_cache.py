@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import logging
 from typing import Any, Dict, List
 
 from agent_framework import FunctionTool
 
+from ._logger import logger
 from .arm import ArmClient, DataPlaneClient
 from .config import resolve_env_var
 from .connectors import load_connection, is_v2_connection
@@ -68,17 +68,18 @@ class _ConnectorToolCache:
             for spec in self._connection_specs:
                 raw_connection_id = spec.get("connection_id", "")
                 if not raw_connection_id:
-                    logging.warning("tools_from_connections entry missing 'connection_id', skipping")
+                    logger.warning("tools_from_connections entry missing 'connection_id', skipping")
                     continue
 
                 connection_id = resolve_env_var(str(raw_connection_id))
                 if not connection_id or connection_id.startswith("%") or connection_id.startswith("$"):
-                    logging.warning(f"tools_from_connections: could not resolve connection_id '{raw_connection_id}', skipping")
+                    logger.warning("tools_from_connections: could not resolve connection_id '%s', skipping", raw_connection_id)
                     continue
                 if connection_id.lower().startswith(("http://", "https://")):
-                    logging.warning(
+                    logger.warning(
                         "tools_from_connections: connection_id must be an ARM resource ID "
-                        f"(e.g. /subscriptions/.../providers/Microsoft.Web/connections/...), got URL '{connection_id}'. Skipping."
+                        "(e.g. /subscriptions/.../providers/Microsoft.Web/connections/...), got URL '%s'. Skipping.",
+                        connection_id,
                     )
                     continue
 
@@ -102,14 +103,14 @@ class _ConnectorToolCache:
                     )
                     all_tools.extend(tools)
                     version_label = "V2" if v2 else "V1"
-                    logging.info(
-                        f"Connector tools discovered ({version_label}): {connection.display_name} ({connection.api_name}): "
-                        f"{len(tools)} tools [{connection.status}]"
+                    logger.info(
+                        "Connector tools discovered (%s): %s (%s): %d tools [%s]",
+                        version_label, connection.display_name, connection.api_name, len(tools), connection.status,
                     )
                     for t in tools:
-                        logging.info(f"  - {t.name}: {t.description[:100]}")
+                        logger.info("  - %s: %s", t.name, t.description[:100])
                 except Exception as e:
-                    logging.warning(f"Failed to load connector tools for '{connection_id}': {e}")
+                    logger.warning("Failed to load connector tools for '%s': %s", connection_id, e)
 
             self._tools = all_tools
             return self._tools

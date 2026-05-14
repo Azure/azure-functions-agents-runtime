@@ -4,6 +4,8 @@ import re
 from pathlib import Path
 from typing import Any, Optional
 
+from ._logger import logger
+
 
 # ---------------------------------------------------------------------------
 # Application root resolution
@@ -32,8 +34,6 @@ def get_app_root() -> Path:
 
     1. Value set via ``set_app_root()``
     2. ``AZURE_FUNCTIONS_AGENTS_APP_ROOT`` environment variable
-       (legacy alias ``COPILOT_APP_ROOT`` is also accepted with a
-       one-time deprecation warning)
     3. ``AzureWebJobsScriptRoot`` environment variable (set automatically
        by the Azure Functions host, both locally via ``func start`` and
        in Azure — points to the directory containing ``host.json``)
@@ -42,13 +42,6 @@ def get_app_root() -> Path:
     if _app_root is not None:
         return _app_root
     explicit = os.environ.get("AZURE_FUNCTIONS_AGENTS_APP_ROOT")
-    if not explicit:
-        legacy = os.environ.get("COPILOT_APP_ROOT")
-        if legacy:
-            logging.warning(
-                "COPILOT_APP_ROOT is deprecated; use AZURE_FUNCTIONS_AGENTS_APP_ROOT instead."
-            )
-            explicit = legacy
     if explicit:
         return Path(explicit).resolve()
     script_root = os.environ.get("AzureWebJobsScriptRoot")
@@ -85,13 +78,13 @@ def resolve_config_dir() -> Optional[str]:
         "CODE_ASSISTANT_CONFIG_PATH"
     )
     if explicit_path:
-        logging.info(f"Using config dir override: {explicit_path}")
+        logger.info("Using config dir override: %s", explicit_path)
         return explicit_path
 
     container_name = os.environ.get("CONTAINER_NAME")
     if container_name:
-        logging.info(
-            f"Remote mode detected (CONTAINER_NAME={container_name}), using {_REMOTE_CONFIG_DIR}"
+        logger.info(
+            "Remote mode detected (CONTAINER_NAME=%s), using %s", container_name, _REMOTE_CONFIG_DIR
         )
         return _REMOTE_CONFIG_DIR
 

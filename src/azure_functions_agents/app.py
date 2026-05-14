@@ -11,7 +11,6 @@ Agent files:
 
 import glob
 import json
-import logging
 import re
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -20,6 +19,7 @@ import azure.functions as func
 import frontmatter
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from ._logger import logger
 from .config import get_app_root, set_app_root, resolve_env_var, substitute_env_vars_in_text, _to_bool
 from .connector_tool_cache import configure_connector_tools
 from .runner import run_agent, run_agent_stream
@@ -62,7 +62,7 @@ def _load_agent_file(path: Path) -> Optional[Dict[str, Any]]:
 
         return {"metadata": metadata, "content": content}
     except Exception as exc:
-        logging.warning(f"Failed to parse {path.name}: {exc}")
+        logger.warning("Failed to parse %s: %s", path.name, exc)
         return None
 
 
@@ -103,7 +103,7 @@ def _warn_if_legacy_runtime_field(metadata: Dict[str, Any], filename: str) -> No
     raw = metadata.get("runtime")
     if raw is None:
         return
-    logging.warning(
+    logger.warning(
         f"{filename}: ignoring deprecated frontmatter field 'runtime: {raw}' — "
         "the runtime now uses the Microsoft Agent Framework only. "
         "Remove the 'runtime:' field from your agent file."
@@ -137,7 +137,7 @@ def _register_triggered_agents(app: func.FunctionApp, app_root: Path) -> None:
     """Discover and register triggered agents from *.agent.md files."""
     agent_files = sorted(glob.glob(str(app_root / "*.agent.md")))
     if not agent_files:
-        logging.info("No agent files found.")
+        logger.info("No agent files found.")
         return
 
     connectors_instance = None  # Lazy-init if needed
@@ -160,7 +160,7 @@ def _register_triggered_agents(app: func.FunctionApp, app_root: Path) -> None:
         trigger_spec = metadata.get("trigger")
 
         if not isinstance(trigger_spec, dict) or "type" not in trigger_spec:
-            logging.warning(f"Skipping {agent_path.name}: missing or invalid 'trigger' section (must have 'type')")
+            logger.warning("Skipping %s: missing or invalid 'trigger' section (must have 'type')", agent_path.name)
             continue
 
         # Extract trigger type and params
@@ -239,7 +239,7 @@ def _register_builtin_agent(
     # Get the decorator method from the FunctionApp
     decorator_fn = getattr(app, trigger_type, None)
     if decorator_fn is None:
-        logging.warning(f"Skipping '{function_name}': unknown trigger type '{trigger_type}'")
+        logger.warning("Skipping '%s': unknown trigger type '%s'", function_name, trigger_type)
         return
 
     # Timer triggers: normalize schedule
@@ -258,9 +258,9 @@ def _register_builtin_agent(
     try:
         decorated = decorator_fn(**trigger_params)(handler)
         app.function_name(name=function_name)(decorated)
-        logging.info(f"Registered '{function_name}' ({trigger_type}) — {agent_name}")
+        logger.info("Registered '%s' (%s) \u2014 %s", function_name, trigger_type, agent_name)
     except Exception as exc:
-        logging.error(f"Failed to register '{function_name}' ({trigger_type}): {exc}")
+        logger.error("Failed to register '%s' (%s): %s", function_name, trigger_type, exc)
 
 
 _AUTH_LEVEL_MAP = {
@@ -284,7 +284,7 @@ def _register_http_agent(
     """Register an HTTP-triggered agent using app.route()."""
     route = trigger_params.get("route")
     if not route:
-        logging.warning(f"Skipping '{function_name}': http_trigger requires 'route'")
+        logger.warning("Skipping '%s': http_trigger requires 'route'", function_name)
         return
 
     methods = trigger_params.get("methods", ["POST"])
@@ -300,9 +300,9 @@ def _register_http_agent(
     try:
         decorated = app.route(route=route, methods=methods, auth_level=auth_level)(handler)
         app.function_name(name=function_name)(decorated)
-        logging.info(f"Registered HTTP agent '{function_name}' at /{route} ({methods}) — {agent_name}")
+        logger.info("Registered HTTP agent '%s' at /%s (%s) \u2014 %s", function_name, route, methods, agent_name)
     except Exception as exc:
-        logging.error(f"Failed to register HTTP agent '{function_name}': {exc}")
+        logger.error("Failed to register HTTP agent '%s': %s", function_name, exc)
 
 
 def _register_connector_agent(
@@ -325,9 +325,10 @@ def _register_connector_agent(
             import azure.functions_connectors as fc
             connectors_instance = fc.FunctionsConnectors(app)
         except ImportError:
-            logging.error(
-                f"Skipping '{function_name}': azure-functions-connectors package not installed. "
-                "Install from: https://github.com/anthonychu/azure-functions-connectors-python"
+            logger.error(
+                "Skipping '%s': azure-functions-connectors package not installed. "
+                "Install from: https://github.com/anthonychu/azure-functions-connectors-python",
+                function_name,
             )
             return None
 
@@ -339,7 +340,7 @@ def _register_connector_agent(
             obj = getattr(obj, part)
         decorator_fn = obj
     except AttributeError:
-        logging.warning(f"Skipping '{function_name}': could not resolve connector trigger '{trigger_type}'")
+        logger.warning("Skipping '%s': could not resolve connector trigger '%s'", function_name, trigger_type)
         return connectors_instance
 
     handler = _make_agent_handler(
@@ -349,9 +350,9 @@ def _register_connector_agent(
 
     try:
         decorator_fn(**trigger_params)(handler)
-        logging.info(f"Registered '{function_name}' ({trigger_type}) — {agent_name}")
+        logger.info("Registered '%s' (%s) \u2014 %s", function_name, trigger_type, agent_name)
     except Exception as exc:
-        logging.error(f"Failed to register '{function_name}' ({trigger_type}): {exc}")
+        logger.error("Failed to register '%s' (%s): %s", function_name, trigger_type, exc)
 
     return connectors_instance
 
@@ -396,7 +397,7 @@ def _make_agent_handler(
 ):
     """Create an async handler function for a triggered agent."""
     async def _handler(trigger_data):
-        logging.info(f"Agent '{function_name}' triggered")
+        logger.info("Agent '%s' triggered", function_name)
 
         try:
             data_json = _serialize_trigger_data(trigger_data)
@@ -416,7 +417,7 @@ def _make_agent_handler(
             )
 
             if should_log:
-                logging.info(
+                logger.info(
                     "Agent '%s' response: %s",
                     function_name,
                     json.dumps(
@@ -430,7 +431,7 @@ def _make_agent_handler(
                     ),
                 )
         except Exception as exc:
-            logging.exception(f"Agent '{function_name}' failed: {exc}")
+            logger.exception("Agent '%s' failed: %s", function_name, exc)
 
     _handler.__name__ = f"handler_{function_name}"
     return _handler
@@ -456,7 +457,7 @@ def _make_http_agent_handler(
 ):
     """Create an async handler for an HTTP-triggered agent that returns structured JSON."""
     async def _handler(req: Request) -> Response:
-        logging.info(f"HTTP agent '{function_name}' triggered")
+        logger.info("HTTP agent '%s' triggered", function_name)
 
         try:
             # Parse request body
@@ -497,7 +498,7 @@ def _make_http_agent_handler(
             )
 
             if should_log:
-                logging.info(
+                logger.info(
                     "HTTP agent '%s' response: %s",
                     function_name,
                     json.dumps(
@@ -517,7 +518,7 @@ def _make_http_agent_handler(
                         media_type="application/json",
                     )
                 except json.JSONDecodeError as je:
-                    logging.warning(f"HTTP agent '{function_name}' returned invalid JSON: {je}")
+                    logger.warning("HTTP agent '%s' returned invalid JSON: %s", function_name, je)
                     return Response(
                         content=json.dumps({"error": "Agent returned invalid JSON", "raw_response": result.content}),
                         status_code=500,
@@ -531,7 +532,7 @@ def _make_http_agent_handler(
                 )
 
         except Exception as exc:
-            logging.exception(f"HTTP agent '{function_name}' failed: {exc}")
+            logger.exception("HTTP agent '%s' failed: %s", function_name, exc)
             return Response(
                 content=json.dumps({"error": str(exc)}),
                 status_code=500,
@@ -598,7 +599,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         if isinstance(execution_sandbox, dict):
             main_sandbox_config = execution_sandbox
     else:
-        logging.info("No main.agent.md found — HTTP chat, MCP, and UI endpoints will return 404.")
+        logger.info("No main.agent.md found — HTTP chat, MCP, and UI endpoints will return 404.")
 
     # ---- HTTP routes (always registered) ----
 
@@ -675,7 +676,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         except Exception as e:
             error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
-            logging.error(f"Chat error: {error_msg}")
+            logger.error("Chat error: %s", error_msg)
             return Response(
                 json.dumps({"error": error_msg}), status_code=500, media_type="application/json"
             )
@@ -729,7 +730,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         except Exception as e:
             error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
-            logging.error(f"Chat stream error: {error_msg}")
+            logger.error("Chat stream error: %s", error_msg)
             async def error_gen():
                 yield f"data: {json.dumps({'type': 'error', 'content': error_msg})}\n\n"
             return StreamingResponse(error_gen(), media_type="text/event-stream")
@@ -772,7 +773,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 )
             except Exception as exc:
                 error_msg = str(exc) if str(exc) else f"{type(exc).__name__}: {repr(exc)}"
-                logging.error(f"MCP tool error: {error_msg}")
+                logger.error("MCP tool error: %s", error_msg)
                 return json.dumps({"error": error_msg})
 
     return app

@@ -1,12 +1,13 @@
 import importlib.util
 import inspect
 import json
-import logging
 import os
 import re
 import sys
 import tempfile
 from typing import Any, List, Optional
+
+from ._logger import logger
 
 from agent_framework import FunctionTool, tool
 from pydantic import BaseModel, Field
@@ -95,7 +96,7 @@ def discover_tools() -> List[FunctionTool]:
 
             print(f"[Tool Discovery] ERROR loading {filename}: {e}")
             traceback.print_exc()
-            logging.error(f"Failed to load tool from {filename}: {e}")
+            logger.error("Failed to load tool from %s: %s", filename, e)
 
     return tools
 
