@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "azurefunctions-agents-runtime"
-version = "0.0.0dev3"
+dynamic = ["version"]
 description = "A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework."
 readme = "README.md"
 license = {text = "MIT"}
@@ -33,3 +33,6 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 azure_functions_agents = ["public/**"]
+
+[tool.setuptools.dynamic]
+version = {attr = "src.azure_functions_agents.__version__"}

@@ -1,0 +1,167 @@
+jobs:
+
+- job: "CreateReleaseBranch"
+  displayName: 'Create Release Branch'
+  pool:
+    name: 1es-pool-azfunc
+    image: 1es-ubuntu-22.04
+    os: linux
+  steps:
+  - powershell: |
+      $githubToken = "$(GithubPat)"
+      $newLibraryVersion = "${{ parameters.libraryVersion }}"
+      
+      if($newLibraryVersion -match '(\d)+.(\d)+.(\d)+') {
+          # Create GitHub credential
+          git config --global user.name "AzureFunctionsPython"
+          git config --global user.email "azfunc@microsoft.com"
+      
+          # Heading to Artifact Repository
+          Write-Host "Operating based on $stagingDirectory/azure-functions-agent-runtime"
+          git checkout -b "release/$newLibraryVersion"
+      
+          # Change __init__.py version
+          Write-Host "Change version number in src\azure_functions_agents\__init__.py to $newLibraryVersion"
+          ((Get-Content src\azure_functions_agents\__init__.py) -replace "__version__ = '(\d)+.(\d)+.*'", "__version__ = '$newLibraryVersion'" -join "`n") + "`n" | Set-Content -NoNewline src\azure_functions_agents\__init__.py
+          git add src\azure_functions_agents\__init__.py
+          
+          git commit -m "build: update Agent Runtime Version to $newLibraryVersion"
+      
+          # Create release branch release/X.Y.Z
+          Write-Host "Creating release branch release/$newLibraryVersion"
+          git push --repo="https://$githubToken@github.com/Azure/azure-functions-agent-runtime.git"
+
+      } else {
+          Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
+          exit -1
+      }
+    displayName: 'Push release/x.y.z'
+
+- job: "CheckReleaseBranch"
+  dependsOn: ['CreateReleaseBranch']
+  displayName: '(Manual) Check Release Branch'
+  pool: server
+  steps:
+  - task: ManualValidation@1
+    displayName: '(Optional) Modify release/x.y.z branch'
+    inputs:
+      notifyUsers: ''  # No email notifications sent
+      instructions: |
+        1. Check if the https://github.com/Azure/azure-functions-agent-runtime/tree/release/${{ parameters.libraryVersion }} build succeeds and passes all unit tests.
+        2. If not, modify the release/${{ parameters.libraryVersion }} branch.
+        3. Ensure release/${{ parameters.libraryVersion }} branch contains all necessary changes.
+
+- job: "CreateReleaseTag"
+  dependsOn: ['CheckReleaseBranch']
+  displayName: 'Create Release Tag'
+  steps:
+  - powershell: |
+      $githubToken = "$(GithubPat)"
+      $newLibraryVersion = "${{ parameters.libraryVersion }}"
+      
+      if($newLibraryVersion -match '(\d)+.(\d)+.(\d)+') {
+          # Create GitHub credential
+          git config --global user.name "AzureFunctionsPython"
+          git config --global user.email "azfunc@microsoft.com"
+      
+          # Clone Repository
+          git clone https://$githubToken@github.com/Azure/azure-functions-agent-runtime
+          Write-Host "Cloned azure-functions-agent-runtime into local"
+          Set-Location "azure-functions-agent-runtime"
+          git checkout "origin/release/$newLibraryVersion"
+      
+          # Create release tag X.Y.Z
+          Write-Host "Creating release tag $newLibraryVersion"
+          git tag -a "$newLibraryVersion" -m "$newLibraryVersion"
+      
+          # Push tag to remote
+          git push origin $newLibraryVersion
+      } else {
+          Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
+          exit -1
+      }
+    displayName: 'Tag and push x.y.z'
+  - pwsh: |
+      $githubUser = "$(GithubUser)"
+      $githubToken = "$(GithubPat)"
+      $newLibraryVersion = "${{ parameters.libraryVersion }}"
+      
+      if($newLibraryVersion -match '(\d)+.(\d)+.(\d)+') {
+          # Create GitHub credential
+          $credential = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
+      
+          # Create Release Note
+          Write-Host "Creating release note in GitHub"
+          $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
+          $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/Azure/azure-functions-agent-runtime/releases"
+      
+          # Return Value
+          if ($response.StatusCode -ne 201) {
+              Write-Host "Failed to create release note in GitHub"
+              exit -1
+          }
+      
+          $draftUrl = $response | ConvertFrom-Json | Select -expand url
+          Write-Host "Release draft created in $draftUrl"
+      } else {
+          Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.1.8)"
+          exit -1
+      }
+    displayName: 'Create GitHub release draft'
+
+- job: "CheckGitHubRelease"
+  dependsOn: ['CreateReleaseTag']
+  displayName: '(Manual) Check GitHub release note'
+  pool: server
+  steps:
+  - task: ManualValidation@1
+    displayName: 'Write GitHub release note'
+    inputs:
+      notifyUsers: ''
+      instructions: 'Please head to https://github.com/Azure/azure-functions-agent-runtime/releases to finish the release note'
+
+- job: "PyPIPackage"
+  displayName: 'PyPI Package'
+  dependsOn: ['CheckGitHubRelease']
+  steps:
+  - task: DownloadPipelineArtifact@2
+    displayName: 'Download Agent Runtime release/x.y.z Artifact'
+    inputs:
+      buildType: specific
+      project: '3f99e810-c336-441f-8892-84983093ad7f'
+      definition: TODO
+      specificBuildWithTriggering: true
+      buildVersionToDownload: latestFromBranch
+      branchName: refs/heads/main
+      targetPath: AgentRuntimeArtifact
+  - task: UsePythonVersion@0
+    displayName: 'Use Python 3.13'
+    inputs:
+      versionSpec: 3.13
+  - task: PipAuthenticate@1
+    displayName: 'Pip Authenticate'
+    inputs:
+      artifactFeeds: internal/PythonSDK_Internal_PublicPackages
+  - pwsh: |
+      $newLibraryVersion = "${{ parameters.libraryVersion }}"
+      $pypiToken = "$(PypiToken)"
+      
+      # Setup local Python environment
+      Write-Host "Setup local Python environment"
+      python -m pip install -U pip
+      pip install twine
+  
+      # Publish artifacts to PyPi
+      twine upload --repository-url https://upload.pypi.org/legacy/ --username "__token__" --password "$pypiToken" AgentRuntimeArtifact/azurefunctions-agent-runtime/dist/*
+      Start-Sleep -Seconds 3
+  
+      # Checking if the new version is uploaded
+      Write-Host "Check if new version is uploaded"
+      $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache"} -Method Get -Uri "https://pypi.org/project/azurefunctions-agent-runtime/$newLibraryVersion/"
+  
+      # Return Value
+      if ($response.StatusCode -ne 200) {
+          Write-Host "Failed to verify https://pypi.org/project/azurefunctions-agent-runtime/$newLibraryVersion/"
+          exit -1
+      }
+    displayName: 'Publish package to pypi.org'
