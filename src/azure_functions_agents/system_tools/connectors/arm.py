@@ -1,4 +1,7 @@
+from __future__ import annotations
+
 import asyncio
+from typing import Any
 
 import aiohttp
 from azure.identity import DefaultAzureCredential
@@ -6,9 +9,11 @@ from azure.identity import DefaultAzureCredential
 ARM_BASE = "https://management.azure.com"
 DEFAULT_API_VERSION = "2016-06-01"
 
+JsonObject = dict[str, Any]
+
 
 class ArmClient:
-    def __init__(self):
+    def __init__(self) -> None:
         self._credential = DefaultAzureCredential()
         self._session: aiohttp.ClientSession | None = None
 
@@ -19,31 +24,44 @@ class ArmClient:
 
     async def _get_token(self) -> str:
         token = await asyncio.to_thread(
-            self._credential.get_token, "https://management.azure.com/.default"
+            self._credential.get_token,
+            "https://management.azure.com/.default",
         )
         return token.token
 
-    async def get(self, path: str, *, api_version: str = DEFAULT_API_VERSION, params: dict | None = None) -> dict:
+    async def get(
+        self,
+        path: str,
+        *,
+        api_version: str = DEFAULT_API_VERSION,
+        params: JsonObject | None = None,
+    ) -> JsonObject:
         session = await self._ensure_session()
         url = f"{ARM_BASE}{path}"
-        query = {"api-version": api_version}
+        query: JsonObject = {"api-version": api_version}
         if params:
             query.update(params)
         headers = {"Authorization": f"Bearer {await self._get_token()}"}
         async with session.get(url, headers=headers, params=query) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            return await _read_json_object(resp)
 
-    async def post(self, path: str, body: dict | None = None, *, api_version: str = DEFAULT_API_VERSION) -> dict:
+    async def post(
+        self,
+        path: str,
+        body: JsonObject | None = None,
+        *,
+        api_version: str = DEFAULT_API_VERSION,
+    ) -> JsonObject:
         session = await self._ensure_session()
         url = f"{ARM_BASE}{path}"
-        query = {"api-version": api_version}
+        query: JsonObject = {"api-version": api_version}
         headers = {"Authorization": f"Bearer {await self._get_token()}"}
         async with session.post(url, headers=headers, params=query, json=body) as resp:
             resp.raise_for_status()
-            return await resp.json()
+            return await _read_json_object(resp)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
         self._credential.close()
@@ -56,7 +74,7 @@ class DataPlaneClient:
     the ARM management plane scope.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
         self._credential = DefaultAzureCredential()
         self._session: aiohttp.ClientSession | None = None
 
@@ -67,7 +85,8 @@ class DataPlaneClient:
 
     async def _get_token(self) -> str:
         token = await asyncio.to_thread(
-            self._credential.get_token, "https://apihub.azure.com/.default"
+            self._credential.get_token,
+            "https://apihub.azure.com/.default",
         )
         return token.token
 
@@ -76,20 +95,31 @@ class DataPlaneClient:
         method: str,
         url: str,
         *,
-        body: dict | None = None,
-        params: dict | None = None,
-    ) -> dict:
+        body: JsonObject | None = None,
+        params: JsonObject | None = None,
+    ) -> JsonObject:
         session = await self._ensure_session()
         headers = {"Authorization": f"Bearer {await self._get_token()}"}
         async with session.request(
-            method, url, headers=headers, params=params, json=body
+            method,
+            url,
+            headers=headers,
+            params=params,
+            json=body,
         ) as resp:
             resp.raise_for_status()
             if resp.content_length == 0:
                 return {}
-            return await resp.json()
+            return await _read_json_object(resp)
 
-    async def close(self):
+    async def close(self) -> None:
         if self._session and not self._session.closed:
             await self._session.close()
         self._credential.close()
+
+
+async def _read_json_object(response: aiohttp.ClientResponse) -> JsonObject:
+    payload = await response.json()
+    if isinstance(payload, dict):
+        return payload
+    return {}

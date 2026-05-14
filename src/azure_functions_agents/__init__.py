@@ -9,12 +9,11 @@ Framework. The most common entry points are:
 * :class:`ClientManager` — extension point for plugging in alternate chat
   client providers. The default implementation is :class:`MAFClientManager`
   (auto-detects OpenAI, Azure OpenAI, or Foundry from environment variables).
-* :func:`tool` — re-exported from :mod:`agent_framework`. Use this decorator
-  in ``tools/*.py`` to register Python functions as agent tools.
+* :func:`tool` — decorator for registering Python functions from ``tools/*.py``
+  as agent tools.
 """
 
-from agent_framework import tool  # re-export the canonical tool decorator
-
+from ._function_tool import tool
 from .app import create_function_app
 from .client_manager import (
     ClientManager,
@@ -23,24 +22,24 @@ from .client_manager import (
     set_client_manager,
     shutdown_client_manager,
 )
-from .config import resolve_config_dir, set_app_root
-from .connector_tool_cache import configure_connector_tools, get_connector_tools
+from .config.paths import resolve_config_dir, set_app_root
 from .runner import (
-    AgentResult,
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
+    AgentResult,
     run_agent,
     run_agent_stream,
     run_copilot_agent,
     run_copilot_agent_stream,
 )
-from .sandbox import create_sandbox_tools
+from .system_tools.connectors.cache import configure_connector_tools, get_connector_tools
+from .system_tools.sandbox import create_sandbox_tools
 
 __all__ = [
-    "AgentResult",
-    "ClientManager",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
+    "AgentResult",
+    "ClientManager",
     "MAFClientManager",
     "configure_connector_tools",
     "create_function_app",

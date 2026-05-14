@@ -34,28 +34,28 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import re
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, List, Optional
+from typing import Any
 
 from ._logger import logger
 from .client_manager import get_client_manager
-from .config import resolve_config_dir
-from .connector_tool_cache import get_connector_tools
-from .mcp import get_cached_mcp_tools
-from .skills import get_cached_skills_text
-from .tools import _REGISTERED_TOOLS_CACHE
-
+from .config.paths import get_app_root, resolve_config_dir
+from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
+from .discovery.mcp import discover_mcp_servers
+from .discovery.skills import discover_skills
+from .discovery.tools import discover_user_tools
+from .system_tools.connectors.cache import get_connector_tools
 
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
 
 DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "900"))
-DEFAULT_MODEL: Optional[str] = os.environ.get("MAF_MODEL")
+DEFAULT_MODEL: str | None = os.environ.get("MAF_MODEL")
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
@@ -75,7 +75,7 @@ _TOOL_RESTRICTION_PREFIX = (
 # Per-session locks (single-process scope)
 # ---------------------------------------------------------------------------
 
-_SESSION_LOCKS: Dict[str, asyncio.Lock] = {}
+_SESSION_LOCKS: dict[str, asyncio.Lock] = {}
 _SESSION_LOCKS_GUARD = asyncio.Lock()
 
 
@@ -99,10 +99,10 @@ class AgentResult:
 
     session_id: str
     content: str
-    content_intermediate: List[str] = field(default_factory=list)
-    tool_calls: List[Dict[str, Any]] = field(default_factory=list)
-    reasoning: Optional[str] = None
-    events: List[Dict[str, Any]] = field(default_factory=list)
+    content_intermediate: list[str] = field(default_factory=list)
+    tool_calls: list[dict[str, Any]] = field(default_factory=list)
+    reasoning: str | None = None
+    events: list[dict[str, Any]] = field(default_factory=list)
 
 
 # ---------------------------------------------------------------------------
@@ -110,14 +110,12 @@ class AgentResult:
 # ---------------------------------------------------------------------------
 
 
-def _validate_session_id(session_id: Optional[str]) -> Optional[str]:
+def _validate_session_id(session_id: str | None) -> str | None:
     """Return ``session_id`` if it matches the safe pattern; raise on invalid input."""
     if session_id is None:
         return None
     if not isinstance(session_id, str) or not _SESSION_ID_PATTERN.match(session_id):
-        raise ValueError(
-            f"Invalid session_id (must match {_SESSION_ID_PATTERN.pattern})"
-        )
+        raise ValueError(f"Invalid session_id (must match {_SESSION_ID_PATTERN.pattern})")
     return session_id
 
 
@@ -145,12 +143,15 @@ def _resolve_session_path(session_id: str) -> Path:
 # ---------------------------------------------------------------------------
 
 
-def _compose_instructions(agent_instructions: Optional[str]) -> Optional[str]:
+def _compose_instructions(
+    agent_instructions: str | None, skills_text: str | None = None
+) -> str | None:
     """Combine the tool-restriction prefix, agent instructions, and skills text."""
-    parts: List[str] = [_TOOL_RESTRICTION_PREFIX.rstrip()]
+    parts: list[str] = [_TOOL_RESTRICTION_PREFIX.rstrip()]
     if agent_instructions and agent_instructions.strip():
         parts.append(agent_instructions.strip())
-    skills_text = get_cached_skills_text()
+    if skills_text is None:
+        skills_text = discover_skills(get_app_root())
     if skills_text:
         parts.append("# Project skills\n\n" + skills_text)
     composed = "\n\n".join(parts).strip()
@@ -164,18 +165,26 @@ def _compose_instructions(agent_instructions: Optional[str]) -> Optional[str]:
 
 async def _build_agent_session_history(
     *,
-    instructions: Optional[str],
-    session_id: Optional[str],
-    sandbox_tools: Optional[list],
-    model: Optional[str],
-):
+    instructions: str | None,
+    session_id: str | None,
+    tools: list[Any] | None,
+    mcp_tools: list[Any] | None,
+    skills_text: str | None,
+    use_connector_tools: bool,
+    model: str | None,
+    sandbox_tools: list[Any] | None,
+) -> tuple[Any, Any, str]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
     Returns ``(agent, session, resolved_session_id)``.
     """
     # Imported here so a missing optional dependency surfaces only when actually
     # needed (e.g. tests that don't run the runtime path).
-    from agent_framework import Agent, AgentSession, FileHistoryProvider
+    from agent_framework import (  # type: ignore[attr-defined]  # MAF re-exports these runtime classes dynamically.
+        Agent,
+        AgentSession,
+        FileHistoryProvider,
+    )
 
     # Build the chat client first so configuration errors surface BEFORE any
     # filesystem state is created.
@@ -194,23 +203,37 @@ async def _build_agent_session_history(
     history_path = _resolve_session_path(resolved_id)
     history_provider = FileHistoryProvider(storage_path=history_path)
 
-    # Tool list: built-ins + user tools from tools/ + connector tools + per-call
-    # sandbox tools + MCP servers from mcp.json. Order chosen so that the most
-    # general/safe tools appear first; LLMs that ignore order are unaffected.
-    tools: List[Any] = list(_REGISTERED_TOOLS_CACHE)
-    connectors = await get_connector_tools()
+    # Tool list: resolved tools + optional connector tools + per-call sandbox
+    # tools + resolved MCP tools. Order chosen so that the most general/safe
+    # tools appear first; LLMs that ignore order are unaffected.
+    app_root = get_app_root()
+    skills_dir = app_root / "skills"
+    if skills_dir.is_dir():
+        add_allowed_read_dir(str(skills_dir))
+
+    resolved_tools: list[Any]
+    if tools is None:
+        resolved_tools = list(discover_user_tools(app_root)) + list(BUILTIN_TOOLS)
+    else:
+        resolved_tools = list(tools)
+
+    connectors = await get_connector_tools() if use_connector_tools else None
     if connectors:
-        tools.extend(connectors)
+        resolved_tools.extend(connectors)
     if sandbox_tools:
-        tools.extend(sandbox_tools)
-    mcp_tools = get_cached_mcp_tools()
-    if mcp_tools:
-        tools.extend(mcp_tools)
+        resolved_tools.extend(sandbox_tools)
+
+    resolved_mcp_tools = (
+        list(discover_mcp_servers(app_root).values()) if mcp_tools is None else list(mcp_tools)
+    )
+    if resolved_mcp_tools:
+        # MAF's Agent.tools accepts a heterogeneous list of FunctionTool and MCP tools.
+        resolved_tools.extend(resolved_mcp_tools)  # type: ignore[arg-type]
 
     agent = Agent(
         chat_client,
-        instructions=_compose_instructions(instructions),
-        tools=tools,
+        instructions=_compose_instructions(instructions, skills_text=skills_text),
+        tools=resolved_tools,
         context_providers=[history_provider],
     )
 
@@ -231,7 +254,7 @@ def _content_text(item: Any) -> str:
     return str(getattr(item, "text", "") or "")
 
 
-def _function_call_event(item: Any) -> Dict[str, Any]:
+def _function_call_event(item: Any) -> dict[str, Any]:
     return {
         "type": "tool_start",
         "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
@@ -240,7 +263,7 @@ def _function_call_event(item: Any) -> Dict[str, Any]:
     }
 
 
-def _function_result_event(item: Any) -> Dict[str, Any]:
+def _function_result_event(item: Any) -> dict[str, Any]:
     return {
         "type": "tool_end",
         "tool_call_id": getattr(item, "call_id", None) or getattr(item, "id", None),
@@ -257,11 +280,15 @@ def _function_result_event(item: Any) -> Dict[str, Any]:
 async def run_agent(
     prompt: str,
     *,
-    instructions: Optional[str] = None,
-    timeout: Optional[float] = None,
-    model: Optional[str] = None,
-    session_id: Optional[str] = None,
-    sandbox_tools: Optional[list] = None,
+    instructions: str | None = None,
+    timeout: float | None = None,
+    tools: list[Any] | None = None,
+    mcp_tools: list[Any] | None = None,
+    skills_text: str | None = None,
+    use_connector_tools: bool = True,
+    model: str | None = None,
+    session_id: str | None = None,
+    sandbox_tools: list[Any] | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -275,6 +302,17 @@ async def run_agent(
     timeout:
         Maximum time to wait for the agent response, in seconds. Defaults to
         :data:`DEFAULT_TIMEOUT`.
+    tools:
+        Optional pre-built tool list. ``None`` preserves legacy auto-discovery;
+        an explicit list is used as-is.
+    mcp_tools:
+        Optional pre-filtered MCP tool list. ``None`` preserves legacy
+        auto-discovery; an explicit list is used as-is.
+    skills_text:
+        Optional pre-loaded skills text. ``None`` preserves legacy discovery;
+        ``""`` disables skills injection.
+    use_connector_tools:
+        Whether to include connector tools discovered from the shared cache.
     model:
         Optional model/deployment override. When omitted the
         :class:`ClientManager` resolves the value from environment variables.
@@ -292,17 +330,19 @@ async def run_agent(
     agent, session, resolved_id = await _build_agent_session_history(
         instructions=instructions,
         session_id=session_id,
-        sandbox_tools=sandbox_tools,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skills_text=skills_text,
+        use_connector_tools=use_connector_tools,
         model=model,
+        sandbox_tools=sandbox_tools,
     )
 
     lock = await _get_session_lock(resolved_id)
     async with lock:
         try:
-            response = await asyncio.wait_for(
-                agent.run(prompt, session=session), timeout=timeout
-            )
-        except asyncio.TimeoutError:
+            response = await asyncio.wait_for(agent.run(prompt, session=session), timeout=timeout)
+        except TimeoutError:
             raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
     # Extract assistant text from the final response.
@@ -322,7 +362,7 @@ async def run_agent(
             logger.debug("Failed to extract response text: %s", exc)
 
     # Walk content items for tool-call records (best-effort metadata for callers).
-    tool_calls: List[Dict[str, Any]] = []
+    tool_calls: list[dict[str, Any]] = []
     try:
         for msg in getattr(response, "messages", None) or []:
             for item in getattr(msg, "contents", None) or []:
@@ -356,11 +396,15 @@ async def run_agent(
 async def run_agent_stream(
     prompt: str,
     *,
-    instructions: Optional[str] = None,
-    timeout: Optional[float] = None,
-    model: Optional[str] = None,
-    session_id: Optional[str] = None,
-    sandbox_tools: Optional[list] = None,
+    instructions: str | None = None,
+    timeout: float | None = None,
+    tools: list[Any] | None = None,
+    mcp_tools: list[Any] | None = None,
+    skills_text: str | None = None,
+    use_connector_tools: bool = True,
+    model: str | None = None,
+    session_id: str | None = None,
+    sandbox_tools: list[Any] | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -382,8 +426,12 @@ async def run_agent_stream(
         agent, session, resolved_id = await _build_agent_session_history(
             instructions=instructions,
             session_id=session_id,
-            sandbox_tools=sandbox_tools,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skills_text=skills_text,
+            use_connector_tools=use_connector_tools,
             model=model,
+            sandbox_tools=sandbox_tools,
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
@@ -419,7 +467,7 @@ async def run_agent_stream(
                     # Unknown content types are intentionally ignored — the
                     # SSE vocabulary is fixed and the UI doesn't render them.
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        except asyncio.TimeoutError:
+        except TimeoutError:
             yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
         except Exception as exc:
             logger.error("Agent stream failed: %s", exc, exc_info=True)
@@ -431,7 +479,7 @@ async def run_agent_stream(
 # ---------------------------------------------------------------------------
 
 
-def run_copilot_agent(*_args, **_kwargs):  # pragma: no cover - stub
+def run_copilot_agent(*_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
     """Removed in 1.0.0. Use :func:`run_agent` instead."""
     raise RuntimeError(
         "run_copilot_agent was removed in azure-functions-agents 1.0.0. "
@@ -440,7 +488,7 @@ def run_copilot_agent(*_args, **_kwargs):  # pragma: no cover - stub
     )
 
 
-def run_copilot_agent_stream(*_args, **_kwargs):  # pragma: no cover - stub
+def run_copilot_agent_stream(*_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
     """Removed in 1.0.0. Use :func:`run_agent_stream` instead."""
     raise RuntimeError(
         "run_copilot_agent_stream was removed in azure-functions-agents 1.0.0. "

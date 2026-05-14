@@ -17,16 +17,16 @@ import asyncio
 import json
 import re
 import urllib.parse
-from typing import Any, Dict, List, Optional
+from collections.abc import Awaitable, Callable
+from typing import Any
 
 import aiohttp
-from agent_framework import FunctionTool, tool
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
-
-from ._logger import logger
 from pydantic import BaseModel, Field
 
-from .config import resolve_env_var
+from .._function_tool import FunctionTool, tool
+from .._logger import logger
+from ..config.env import resolve_env_var
 
 _API_VERSION = "2025-10-02-preview"
 
@@ -155,7 +155,7 @@ async def _execute_code(
     endpoint: str,
     code: str,
     session_id: str,
-    token_provider,
+    token_provider: Callable[[], Awaitable[str]],
     http_session: aiohttp.ClientSession,
 ) -> str:
     """Execute Python code in an ACA dynamic session."""
@@ -200,9 +200,9 @@ async def _execute_code(
 # Shared credential and HTTP session (created lazily, reused across agents).
 # These are process-wide because building credentials and aiohttp sessions is
 # expensive — one is enough for the entire app.
-_credential: Optional[DefaultAzureCredential] = None
-_token_provider = None
-_http_session: Optional[aiohttp.ClientSession] = None
+_credential: DefaultAzureCredential | None = None
+_token_provider: Callable[[], Awaitable[str]] | None = None
+_http_session: aiohttp.ClientSession | None = None
 _init_lock = asyncio.Lock()
 
 # Track which ACA sessions have been set up (Playwright helper loaded)
@@ -210,7 +210,7 @@ _setup_sessions: set[str] = set()
 _setup_lock = asyncio.Lock()
 
 
-async def _ensure_shared_resources():
+async def _ensure_shared_resources() -> None:
     """Lazily create the shared credential, token provider, and HTTP session."""
     global _credential, _token_provider, _http_session
     if _token_provider is not None:
@@ -229,10 +229,10 @@ async def _ensure_shared_resources():
 
 
 def create_sandbox_tools(
-    config: Dict[str, Any],
+    config: dict[str, Any],
     *,
     fallback_session_id: str = "default",
-) -> List[FunctionTool]:
+) -> list[FunctionTool]:
     """Create an ``execute_python`` tool bound to a specific ACA session pool.
 
     Parameters
@@ -261,7 +261,9 @@ def create_sandbox_tools(
 
     aca_session_id = fallback_session_id or "default"
     logger.info(
-        f"execution_sandbox: creating tool with endpoint {endpoint} (aca_session={aca_session_id})"
+        "execution_sandbox: creating tool with endpoint %s (aca_session=%s)",
+        endpoint,
+        aca_session_id,
     )
 
     @tool(
@@ -271,38 +273,50 @@ def create_sandbox_tools(
     )
     async def execute_python(params: ExecutePythonParams) -> str:
         await _ensure_shared_resources()
+        token_provider = _token_provider
+        http_session = _http_session
+        assert token_provider is not None
+        assert http_session is not None
 
         code = params.code or ""
         if not code.strip():
             return json.dumps({"error": "No code provided"})
 
-        logger.info(
-            f"execution_sandbox: executing code in ACA session {aca_session_id}"
-        )
+        logger.info("execution_sandbox: executing code in ACA session %s", aca_session_id)
 
         try:
             # Pre-load Playwright helper on first call per session
             async with _setup_lock:
                 if aca_session_id not in _setup_sessions:
                     await _execute_code(
-                        endpoint, _ACA_SESSION_SETUP, aca_session_id, _token_provider, _http_session
+                        endpoint,
+                        _ACA_SESSION_SETUP,
+                        aca_session_id,
+                        token_provider,
+                        http_session,
                     )
                     _setup_sessions.add(aca_session_id)
 
             result = await _execute_code(
-                endpoint, code, aca_session_id, _token_provider, _http_session
+                endpoint,
+                code,
+                aca_session_id,
+                token_provider,
+                http_session,
             )
             logger.info(
-                f"execution_sandbox: ACA session {aca_session_id} completed successfully"
+                "execution_sandbox: ACA session %s completed successfully",
+                aca_session_id,
             )
             return result
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             logger.error(
-                f"execution_sandbox: ACA session {aca_session_id} failed: {error_msg}"
+                "execution_sandbox: ACA session %s failed: %s",
+                aca_session_id,
+                error_msg,
             )
             return json.dumps({"error": error_msg})
 
     logger.info("execution_sandbox: execute_python tool created")
     return [execute_python]
-

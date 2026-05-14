@@ -2,13 +2,17 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from urllib.parse import quote
 
-from agent_framework import FunctionTool
-
-from ._logger import logger
+from ..._function_tool import FunctionTool
+from ..._logger import logger
 from .arm import ArmClient, DataPlaneClient
 from .connectors import ConnectionInfo, ParsedOperation, ParsedParameter
+
+ToolArgs = dict[str, object]
+JsonSchema = dict[str, object]
 
 
 def _sanitize_name(name: str) -> str:
@@ -19,17 +23,17 @@ def _sanitize_name(name: str) -> str:
 
 def _to_snake_case(name: str) -> str:
     """Convert operationId to snake_case."""
-    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
-    s = re.sub(r"[^a-zA-Z0-9]", "_", s)
-    s = re.sub(r"_+", "_", s)
-    return s.strip("_").lower()
+    snake = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
+    snake = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", snake)
+    snake = re.sub(r"[^a-zA-Z0-9]", "_", snake)
+    snake = re.sub(r"_+", "_", snake)
+    return snake.strip("_").lower()
 
 
-def _param_to_json_schema(param: ParsedParameter) -> dict:
+def _param_to_json_schema(param: ParsedParameter) -> JsonSchema:
     """Convert a ParsedParameter to a JSON Schema property."""
     type_map = {"integer": "integer", "number": "number", "boolean": "boolean"}
-    schema: dict = {"type": type_map.get(param.type, "string")}
+    schema: JsonSchema = {"type": type_map.get(param.type, "string")}
     if param.description:
         schema["description"] = param.description
     if param.enum:
@@ -39,11 +43,17 @@ def _param_to_json_schema(param: ParsedParameter) -> dict:
     return schema
 
 
-def _build_invoke_path(op: ParsedOperation, args: dict, all_params: list[ParsedParameter], url_encode: bool = True) -> str:
+def _build_invoke_path(
+    op: ParsedOperation,
+    args: ToolArgs,
+    all_params: list[ParsedParameter],
+    *,
+    url_encode: bool = True,
+) -> str:
     """Build the invoke path by stripping /{connectionId} and substituting path params.
 
     When url_encode is False (V1 dynamicInvoke), path param values are inserted
-    as-is since the path is a JSON field, not a real URL.  When True (V2 data
+    as-is since the path is a JSON field, not a real URL. When True (V2 data
     plane), values are percent-encoded for use in an HTTP URL.
     """
     path = re.sub(r"^/\{connectionId\}", "", op.path, flags=re.IGNORECASE)
@@ -55,7 +65,7 @@ def _build_invoke_path(op: ParsedOperation, args: dict, all_params: list[ParsedP
                 raise ValueError(f"Missing required path parameter: {param.name}")
             replacement = quote(str(value), safe="") if url_encode else str(value)
             path = path.replace(f"{{{param.name}}}", replacement)
-    # Substitute internal path params with their defaults
+
     for param in op.internal_params:
         if param.location == "path" and param.default is not None:
             replacement = quote(str(param.default), safe="") if url_encode else str(param.default)
@@ -63,8 +73,18 @@ def _build_invoke_path(op: ParsedOperation, args: dict, all_params: list[ParsedP
     return path
 
 
+def _set_nested_value(body: ToolArgs, dotted_name: str, value: object) -> None:
+    head, tail = dotted_name.split(".", 1)
+    nested = body.get(head)
+    if not isinstance(nested, dict):
+        nested = {}
+        body[head] = nested
+    nested[tail] = value
+
+
 def generate_tools(
-    arm: ArmClient, connection: ConnectionInfo,
+    arm: ArmClient,
+    connection: ConnectionInfo,
     prefix: str | None = None,
     data_plane_client: DataPlaneClient | None = None,
 ) -> list[FunctionTool]:
@@ -83,36 +103,33 @@ def generate_tools(
     """
     tools: list[FunctionTool] = []
     api_name = connection.api_name
-
-    # Determine effective prefix
-    if prefix:
-        effective_prefix = _sanitize_name(_to_snake_case(prefix))
-    else:
-        effective_prefix = _sanitize_name(_to_snake_case(connection.name))
+    effective_prefix = (
+        _sanitize_name(_to_snake_case(prefix))
+        if prefix
+        else _sanitize_name(_to_snake_case(connection.name))
+    )
 
     for op in connection.operations:
         snake_op = _to_snake_case(op.operation_id)
+        tool_name = (
+            f"{api_name}_{snake_op}"
+            if effective_prefix == api_name
+            else f"{effective_prefix}_{api_name}_{snake_op}"
+        )
 
-        # Build tool name: collapse prefix when it matches api_name
-        if effective_prefix == api_name:
-            tool_name = f"{api_name}_{snake_op}"
-        else:
-            tool_name = f"{effective_prefix}_{api_name}_{snake_op}"
-
-        # Smart truncation: shrink prefix first to preserve operation name
         if len(tool_name) > 64:
-            suffix = f"_{api_name}_{snake_op}" if effective_prefix != api_name else f"_{snake_op}"
+            suffix = f"_{snake_op}" if effective_prefix == api_name else f"_{api_name}_{snake_op}"
             prefix_budget = 64 - len(suffix)
-            if prefix_budget > 0:
-                tool_name = f"{effective_prefix[:prefix_budget]}{suffix}"
-            else:
-                tool_name = tool_name[:64]
+            tool_name = (
+                f"{effective_prefix[:prefix_budget]}{suffix}"
+                if prefix_budget > 0
+                else tool_name[:64]
+            )
             logger.warning("Tool name truncated to 64 chars: '%s'", tool_name)
 
         tool_name = tool_name[:64]
 
-        # Build JSON schema for parameters
-        properties: dict = {}
+        properties: dict[str, JsonSchema] = {}
         required: list[str] = []
         all_params = op.parameters + op.body_properties
 
@@ -128,11 +145,13 @@ def generate_tools(
             if param.required or param.name in op.body_required_fields:
                 required.append(key)
 
-        parameters_schema: dict = {"type": "object", "properties": properties}
+        parameters_schema: JsonSchema = {
+            "type": "object",
+            "properties": properties,
+        }
         if required:
             parameters_schema["required"] = required
 
-        # Build description
         desc_parts = [op.summary or op.operation_id]
         if op.description and op.description != op.summary:
             desc_parts.append(op.description)
@@ -141,53 +160,58 @@ def generate_tools(
             desc_parts.append(f"Connection status: {connection.status}")
         description = " — ".join(desc_parts)
 
-        def make_handler(op=op, connection=connection, all_params=all_params):
-            async def handler(**args) -> str:
-                # V2 uses direct HTTP URLs (need encoding); V1 uses JSON path field (no encoding)
+        def make_handler(
+            op: ParsedOperation = op,
+            connection: ConnectionInfo = connection,
+            all_params: list[ParsedParameter] = all_params,
+        ) -> Callable[..., Awaitable[str]]:
+            async def handler(**args: object) -> str:
                 is_v2 = bool(data_plane_client and connection.connection_runtime_url)
-                invoke_path = _build_invoke_path(op, args, all_params, url_encode=is_v2)
+                invoke_path = _build_invoke_path(
+                    op,
+                    args,
+                    all_params,
+                    url_encode=is_v2,
+                )
 
-                queries = {}
+                queries: ToolArgs = {}
                 for param in op.parameters:
                     if param.location == "query":
                         key = _sanitize_name(param.name)
                         if key in args:
                             queries[param.name] = args[key]
 
-                # Inject internal query params with defaults
                 for param in op.internal_params:
-                    if param.location == "query" and param.default is not None:
-                        if param.name not in queries:
-                            queries[param.name] = param.default
+                    if (
+                        param.location == "query"
+                        and param.default is not None
+                        and param.name not in queries
+                    ):
+                        queries[param.name] = param.default
 
-                body: dict = {}
+                body: ToolArgs = {}
                 for param in op.body_properties:
                     key = _sanitize_name(param.name)
                     if key in args:
-                        value = args[key]
+                        value: object = args[key]
                         if param.type in ("object", "array") and isinstance(value, str):
-                            try:
+                            with suppress(json.JSONDecodeError, ValueError):
                                 value = json.loads(value)
-                            except (json.JSONDecodeError, ValueError):
-                                pass
-                        # Handle dot-separated names as nested objects
                         if "." in param.name:
-                            parts = param.name.split(".", 1)
-                            if parts[0] not in body:
-                                body[parts[0]] = {}
-                            body[parts[0]][parts[1]] = value
+                            _set_nested_value(body, param.name, value)
                         else:
                             body[param.name] = value
 
-                # Inject internal body params with defaults
                 for param in op.internal_params:
-                    if param.location == "body" and param.default is not None:
-                        if param.name not in body:
-                            body[param.name] = param.default
+                    if (
+                        param.location == "body"
+                        and param.default is not None
+                        and param.name not in body
+                    ):
+                        body[param.name] = param.default
 
                 try:
                     if data_plane_client and connection.connection_runtime_url:
-                        # V2: direct HTTP to data plane
                         url = f"{connection.connection_runtime_url.rstrip('/')}{invoke_path}"
                         result = await data_plane_client.request(
                             op.method,
@@ -197,23 +221,22 @@ def generate_tools(
                         )
                         return json.dumps(result, indent=2, default=str)
 
-                    # V1: dynamicInvoke via ARM
-                    request_body: dict = {
-                        "request": {
-                            "method": op.method,
-                            "path": invoke_path,
-                        }
+                    request_payload: ToolArgs = {
+                        "method": op.method,
+                        "path": invoke_path,
                     }
                     if queries:
-                        request_body["request"]["queries"] = queries
+                        request_payload["queries"] = queries
                     if body:
-                        request_body["request"]["body"] = body
+                        request_payload["body"] = body
 
                     result = await arm.post(
                         f"{connection.resource_id}/dynamicInvoke",
-                        body=request_body,
+                        body={"request": request_payload},
                     )
                     response = result.get("response", {})
+                    if not isinstance(response, dict):
+                        response = {}
                     response_body = response.get("body", result)
                     raw_status = response.get("statusCode", 200)
                     try:
@@ -236,73 +259,18 @@ def generate_tools(
                         return f"Error ({status_code}): {json.dumps(response_body)}"
 
                     return json.dumps(response_body, indent=2, default=str)
-                except Exception as e:
-                    error_type = type(e).__name__
-                    return f"Error invoking {op.operation_id}: {error_type}: {e}"
+                except Exception as exc:
+                    error_type = type(exc).__name__
+                    return f"Error invoking {op.operation_id}: {error_type}: {exc}"
 
             return handler
 
-        tools.append(
-            FunctionTool(
-                name=tool_name,
-                description=description,
-                func=make_handler(),
-                input_model=parameters_schema,
-            )
+        tool: FunctionTool = FunctionTool(
+            name=tool_name,
+            description=description,
+            func=make_handler(),
+            input_model=parameters_schema,
         )
+        tools.append(tool)
 
     return tools
-
-
-
-def _sanitize_name(name: str) -> str:
-    """Sanitize parameter name to match ^[a-zA-Z0-9_.-]{1,64}$."""
-    sanitized = re.sub(r"[^a-zA-Z0-9_.\-]", "_", name)
-    return sanitized[:64]
-
-
-def _to_snake_case(name: str) -> str:
-    """Convert operationId to snake_case."""
-    s = re.sub(r"([A-Z]+)([A-Z][a-z])", r"\1_\2", name)
-    s = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", s)
-    s = re.sub(r"[^a-zA-Z0-9]", "_", s)
-    s = re.sub(r"_+", "_", s)
-    return s.strip("_").lower()
-
-
-def _param_to_json_schema(param: ParsedParameter) -> dict:
-    """Convert a ParsedParameter to a JSON Schema property."""
-    type_map = {"integer": "integer", "number": "number", "boolean": "boolean"}
-    schema: dict = {"type": type_map.get(param.type, "string")}
-    if param.description:
-        schema["description"] = param.description
-    if param.enum:
-        schema["enum"] = param.enum
-    if param.default is not None:
-        schema["default"] = param.default
-    return schema
-
-
-def _build_invoke_path(op: ParsedOperation, args: dict, all_params: list[ParsedParameter], url_encode: bool = True) -> str:
-    """Build the invoke path by stripping /{connectionId} and substituting path params.
-
-    When url_encode is False (V1 dynamicInvoke), path param values are inserted
-    as-is since the path is a JSON field, not a real URL.  When True (V2 data
-    plane), values are percent-encoded for use in an HTTP URL.
-    """
-    path = re.sub(r"^/\{connectionId\}", "", op.path, flags=re.IGNORECASE)
-    for param in all_params:
-        if param.location == "path":
-            sanitized = _sanitize_name(param.name)
-            value = args.get(sanitized)
-            if value is None:
-                raise ValueError(f"Missing required path parameter: {param.name}")
-            replacement = quote(str(value), safe="") if url_encode else str(value)
-            path = path.replace(f"{{{param.name}}}", replacement)
-    # Substitute internal path params with their defaults
-    for param in op.internal_params:
-        if param.location == "path" and param.default is not None:
-            replacement = quote(str(param.default), safe="") if url_encode else str(param.default)
-            path = path.replace(f"{{{param.name}}}", replacement)
-    return path
-

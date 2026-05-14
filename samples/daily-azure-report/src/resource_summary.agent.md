@@ -7,7 +7,7 @@ trigger:
   args:
     route: resource-summary
     methods: ["POST"]
-    auth_level: FUNCTION
+    auth_level: function
 
 response_example: |
   {

@@ -429,5 +429,6 @@ FodyWeavers.xsd
 *.msp
 
 **/*.egg-info
-dist
+build/
+dist/
 .venv*

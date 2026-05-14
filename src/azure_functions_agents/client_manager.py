@@ -23,13 +23,11 @@ ABC surface
 
 from __future__ import annotations
 
-import logging
 import os
 from abc import ABC, abstractmethod
-from typing import Any, Dict, Optional
+from typing import Any
 
 from ._logger import logger
-
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -42,7 +40,7 @@ class ClientManager(ABC):
     name: str = "abstract"
 
     @abstractmethod
-    def resolve_model(self, requested: Optional[str]) -> str:
+    def resolve_model(self, requested: str | None) -> str:
         """Return the model/deployment id to use for this turn.
 
         ``requested`` is the per-call value (e.g. from the agent's frontmatter
@@ -51,7 +49,7 @@ class ClientManager(ABC):
         """
 
     @abstractmethod
-    def build_chat_client(self, model: Optional[str]) -> Any:
+    def build_chat_client(self, model: str | None) -> Any:
         """Construct and return a chat client for the given model.
 
         ``model`` may be ``None``, in which case the implementation MUST call
@@ -86,7 +84,7 @@ class MAFClientManager(ClientManager):
 
     name = "maf"
 
-    def resolve_model(self, requested: Optional[str]) -> str:
+    def resolve_model(self, requested: str | None) -> str:
         if requested:
             return requested
         env_override = os.environ.get("MAF_MODEL")
@@ -99,7 +97,7 @@ class MAFClientManager(ClientManager):
             return os.environ.get("FOUNDRY_MODEL") or _DEFAULT_FOUNDRY_MODEL
         return _DEFAULT_OPENAI_MODEL
 
-    def build_chat_client(self, model: Optional[str]) -> Any:
+    def build_chat_client(self, model: str | None) -> Any:
         provider = self._provider()
         resolved = self.resolve_model(model)
         logger.info("MAF provider=%s model=%s", provider, resolved)
@@ -150,7 +148,10 @@ class MAFClientManager(ClientManager):
     def _build_openai(cls, model: str) -> Any:
         from agent_framework.openai import OpenAIChatClient
 
-        return OpenAIChatClient(model=model, api_key=cls._env("OPENAI_API_KEY") or None)
+        return OpenAIChatClient(
+            model=model,
+            api_key=cls._env("OPENAI_API_KEY") or None,
+        )
 
     @classmethod
     def _build_azure_openai(cls, model: str) -> Any:
@@ -161,7 +162,7 @@ class MAFClientManager(ClientManager):
             raise RuntimeError(
                 "MAF_PROVIDER=azure_openai requires AZURE_OPENAI_ENDPOINT to be set."
             )
-        kwargs: Dict[str, Any] = {
+        kwargs: dict[str, Any] = {
             "model": model,
             "azure_endpoint": endpoint,
         }
@@ -187,9 +188,7 @@ class MAFClientManager(ClientManager):
 
         endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
         if not endpoint:
-            raise RuntimeError(
-                "MAF_PROVIDER=foundry requires FOUNDRY_PROJECT_ENDPOINT to be set."
-            )
+            raise RuntimeError("MAF_PROVIDER=foundry requires FOUNDRY_PROJECT_ENDPOINT to be set.")
         return FoundryChatClient(
             project_endpoint=endpoint,
             model=model,
@@ -201,7 +200,7 @@ class MAFClientManager(ClientManager):
 # Process-wide singleton selection
 # ---------------------------------------------------------------------------
 
-_INSTANCE: Optional[ClientManager] = None
+_INSTANCE: ClientManager | None = None
 
 
 def get_client_manager() -> ClientManager:
@@ -236,4 +235,3 @@ async def shutdown_client_manager() -> None:
             await _INSTANCE.close()
         finally:
             _INSTANCE = None
-
