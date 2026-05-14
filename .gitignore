@@ -428,7 +428,6 @@ FodyWeavers.xsd
 *.msm
 *.msp
 
-# Python
-.venv*/
-dist/
-**/*.egg-info/
+**/*.egg-info
+dist
+.venv*

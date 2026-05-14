@@ -8,11 +8,11 @@
     "location": {
       "value": "${AZURE_LOCATION}"
     },
-    "githubToken": {
-      "value": "${GITHUB_TOKEN}"
+    "azureOpenAiEndpoint": {
+      "value": "${AZURE_OPENAI_ENDPOINT}"
     },
-    "copilotModel": {
-      "value": "${COPILOT_MODEL}"
+    "azureOpenAiDeployment": {
+      "value": "${AZURE_OPENAI_DEPLOYMENT}"
     }
   }
 }

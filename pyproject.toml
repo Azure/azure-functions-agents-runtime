@@ -4,24 +4,29 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "azurefunctions-agents-runtime"
-version = "0.0.0dev2"
-description = "A markdown-first programming model for building AI agents on Azure Functions with the GitHub Copilot SDK."
+version = "0.0.0dev3"
+description = "A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework."
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.10"
+requires-python = ">=3.13"
 dependencies = [
     "azure-functions>=1.24.0",
-    "github-copilot-sdk>=0.2.1",
+    "agent-framework-core>=1.2.2",
+    "agent-framework-openai>=1.2.2",
+    "agent-framework-foundry>=1.2.2",
     "pydantic>=2.0.0",
     "python-frontmatter>=1.1.0",
     "azurefunctions-extensions-http-fastapi",
     "aiohttp>=3.9.0",
     "azure-identity>=1.15.0",
+    "mcp>=1.0.0",
 ]
 
 
 [project.optional-dependencies]
-connectors = ["azure-connectors"]
+connectors = [
+    "azure-connectors",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

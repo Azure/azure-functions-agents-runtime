@@ -6,6 +6,7 @@ trigger:
   type: timer_trigger
   args:
     schedule: "0 0 7 * * *"
+    run_on_start: true
 ---
 
 You are an Azure infrastructure reporting assistant. When triggered, do the following:

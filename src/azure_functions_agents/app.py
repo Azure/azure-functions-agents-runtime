@@ -1,5 +1,5 @@
 """
-Azure Functions + GitHub Copilot SDK — app factory.
+Azure Functions + Microsoft Agent Framework — app factory.
 
 Call ``create_function_app()`` to build a fully-configured FunctionApp
 with HTTP routes, MCP tool, and dynamic triggers from agent markdown files.
@@ -11,19 +11,19 @@ Agent files:
 
 import glob
 import json
-import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 import azure.functions as func
 import frontmatter
+from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from ._logger import logger
 from .config import get_app_root, set_app_root, resolve_env_var, substitute_env_vars_in_text, _to_bool
 from .connector_tool_cache import configure_connector_tools
-from .runner import run_copilot_agent, run_copilot_agent_stream
+from .runner import run_agent, run_agent_stream
 from .sandbox import create_sandbox_tools
-from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     [
@@ -62,7 +62,7 @@ def _load_agent_file(path: Path) -> Optional[Dict[str, Any]]:
 
         return {"metadata": metadata, "content": content}
     except Exception as exc:
-        logging.warning(f"Failed to parse {path.name}: {exc}")
+        logger.warning("Failed to parse %s: %s", path.name, exc)
         return None
 
 
@@ -92,15 +92,30 @@ def _safe_function_name(raw_name: str) -> str:
     return name
 
 
+def _warn_if_legacy_runtime_field(metadata: Dict[str, Any], filename: str) -> None:
+    """Emit a one-time deprecation warning if an agent file still declares ``runtime:``.
+
+    Earlier versions of the runtime supported ``runtime: copilot|maf`` to
+    select between two backends. As of 1.0.0 only the Microsoft Agent
+    Framework is supported and the field is silently ignored. We surface a
+    targeted warning per agent file so users can find and remove the field.
+    """
+    raw = metadata.get("runtime")
+    if raw is None:
+        return
+    logger.warning(
+        f"{filename}: ignoring deprecated frontmatter field 'runtime: {raw}' — "
+        "the runtime now uses the Microsoft Agent Framework only. "
+        "Remove the 'runtime:' field from your agent file."
+    )
+
+
 def _normalize_timer_schedule(schedule: str) -> str:
     """Accept 5-part cron by prepending seconds; keep 6-part schedules unchanged."""
     schedule_parts = schedule.strip().split()
     if len(schedule_parts) == 5:
         return f"0 {schedule.strip()}"
     return schedule.strip()
-
-
-# _to_bool imported from .config
 
 
 def _resolve_trigger_params(trigger_params: Dict[str, Any]) -> Dict[str, Any]:
@@ -122,7 +137,7 @@ def _register_triggered_agents(app: func.FunctionApp, app_root: Path) -> None:
     """Discover and register triggered agents from *.agent.md files."""
     agent_files = sorted(glob.glob(str(app_root / "*.agent.md")))
     if not agent_files:
-        logging.info("No agent files found.")
+        logger.info("No agent files found.")
         return
 
     connectors_instance = None  # Lazy-init if needed
@@ -141,10 +156,11 @@ def _register_triggered_agents(app: func.FunctionApp, app_root: Path) -> None:
 
         metadata = agent["metadata"]
         content = agent["content"]
+        _warn_if_legacy_runtime_field(metadata, agent_path.name)
         trigger_spec = metadata.get("trigger")
 
         if not isinstance(trigger_spec, dict) or "type" not in trigger_spec:
-            logging.warning(f"Skipping {agent_path.name}: missing or invalid 'trigger' section (must have 'type')")
+            logger.warning("Skipping %s: missing or invalid 'trigger' section (must have 'type')", agent_path.name)
             continue
 
         # Extract trigger type and params
@@ -172,30 +188,26 @@ def _register_triggered_agents(app: func.FunctionApp, app_root: Path) -> None:
         if isinstance(agent_connections, list):
             configure_connector_tools(agent_connections)
 
-        # Per-agent sandbox tools
-        agent_sandbox_tools = []
-        agent_sandbox = metadata.get("execution_sandbox")
-        if isinstance(agent_sandbox, dict):
-            agent_sandbox_tools = create_sandbox_tools(agent_sandbox)
+        # Per-agent sandbox config (tools are built per-request inside the handler
+        # so the resolved session id can be baked into the closure)
+        agent_sandbox_config = metadata.get("execution_sandbox")
+        if not isinstance(agent_sandbox_config, dict):
+            agent_sandbox_config = None
 
         # Determine if this is a built-in trigger or connector trigger
-        # Dot notation routes to the connectors library (e.g. "teams.new_channel_message_trigger").
-        # "connectors." prefix is stripped if present (e.g. "connectors.generic_trigger" → "generic_trigger").
         is_connector = "." in trigger_type
         if is_connector:
-            # Strip leading "connectors." prefix if present
             connector_type = trigger_type.removeprefix("connectors.")
             connectors_instance = _register_connector_agent(
                 app, connectors_instance, function_name, agent_name,
                 connector_type, trigger_params, content, should_log,
-                sandbox_tools=agent_sandbox_tools,
+                sandbox_config=agent_sandbox_config,
             )
         else:
-            # Built-in Azure Functions trigger
             _register_builtin_agent(
                 app, function_name, agent_name,
                 trigger_type, trigger_params, content, should_log,
-                sandbox_tools=agent_sandbox_tools,
+                sandbox_config=agent_sandbox_config,
                 response_example=metadata.get("response_example"),
                 response_schema=metadata.get("response_schema"),
             )
@@ -209,7 +221,7 @@ def _register_builtin_agent(
     trigger_params: Dict[str, Any],
     prompt: str,
     should_log: bool,
-    sandbox_tools: Optional[list] = None,
+    sandbox_config: Optional[Dict[str, Any]] = None,
     response_example: Optional[str] = None,
     response_schema: Optional[dict] = None,
 ) -> None:
@@ -219,7 +231,7 @@ def _register_builtin_agent(
     if trigger_type == "http_trigger":
         _register_http_agent(
             app, function_name, agent_name, trigger_params, prompt,
-            should_log, sandbox_tools=sandbox_tools,
+            should_log, sandbox_config=sandbox_config,
             response_example=response_example, response_schema=response_schema,
         )
         return
@@ -227,7 +239,7 @@ def _register_builtin_agent(
     # Get the decorator method from the FunctionApp
     decorator_fn = getattr(app, trigger_type, None)
     if decorator_fn is None:
-        logging.warning(f"Skipping '{function_name}': unknown trigger type '{trigger_type}'")
+        logger.warning("Skipping '%s': unknown trigger type '%s'", function_name, trigger_type)
         return
 
     # Timer triggers: normalize schedule
@@ -236,16 +248,19 @@ def _register_builtin_agent(
             trigger_params["schedule"] = _normalize_timer_schedule(str(trigger_params["schedule"]))
 
     # Create handler
-    handler = _make_agent_handler(function_name, agent_name, trigger_type, should_log, sandbox_tools=sandbox_tools, agent_instructions=prompt)
+    handler = _make_agent_handler(
+        function_name, agent_name, trigger_type, should_log,
+        sandbox_config=sandbox_config, agent_instructions=prompt,
+    )
 
     # Register with auto-generated arg_name
     trigger_params["arg_name"] = "trigger_data"
     try:
         decorated = decorator_fn(**trigger_params)(handler)
         app.function_name(name=function_name)(decorated)
-        logging.info(f"Registered '{function_name}' ({trigger_type}) — {agent_name}")
+        logger.info("Registered '%s' (%s) \u2014 %s", function_name, trigger_type, agent_name)
     except Exception as exc:
-        logging.error(f"Failed to register '{function_name}' ({trigger_type}): {exc}")
+        logger.error("Failed to register '%s' (%s): %s", function_name, trigger_type, exc)
 
 
 _AUTH_LEVEL_MAP = {
@@ -262,14 +277,14 @@ def _register_http_agent(
     trigger_params: Dict[str, Any],
     prompt: str,
     should_log: bool,
-    sandbox_tools: Optional[list] = None,
+    sandbox_config: Optional[Dict[str, Any]] = None,
     response_example: Optional[str] = None,
     response_schema: Optional[dict] = None,
 ) -> None:
     """Register an HTTP-triggered agent using app.route()."""
     route = trigger_params.get("route")
     if not route:
-        logging.warning(f"Skipping '{function_name}': http_trigger requires 'route'")
+        logger.warning("Skipping '%s': http_trigger requires 'route'", function_name)
         return
 
     methods = trigger_params.get("methods", ["POST"])
@@ -278,16 +293,16 @@ def _register_http_agent(
 
     handler = _make_http_agent_handler(
         function_name, agent_name, should_log,
-        sandbox_tools=sandbox_tools, agent_instructions=prompt,
+        sandbox_config=sandbox_config, agent_instructions=prompt,
         response_example=response_example, response_schema=response_schema,
     )
 
     try:
         decorated = app.route(route=route, methods=methods, auth_level=auth_level)(handler)
         app.function_name(name=function_name)(decorated)
-        logging.info(f"Registered HTTP agent '{function_name}' at /{route} ({methods}) — {agent_name}")
+        logger.info("Registered HTTP agent '%s' at /%s (%s) \u2014 %s", function_name, route, methods, agent_name)
     except Exception as exc:
-        logging.error(f"Failed to register HTTP agent '{function_name}': {exc}")
+        logger.error("Failed to register HTTP agent '%s': %s", function_name, exc)
 
 
 def _register_connector_agent(
@@ -299,7 +314,7 @@ def _register_connector_agent(
     trigger_params: Dict[str, Any],
     prompt: str,
     should_log: bool,
-    sandbox_tools: Optional[list] = None,
+    sandbox_config: Optional[Dict[str, Any]] = None,
 ):
     """Register a triggered agent using a connector trigger.
 
@@ -310,14 +325,14 @@ def _register_connector_agent(
             import azure.functions_connectors as fc
             connectors_instance = fc.FunctionsConnectors(app)
         except ImportError:
-            logging.error(
-                f"Skipping '{function_name}': azure-functions-connectors package not installed. "
-                "Install from: https://github.com/anthonychu/azure-functions-connectors-python"
+            logger.error(
+                "Skipping '%s': azure-functions-connectors package not installed. "
+                "Install from: https://github.com/anthonychu/azure-functions-connectors-python",
+                function_name,
             )
             return None
 
     # Resolve the decorator via getattr chain (e.g. "teams.new_channel_message_trigger")
-    # For top-level methods like "generic_trigger", it's a single getattr
     parts = trigger_type.split(".")
     obj = connectors_instance
     try:
@@ -325,16 +340,19 @@ def _register_connector_agent(
             obj = getattr(obj, part)
         decorator_fn = obj
     except AttributeError:
-        logging.warning(f"Skipping '{function_name}': could not resolve connector trigger '{trigger_type}'")
+        logger.warning("Skipping '%s': could not resolve connector trigger '%s'", function_name, trigger_type)
         return connectors_instance
 
-    handler = _make_agent_handler(function_name, agent_name, trigger_type, should_log, sandbox_tools=sandbox_tools, agent_instructions=prompt)
+    handler = _make_agent_handler(
+        function_name, agent_name, trigger_type, should_log,
+        sandbox_config=sandbox_config, agent_instructions=prompt,
+    )
 
     try:
         decorator_fn(**trigger_params)(handler)
-        logging.info(f"Registered '{function_name}' ({trigger_type}) — {agent_name}")
+        logger.info("Registered '%s' (%s) \u2014 %s", function_name, trigger_type, agent_name)
     except Exception as exc:
-        logging.error(f"Failed to register '{function_name}' ({trigger_type}): {exc}")
+        logger.error("Failed to register '%s' (%s): %s", function_name, trigger_type, exc)
 
     return connectors_instance
 
@@ -359,17 +377,27 @@ def _serialize_trigger_data(trigger_data) -> str:
     return str(payload)
 
 
+def _build_sandbox_tools_for_session(
+    sandbox_config: Optional[Dict[str, Any]], session_id: Optional[str]
+) -> Optional[list]:
+    """Build per-request sandbox tools using the resolved session id."""
+    if not isinstance(sandbox_config, dict):
+        return None
+    fallback = session_id or "default"
+    return create_sandbox_tools(sandbox_config, fallback_session_id=fallback)
+
+
 def _make_agent_handler(
     function_name: str,
     agent_name: str,
     trigger_type: str,
     should_log: bool,
-    sandbox_tools: Optional[list] = None,
+    sandbox_config: Optional[Dict[str, Any]] = None,
     agent_instructions: Optional[str] = None,
 ):
     """Create an async handler function for a triggered agent."""
     async def _handler(trigger_data):
-        logging.info(f"Agent '{function_name}' triggered")
+        logger.info("Agent '%s' triggered", function_name)
 
         try:
             data_json = _serialize_trigger_data(trigger_data)
@@ -379,17 +407,23 @@ def _make_agent_handler(
             parts.append(f"Triggered by: {trigger_type}\n\nTrigger data:\n```json\n{data_json}\n```")
             prompt = "\n\n".join(parts)
 
-            result = await run_copilot_agent(prompt, sandbox_tools=sandbox_tools)
+            # Triggered agents are always one-shot — no incoming session id
+            sandbox_tools = _build_sandbox_tools_for_session(sandbox_config, None)
+
+            result = await run_agent(
+                prompt,
+                instructions=agent_instructions,
+                sandbox_tools=sandbox_tools,
+            )
 
             if should_log:
-                logging.info(
+                logger.info(
                     "Agent '%s' response: %s",
                     function_name,
                     json.dumps(
                         {
                             "session_id": result.session_id,
                             "response": result.content,
-                            "response_intermediate": result.content_intermediate,
                             "tool_calls": result.tool_calls,
                         },
                         ensure_ascii=False,
@@ -397,7 +431,7 @@ def _make_agent_handler(
                     ),
                 )
         except Exception as exc:
-            logging.exception(f"Agent '{function_name}' failed: {exc}")
+            logger.exception("Agent '%s' failed: %s", function_name, exc)
 
     _handler.__name__ = f"handler_{function_name}"
     return _handler
@@ -406,7 +440,6 @@ def _make_agent_handler(
 def _extract_json_from_response(text: str) -> str:
     """Extract JSON from an agent response, stripping markdown code fences if present."""
     stripped = text.strip()
-    # Try to extract from ```json ... ``` or ``` ... ```
     fence_match = re.search(r"```(?:json)?\s*\n(.*?)```", stripped, re.DOTALL)
     if fence_match:
         return fence_match.group(1).strip()
@@ -417,14 +450,14 @@ def _make_http_agent_handler(
     function_name: str,
     agent_name: str,
     should_log: bool,
-    sandbox_tools: Optional[list] = None,
+    sandbox_config: Optional[Dict[str, Any]] = None,
     agent_instructions: Optional[str] = None,
     response_example: Optional[str] = None,
     response_schema: Optional[dict] = None,
 ):
     """Create an async handler for an HTTP-triggered agent that returns structured JSON."""
     async def _handler(req: Request) -> Response:
-        logging.info(f"HTTP agent '{function_name}' triggered")
+        logger.info("HTTP agent '%s' triggered", function_name)
 
         try:
             # Parse request body
@@ -456,10 +489,16 @@ def _make_http_agent_handler(
             parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
             prompt = "\n\n".join(parts)
 
-            result = await run_copilot_agent(prompt, sandbox_tools=sandbox_tools)
+            sandbox_tools = _build_sandbox_tools_for_session(sandbox_config, None)
+
+            result = await run_agent(
+                prompt,
+                instructions=agent_instructions,
+                sandbox_tools=sandbox_tools,
+            )
 
             if should_log:
-                logging.info(
+                logger.info(
                     "HTTP agent '%s' response: %s",
                     function_name,
                     json.dumps(
@@ -479,14 +518,13 @@ def _make_http_agent_handler(
                         media_type="application/json",
                     )
                 except json.JSONDecodeError as je:
-                    logging.warning(f"HTTP agent '{function_name}' returned invalid JSON: {je}")
+                    logger.warning("HTTP agent '%s' returned invalid JSON: %s", function_name, je)
                     return Response(
                         content=json.dumps({"error": "Agent returned invalid JSON", "raw_response": result.content}),
                         status_code=500,
                         media_type="application/json",
                     )
             else:
-                # No schema — return raw text
                 return Response(
                     content=result.content,
                     status_code=200,
@@ -494,7 +532,7 @@ def _make_http_agent_handler(
                 )
 
         except Exception as exc:
-            logging.exception(f"HTTP agent '{function_name}' failed: {exc}")
+            logger.exception("HTTP agent '%s' failed: %s", function_name, exc)
             return Response(
                 content=json.dumps({"error": str(exc)}),
                 status_code=500,
@@ -516,8 +554,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     ----------
     app_root:
         Root directory of the agent project (contains ``main.agent.md``,
-        ``tools/``, ``skills/``, etc.).  When *None*, falls back to
-        ``COPILOT_APP_ROOT`` env var or the current working directory.
+        ``tools/``, ``skills/``, etc.). When *None*, falls back to the
+        ``AZURE_FUNCTIONS_AGENTS_APP_ROOT`` env var, then to
+        ``AzureWebJobsScriptRoot``, then to the current working directory.
     """
     if app_root is not None:
         set_app_root(app_root)
@@ -533,13 +572,15 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     _register_triggered_agents(app, resolved_root)
 
     # ---- Configure main agent (if present) ----
-    metadata: Dict[str, Any] = {}
-    main_sandbox_tools: list = []
+    main_sandbox_config: Optional[Dict[str, Any]] = None
+    main_instructions: Optional[str] = None
     mcp_tool_name = "agent_chat"
     mcp_tool_description = "Run an agent chat turn with a prompt."
 
     if main_agent:
         metadata = main_agent["metadata"]
+        _warn_if_legacy_runtime_field(metadata, "main.agent.md")
+        main_instructions = main_agent.get("content") or None
 
         mcp_tool_name = _safe_mcp_tool_name(
             str(metadata.get("name") or "agent_chat")
@@ -553,12 +594,12 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         if isinstance(tools_from_connections, list):
             configure_connector_tools(tools_from_connections)
 
-        # ---- Configure execution sandbox from main agent frontmatter ----
+        # ---- Capture sandbox config (per-request tool construction) ----
         execution_sandbox = metadata.get("execution_sandbox")
         if isinstance(execution_sandbox, dict):
-            main_sandbox_tools = create_sandbox_tools(execution_sandbox)
+            main_sandbox_config = execution_sandbox
     else:
-        logging.info("No main.agent.md found — HTTP chat, MCP, and UI endpoints will return 404.")
+        logger.info("No main.agent.md found — HTTP chat, MCP, and UI endpoints will return 404.")
 
     # ---- HTTP routes (always registered) ----
 
@@ -611,14 +652,20 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 )
 
             session_id = req.headers.get("x-ms-session-id")
-            result = await run_copilot_agent(prompt, session_id=session_id, sandbox_tools=main_sandbox_tools)
+            sandbox_tools = _build_sandbox_tools_for_session(main_sandbox_config, session_id)
+
+            result = await run_agent(
+                prompt,
+                instructions=main_instructions,
+                session_id=session_id,
+                sandbox_tools=sandbox_tools,
+            )
 
             response = Response(
                 json.dumps(
                     {
                         "session_id": result.session_id,
                         "response": result.content,
-                        "response_intermediate": result.content_intermediate,
                         "tool_calls": result.tool_calls,
                     }
                 ),
@@ -629,7 +676,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         except Exception as e:
             error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
-            logging.error(f"Chat error: {error_msg}")
+            logger.error("Chat error: %s", error_msg)
             return Response(
                 json.dumps({"error": error_msg}), status_code=500, media_type="application/json"
             )
@@ -639,7 +686,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         """
         Streaming chat endpoint - send a prompt, receive SSE events.
 
-        POST /agent/chat/stream
+        POST /agent/chatstream
         Headers:
             x-ms-session-id (optional): Session ID for resuming a previous session
         Body:
@@ -651,7 +698,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             data: {"type": "session", "session_id": "..."}
             data: {"type": "delta", "content": "partial text"}
             data: {"type": "tool_start", "tool_name": "...", "tool_call_id": "..."}
-            data: {"type": "message", "content": "full message"}
+            data: {"type": "tool_end", ...}
             data: {"type": "done"}
         """
         try:
@@ -669,14 +716,21 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 return StreamingResponse(error_gen(), media_type="text/event-stream")
 
             session_id = req.headers.get("x-ms-session-id")
+            sandbox_tools = _build_sandbox_tools_for_session(main_sandbox_config, session_id)
+
             return StreamingResponse(
-                run_copilot_agent_stream(prompt, session_id=session_id, sandbox_tools=main_sandbox_tools),
+                run_agent_stream(
+                    prompt,
+                    instructions=main_instructions,
+                    session_id=session_id,
+                    sandbox_tools=sandbox_tools,
+                ),
                 media_type="text/event-stream",
             )
 
         except Exception as e:
             error_msg = str(e) if str(e) else f"{type(e).__name__}: {repr(e)}"
-            logging.error(f"Chat stream error: {error_msg}")
+            logger.error("Chat stream error: %s", error_msg)
             async def error_gen():
                 yield f"data: {json.dumps({'type': 'error', 'content': error_msg})}\n\n"
             return StreamingResponse(error_gen(), media_type="text/event-stream")
@@ -701,20 +755,25 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                     return json.dumps({"error": "Missing 'prompt'"})
 
                 session_id = _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
+                sandbox_tools = _build_sandbox_tools_for_session(main_sandbox_config, session_id)
 
-                result = await run_copilot_agent(prompt.strip(), session_id=session_id, sandbox_tools=main_sandbox_tools)
+                result = await run_agent(
+                    prompt.strip(),
+                    instructions=main_instructions,
+                    session_id=session_id,
+                    sandbox_tools=sandbox_tools,
+                )
 
                 return json.dumps(
                     {
                         "session_id": result.session_id,
                         "response": result.content,
-                        "response_intermediate": result.content_intermediate,
                         "tool_calls": result.tool_calls,
                     }
                 )
             except Exception as exc:
                 error_msg = str(exc) if str(exc) else f"{type(exc).__name__}: {repr(exc)}"
-                logging.error(f"MCP tool error: {error_msg}")
+                logger.error("MCP tool error: %s", error_msg)
                 return json.dumps({"error": error_msg})
 
     return app

@@ -14,13 +14,12 @@ param environmentName string
 })
 param location string
 
-@description('GitHub Personal Access Token with Copilot Requests permission.')
-@secure()
+@description('Azure OpenAI endpoint (e.g. https://<name>.openai.azure.com/).')
 @minLength(1)
-param githubToken string
+param azureOpenAiEndpoint string
 
-@description('GitHub Copilot model to use (e.g. claude-sonnet-4.6, claude-opus-4.6).')
-param copilotModel string = 'claude-opus-4.6'
+@description('Azure OpenAI model deployment name (e.g. gpt-4o, gpt-4o-mini).')
+param azureOpenAiDeployment string = 'gpt-5.2'
 
 @description('Email address to send the daily Azure report to.')
 param toEmail string
@@ -28,7 +27,7 @@ param toEmail string
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
-var functionAppName = '${abbrs.webSitesFunctions}copilot-func-${resourceToken}'
+var functionAppName = '${abbrs.webSitesFunctions}agent-func-${resourceToken}'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
 var sessionShareName = 'code-assistant-session'
 var o365ConnectionName = 'office365-${resourceToken}'
@@ -50,7 +49,7 @@ module apiUserAssignedIdentity 'br/public:avm/res/managed-identity/user-assigned
   params: {
     location: location
     tags: tags
-    name: '${abbrs.managedIdentityUserAssignedIdentities}copilot-func-${resourceToken}'
+    name: '${abbrs.managedIdentityUserAssignedIdentities}agent-func-${resourceToken}'
   }
 }
 
@@ -99,8 +98,8 @@ module api './app/api.bicep' = {
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
-      GITHUB_TOKEN: githubToken
-      COPILOT_MODEL: copilotModel
+      AZURE_OPENAI_ENDPOINT: azureOpenAiEndpoint
+      AZURE_OPENAI_DEPLOYMENT: azureOpenAiDeployment
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       TO_EMAIL: toEmail
       SUBSCRIPTION_ID: subscription().subscriptionId

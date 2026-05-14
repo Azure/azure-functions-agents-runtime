@@ -3,7 +3,7 @@
 <head>
 	<meta charset="UTF-8" />
 	<meta name="viewport" content="width=device-width, initial-scale=1.0" />
-	<title>Copilot Chat</title>
+	<title>Agent Chat</title>
 	<style>
 		:root {
 			--bg: #f5f7fb;
@@ -12,7 +12,7 @@
 			--text: #111827;
 			--muted: #6b7280;
 			--you: #2563eb;
-			--copilot: #e8eefc;
+			--assistant: #e8eefc;
 			--danger: #b91c1c;
 		}
 
@@ -97,7 +97,7 @@
 		}
 
 		.bubble-wrap.you { justify-content: flex-end; }
-		.bubble-wrap.copilot { justify-content: flex-start; }
+		.bubble-wrap.assistant { justify-content: flex-start; }
 
 		.bubble {
 			max-width: min(75ch, 85%);
@@ -220,16 +220,16 @@
 			border-bottom-right-radius: 4px;
 		}
 
-		.bubble.copilot {
-			background: var(--copilot);
+		.bubble.assistant {
+			background: var(--assistant);
 			border-bottom-left-radius: 4px;
 		}
 
-		.bubble.copilot.has-details {
+		.bubble.assistant.has-details {
 			cursor: pointer;
 		}
 
-		.bubble.copilot.has-details:hover {
+		.bubble.assistant.has-details:hover {
 			background: #dce7ff;
 		}
 
@@ -450,7 +450,7 @@
 <body>
 	<main class="app">
 		<header class="topbar">
-			<div class="topbar-title">Copilot Chat</div>
+			<div class="topbar-title">Agent Chat</div>
 			<div class="topbar-actions">
 				<button id="newSessionBtn" type="button">New session</button>
 				<button id="settingsBtn" class="gear-btn" type="button" aria-label="Settings">⚙️</button>
@@ -489,7 +489,7 @@
 	<div id="detailsBackdrop" class="details-backdrop" role="dialog" aria-modal="true" aria-labelledby="detailsTitle">
 		<section class="details-modal">
 			<header class="details-header">
-				<h2 id="detailsTitle" class="details-title">Copilot details</h2>
+				<h2 id="detailsTitle" class="details-title">Agent details</h2>
 				<button id="closeDetailsBtn" type="button">Close</button>
 			</header>
 			<div id="detailsContent" class="details-content"></div>
@@ -844,7 +844,7 @@
 		}
 
 		function renderBubbleContent(role, text) {
-			return role === "copilot" ? renderMarkdownBasic(text) : escapeHtml(text);
+			return role === "assistant" ? renderMarkdownBasic(text) : escapeHtml(text);
 		}
 
 		function setBubbleText(bubble, role, text) {
@@ -932,7 +932,7 @@
 			bubble.appendChild(intermediatesEl);
 
 			setBubbleMeta(bubble, meta);
-			if (role === "copilot") {
+			if (role === "assistant") {
 				attachBubbleDetails(bubble, details);
 			}
 
@@ -944,11 +944,11 @@
 
 		function renderWaitingBubble() {
 			const wrap = document.createElement("div");
-			wrap.className = "bubble-wrap copilot";
+			wrap.className = "bubble-wrap assistant";
 			wrap.id = "waitingBubble";
 
 			const bubble = document.createElement("div");
-			bubble.className = "bubble copilot";
+			bubble.className = "bubble assistant";
 			bubble.innerHTML = `
 				<span class="typing" aria-label="Waiting for response">
 					<span class="typing-dot"></span>
@@ -977,10 +977,10 @@
 					renderWaitingBubble();
 				}
 				state.loadingSeconds = 0;
-				setStatus("Waiting for Copilot...");
+				setStatus("Waiting for agent...");
 				state.loadingTimer = window.setInterval(() => {
 					state.loadingSeconds += 1;
-					setStatus(`Waiting for Copilot... ${state.loadingSeconds}s`);
+					setStatus(`Waiting for agent... ${state.loadingSeconds}s`);
 				}, 1000);
 			} else {
 				clearWaitingBubble();
@@ -1367,7 +1367,7 @@
 			renderBubble("you", prompt, "You");
 			promptInputEl.value = "";
 			setLoading(true, { showWaitingBubble: false });
-			const streamingBubble = renderBubble("copilot", "", "Copilot • streaming...");
+			const streamingBubble = renderBubble("assistant", "", "Assistant • streaming...");
 			const liveDetails = {
 				responseIntermediate: [],
 				toolCalls: []
@@ -1377,7 +1377,7 @@
 				let currentToolCount = 0;
 				let currentIntermediateCount = 0;
 				const updateStreamingMeta = () => {
-					const segments = ["Copilot", "streaming..."];
+					const segments = ["assistant", "streaming..."];
 					if (currentToolCount > 0) {
 						segments.push(`${currentToolCount} tool call${currentToolCount === 1 ? "" : "s"}`);
 					}
@@ -1389,7 +1389,7 @@
 
 				const result = await sendMessage(prompt, {
 					onDelta: (text) => {
-						setBubbleText(streamingBubble.bubble, "copilot", text);
+						setBubbleText(streamingBubble.bubble, "assistant", text);
 						scrollChatToBottom();
 					},
 					onToolCount: (count) => {
@@ -1410,12 +1410,12 @@
 						refreshOpenDetails(liveDetails);
 					}
 				});
-				const copilotMeta = hasDetails(result.details)
-					? "Copilot • click bubble for details"
-					: "Copilot";
-				setBubbleText(streamingBubble.bubble, "copilot", result.text);
+				const assistantMeta = hasDetails(result.details)
+					? "Agent • click bubble for details"
+					: "assistant";
+				setBubbleText(streamingBubble.bubble, "assistant", result.text);
 				setBubbleIntermediates(streamingBubble.bubble, []);
-				setBubbleMeta(streamingBubble.bubble, copilotMeta);
+				setBubbleMeta(streamingBubble.bubble, assistantMeta);
 				liveDetails.responseIntermediate = result.details.responseIntermediate;
 				liveDetails.toolCalls = result.details.toolCalls;
 				attachBubbleDetails(streamingBubble.bubble, liveDetails);
@@ -1426,9 +1426,9 @@
 					setStatus("Connected");
 				}
 			} catch (error) {
-				setBubbleText(streamingBubble.bubble, "copilot", `Request failed. ${error.message}`);
+				setBubbleText(streamingBubble.bubble, "assistant", `Request failed. ${error.message}`);
 				setBubbleIntermediates(streamingBubble.bubble, []);
-				setBubbleMeta(streamingBubble.bubble, "Copilot");
+				setBubbleMeta(streamingBubble.bubble, "assistant");
 				attachBubbleDetails(streamingBubble.bubble, null);
 				setStatus(error.message, true);
 			} finally {
@@ -1496,7 +1496,7 @@
 			setStatus("Enter your base URL and key to begin.");
 		} else {
 			setStatus("Ready.");
-			renderBubble("copilot", "Hi! Send a message to start chatting.", "Copilot");
+			renderBubble("assistant", "Hi! Send a message to start chatting.", "assistant");
 			promptInputEl.focus();
 		}
 	</script>

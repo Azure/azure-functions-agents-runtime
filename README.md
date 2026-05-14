@@ -2,30 +2,29 @@
 
 > **⚠️ This is an experimental package.** The APIs described here are under active development and subject to change.
 
-A markdown-first programming model for building AI agents on Azure Functions with the [GitHub Copilot SDK](https://github.com/github/copilot-sdk).
+A markdown-first programming model for building AI agents on Azure Functions, powered by the [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework).
 
-- **Build agents with markdown** — write instructions, configure triggers, and bind tools in  `.agent.md` files
+- **Build agents with markdown** — write instructions, configure triggers, and bind tools in `.agent.md` files
 - **Run on any Azure Functions trigger** — trigger agents on timer, queue, blob, HTTP, Event Hub, Service Bus, Cosmos DB, and more
 - **Connect to 1,400+ services** — Azure API Connections let agents trigger on and perform actions across Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors — no custom code required
-- **Extend with MCP servers** — plug in remote HTTP MCP servers for additional capabilities
-- **Build custom tools in plain Python** — when connectors and MCP aren't enough, drop a `.py` file in `tools/` and pull in any package you need
+- **Extend with MCP servers** — plug in remote HTTP MCP servers and stdio MCP servers for additional capabilities
+- **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
-- **Serverless with built-in session management** — scales to zero, persists multi-turn conversations across instances on Azure Files
+- **Serverless with built-in session management** — scales to zero, persists multi-turn conversations on Azure Files
+- **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Azure AI Foundry credentials and the runtime auto-detects the right client
 
 ## Installation
 
-### From a GitHub release (`.whl`)
-
-Install directly from the release URL:
+The package is published on PyPI as **`azurefunctions-agents-runtime`**.
 
 ```bash
-pip install https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl
+pip install azurefunctions-agents-runtime
 ```
 
-### From the GitHub repo
+Add it to your function app's `requirements.txt`:
 
-```bash
-pip install azure-functions-agents @ git+https://github.com/anthonychu/azure-functions-agents.git
+```
+azurefunctions-agents-runtime
 ```
 
 ### With connector tools support
@@ -33,23 +32,47 @@ pip install azure-functions-agents @ git+https://github.com/anthonychu/azure-fun
 Connector tools (Teams, Office 365, SQL, Salesforce, etc.) require an optional extra:
 
 ```bash
-# From release URL
-pip install "azure-functions-agents[connectors] @ https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl"
-
-# From repo
-pip install "azure-functions-agents[connectors] @ git+https://github.com/anthonychu/azure-functions-agents.git"
+pip install "azurefunctions-agents-runtime[connectors]"
 ```
 
-## GitHub Token
 
-The Copilot SDK requires a GitHub Personal Access Token (PAT) to authenticate with the GitHub Copilot API.
+## Model Provider Configuration
 
-1. Go to [github.com/settings/tokens](https://github.com/settings/tokens?type=beta) and click **Generate new token** (fine-grained)
-2. Give the token a name (e.g. `azure-functions-agents`)
-3. Under **Permissions**, select **Add permissions**, then select **Copilot requests**, and set it to **Read-only**
-4. Click **Generate token** and copy the value
+The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Azure AI Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
 
-Set it as the `GITHUB_TOKEN` environment variable (or pass it via `local.settings.json` / `azd env set` when deploying).
+1. `AZURE_OPENAI_ENDPOINT` → Azure OpenAI
+2. `FOUNDRY_PROJECT_ENDPOINT` → Azure AI Foundry
+3. `OPENAI_API_KEY` → OpenAI
+
+You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|foundry`.
+
+| Provider          | Required env vars                                                                            | Notes                                                                              |
+| ----------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| OpenAI            | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`)                               |                                                                                    |
+| Azure OpenAI      | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION`      | If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD).  |
+| Azure AI Foundry  | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | Always uses `DefaultAzureCredential`.                                              |
+
+`MAF_MODEL` overrides the per-provider default when set.
+
+### Plugging in a custom client manager
+
+Provider auto-detection lives behind a small interface. To integrate a new chat client, implement `ClientManager` and register your instance once at startup:
+
+```python
+from azure_functions_agents import ClientManager, set_client_manager
+
+class MyCustomClientManager(ClientManager):
+    def resolve_model(self, model_override=None):
+        return model_override or "my-model"
+    def build_chat_client(self, model_override=None):
+        return MyChatClient(model=self.resolve_model(model_override))
+    async def close(self):
+        ...
+
+set_client_manager(MyCustomClientManager())
+```
+
+Once set, every call to `run_agent` / `run_agent_stream` and every triggered agent uses your client.
 
 ## Quick Start
 
@@ -76,7 +99,7 @@ from azure_functions_agents import create_function_app
 app = create_function_app()
 ```
 
-> The app root is auto-detected from `AzureWebJobsScriptRoot` (set by `func start` and the Azure Functions host). You can override it with `create_function_app(app_root=Path(__file__).parent)` or the `COPILOT_APP_ROOT` env var.
+> The app root is auto-detected from `AzureWebJobsScriptRoot` (set by `func start` and the Azure Functions host). You can override it with `create_function_app(app_root=Path(__file__).parent)` or the `AZURE_FUNCTIONS_AGENTS_APP_ROOT` env var.
 
 ### 3. Create `host.json`
 
@@ -98,12 +121,28 @@ app = create_function_app()
 ### 4. Create `requirements.txt`
 
 ```
-https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl
+azurefunctions-agents-runtime
 ```
 
-Or use any other install method from the [Installation](#installation) section.
+Or use `azurefunctions-agents-runtime[connectors]` to enable the optional connector tools extra.
 
-### 5. Start Azurite (local storage emulator)
+### 5. Set the model provider
+
+For local development with OpenAI:
+
+```json
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "OPENAI_API_KEY": "sk-...",
+    "MAF_MODEL": "gpt-4o-mini"
+  }
+}
+```
+
+### 6. Start Azurite (local storage emulator)
 
 The MCP server endpoint and non-HTTP triggers (timer, queue, blob, etc.) require a storage account. Locally, use [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) via Docker:
 
@@ -113,19 +152,7 @@ docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 \
   azurite --skipApiVersionCheck --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
 ```
 
-Then set the storage connection string in `local.settings.json`:
-
-```json
-{
-  "IsEncrypted": false,
-  "Values": {
-    "FUNCTIONS_WORKER_RUNTIME": "python",
-    "AzureWebJobsStorage": "UseDevelopmentStorage=true"
-  }
-}
-```
-
-### 6. Run locally
+### 7. Run locally
 
 ```bash
 func start
@@ -142,7 +169,7 @@ Define an agent with a markdown file. When `main.agent.md` is present, the runti
 - **Chat UI** — built-in single-page web interface at the app root
 - **HTTP APIs** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
 - **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
-- **Session persistence** — multi-turn conversations stored on Azure Files
+- **Session persistence** — multi-turn conversations stored on Azure Files via MAF's `FileHistoryProvider`
 
 ### Event-driven agents (`<name>.agent.md`)
 
@@ -153,11 +180,11 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
-- **Skills** — reusable prompt modules from `SKILL.md` files
-- **Custom tools** — drop a `.py` file in `tools/` and it becomes a callable tool
+- **Skills** — reusable prompt modules from `*.md` files under `skills/`
+- **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
 - **Connector tools** — dynamically generated tools from Azure API Connections
-- **MCP servers** — connect to external MCP servers for additional tools
-- **Sandbox** — code execution via Azure Container Apps dynamic sessions with Playwright web browsing support
+- **MCP servers** — connect to external MCP servers (HTTP or stdio) for additional tools
+- **Sandbox** — Python code execution via Azure Container Apps dynamic sessions
 
 ## Agent File Format (`.agent.md`)
 
@@ -194,6 +221,8 @@ response_example: |        # optional — agent returns structured JSON matching
 
 Agent instructions in markdown...
 ```
+
+> **Note**: Earlier preview releases supported a `runtime: copilot|maf` frontmatter field. As of 1.0.0 only Microsoft Agent Framework is used and the field is ignored (with a one-time warning per agent file). Remove it from your `.agent.md` files.
 
 ### Multiple functions from markdown
 
@@ -290,6 +319,22 @@ substitute_variables: false
 Instructions with literal $VAR references that should not be replaced.
 ```
 
+## Custom Python tools
+
+Drop a `.py` file in `tools/` and decorate functions with `@tool`. The runtime auto-discovers them at import time and adds them to every agent.
+
+```python
+# tools/my_tools.py
+from azure_functions_agents import tool
+
+@tool
+def reverse_string(text: str) -> str:
+    """Reverse the input string."""
+    return text[::-1]
+```
+
+`@tool` is re-exported from `agent_framework`. Functions can be sync or async; types in the signature feed MAF's automatic JSON-Schema generation. Tools that need richer schemas can be declared with `agent_framework.FunctionTool` directly.
+
 ## What `main.agent.md` Enables
 
 When a `main.agent.md` file exists in your app root, the runtime automatically registers:
@@ -305,7 +350,7 @@ On first load, you'll be prompted for the base URL and a function key (for deplo
 Two POST endpoints for programmatic access:
 
 - **`POST /agent/chat`** — JSON request/response. Returns `session_id`, `response`, and `tool_calls`.
-- **`POST /agent/chatstream`** — streaming Server-Sent Events (SSE). Returns incremental text chunks, tool execution events, and a final message.
+- **`POST /agent/chatstream`** — streaming Server-Sent Events (SSE). Events include `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error`.
 
 Pass `x-ms-session-id` header to continue a conversation across requests. If omitted, a new session is created automatically.
 
@@ -319,7 +364,7 @@ If there's no `main.agent.md`, the HTTP chat, MCP, and UI endpoints are all disa
 
 ## MCP Server Configuration
 
-You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only **HTTP remote servers** are supported.
+You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Both **HTTP (Streamable)** remote servers and **stdio** servers are supported.
 
 ```json
 {
@@ -327,6 +372,11 @@ You can give your agent access to external MCP servers by creating an `mcp.json`
     "microsoft-learn": {
       "type": "http",
       "url": "https://learn.microsoft.com/api/mcp"
+    },
+    "filesystem": {
+      "type": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
     }
   }
 }
@@ -334,14 +384,49 @@ You can give your agent access to external MCP servers by creating an `mcp.json`
 
 Tools from configured MCP servers are automatically available to the agent at runtime. Each server entry supports:
 
-- **`type`** — `"http"` (required)
-- **`url`** — the MCP server endpoint URL
-- **`headers`** — optional HTTP headers (e.g. for authentication)
+- **`type`** — `"http"` (Streamable HTTP transport) or `"stdio"`
+- **`url`** — the MCP server endpoint URL (HTTP only)
+- **`command`** + **`args`** + **`env`** — process spec (stdio only)
+- **`headers`** — optional HTTP headers (e.g. for authentication; HTTP only)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
+
+> **Note**: SSE-transport MCP servers (`type: "sse"`) are no longer supported. Use the Streamable HTTP transport (`type: "http"`) instead.
+
+## Session storage
+
+Multi-turn conversations are persisted as JSONL files using MAF's `FileHistoryProvider`. Storage path resolution:
+
+- When `CONTAINER_NAME` is set (Functions container) → `/code-assistant-session/agent-sessions/{session_id}.jsonl`
+- Otherwise: `{AZURE_FUNCTIONS_AGENTS_CONFIG_DIR}/agent-sessions/{session_id}.jsonl`, defaulting to `~/.azure-functions-agents/agent-sessions/`
+
+Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
+
+> **Single-process scope**: A per-session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per session id". Multi-instance distributed locking is intentionally out of scope.
 
 ## Samples
 
-See the [`samples/`](samples/) directory for complete, deployable example apps.
+See the [`samples/`](samples/) directory for complete, deployable example apps:
+
+- [`basic-chat`](samples/basic-chat) — minimal chat agent with sandbox
+- [`daily-azure-report`](samples/daily-azure-report) — timer-triggered agent that emails a daily Azure status report
+- [`daily-tech-news-email`](samples/daily-tech-news-email) — timer-triggered agent that scrapes news and emails a digest
+
+## Deployment Notes
+
+### Required Azure App Settings
+
+Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, or `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`).
+
+When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup.
+
+### Optional config overrides
+
+| Setting | Purpose |
+|---|---|
+| `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
+| `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage (legacy alias `CODE_ASSISTANT_CONFIG_PATH` still accepted) |
+| `AGENT_TIMEOUT` | Per-call timeout in seconds (default `900`) |
+| `MAF_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 
 ## Development
 
@@ -356,7 +441,6 @@ pip install -e ".[connectors]"
 # Build a wheel
 pip install build
 python -m build --wheel
-# Output: dist/azure_functions_agents-0.7.1-py3-none-any.whl
 ```
 
 ## Contributing
