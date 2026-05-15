@@ -4,9 +4,9 @@ import os
 import sys
 from pathlib import Path
 
-from agent_framework import AIFunction
+from agent_framework import FunctionTool
 
-from .._function_tool import FunctionTool, tool
+from .._function_tool import tool
 from .._logger import logger
 
 
@@ -63,7 +63,7 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
             for name, obj in inspect.getmembers(module):
                 if name.startswith("_"):
                     continue
-                if isinstance(obj, AIFunction):
+                if isinstance(obj, FunctionTool):
                     picked = obj
                     print(f"[Tool Discovery] Loaded (FunctionTool): {obj.name}")
                     break

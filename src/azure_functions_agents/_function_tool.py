@@ -3,15 +3,10 @@ from __future__ import annotations
 import inspect
 from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import TYPE_CHECKING, Any, TypeVar, overload
+from typing import Any, TypeVar, overload
 
-from agent_framework import AIFunction
+from agent_framework import FunctionTool
 from pydantic import BaseModel
-
-if TYPE_CHECKING:
-    FunctionTool = AIFunction[Any, Any]
-else:
-    FunctionTool = AIFunction
 
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 

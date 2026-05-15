@@ -432,3 +432,6 @@ FodyWeavers.xsd
 build/
 dist/
 .venv*
+__azurite_*
+__blobstorage__/
+*/local.settings.json
