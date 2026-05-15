@@ -74,28 +74,33 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     for spec in agent_specs:
-        resolved = compose(
-            spec,
-            global_config,
-            discovered_mcp_names=mcp_names,
-            discovered_skill_names=skill_names,
-        )
-        validate_resolved_agent(
-            resolved,
-            all_global_mcp=global_config.mcp,
-            discovered_skills=skill_names,
-        )
-        capabilities = build_capabilities(
-            resolved,
-            discovered_user_tools=user_tools,
-            builtin_tools=list(BUILTIN_TOOLS),
-            discovered_mcp_tools=mcp_tools,
-            discovered_skills=skill_texts,
-        )
-        if resolved.trigger is not None and not resolved.is_main:
-            register_agent(app, resolved, capabilities)
-        if _debug_enabled(resolved.debug):
-            register_debug_endpoints(app, resolved, capabilities)
+        try:
+            resolved = compose(
+                spec,
+                global_config,
+                discovered_mcp_names=mcp_names,
+                discovered_skill_names=skill_names,
+            )
+            validate_resolved_agent(
+                resolved,
+                all_global_mcp=global_config.mcp,
+                discovered_skills=skill_names,
+            )
+            capabilities = build_capabilities(
+                resolved,
+                discovered_user_tools=user_tools,
+                builtin_tools=list(BUILTIN_TOOLS),
+                discovered_mcp_tools=mcp_tools,
+                discovered_skills=skill_texts,
+            )
+            if resolved.trigger is not None and not resolved.is_main:
+                register_agent(app, resolved, capabilities)
+            if _debug_enabled(resolved.debug):
+                register_debug_endpoints(app, resolved, capabilities)
+        except Exception as exc:
+            source = spec.source_file or spec.name
+            logger.warning("Skipping agent registration for %s: %s", source, exc)
+            continue
 
     if not agent_specs:
         logger.info("No agent files found.")

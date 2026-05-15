@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 import textwrap
 from pathlib import Path
@@ -142,7 +143,7 @@ def test_load_agent_specs_unknown_field_raises(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=r"unknown_field"):
-        load_agent_specs(tmp_path)
+        load_agent_specs(tmp_path, strict=True)
 
 
 def test_load_agent_specs_resolves_frontmatter_strings(
@@ -240,7 +241,7 @@ def test_load_agent_specs_missing_name_raises(tmp_path: Path) -> None:
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match=r"name"):
-        load_agent_specs(tmp_path)
+        load_agent_specs(tmp_path, strict=True)
 
 
 def test_load_global_config_empty_file_returns_empty(tmp_path: Path) -> None:
@@ -320,10 +321,70 @@ def test_load_agent_specs_malformed_frontmatter_yaml_raises(tmp_path: Path) -> N
         encoding="utf-8",
     )
     with pytest.raises(ValueError) as exc_info:
-        load_agent_specs(tmp_path)
+        load_agent_specs(tmp_path, strict=True)
     message = str(exc_info.value)
     assert str(source) in message
     assert "frontmatter" in message.lower() or "yaml" in message.lower()
+
+
+def test_load_agent_specs_skips_malformed_file_and_logs_warning(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    bad_source = tmp_path / "broken.agent.md"
+    bad_source.write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Broken
+            description: bad
+            trigger: [unclosed
+            ---
+            body
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        specs = load_agent_specs(tmp_path)
+
+    assert len(specs) == 1
+    assert specs[0].name == "Main"
+    assert any(str(bad_source) in record.getMessage() for record in caplog.records)
+    assert any("Skipping malformed agent file" in record.getMessage() for record in caplog.records)
+
+
+def test_load_agent_specs_strict_reraises_first_failure(tmp_path: Path) -> None:
+    source = tmp_path / "broken.agent.md"
+    source.write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Broken
+            description: bad
+            trigger: [unclosed
+            ---
+            body
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=re.escape(str(source))):
+        load_agent_specs(tmp_path, strict=True)
 
 
 def test_load_agent_specs_resolves_strings_passes_through_non_string_scalars(

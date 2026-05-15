@@ -9,6 +9,7 @@ import frontmatter
 import yaml  # type: ignore[import-untyped]  # PyYAML does not ship inline typing here.
 from pydantic import ValidationError
 
+from azure_functions_agents._logger import logger
 from azure_functions_agents.config.env import (
     _to_bool,
     resolve_env_var,
@@ -52,6 +53,34 @@ def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueEr
     )
 
 
+def _load_agent_spec(source_file: Path) -> AgentSpec:
+    try:
+        post = frontmatter.load(str(source_file))
+    except yaml.YAMLError as exc:
+        raise ValueError(f"{source_file}: invalid YAML frontmatter: {exc}") from exc
+
+    metadata = dict(post.metadata or {})
+    validate_agent_frontmatter(metadata, source_file)
+    substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
+
+    normalized = dict(metadata)
+    if substitute_variables:
+        normalized = _normalize_agent_metadata(normalized)
+        instructions = substitute_env_vars_in_text(post.content)
+    else:
+        instructions = post.content
+
+    normalized["substitute_variables"] = substitute_variables
+    normalized["instructions"] = instructions
+    normalized["source_file"] = str(source_file.resolve())
+    normalized["is_main"] = source_file.name == "main.agent.md"
+
+    try:
+        return AgentSpec.model_validate(normalized)
+    except ValidationError as exc:
+        raise _format_validation_error(source_file, exc) from exc
+
+
 def load_global_config(app_root: Path) -> GlobalConfig:
     """Read agents.config.yaml from app_root. Returns empty GlobalConfig() if missing."""
     source_file = Path(app_root).resolve() / "agents.config.yaml"
@@ -79,33 +108,18 @@ def load_global_config(app_root: Path) -> GlobalConfig:
         raise _format_validation_error(source_file, exc) from exc
 
 
-def load_agent_specs(app_root: Path) -> list[AgentSpec]:
+def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
     """Read every *.agent.md in app_root and return parsed AgentSpec values."""
     root = Path(app_root).resolve()
     specs: list[AgentSpec] = []
 
     for source_file in sorted(root.glob("*.agent.md")):
         try:
-            post = frontmatter.load(source_file)
-        except yaml.YAMLError as exc:
-            raise ValueError(f"{source_file}: invalid YAML frontmatter: {exc}") from exc
-
-        metadata = dict(post.metadata or {})
-        validate_agent_frontmatter(metadata, source_file)
-        substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
-        metadata["substitute_variables"] = substitute_variables
-        instructions = post.content
-        if substitute_variables:
-            instructions = substitute_env_vars_in_text(instructions)
-
-        normalized = metadata if not substitute_variables else _normalize_agent_metadata(metadata)
-        normalized["instructions"] = instructions
-        normalized["source_file"] = str(source_file.resolve())
-        normalized["is_main"] = source_file.name == "main.agent.md"
-
-        try:
-            specs.append(AgentSpec.model_validate(normalized))
-        except ValidationError as exc:
-            raise _format_validation_error(source_file, exc) from exc
+            specs.append(_load_agent_spec(source_file))
+        except Exception as exc:
+            if strict:
+                raise
+            logger.warning("Skipping malformed agent file %s: %s", source_file, exc)
+            continue
 
     return specs
