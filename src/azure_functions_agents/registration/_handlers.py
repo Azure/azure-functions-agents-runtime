@@ -273,6 +273,28 @@ def make_http_agent_handler(
                         status_code=500,
                         media_type="application/json",
                     )
+                if resolved.response_schema:
+                    try:
+                        jsonschema.validate(
+                            instance=parsed,
+                            schema=resolved.response_schema,
+                        )
+                    except jsonschema.ValidationError as exc:
+                        logger.warning(
+                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
+                            resolved.name,
+                            exc,
+                        )
+                        return Response(
+                            content=json.dumps(
+                                {
+                                    "error": "Agent response validation failed",
+                                    "details": exc.message,
+                                }
+                            ),
+                            status_code=500,
+                            media_type="application/json",
+                        )
                 return Response(
                     content=json.dumps(parsed, ensure_ascii=False),
                     status_code=200,
