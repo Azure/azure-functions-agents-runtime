@@ -127,6 +127,10 @@ def compose(
 
     tool_filter, tools_disabled = apply_tools_filter(spec.tools, global_config.tools)
 
+    metadata = dict(spec.metadata or {})
+    if spec.logger is not None:
+        metadata["logger"] = spec.logger
+
     resolved = ResolvedAgent(
         name=spec.name,
         description=spec.description,
@@ -152,7 +156,8 @@ def compose(
         input_schema=spec.input_schema,
         response_schema=spec.response_schema,
         response_example=spec.response_example,
-        metadata=spec.metadata or {},
+        substitute_variables=spec.substitute_variables,
+        metadata=metadata,
         source_file=spec.source_file,
     )
 

@@ -12,6 +12,13 @@ from .._logger import logger
 
 MCPTool = MCPStdioTool | MCPStreamableHTTPTool
 
+_DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
+
+
+def clear_mcp_cache() -> None:
+    """Clear cached MCP server discovery results."""
+    _DISCOVERED_MCP_SERVERS_CACHE.clear()
+
 
 def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
     """Translate a single mcp.json entry to a MAF MCP tool object."""
@@ -71,9 +78,14 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
 
 
 def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
+    resolved_root = Path(app_root).resolve()
+    cached_servers = _DISCOVERED_MCP_SERVERS_CACHE.get(resolved_root)
+    if cached_servers is not None:
+        return dict(cached_servers)
+
     candidates = [
-        app_root / ".vscode" / "mcp.json",
-        app_root / "mcp.json",
+        resolved_root / ".vscode" / "mcp.json",
+        resolved_root / "mcp.json",
     ]
 
     for path in candidates:
@@ -89,6 +101,7 @@ def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
         servers = data.get("servers", {})
         if not isinstance(servers, dict):
             logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
+            _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
             return {}
 
         tools: dict[str, MCPTool] = {}
@@ -104,6 +117,8 @@ def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
             logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
         else:
             logger.info("No valid MCP servers found in %s", path)
-        return tools
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
+        return dict(tools)
 
+    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
     return {}

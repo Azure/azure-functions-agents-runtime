@@ -116,6 +116,8 @@ class AgentSpec(BaseModel):
     debug: bool | DebugConfig | None = None
     model: str | None = None
     timeout: float | None = None
+    logger: bool | None = None
+    substitute_variables: bool = True
     system_tools: SystemToolsAgentOverride | None = None
     mcp: bool | McpFilter | None = None
     skills: bool | SkillsFilter | None = None
@@ -156,6 +158,7 @@ class ResolvedAgent(BaseModel):
     input_schema: dict[str, Any] | None
     response_schema: dict[str, Any] | None
     response_example: str | None
+    substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
 

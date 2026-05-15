@@ -53,6 +53,11 @@ def test_agent_spec_tools_variants(value: bool | None | ToolsFilter) -> None:
     assert spec.tools == value
 
 
+def test_agent_spec_accepts_logger_field() -> None:
+    spec = AgentSpec.model_validate({"name": "X", "description": "Y", "logger": True})
+    assert spec.logger is True
+
+
 def test_trigger_spec_validates() -> None:
     trigger = TriggerSpec(type="timer_trigger", args={"schedule": "0 0 * * * *"})
     assert trigger.type == "timer_trigger"

@@ -231,22 +231,27 @@ trigger:
 **Structure:**
 ```yaml
 debug:
-  chat: boolean   # Enable chat UI endpoint (GET /)
-  http: boolean   # Enable REST API endpoints (POST /agent/chat, POST /agent/chatstream)
+  chat: boolean   # Enable chat UI plus chat/chatstream APIs
+  http: boolean   # Enable REST API endpoints even without the chat UI
   mcp: boolean    # Enable MCP tool registration for agent-to-agent calls
 ```
 
 **Endpoint Details:**
 
 **`chat: true`** — Interactive Chat UI
-- **Endpoint:** `GET /`
+- **Endpoints:**
+  - `GET /`
+  - `POST /agent/chat`
+  - `POST /agent/chatstream`
 - **Purpose:** Browser-based chat interface for manual testing and interaction
+- **Behavior:** Also registers the backing REST endpoints the built-in page calls, so `debug.chat: true` is self-sufficient
 - **Use case:** Test any agent (timer, queue, HTTP) via a web UI during development
 
 **`http: true`** — REST API Endpoints
 - **Endpoints:**
   - `POST /agent/chat` — Non-streaming chat endpoint (returns full response)
   - `POST /agent/chatstream` — Streaming chat endpoint (Server-Sent Events)
+- **Behavior:** Useful when you want programmatic access without exposing the chat page
 - **Request body:** `{"prompt": "your question or instruction"}`
 - **Response:** JSON with `session_id`, `response`, `tool_calls`, etc.
 - **Use case:** Programmatic access to the agent, integration testing, API clients

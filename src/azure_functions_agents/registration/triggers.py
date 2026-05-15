@@ -17,7 +17,10 @@ from ._handlers import (
     make_http_agent_handler,
     normalize_timer_schedule,
 )
+from ._naming import _safe_function_name
 from .capabilities import AgentCapabilities
+
+__all__ = ["_function_name_from_source", "_safe_function_name", "register_agent"]
 
 _CONNECTORS_INSTANCES: dict[int, object] = {}
 _function_name_from_source = _naming._function_name_from_source
@@ -25,6 +28,7 @@ _function_name_from_source = _naming._function_name_from_source
 
 def _dump_connector_specs(resolved: ResolvedAgent) -> list[dict[str, Any]]:
     return [spec.model_dump() for spec in resolved.connector_specs]
+
 
 def _resolve_trigger_params(trigger_params: dict[str, Any]) -> dict[str, Any]:
     """Resolve env vars on all string values in trigger params."""
@@ -211,7 +215,9 @@ def register_agent(
         return
 
     trigger_type = resolved.trigger.type.strip()
-    trigger_params = _resolve_trigger_params(dict(resolved.trigger.args or {}))
+    trigger_params = dict(resolved.trigger.args or {})
+    if resolved.substitute_variables:
+        trigger_params = _resolve_trigger_params(trigger_params)
     function_name = _function_name_from_source(resolved.source_file, resolved.name)
 
     _configure_connector_tools_if_needed(resolved, capabilities)

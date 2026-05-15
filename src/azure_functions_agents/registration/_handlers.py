@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import uuid
 from collections.abc import Callable
 from importlib import import_module
 from typing import Any, cast
@@ -64,6 +65,8 @@ def build_sandbox_tools_for_session(
     resolved: ResolvedAgent, session_id: str | None
 ) -> list[Any] | None:
     """Build per-request sandbox tools using the resolved session id."""
+    if resolved.tools_disabled:
+        return None
     if resolved.sandbox_config is None:
         return None
     fallback = session_id or "default"
@@ -139,6 +142,27 @@ async def _run_agent(*args: Any, **kwargs: Any) -> Any:
     return await runner_module.run_agent(*args, **kwargs)
 
 
+def _request_header_value(req: Request, header_name: str) -> str | None:
+    headers = getattr(req, "headers", None)
+    if headers is None:
+        return None
+
+    value = headers.get(header_name) if hasattr(headers, "get") else None
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+
+    if hasattr(headers, "items"):
+        for key, item in headers.items():
+            if key.lower() == header_name.lower() and isinstance(item, str) and item.strip():
+                return item.strip()
+
+    return None
+
+
+def _new_session_id() -> str:
+    return uuid.uuid4().hex
+
+
 def make_agent_handler(
     resolved: ResolvedAgent,
     trigger_type: str,
@@ -155,6 +179,7 @@ def make_agent_handler(
         logger.info("Agent '%s' triggered", resolved.name)
 
         try:
+            session_id = _new_session_id()
             data_json = serialize_trigger_data(trigger_data)
             parts: list[str] = []
             if resolved.instructions:
@@ -169,7 +194,8 @@ def make_agent_handler(
                 instructions=resolved.instructions,
                 timeout=resolved.timeout,
                 model=resolved.model,
-                sandbox_tools=build_sandbox_tools_for_session(resolved, None),
+                session_id=session_id,
+                sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
                 skills_text=capabilities.skills_text,
@@ -207,6 +233,7 @@ def make_http_agent_handler(
         logger.info("HTTP agent '%s' triggered", resolved.name)
 
         try:
+            session_id = _request_header_value(req, "x-ms-session-id") or _new_session_id()
             try:
                 body = await req.json()
                 body_json = json.dumps(body, ensure_ascii=False, default=str)
@@ -223,6 +250,7 @@ def make_http_agent_handler(
                         resolved.name,
                         validation_error.body.decode("utf-8"),
                     )
+                validation_error.headers["x-ms-session-id"] = session_id
                 return validation_error
 
             parts: list[str] = []
@@ -237,7 +265,8 @@ def make_http_agent_handler(
                 instructions=resolved.instructions,
                 timeout=resolved.timeout,
                 model=resolved.model,
-                sandbox_tools=build_sandbox_tools_for_session(resolved, None),
+                session_id=session_id,
+                sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
                 skills_text=capabilities.skills_text,
@@ -277,6 +306,7 @@ def make_http_agent_handler(
                         ),
                         status_code=500,
                         media_type="application/json",
+                        headers={"x-ms-session-id": session_id},
                     )
                 if resolved.response_schema:
                     try:
@@ -299,17 +329,20 @@ def make_http_agent_handler(
                             ),
                             status_code=500,
                             media_type="application/json",
+                            headers={"x-ms-session-id": session_id},
                         )
                 return Response(
                     content=json.dumps(parsed, ensure_ascii=False),
                     status_code=200,
                     media_type="application/json",
+                    headers={"x-ms-session-id": session_id},
                 )
 
             return Response(
                 content=result.content,
                 status_code=200,
                 media_type="text/plain",
+                headers={"x-ms-session-id": session_id},
             )
         except Exception as exc:
             logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
@@ -317,6 +350,7 @@ def make_http_agent_handler(
                 content=json.dumps({"error": str(exc)}),
                 status_code=500,
                 media_type="application/json",
+                headers={"x-ms-session-id": session_id},
             )
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"

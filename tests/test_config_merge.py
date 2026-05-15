@@ -161,6 +161,28 @@ def test_compose_end_to_end() -> None:
     assert resolved.metadata == {"team": "x"}
 
 
+def test_compose_copies_logger_into_metadata() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", logger=False, is_main=True),
+        GlobalConfig(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.metadata["logger"] is False
+
+
+def test_compose_preserves_substitute_variables_flag() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", substitute_variables=False, is_main=True),
+        GlobalConfig(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.substitute_variables is False
+
+
 def test_resolve_debug_explicit_false() -> None:
     """Defensive: explicit debug: false returns an all-disabled DebugConfig (overrides the
     is_main default-true behavior)."""

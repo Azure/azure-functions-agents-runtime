@@ -4,6 +4,7 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+import azure.functions as func
 import pytest
 
 from azure_functions_agents.config.loader import load_agent_specs
@@ -38,6 +39,13 @@ class FakeFunctionApp:
     def timer_trigger(self, **kwargs: Any) -> Any:
         def decorator(handler: Any) -> Any:
             self.trigger_calls.append(("timer_trigger", kwargs))
+            return handler
+
+        return decorator
+
+    def route(self, **kwargs: Any) -> Any:
+        def decorator(handler: Any) -> Any:
+            self.trigger_calls.append(("route", kwargs))
             return handler
 
         return decorator
@@ -187,3 +195,47 @@ def test_register_agent_missing_source_file_warns_and_falls_back(
 
     assert app.function_names == [_safe_function_name("Daily Report")]
     assert "missing source_file" in caplog.text
+
+
+def test_register_agent_keeps_literal_trigger_args_when_substitution_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "literal.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Literal Route
+            description: Test agent
+            substitute_variables: false
+            trigger:
+              type: http_trigger
+              args:
+                route: "${ROUTE_SEGMENT}"
+                methods: ["POST"]
+            ---
+            Keep ${ROUTE_SEGMENT} literal.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    [resolved] = _resolve_agents(tmp_path)
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    register_agent(app, resolved, AgentCapabilities())
+
+    assert resolved.substitute_variables is False
+    assert app.trigger_calls == [
+        (
+            "route",
+            {
+                "route": "${ROUTE_SEGMENT}",
+                "methods": ["POST"],
+                "auth_level": func.AuthLevel.FUNCTION,
+            },
+        )
+    ]

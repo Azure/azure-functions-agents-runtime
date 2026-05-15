@@ -8,6 +8,7 @@ keeps tests isolated without relying on global module state.
 from __future__ import annotations
 
 import json
+import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -110,6 +111,10 @@ def _index_path() -> Path:
     return Path(__file__).resolve().parent.parent / "public" / "index.html"
 
 
+def _resolve_debug_session_id(session_id: str | None) -> str:
+    return session_id or uuid.uuid4().hex
+
+
 async def _run_debug_agent(
     prompt: str,
     *,
@@ -117,13 +122,14 @@ async def _run_debug_agent(
     capabilities: AgentCapabilities,
     session_id: str | None,
 ) -> Any:
-    sandbox_tools = build_sandbox_tools_for_session(resolved, session_id)
+    resolved_session_id = _resolve_debug_session_id(session_id)
+    sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return await _run_agent(
         prompt,
         instructions=resolved.instructions,
         timeout=resolved.timeout,
         model=resolved.model,
-        session_id=session_id,
+        session_id=resolved_session_id,
         sandbox_tools=sandbox_tools,
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
@@ -139,13 +145,14 @@ def _run_debug_agent_stream(
     capabilities: AgentCapabilities,
     session_id: str | None,
 ) -> Any:
-    sandbox_tools = build_sandbox_tools_for_session(resolved, session_id)
+    resolved_session_id = _resolve_debug_session_id(session_id)
+    sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return _run_agent_stream(
         prompt,
         instructions=resolved.instructions,
         timeout=resolved.timeout,
         model=resolved.model,
-        session_id=session_id,
+        session_id=resolved_session_id,
         sandbox_tools=sandbox_tools,
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
@@ -392,7 +399,7 @@ def register_debug_endpoints(
         )
         logger.info("Registered debug chat page for '%s' at /%s", resolved.name, route)
 
-    if resolved.debug.http:
+    if resolved.debug.chat or resolved.debug.http:
         chat_route = "agent/chat" if resolved.is_main else f"agents/{slug}/chat"
         stream_route = "agent/chatstream" if resolved.is_main else f"agents/{slug}/chatstream"
         _register_http_chat(

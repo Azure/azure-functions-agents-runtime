@@ -93,6 +93,7 @@ def load_agent_specs(app_root: Path) -> list[AgentSpec]:
         metadata = dict(post.metadata or {})
         validate_agent_frontmatter(metadata, source_file)
         substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
+        metadata["substitute_variables"] = substitute_variables
         instructions = post.content
         if substitute_variables:
             instructions = substitute_env_vars_in_text(instructions)

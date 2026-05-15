@@ -303,16 +303,23 @@ async def run_agent(
         Maximum time to wait for the agent response, in seconds. Defaults to
         :data:`DEFAULT_TIMEOUT`.
     tools:
-        Optional pre-built tool list. ``None`` preserves legacy auto-discovery;
-        an explicit list is used as-is.
+        Optional user/built-in tool override. ``None`` auto-discovers user
+        tools and includes built-ins. When a list is provided (including
+        ``[]``), that exact list becomes the user-tool set. Connector tools,
+        sandbox tools, and MCP tools are controlled separately and may still be
+        added.
     mcp_tools:
-        Optional pre-filtered MCP tool list. ``None`` preserves legacy
-        auto-discovery; an explicit list is used as-is.
+        Optional MCP tool list. ``None`` auto-discovers tools from
+        ``mcp.json``; an explicit list is used as-is. Pass ``[]`` to disable
+        MCP tools entirely.
     skills_text:
         Optional pre-loaded skills text. ``None`` preserves legacy discovery;
         ``""`` disables skills injection.
     use_connector_tools:
         Whether to include connector tools discovered from the shared cache.
+        This is separate from ``tools``. ``run_agent()`` defaults to ``True``;
+        higher-level config-driven callers can treat ``None`` as "use the
+        configured default" before calling this function.
     model:
         Optional model/deployment override. When omitted the
         :class:`ClientManager` resolves the value from environment variables.
@@ -322,8 +329,14 @@ async def run_agent(
         and its id is returned in :class:`AgentResult`.
     sandbox_tools:
         Optional list of tools created via :func:`create_sandbox_tools` —
-        bound to a specific ACA session pool. Per-call because the ACA
-        session id is baked into each tool's closure.
+        bound to a specific ACA session pool. ``None`` adds no sandbox tools;
+        pass a list to enable them. Per-call because the ACA session id is
+        baked into each tool's closure.
+
+    Notes
+    -----
+    To fully disable all tools from a direct API call, pass
+    ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
@@ -407,6 +420,21 @@ async def run_agent_stream(
     sandbox_tools: list[Any] | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
+
+    Tool-selection semantics match :func:`run_agent`:
+
+    * ``tools`` controls only the user/built-in tool set. ``None``
+      auto-discovers user tools and includes built-ins; a provided list
+      (including ``[]``) is used exactly as that user-tool set.
+    * ``use_connector_tools`` separately controls connector tools. Callers that
+      want config-driven defaults can treat ``None`` as "use the configured
+      default" before calling this function.
+    * ``mcp_tools`` separately controls MCP tools. ``None`` auto-discovers
+      from ``mcp.json``; pass ``[]`` to disable MCP tools.
+    * ``sandbox_tools`` separately controls sandbox tools. ``None`` adds no
+      sandbox tools; pass a list to enable them.
+    * To fully disable all tools from a direct API call, pass
+      ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
 
     Event vocabulary (kept stable for the chat UI):
 

@@ -11,6 +11,15 @@ from pathlib import Path
 
 from .._logger import logger
 
+_DISCOVERED_SKILL_TEXTS_CACHE: dict[Path, dict[str, str]] = {}
+_DISCOVERED_SKILLS_CACHE: dict[Path, str] = {}
+
+
+def clear_skills_cache() -> None:
+    """Clear cached skill discovery results."""
+    _DISCOVERED_SKILL_TEXTS_CACHE.clear()
+    _DISCOVERED_SKILLS_CACHE.clear()
+
 
 def _resolve_skills_dir(app_root: Path) -> Path | None:
     """Find ``{app_root}/skills`` (or ``Skills``) if it exists."""
@@ -37,13 +46,20 @@ def discover_skill_names(app_root: Path) -> list[str]:
 
 def discover_skill_texts(app_root: Path) -> dict[str, str]:
     """Return per-skill markdown text keyed by relative path."""
-    skills_dir = _resolve_skills_dir(app_root)
+    resolved_root = Path(app_root).resolve()
+    cached_skills = _DISCOVERED_SKILL_TEXTS_CACHE.get(resolved_root)
+    if cached_skills is not None:
+        return dict(cached_skills)
+
+    skills_dir = _resolve_skills_dir(resolved_root)
     if skills_dir is None:
+        _DISCOVERED_SKILL_TEXTS_CACHE[resolved_root] = {}
         return {}
 
     files = _collect_skill_files(skills_dir)
     if not files:
         logger.info("No skill markdown files found in %s", skills_dir)
+        _DISCOVERED_SKILL_TEXTS_CACHE[resolved_root] = {}
         return {}
 
     skills: dict[str, str] = {}
@@ -53,13 +69,21 @@ def discover_skill_texts(app_root: Path) -> dict[str, str]:
         except Exception as exc:
             logger.warning("Failed to read skill file %s: %s", path, exc)
     logger.info("Loaded %d skill file(s) from %s", len(skills), skills_dir)
-    return skills
+    _DISCOVERED_SKILL_TEXTS_CACHE[resolved_root] = skills
+    return dict(skills)
 
 
 def discover_skills(app_root: Path) -> str:
     """Return the concatenated text of every skill markdown file, sorted by path."""
+    resolved_root = Path(app_root).resolve()
+    cached_skills = _DISCOVERED_SKILLS_CACHE.get(resolved_root)
+    if cached_skills is not None:
+        return cached_skills
+
     parts: list[str] = [
         f"## skill: {name}\n\n{text.rstrip()}"
-        for name, text in discover_skill_texts(app_root).items()
+        for name, text in discover_skill_texts(resolved_root).items()
     ]
-    return "\n\n".join(parts)
+    combined = "\n\n".join(parts)
+    _DISCOVERED_SKILLS_CACHE[resolved_root] = combined
+    return combined

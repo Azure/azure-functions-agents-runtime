@@ -194,6 +194,7 @@ def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
 
     [spec] = load_agent_specs(tmp_path)
     assert spec.model == "$AGENT_MODEL"
+    assert spec.substitute_variables is False
     assert spec.instructions.strip() == "Keep $FOO literal"
 
 

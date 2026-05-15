@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -8,7 +9,11 @@ import azure.functions as func
 
 from azure_functions_agents.config.schema import DebugConfig, ResolvedAgent, ToolsFilter
 from azure_functions_agents.registration.capabilities import AgentCapabilities
-from azure_functions_agents.registration.endpoints import register_debug_endpoints
+from azure_functions_agents.registration.endpoints import (
+    _run_debug_agent,
+    _run_debug_agent_stream,
+    register_debug_endpoints,
+)
 
 
 class FakeFunctionApp:
@@ -83,7 +88,7 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
 
     register_debug_endpoints(app, resolved, AgentCapabilities())
 
-    [chat_page_route] = app.routes
+    chat_page_route = app.routes[0]
     assert chat_page_route["route"] == "agents/secondary_agent/"
     assert chat_page_route["methods"] == ["GET"]
     assert chat_page_route["auth_level"] == func.AuthLevel.ANONYMOUS
@@ -128,5 +133,136 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
 
     assert [route["route"] for route in app.routes] == [
         "agents/daily_report_a/",
+        "agents/daily_report_a/chat",
+        "agents/daily_report_a/chatstream",
         "agents/daily_report_b/",
+        "agents/daily_report_b/chat",
+        "agents/daily_report_b/chatstream",
+    ]
+
+
+def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
+    monkeypatch: Any,
+) -> None:
+    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug=DebugConfig(chat=True))
+    calls: dict[str, Any] = {}
+
+    class FakeUuid:
+        hex = "generated-session-id"
+
+    def fake_build_sandbox_tools_for_session(
+        build_resolved: ResolvedAgent, session_id: str | None
+    ) -> list[str]:
+        calls["sandbox"] = (build_resolved, session_id)
+        return ["sandbox-tool"]
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        calls["run_agent"] = kwargs
+        return SimpleNamespace(session_id=kwargs["session_id"], content="ok", tool_calls=[])
+
+    monkeypatch.setattr("azure_functions_agents.registration.endpoints.uuid.uuid4", lambda: FakeUuid())
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.build_sandbox_tools_for_session",
+        fake_build_sandbox_tools_for_session,
+    )
+    monkeypatch.setattr("azure_functions_agents.registration.endpoints._run_agent", fake_run_agent)
+
+    result = asyncio.run(
+        _run_debug_agent(
+            "hello",
+            resolved=resolved,
+            capabilities=AgentCapabilities(),
+            session_id=None,
+        )
+    )
+
+    assert calls["sandbox"] == (resolved, "generated-session-id")
+    assert calls["run_agent"]["session_id"] == "generated-session-id"
+    assert calls["run_agent"]["sandbox_tools"] == ["sandbox-tool"]
+    assert result.session_id == "generated-session-id"
+
+
+def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_tools(
+    monkeypatch: Any,
+) -> None:
+    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug=DebugConfig(chat=True))
+    calls: dict[str, Any] = {}
+
+    class FakeUuid:
+        hex = "generated-stream-session-id"
+
+    def fake_build_sandbox_tools_for_session(
+        build_resolved: ResolvedAgent, session_id: str | None
+    ) -> list[str]:
+        calls["sandbox"] = (build_resolved, session_id)
+        return ["sandbox-tool"]
+
+    def fake_run_agent_stream(*args: Any, **kwargs: Any) -> str:
+        calls["run_agent_stream"] = kwargs
+        return "stream"
+
+    monkeypatch.setattr("azure_functions_agents.registration.endpoints.uuid.uuid4", lambda: FakeUuid())
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.build_sandbox_tools_for_session",
+        fake_build_sandbox_tools_for_session,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_agent_stream",
+        fake_run_agent_stream,
+    )
+
+    result = _run_debug_agent_stream(
+        "hello",
+        resolved=resolved,
+        capabilities=AgentCapabilities(),
+        session_id=None,
+    )
+
+    assert calls["sandbox"] == (resolved, "generated-stream-session-id")
+    assert calls["run_agent_stream"]["session_id"] == "generated-stream-session-id"
+    assert calls["run_agent_stream"]["sandbox_tools"] == ["sandbox-tool"]
+    assert result == "stream"
+
+
+def test_register_debug_endpoints_chat_also_registers_http_routes_for_non_main_agent(
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        debug=DebugConfig(chat=True),
+        source_file=source_file,
+    )
+
+    register_debug_endpoints(app, resolved, AgentCapabilities())
+
+    assert [route["route"] for route in app.routes] == [
+        "agents/secondary_agent/",
+        "agents/secondary_agent/chat",
+        "agents/secondary_agent/chatstream",
+    ]
+
+
+def test_register_debug_endpoints_chat_and_http_do_not_double_register_routes(
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        debug=DebugConfig(chat=True, http=True),
+        source_file=source_file,
+    )
+
+    register_debug_endpoints(app, resolved, AgentCapabilities())
+
+    assert [route["route"] for route in app.routes] == [
+        "agents/secondary_agent/",
+        "agents/secondary_agent/chat",
+        "agents/secondary_agent/chatstream",
     ]
