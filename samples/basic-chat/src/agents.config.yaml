@@ -6,5 +6,5 @@ system_tools:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 # Default runtime configuration
-model: claude-sonnet-4
+model: $FOUNDRY_MODEL
 timeout: 900

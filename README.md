@@ -171,6 +171,8 @@ Define an agent with a markdown file. When `main.agent.md` is present, the runti
 - **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
 - **Session persistence** — multi-turn conversations stored on Azure Files via MAF's `FileHistoryProvider`
 
+Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug.chat: true` (or `debug: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
+
 ### Event-driven agents (`<name>.agent.md`)
 
 Define event-triggered agents with `.agent.md` files. Each file corresponds to a single Azure Function. Supported trigger types:
@@ -227,7 +229,7 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`main.agent.md`** — creates HTTP chat, MCP, and UI endpoints. No other triggers are supported in this file.
-- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. The filename (minus `.agent.md`) becomes the function name after sanitization; the frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#file-naming-conventions`](docs/front-matter-spec.md#file-naming-conventions).
+- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. With `debug.chat: true` (or `debug: true`), it also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`. The filename (minus `.agent.md`) becomes both the function name and the non-main debug slug after sanitization; the frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#debug`](docs/front-matter-spec.md#debug).
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -339,16 +341,18 @@ When a `main.agent.md` file exists in your app root, the runtime automatically r
 
 ### Chat UI
 
-A built-in single-page chat interface served at the app root (`/`). No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed.
+A built-in single-page chat interface served at `/` for the main agent, and at `/agents/{slug}/` for any non-main agent with `debug.chat: true` (or `debug: true`). For non-main agents, `{slug}` comes from the `.agent.md` filename after sanitization, not from the display `name:` field. No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
 ### HTTP Chat API
 
-Two POST endpoints for programmatic access:
+POST endpoints for programmatic access:
 
-- **`POST /agent/chat`** — JSON request/response. Returns `session_id`, `response`, and `tool_calls`.
-- **`POST /agent/chatstream`** — streaming Server-Sent Events (SSE). Events include `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error`.
+- **Main agent:** `POST /agent/chat` and `POST /agent/chatstream`
+- **Non-main agent with `debug.chat: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream` (`{slug}` comes from the `.agent.md` filename after sanitization)
+
+The JSON endpoint returns `session_id`, `response`, and `tool_calls`. The streaming endpoint uses Server-Sent Events (SSE) with `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error` events.
 
 Pass `x-ms-session-id` header to continue a conversation across requests. If omitted, a new session is created automatically.
 
@@ -358,7 +362,7 @@ An MCP-compatible endpoint at `/runtime/webhooks/mcp` that any MCP client (VS Co
 
 ### Without `main.agent.md`
 
-If there's no `main.agent.md`, the HTTP chat, MCP, and UI endpoints are all disabled. The app only runs triggered functions.
+If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and `/runtime/webhooks/mcp` endpoint are disabled. The app still runs triggered functions, and non-main agents can still opt into per-agent chat surfaces with `debug.chat: true` (or `debug: true`). See [`docs/front-matter-spec.md#debug`](docs/front-matter-spec.md#debug).
 
 ## MCP Server Configuration
 

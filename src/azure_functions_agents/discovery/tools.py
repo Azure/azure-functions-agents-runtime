@@ -9,6 +9,13 @@ from agent_framework import FunctionTool
 from .._function_tool import tool
 from .._logger import logger
 
+_DISCOVERED_TOOLS_CACHE: dict[Path, list[FunctionTool]] = {}
+
+
+def clear_tool_discovery_cache() -> None:
+    """Clear the cached user-tool discovery results."""
+    _DISCOVERED_TOOLS_CACHE.clear()
+
 
 def discover_user_tools(app_root: Path) -> list[FunctionTool]:
     """
@@ -26,8 +33,13 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
     The first matching object per file is registered (preserving the previous
     behavior of the runtime).
     """
+    resolved_root = Path(app_root).resolve()
+    cached_tools = _DISCOVERED_TOOLS_CACHE.get(resolved_root)
+    if cached_tools is not None:
+        return list(cached_tools)
+
     tools: list[FunctionTool] = []
-    project_src_dir = str(app_root)
+    project_src_dir = str(resolved_root)
     tools_dir = os.path.join(project_src_dir, "tools")
 
     if tools_dir not in sys.path:
@@ -38,7 +50,8 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
 
     if not os.path.exists(tools_dir):
         print(f"[Tool Discovery] WARNING: Tools directory not found: {tools_dir}")
-        return tools
+        _DISCOVERED_TOOLS_CACHE[resolved_root] = tools
+        return list(tools)
 
     files = sorted(f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_"))
     print(f"[Tool Discovery] Python files found: {files}")
@@ -91,4 +104,5 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
             traceback.print_exc()
             logger.error("Failed to load tool from %s: %s", filename, exc)
 
-    return tools
+    _DISCOVERED_TOOLS_CACHE[resolved_root] = tools
+    return list(tools)

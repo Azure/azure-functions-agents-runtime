@@ -8,7 +8,6 @@ keeps tests isolated without relying on global module state.
 from __future__ import annotations
 
 import json
-import re
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,7 @@ from .._logger import logger
 from ..config import ResolvedAgent
 from ..system_tools.connectors.cache import configure_connector_tools
 from ._handlers import build_sandbox_tools_for_session, validate_request_body
+from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
@@ -59,25 +59,6 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
     runner_module = import_module("azure_functions_agents.runner")
     return runner_module.run_agent_stream(*args, **kwargs)
 
-
-def _safe_mcp_tool_name(raw_name: str) -> str:
-    normalized = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name).strip("_").lower()
-    if not normalized:
-        return "agent_chat"
-    if normalized[0].isdigit():
-        return f"agent_{normalized}"
-    return normalized
-
-
-def _safe_function_name(raw_name: str) -> str:
-    name = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name).strip("_")
-    if not name:
-        return "agent_function"
-    if name[0].isdigit():
-        return f"fn_{name}"
-    return name
-
-
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     value = payload.get("sessionId") or payload.get("sessionid")
     if isinstance(value, str) and value.strip():
@@ -104,15 +85,16 @@ def reset_debug_slug_registry(app: func.FunctionApp) -> None:
 
 
 def _ensure_unique_non_main_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
-    slug = _safe_mcp_tool_name(resolved.name)
+    slug = _function_name_from_source(resolved.source_file, resolved.name)
     registry = _debug_slug_registry(app)
-    existing_name = registry.get(slug)
-    if existing_name is not None:
+    existing_source = registry.get(slug)
+    if existing_source is not None:
         raise ValueError(
             "Debug slug collision for non-main agents: "
-            f"'{existing_name}' and '{resolved.name}' both map to '{slug}'"
+            f"'{existing_source}' and '{resolved.source_file or resolved.name}' both map to '{slug}'. "
+            "This likely means two .agent.md files share the same filename stem."
         )
-    registry[slug] = resolved.name
+    registry[slug] = str(resolved.source_file or resolved.name)
     return slug
 
 
@@ -392,7 +374,7 @@ def register_debug_endpoints(
 
     _configure_connector_tools_if_needed(resolved, capabilities)
 
-    slug = _safe_mcp_tool_name(resolved.name)
+    slug = _function_name_from_source(resolved.source_file, resolved.name)
     if not resolved.is_main and (resolved.debug.chat or resolved.debug.http or resolved.debug.mcp):
         slug = _ensure_unique_non_main_slug(app, resolved)
 

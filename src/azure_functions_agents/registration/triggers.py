@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Callable
-from pathlib import Path
 from typing import Any, cast
 
 import azure.functions as func
@@ -12,6 +10,7 @@ import azure.functions as func
 from .._logger import logger
 from ..config import ResolvedAgent, resolve_env_var
 from ..system_tools.connectors.cache import configure_connector_tools
+from . import _naming
 from ._handlers import (
     AUTH_LEVEL_MAP,
     make_agent_handler,
@@ -21,36 +20,11 @@ from ._handlers import (
 from .capabilities import AgentCapabilities
 
 _CONNECTORS_INSTANCES: dict[int, object] = {}
+_function_name_from_source = _naming._function_name_from_source
 
 
 def _dump_connector_specs(resolved: ResolvedAgent) -> list[dict[str, Any]]:
     return [spec.model_dump() for spec in resolved.connector_specs]
-
-
-def _safe_function_name(raw_name: str) -> str:
-    name = re.sub(r"[^a-zA-Z0-9_]", "_", raw_name).strip("_")
-    if not name:
-        return "agent_function"
-    if name[0].isdigit():
-        return f"fn_{name}"
-    return name
-
-
-def _function_name_from_source(source_file: str | Path | None, fallback_name: str) -> str:
-    source_value = str(source_file).strip() if source_file is not None else ""
-    if not source_value:
-        logger.warning(
-            "Resolved agent '%s' is missing source_file; falling back to sanitized display name for function registration.",
-            fallback_name,
-        )
-        return _safe_function_name(fallback_name)
-
-    source_name = Path(source_value).name
-    base_name = source_name.removesuffix(".agent.md")
-    if base_name == source_name:
-        base_name = Path(source_name).stem
-    return _safe_function_name(base_name)
-
 
 def _resolve_trigger_params(trigger_params: dict[str, Any]) -> dict[str, Any]:
     """Resolve env vars on all string values in trigger params."""

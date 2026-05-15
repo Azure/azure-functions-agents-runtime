@@ -135,7 +135,7 @@ Fields are organized into categories based on how they can be used:
 #### `name`
 - **Type:** `string`
 - **Typical location:** Agent only (required)
-- **Description:** Display name for the agent. This is used for chat UI labels, MCP/debug tool naming, and documentation, but it does **not** control the registered Azure Function name. See [File Naming Conventions](#file-naming-conventions).
+- **Description:** Display name for the agent. This is used for chat UI labels, descriptions, logs, and documentation, but it does **not** control any registered Azure Function name, route slug, or MCP/debug identifier. See [File Naming Conventions](#file-naming-conventions).
 - **Example:** `"Daily Azure Report"`
 
 #### `description`
@@ -939,7 +939,15 @@ Examples:
 - `daily_azure_report.agent.md` → `daily_azure_report`
 - `daily-report.agent.md` → `daily_report`
 
-The frontmatter `name:` field remains display-only. It is used for chat UI titles, registered MCP/debug tool names, descriptions, and logs, but it does **not** affect the registered Azure Function identifier.
+The frontmatter `name:` field remains display-only. It is used for chat UI titles, descriptions, and logs, but it does **not** affect any registered Azure Function identifier, debug route slug, or MCP tool identifier.
+
+The same filename-based sanitized value is also used as the non-main debug slug for:
+- `GET /agents/{slug}/`
+- `POST /agents/{slug}/chat`
+- `POST /agents/{slug}/chatstream`
+- The MCP tool name exposed when `debug.mcp: true`
+
+In other words, the display `name:` field is never used to derive routes or runtime identifiers; it is presentation-only. See also [`name`](#name).
 
 **Main agent behavior:**
 The `main.agent.md` file is special:

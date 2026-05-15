@@ -1,1 +1,1 @@
-azurefunctions-agents-runtime
+-e ../../..

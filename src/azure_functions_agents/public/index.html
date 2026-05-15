@@ -522,6 +522,15 @@
 
 		const defaultBaseUrl = `${location.protocol}//${location.host}`;
 
+		function getApiBasePath() {
+			const path = window.location.pathname.replace(/\/+$/, "");
+			const match = path.match(/^(\/agents\/[^/]+)$/);
+			if (match) {
+				return match[1];
+			}
+			return "/agent";
+		}
+
 		const state = {
 			baseUrl: "",
 			key: "",
@@ -1119,7 +1128,7 @@
 
 		async function sendMessage(prompt, callbacks = {}) {
 			const authQuery = state.key ? `?code=${encodeURIComponent(state.key)}` : "";
-			const endpoint = `${state.baseUrl}/agent/chatstream${authQuery}`;
+			const endpoint = `${state.baseUrl}${getApiBasePath()}/chatstream${authQuery}`;
 			const headers = {
 				"Content-Type": "application/json",
 				"Accept": "text/event-stream"
