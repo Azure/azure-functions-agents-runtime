@@ -27,6 +27,11 @@ def test_resolve_env_var_plain() -> None:
     assert resolve_env_var("plain") == "plain"
 
 
+def test_resolve_env_var_brace_syntax_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOO", "value")
+    assert resolve_env_var("${FOO}") == "${FOO}"
+
+
 def test_substitute_env_vars_in_text(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOO", "value")
     text = "hello $FOO and %FOO%"

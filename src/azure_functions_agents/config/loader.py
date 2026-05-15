@@ -33,18 +33,12 @@ def _resolve_strings(value: Any) -> Any:
 
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
-    system_tools = normalized.get("system_tools")
-    if isinstance(system_tools, dict):
-        normalized["system_tools"] = _resolve_strings(system_tools)
-    return normalized
+    return _resolve_strings(normalized)
 
 
 def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(metadata)
-    trigger = normalized.get("trigger")
-    if isinstance(trigger, dict):
-        normalized["trigger"] = _resolve_strings(trigger)
-    return normalized
+    return _resolve_strings(normalized)
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
@@ -98,13 +92,12 @@ def load_agent_specs(app_root: Path) -> list[AgentSpec]:
 
         metadata = dict(post.metadata or {})
         validate_agent_frontmatter(metadata, source_file)
-
         substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
         instructions = post.content
         if substitute_variables:
             instructions = substitute_env_vars_in_text(instructions)
 
-        normalized = _normalize_agent_metadata(metadata)
+        normalized = metadata if not substitute_variables else _normalize_agent_metadata(metadata)
         normalized["instructions"] = instructions
         normalized["source_file"] = str(source_file.resolve())
         normalized["is_main"] = source_file.name == "main.agent.md"

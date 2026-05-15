@@ -35,6 +35,33 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
     assert config.system_tools.tools_from_connections[0].connection_id == "conn-1"
 
 
+def test_load_global_config_resolves_all_string_values(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("MODEL_NAME", "gpt-4.1")
+    (tmp_path / "agents.config.yaml").write_text(
+        textwrap.dedent(
+            """
+            model: $MODEL_NAME
+            timeout: 600
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    config = load_global_config(tmp_path)
+    assert config.model == "gpt-4.1"
+    assert config.timeout == 600
+
+
+def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) -> None:
+    (tmp_path / "agents.config.yaml").write_text("model: $MODEL_NAME\n", encoding="utf-8")
+
+    config = load_global_config(tmp_path)
+    assert config.model == "$MODEL_NAME"
+
+
 def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path) == load_global_config(tmp_path)
     assert load_global_config(tmp_path).model_dump() == {
@@ -116,6 +143,86 @@ def test_load_agent_specs_unknown_field_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match=r"unknown_field"):
         load_agent_specs(tmp_path)
+
+
+def test_load_agent_specs_resolves_frontmatter_strings(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AGENT_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("RESPONSE_TEMPLATE", '{"status":"ok"}')
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            model: $AGENT_MODEL
+            response_example: $RESPONSE_TEMPLATE
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    [spec] = load_agent_specs(tmp_path)
+    assert spec.model == "gpt-4.1-mini"
+    assert spec.response_example == '{"status":"ok"}'
+
+
+def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("AGENT_MODEL", "gpt-4.1-mini")
+    monkeypatch.setenv("FOO", "VALUE")
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            model: $AGENT_MODEL
+            substitute_variables: false
+            ---
+            Keep $FOO literal
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    [spec] = load_agent_specs(tmp_path)
+    assert spec.model == "$AGENT_MODEL"
+    assert spec.instructions.strip() == "Keep $FOO literal"
+
+
+def test_load_agent_specs_resolves_trigger_type(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TRIG_TYPE", "http_trigger")
+    (tmp_path / "report.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report
+            description: Report agent
+            trigger:
+              type: $TRIG_TYPE
+              args:
+                route: report
+                methods: ["POST"]
+            ---
+            body
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    [spec] = load_agent_specs(tmp_path)
+    assert spec.trigger is not None
+    assert spec.trigger.type == "http_trigger"
 
 
 def test_load_agent_specs_missing_name_raises(tmp_path: Path) -> None:

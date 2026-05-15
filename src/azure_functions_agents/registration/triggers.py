@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
+from pathlib import Path
 from typing import Any, cast
 
 import azure.functions as func
@@ -33,6 +34,22 @@ def _safe_function_name(raw_name: str) -> str:
     if name[0].isdigit():
         return f"fn_{name}"
     return name
+
+
+def _function_name_from_source(source_file: str | Path | None, fallback_name: str) -> str:
+    source_value = str(source_file).strip() if source_file is not None else ""
+    if not source_value:
+        logger.warning(
+            "Resolved agent '%s' is missing source_file; falling back to sanitized display name for function registration.",
+            fallback_name,
+        )
+        return _safe_function_name(fallback_name)
+
+    source_name = Path(source_value).name
+    base_name = source_name.removesuffix(".agent.md")
+    if base_name == source_name:
+        base_name = Path(source_name).stem
+    return _safe_function_name(base_name)
 
 
 def _resolve_trigger_params(trigger_params: dict[str, Any]) -> dict[str, Any]:
@@ -221,7 +238,7 @@ def register_agent(
 
     trigger_type = resolved.trigger.type.strip()
     trigger_params = _resolve_trigger_params(dict(resolved.trigger.args or {}))
-    function_name = _safe_function_name(resolved.name)
+    function_name = _function_name_from_source(resolved.source_file, resolved.name)
 
     _configure_connector_tools_if_needed(resolved, capabilities)
 

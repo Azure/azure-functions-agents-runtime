@@ -16,7 +16,7 @@ trigger:
 
 The framework calls `getattr(app, trigger_type)(**params)` to register the function, so any parameter accepted by the Azure Functions Python SDK decorator can be used.
 
-> **Environment variable substitution**: All string values under `trigger.*` (except `type`) support `$VAR` or `%VAR%` syntax for full-string env var replacement.
+> **Environment variable substitution**: All string values under `trigger.*`, including `type`, follow the broader rules in [front-matter-spec.md#environment-variable-substitution](./front-matter-spec.md#environment-variable-substitution).
 
 ---
 

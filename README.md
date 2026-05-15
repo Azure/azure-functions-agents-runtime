@@ -209,7 +209,7 @@ trigger:
   schedule: "0 0 9 * * *"  # trigger-specific params passed as kwargs
 
 logger: true               # optional, default true
-substitute_variables: true # optional, default true — inline $VAR / %VAR% replacement in body
+substitute_variables: true # optional, default true — env-var replacement in frontmatter + body
 
 # For HTTP-triggered agents: expected response format
 response_example: |        # optional — agent returns structured JSON matching this example
@@ -227,7 +227,7 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`main.agent.md`** — creates HTTP chat, MCP, and UI endpoints. No other triggers are supported in this file.
-- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. The filename (minus `.agent.md`) becomes the function name.
+- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. The filename (minus `.agent.md`) becomes the function name after sanitization; the frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#file-naming-conventions`](docs/front-matter-spec.md#file-naming-conventions).
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -282,9 +282,7 @@ The agent receives the HTTP request body as input and is instructed to return JS
 
 ### Environment variable substitution
 
-#### Frontmatter values
-
-String values in `trigger.*` (except `type`), `system_tools.tools_from_connections[].connection_id`, and `system_tools.execute_in_sessions.session_pool_management_endpoint` support `$VAR` or `%VAR%` syntax (full-string match only).
+`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders in every string value in `agents.config.yaml`, every string value in agent frontmatter, and inline in the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
 
 #### Agent instructions (markdown body)
 
@@ -308,7 +306,7 @@ If a referenced variable is not set, the original `$VAR_NAME` or `%VAR_NAME%` te
 
 Text inside fenced code blocks (`` ``` ``) is **not** substituted, so documentation examples in your instructions are preserved.
 
-To disable substitution for an agent, set `substitute_variables: false` in the frontmatter:
+To disable both frontmatter and body substitution for an agent, set `substitute_variables: false` in the frontmatter:
 
 ```yaml
 ---

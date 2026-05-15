@@ -135,7 +135,7 @@ Fields are organized into categories based on how they can be used:
 #### `name`
 - **Type:** `string`
 - **Typical location:** Agent only (required)
-- **Description:** Display name for the agent
+- **Description:** Display name for the agent. This is used for chat UI labels, MCP/debug tool naming, and documentation, but it does **not** control the registered Azure Function name. See [File Naming Conventions](#file-naming-conventions).
 - **Example:** `"Daily Azure Report"`
 
 #### `description`
@@ -580,12 +580,46 @@ metadata:
 
 ## Environment Variable Substitution
 
-Use `$VARIABLE_NAME` syntax in any field value for runtime substitution from app settings or environment variables.
+Environment variable substitution is resolved against the Azure Functions process environment. On Azure, Application Settings are exposed to the function host as environment variables, so placeholders can refer to either local environment variables or deployed app settings.
+
+**Supported syntaxes**
+- `$VAR`
+- `%VAR%`
+
+Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
+
+**Supported scope**
+1. Any string value in the global `agents.config.yaml` file (recursively)
+2. Any string value in agent frontmatter YAML metadata (recursively)
+3. Inline references in the agent markdown body, except inside fenced code blocks
+
+For YAML/JSON configuration fields, substitution only happens when the entire string value is exactly `$VAR` or `%VAR%`. For markdown bodies, substitution can occur inline anywhere outside fenced code blocks.
+
+If a referenced environment variable is not set, the original placeholder text is left as a literal value. No error is raised and no empty string is substituted.
+
+Text inside fenced code blocks (` ``` `) in the markdown body is not substituted, so documentation examples remain literal.
+
+Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent and defaults to `true`.
+
+**Example:**
+```yaml
+---
+name: Notifier
+model: $AGENT_MODEL
+substitute_variables: false
+response_example: $RESPONSE_TEMPLATE
+---
+
+Send a daily summary email to $TO_EMAIL.
+```
+
+With `substitute_variables: false`, `model`, `response_example`, and `$TO_EMAIL` in the body all remain literal.
 
 **Common patterns:**
 - `$ACA_SESSION_POOL_ENDPOINT` — Session pool endpoint
 - `$SUBSCRIPTION_ID` — Azure subscription ID
 - `$O365_CONNECTION_ID` — Office 365 connection resource ID
+- `$API_ENDPOINT` — Service endpoint URL
 - `$TO_EMAIL` — Recipient email address
 - `$STORAGE_CONNECTION` — Storage account connection string
 
@@ -866,7 +900,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 1. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
 2. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
 3. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
-4. **Environment variables:** `$VARIABLE_NAME` references must be defined in app settings at runtime
+4. **Environment variables:** `$VAR` and `%VAR%` placeholders may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
 5. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
 6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
 7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
@@ -886,6 +920,26 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 - **Main agent:** `main.agent.md` (optional) — Special agent with HTTP chat UI and MCP tool enabled by default
 - **Named agents:** `{agent-name}.agent.md` (e.g., `daily_azure_report.agent.md`)
 - **Skills:** `skills/{skill-name}/SKILL.md`
+
+### Function name resolution
+
+For non-main agents, the registered Azure Function name is derived from the **source filename**, not from the frontmatter `name:` field:
+
+1. Start with the agent filename
+2. Remove the `.agent.md` suffix
+3. Sanitize the remaining base name for Azure Functions registration
+
+The sanitizer:
+- Replaces characters outside `[A-Za-z0-9_]` with `_`
+- Trims leading/trailing underscores
+- Prefixes `fn_` if the result would otherwise start with a digit
+
+Examples:
+- `main.agent.md` → `main`
+- `daily_azure_report.agent.md` → `daily_azure_report`
+- `daily-report.agent.md` → `daily_report`
+
+The frontmatter `name:` field remains display-only. It is used for chat UI titles, registered MCP/debug tool names, descriptions, and logs, but it does **not** affect the registered Azure Function identifier.
 
 **Main agent behavior:**
 The `main.agent.md` file is special:
