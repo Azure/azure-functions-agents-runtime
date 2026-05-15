@@ -146,7 +146,12 @@ def make_agent_handler(
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
 
-    async def _handler(trigger_data: Any) -> None:
+    # NOTE: deliberately omit a type annotation on `trigger_data`. The Azure
+    # Functions Python worker validates annotations against the binding's
+    # expected type (e.g. ``func.TimerRequest``) and rejects ``Any``. Leaving
+    # the parameter unannotated tells the worker to skip that type check, so
+    # this single handler can be reused across all non-HTTP trigger types.
+    async def _handler(trigger_data) -> None:  # noqa: ANN001
         logger.info("Agent '%s' triggered", resolved.name)
 
         try:
