@@ -434,4 +434,4 @@ dist/
 .venv*
 __azurite_*
 __blobstorage__/
-*/local.settings.json
+**/local.settings.json
