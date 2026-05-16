@@ -218,6 +218,7 @@ def make_agent_handler(
                 )
         except Exception as exc:
             logger.exception("Agent '%s' failed: %s", resolved.name, exc)
+            raise
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
     return _handler

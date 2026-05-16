@@ -8,7 +8,7 @@ from typing import Any, cast
 import azure.functions as func
 
 from .._logger import logger
-from ..config import ResolvedAgent, resolve_env_var
+from ..config import ResolvedAgent
 from ..system_tools.connectors.cache import configure_connector_tools
 from . import _naming
 from ._handlers import (
@@ -28,17 +28,6 @@ _function_name_from_source = _naming._function_name_from_source
 
 def _dump_connector_specs(resolved: ResolvedAgent) -> list[dict[str, Any]]:
     return [spec.model_dump() for spec in resolved.connector_specs]
-
-
-def _resolve_trigger_params(trigger_params: dict[str, Any]) -> dict[str, Any]:
-    """Resolve env vars on all string values in trigger params."""
-    resolved = {}
-    for key, value in trigger_params.items():
-        if isinstance(value, str):
-            resolved[key] = resolve_env_var(value)
-        else:
-            resolved[key] = value
-    return resolved
 
 
 def _configure_connector_tools_if_needed(
@@ -216,8 +205,6 @@ def register_agent(
 
     trigger_type = resolved.trigger.type.strip()
     trigger_params = dict(resolved.trigger.args or {})
-    if resolved.substitute_variables:
-        trigger_params = _resolve_trigger_params(trigger_params)
     function_name = _function_name_from_source(resolved.source_file, resolved.name)
 
     _configure_connector_tools_if_needed(resolved, capabilities)

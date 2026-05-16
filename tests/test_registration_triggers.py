@@ -239,3 +239,49 @@ def test_register_agent_keeps_literal_trigger_args_when_substitution_disabled(
             },
         )
     ]
+
+
+def test_register_agent_does_not_double_substitute_trigger_args(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("ROUTE", "$OTHER")
+    monkeypatch.setenv("OTHER", "actual-route")
+    (tmp_path / "nested.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Nested Route
+            description: Test agent
+            trigger:
+              type: http_trigger
+              args:
+                route: "$ROUTE"
+                methods: ["POST"]
+            ---
+            Use the resolved route.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    [resolved] = _resolve_agents(tmp_path)
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    register_agent(app, resolved, AgentCapabilities())
+
+    assert resolved.trigger is not None
+    assert resolved.trigger.args["route"] == "$OTHER"
+    assert app.trigger_calls == [
+        (
+            "route",
+            {
+                "route": "$OTHER",
+                "methods": ["POST"],
+                "auth_level": func.AuthLevel.FUNCTION,
+            },
+        )
+    ]

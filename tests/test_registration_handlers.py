@@ -268,3 +268,22 @@ def test_non_http_handler_generates_fresh_session_id_per_invocation(monkeypatch:
 
     assert sandbox_session_ids == ["session-one", "session-two"]
     assert run_session_ids == ["session-one", "session-two"]
+
+
+def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("agent failed")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_agent_handler(_resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities())
+
+    try:
+        asyncio.run(handler({"message": "boom"}))
+    except RuntimeError as exc:
+        assert str(exc) == "agent failed"
+    else:
+        raise AssertionError("Expected RuntimeError to be re-raised")

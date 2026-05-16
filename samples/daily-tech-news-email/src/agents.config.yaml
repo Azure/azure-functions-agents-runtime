@@ -8,5 +8,5 @@ system_tools:
     - connection_id: $O365_CONNECTION_ID
 
 # Default runtime configuration
-model: $FOUNDRY_MODEL
+model: gpt-4o
 timeout: 900

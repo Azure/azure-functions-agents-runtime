@@ -4,17 +4,18 @@ This document describes all trigger types supported in `.agent.md` frontmatter a
 
 ## How triggers work
 
-Each `*.agent.md` file (except `main.agent.md`) requires a `trigger` section in its YAML frontmatter. The `type` field determines the Azure Functions trigger, and all other fields are passed as parameters to the trigger decorator.
+Each `*.agent.md` file (except `main.agent.md`) requires a `trigger` section in its YAML frontmatter. The `type` field determines the Azure Functions trigger, and binding parameters go under `trigger.args`.
 
 ```yaml
 ---
 trigger:
   type: <trigger_type>
-  <param>: <value>
+  args:
+    <param>: <value>
 ---
 ```
 
-The framework calls `getattr(app, trigger_type)(**params)` to register the function, so any parameter accepted by the Azure Functions Python SDK decorator can be used.
+The framework passes `trigger.args` as the trigger decorator kwargs, so any parameter accepted by the Azure Functions Python SDK decorator can be used.
 
 > **Environment variable substitution**: All string values under `trigger.*`, including `type`, follow the broader rules in [front-matter-spec.md#environment-variable-substitution](./front-matter-spec.md#environment-variable-substitution).
 
@@ -27,9 +28,10 @@ Exposes the agent as a REST API endpoint that returns structured JSON.
 ```yaml
 trigger:
   type: http_trigger
-  route: my-endpoint
-  methods: ["POST"]
-  auth_level: FUNCTION
+  args:
+    route: my-endpoint
+    methods: ["POST"]
+    auth_level: FUNCTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -49,7 +51,8 @@ Runs the agent on a schedule (cron expression).
 ```yaml
 trigger:
   type: timer_trigger
-  schedule: "0 0 9 * * *"
+  args:
+    schedule: "0 0 9 * * *"
 ```
 
 | Parameter | Required | Default | Description |
@@ -75,8 +78,9 @@ Triggers when a message is added to an Azure Storage queue.
 ```yaml
 trigger:
   type: queue_trigger
-  queue_name: my-queue
-  connection: $STORAGE_CONNECTION
+  args:
+    queue_name: my-queue
+    connection: $STORAGE_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -95,8 +99,9 @@ Triggers when a blob is created or updated in Azure Storage.
 ```yaml
 trigger:
   type: blob_trigger
-  path: my-container/{name}
-  connection: $STORAGE_CONNECTION
+  args:
+    path: my-container/{name}
+    connection: $STORAGE_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -116,8 +121,9 @@ Triggers when events are sent to an Azure Event Hub.
 ```yaml
 trigger:
   type: event_hub_message_trigger
-  event_hub_name: my-hub
-  connection: $EVENTHUB_CONNECTION
+  args:
+    event_hub_name: my-hub
+    connection: $EVENTHUB_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -138,8 +144,9 @@ Triggers when a message is sent to a Service Bus queue.
 ```yaml
 trigger:
   type: service_bus_queue_trigger
-  queue_name: my-queue
-  connection: $SERVICEBUS_CONNECTION
+  args:
+    queue_name: my-queue
+    connection: $SERVICEBUS_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -161,9 +168,10 @@ Triggers when a message is sent to a Service Bus topic subscription.
 ```yaml
 trigger:
   type: service_bus_topic_trigger
-  topic_name: my-topic
-  subscription_name: my-sub
-  connection: $SERVICEBUS_CONNECTION
+  args:
+    topic_name: my-topic
+    subscription_name: my-sub
+    connection: $SERVICEBUS_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -185,9 +193,10 @@ Triggers when documents are created or modified in a Cosmos DB container.
 ```yaml
 trigger:
   type: cosmos_db_trigger
-  database_name: my-db
-  container_name: my-container
-  connection: $COSMOSDB_CONNECTION
+  args:
+    database_name: my-db
+    container_name: my-container
+    connection: $COSMOSDB_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -227,8 +236,9 @@ Triggers when events are sent to a Kafka topic.
 ```yaml
 trigger:
   type: kafka_trigger
-  topic: my-topic
-  broker_list: $KAFKA_BROKERS
+  args:
+    topic: my-topic
+    broker_list: $KAFKA_BROKERS
 ```
 
 | Parameter | Required | Default | Description |
@@ -251,8 +261,9 @@ Triggers when rows change in a SQL database table.
 ```yaml
 trigger:
   type: sql_trigger
-  table_name: dbo.MyTable
-  connection_string_setting: $SQL_CONNECTION
+  args:
+    table_name: dbo.MyTable
+    connection_string_setting: $SQL_CONNECTION
 ```
 
 | Parameter | Required | Default | Description |
@@ -271,7 +282,8 @@ Triggers from [Azure API Connections](https://learn.microsoft.com/azure/connecto
 ```yaml
 trigger:
   type: teams.new_channel_message_trigger
-  # connector-specific params
+  args:
+    # connector-specific params
 ```
 
 | Format | Description |
@@ -288,15 +300,16 @@ For trigger types not directly supported by the framework, use the built-in Azur
 ```yaml
 trigger:
   type: generic_trigger
-  type: cosmosDBTrigger    # the actual binding type name
-  connection: $COSMOSDB_CONNECTION
-  databaseName: my-db
-  containerName: my-container
+  args:
+    type: cosmosDBTrigger    # the actual binding type name
+    connection: $COSMOSDB_CONNECTION
+    databaseName: my-db
+    containerName: my-container
 ```
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
-| `type` (second) | Yes | — | The binding type name (as it appears in `function.json`) |
+| `args.type` | Yes | — | The binding type name (as it appears in `function.json`) |
 
 All other parameters are passed through to the binding definition. Use this when a trigger type isn't available as a dedicated decorator.
 
@@ -311,8 +324,9 @@ For connector triggers not covered by specific helpers (e.g., `teams.new_channel
 ```yaml
 trigger:
   type: connectors.generic_trigger
-  connection_name: $CONNECTION_NAME
-  trigger_identifier: <trigger-id>
+  args:
+    connection_name: $CONNECTION_NAME
+    trigger_identifier: <trigger-id>
 ```
 
 | Parameter | Required | Default | Description |

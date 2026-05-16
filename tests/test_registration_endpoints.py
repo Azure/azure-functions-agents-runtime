@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -38,12 +39,22 @@ class FakeFunctionApp:
         return decorator
 
 
+class DummyRequest:
+    def __init__(self, payload: Any, headers: dict[str, str] | None = None) -> None:
+        self._payload = payload
+        self.headers = headers or {}
+
+    async def json(self) -> Any:
+        return self._payload
+
+
 def _resolved_agent(
     *,
     name: str,
     is_main: bool,
     debug: DebugConfig,
     source_file: str | Path | None = None,
+    input_schema: dict[str, Any] | None = None,
 ) -> ResolvedAgent:
     source = source_file or Path(__file__).resolve()
     return ResolvedAgent(
@@ -60,7 +71,7 @@ def _resolved_agent(
         tool_filter=ToolsFilter(),
         sandbox_config=None,
         connector_specs=[],
-        input_schema=None,
+        input_schema=input_schema,
         response_schema=None,
         response_example=None,
         metadata={},
@@ -266,3 +277,82 @@ def test_register_debug_endpoints_chat_and_http_do_not_double_register_routes(
         "agents/secondary_agent/chat",
         "agents/secondary_agent/chatstream",
     ]
+
+
+def test_debug_chat_endpoint_skips_input_schema_validation(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        debug=DebugConfig(chat=True),
+        source_file=source_file,
+        input_schema={"type": "object", "required": ["subscription_id"]},
+    )
+    run_calls: dict[str, Any] = {}
+
+    async def fake_run_debug_agent(prompt: str, **kwargs: Any) -> Any:
+        run_calls["prompt"] = prompt
+        run_calls["kwargs"] = kwargs
+        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_debug_agent",
+        fake_run_debug_agent,
+    )
+
+    register_debug_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(route for route in app.routes if route["route"] == "agents/secondary_agent/chat")
+
+    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert json.loads(_response_text(response)) == {
+        "session_id": "session-123",
+        "response": "ok",
+        "tool_calls": [],
+    }
+    assert run_calls["prompt"] == "hello"
+
+
+def test_debug_chat_stream_endpoint_skips_input_schema_validation(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        debug=DebugConfig(chat=True),
+        source_file=source_file,
+        input_schema={"type": "object", "required": ["subscription_id"]},
+    )
+    run_calls: dict[str, Any] = {}
+
+    async def fake_stream() -> Any:
+        yield "data: hello\n\n"
+
+    def fake_run_debug_agent_stream(prompt: str, **kwargs: Any) -> Any:
+        run_calls["prompt"] = prompt
+        run_calls["kwargs"] = kwargs
+        return fake_stream()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_debug_agent_stream",
+        fake_run_debug_agent_stream,
+    )
+
+    register_debug_endpoints(app, resolved, AgentCapabilities())
+    stream_route = next(
+        route for route in app.routes if route["route"] == "agents/secondary_agent/chatstream"
+    )
+
+    response = asyncio.run(stream_route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert response.media_type == "text/event-stream"
+    assert run_calls["prompt"] == "hello"

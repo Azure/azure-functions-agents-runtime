@@ -19,7 +19,7 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 from .._logger import logger
 from ..config import ResolvedAgent
 from ..system_tools.connectors.cache import configure_connector_tools
-from ._handlers import build_sandbox_tools_for_session, validate_request_body
+from ._handlers import build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 
@@ -253,9 +253,6 @@ def _register_http_chat(
     async def chat(req: Request) -> Response:
         try:
             body = await req.json()
-            validation_error = validate_request_body(body, resolved.input_schema)
-            if validation_error is not None:
-                return validation_error
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
             result = await _run_debug_agent(
@@ -297,16 +294,6 @@ def _register_http_chat_stream(
     async def chat_stream(req: Request) -> StreamingResponse:
         try:
             body = await req.json()
-            validation_error = validate_request_body(body, resolved.input_schema)
-            if validation_error is not None:
-                payload = json.loads(validation_error.body.decode("utf-8"))
-                message = (
-                    payload.get("details") or payload.get("error") or "Input validation failed"
-                )
-                return _sse_error_response(
-                    message,
-                    status_code=validation_error.status_code,
-                )
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
             return StreamingResponse(

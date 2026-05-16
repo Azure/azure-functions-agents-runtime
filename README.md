@@ -208,7 +208,8 @@ system_tools:
 # For triggered agents only (not `main.agent.md`):
 trigger:
   type: timer_trigger      # or queue_trigger, teams.new_channel_message_trigger, etc.
-  schedule: "0 0 9 * * *"  # trigger-specific params passed as kwargs
+  args:
+    schedule: "0 0 9 * * *"  # trigger-specific params passed as kwargs
 
 logger: true               # optional, default true
 substitute_variables: true # optional, default true — env-var replacement in frontmatter + body
@@ -264,9 +265,10 @@ HTTP-triggered agents expose REST API endpoints that accept JSON input and retur
 name: Summarize
 trigger:
   type: http_trigger
-  route: summarize
-  methods: ["POST"]
-  auth_level: FUNCTION     # ANONYMOUS | FUNCTION | ADMIN (default: FUNCTION)
+  args:
+    route: summarize
+    methods: ["POST"]
+    auth_level: FUNCTION     # ANONYMOUS | FUNCTION | ADMIN (default: FUNCTION)
 response_example: |
   {
     "summary": "A brief summary of the content",
@@ -318,6 +320,8 @@ substitute_variables: false
 
 Instructions with literal $VAR references that should not be replaced.
 ```
+
+> **Note**: `substitute_variables` itself is read before env-var substitution. It must be a literal boolean (`true` or `false`). Setting `substitute_variables: $MY_FLAG` will not be resolved and defaults to `true`.
 
 ## Custom Python tools
 

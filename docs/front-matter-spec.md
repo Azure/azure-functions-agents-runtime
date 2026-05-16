@@ -606,6 +606,8 @@ Text inside fenced code blocks (` ``` `) in the markdown body is not substituted
 
 Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent and defaults to `true`.
 
+> **Note**: `substitute_variables` itself is read before env-var substitution. It must be a literal boolean (`true` or `false`). Setting `substitute_variables: $MY_FLAG` will not be resolved and defaults to `true`.
+
 **Example:**
 ```yaml
 ---
