@@ -22,6 +22,7 @@ from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.triggers import (
     _function_name_from_source,
     _safe_function_name,
+    allocate_unique_function_name,
     register_agent,
 )
 
@@ -189,6 +190,19 @@ def test_function_name_from_source_falls_back_to_display_name(
     assert "missing source_file" in caplog.text
 
 
+def test_allocate_unique_function_name_auto_suffixes_collisions() -> None:
+    registered_names = {"daily_report"}
+
+    function_name = allocate_unique_function_name(
+        "daily-report.agent.md",
+        "Daily Report",
+        registered_names,
+    )
+
+    assert function_name == "daily_report_2"
+    assert registered_names == {"daily_report", "daily_report_2"}
+
+
 def test_register_agent_missing_source_file_warns_and_falls_back(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -208,6 +222,27 @@ def test_register_agent_missing_source_file_warns_and_falls_back(
 
     assert app.function_names == [_safe_function_name("Daily Report")]
     assert "missing source_file" in caplog.text
+
+
+def test_register_agent_auto_suffixes_duplicate_function_names_with_registry(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_timer_agent(tmp_path, "daily-report.agent.md", "Daily Report Dash")
+    _write_timer_agent(tmp_path, "daily_report.agent.md", "Daily Report Underscore")
+    resolved_agents = _resolve_agents(tmp_path)
+    app = FakeFunctionApp()
+    registered_names: set[str] = set()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    for resolved in resolved_agents:
+        register_agent(app, resolved, AgentCapabilities(), registered_names=registered_names)
+
+    assert app.function_names == ["daily_report", "daily_report_2"]
+    assert registered_names == {"daily_report", "daily_report_2"}
 
 
 def test_register_agent_keeps_literal_trigger_args_when_substitution_disabled(

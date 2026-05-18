@@ -17,10 +17,15 @@ from ._handlers import (
     make_http_agent_handler,
     normalize_timer_schedule,
 )
-from ._naming import _safe_function_name
+from ._naming import _safe_function_name, allocate_unique_function_name
 from .capabilities import AgentCapabilities
 
-__all__ = ["_function_name_from_source", "_safe_function_name", "register_agent"]
+__all__ = [
+    "_function_name_from_source",
+    "_safe_function_name",
+    "allocate_unique_function_name",
+    "register_agent",
+]
 
 _CONNECTORS_INSTANCES: dict[int, object] = {}
 _function_name_from_source = _naming._function_name_from_source
@@ -178,6 +183,7 @@ def register_agent(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
+    registered_names: set[str] | None = None,
 ) -> None:
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
@@ -189,7 +195,14 @@ def register_agent(
 
     trigger_type = resolved.trigger.type.strip()
     trigger_params = dict(resolved.trigger.args or {})
-    function_name = _function_name_from_source(resolved.source_file, resolved.name)
+    if registered_names is None:
+        function_name = _function_name_from_source(resolved.source_file, resolved.name)
+    else:
+        function_name = allocate_unique_function_name(
+            resolved.source_file,
+            resolved.name,
+            registered_names.copy(),
+        )
 
     _configure_connector_tools_if_needed(resolved, capabilities)
 
@@ -203,6 +216,8 @@ def register_agent(
 
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
+        if registered_names is not None:
+            registered_names.add(function_name)
         return
 
     if "." in trigger_type:
@@ -214,6 +229,8 @@ def register_agent(
             trigger_params,
             trigger_type,
         )
+        if registered_names is not None:
+            registered_names.add(function_name)
         return
 
     _register_builtin_agent(
@@ -224,3 +241,5 @@ def register_agent(
         trigger_params,
         trigger_type,
     )
+    if registered_names is not None:
+        registered_names.add(function_name)

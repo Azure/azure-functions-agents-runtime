@@ -73,35 +73,31 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
 
     app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+    registered_names: set[str] = set()
     for spec in agent_specs:
-        try:
-            resolved = compose(
-                spec,
-                global_config,
-                discovered_mcp_names=mcp_names,
-                discovered_skill_names=skill_names,
-            )
-            # Validation is owned by the app factory; compose() stays a pure translation step.
-            validate_resolved_agent(
-                resolved,
-                all_global_mcp=global_config.mcp,
-                discovered_skills=skill_names,
-            )
-            capabilities = build_capabilities(
-                resolved,
-                discovered_user_tools=user_tools,
-                builtin_tools=list(BUILTIN_TOOLS),
-                discovered_mcp_tools=mcp_tools,
-                discovered_skills=skill_texts,
-            )
-            if resolved.trigger is not None:
-                register_agent(app, resolved, capabilities)
-            if _debug_enabled(resolved.debug):
-                register_debug_endpoints(app, resolved, capabilities)
-        except Exception as exc:
-            source = spec.source_file or spec.name
-            logger.warning("Skipping agent registration for %s: %s", source, exc)
-            continue
+        resolved = compose(
+            spec,
+            global_config,
+            discovered_mcp_names=mcp_names,
+            discovered_skill_names=skill_names,
+        )
+        # Validation is owned by the app factory; compose() stays a pure translation step.
+        validate_resolved_agent(
+            resolved,
+            all_global_mcp=global_config.mcp,
+            discovered_skills=skill_names,
+        )
+        capabilities = build_capabilities(
+            resolved,
+            discovered_user_tools=user_tools,
+            builtin_tools=list(BUILTIN_TOOLS),
+            discovered_mcp_tools=mcp_tools,
+            discovered_skills=skill_texts,
+        )
+        if resolved.trigger is not None:
+            register_agent(app, resolved, capabilities, registered_names=registered_names)
+        if _debug_enabled(resolved.debug):
+            register_debug_endpoints(app, resolved, capabilities)
 
     if not agent_specs:
         logger.info("No agent files found.")

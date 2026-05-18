@@ -29,3 +29,16 @@ def _function_name_from_source(source_file: str | Path | None, fallback_name: st
     if base_name == source_name:
         base_name = Path(source_name).stem
     return _safe_function_name(base_name)
+
+
+def allocate_unique_function_name(
+    source_file: str | Path | None, name: str, registered_names: set[str]
+) -> str:
+    base_name = _function_name_from_source(source_file, name)
+    function_name = base_name
+    suffix = 2
+    while function_name in registered_names:
+        function_name = f"{base_name}_{suffix}"
+        suffix += 1
+    registered_names.add(function_name)
+    return function_name
