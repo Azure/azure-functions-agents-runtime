@@ -144,8 +144,9 @@ def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
         debug=DebugConfig(),
         model=None,
         timeout=1.0,
-        enabled_mcp_names=["missing"],
+        enabled_mcp_names=["known"],
         enabled_skills_names=[],
+        mcp_exclude_names=["missing"],
         tool_filter=ToolsFilter(),
         sandbox_config=None,
         connector_specs=[],
@@ -159,6 +160,40 @@ def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
         validate_resolved_agent(resolved, all_global_mcp=["known"], discovered_skills=[])
     message = str(exc_info.value)
     assert "field `mcp.exclude`" in message
+    assert message.count("docs/front-matter-spec.md#mcp") == 1
+    assert "docs/front-matter-spec.mddocs/front-matter-spec.md#mcp" not in message
+
+
+def test_validate_resolved_agent_rejects_unknown_mcp_enabled_when_no_exclude(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "report.agent.md"
+    resolved = ResolvedAgent(
+        name="Report",
+        description="desc",
+        trigger=None,
+        instructions="x",
+        is_main=True,
+        debug=DebugConfig(),
+        model=None,
+        timeout=1.0,
+        enabled_mcp_names=["nope"],
+        enabled_skills_names=[],
+        mcp_exclude_names=[],
+        tool_filter=ToolsFilter(),
+        sandbox_config=None,
+        connector_specs=[],
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file=str(source),
+    )
+    with pytest.raises(ValueError) as exc_info:
+        validate_resolved_agent(resolved, all_global_mcp=["known"], discovered_skills=[])
+    message = str(exc_info.value)
+    assert "field `mcp`" in message
+    assert "field `mcp.exclude`" not in message
     assert message.count("docs/front-matter-spec.md#mcp") == 1
     assert "docs/front-matter-spec.mddocs/front-matter-spec.md#mcp" not in message
 

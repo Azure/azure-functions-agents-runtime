@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 
+from azure_functions_agents._logger import logger
 from azure_functions_agents.config.schema import (
     AgentSpec,
     DebugConfig,
@@ -117,6 +118,12 @@ def compose(
     global_mcp = list(global_config.mcp)
     if discovered_mcp_names is not None:
         discovered_set = set(discovered_mcp_names)
+        filtered_out = [name for name in global_mcp if name not in discovered_set]
+        if filtered_out:
+            logger.warning(
+                "Filtering out MCP server reference(s) not defined in mcp.json: %s",
+                ", ".join(filtered_out),
+            )
         global_mcp = [name for name in global_mcp if name in discovered_set]
 
     enabled_mcp, mcp_disabled = apply_mcp_filter(global_mcp, spec.mcp)

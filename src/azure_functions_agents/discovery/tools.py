@@ -45,25 +45,25 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
     if tools_dir not in sys.path:
         sys.path.insert(0, tools_dir)
 
-    print(f"[Tool Discovery] Looking for tools in: {tools_dir}")
-    print(f"[Tool Discovery] Directory exists: {os.path.exists(tools_dir)}")
+    logger.debug("Looking for tools in %s", tools_dir)
+    logger.debug("Tools directory exists: %s", os.path.exists(tools_dir))
 
     if not os.path.exists(tools_dir):
-        print(f"[Tool Discovery] WARNING: Tools directory not found: {tools_dir}")
+        logger.warning("Tools directory not found: %s", tools_dir)
         _DISCOVERED_TOOLS_CACHE[resolved_root] = tools
         return list(tools)
 
     files = sorted(f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_"))
-    print(f"[Tool Discovery] Python files found: {files}")
+    logger.debug("Python tool files found in %s: %s", tools_dir, files)
 
     for filename in files:
         filepath = os.path.join(tools_dir, filename)
         module_name = filename[:-3]
-        print(f"[Tool Discovery] Loading module: {module_name} from {filepath}")
+        logger.debug("Loading tool module %s from %s", module_name, filepath)
         try:
             spec = importlib.util.spec_from_file_location(module_name, filepath)
             if spec is None or spec.loader is None:
-                print(f"[Tool Discovery] ERROR: Could not create spec for {filename}")
+                logger.warning("Could not create import spec for %s", filename)
                 continue
 
             module = importlib.util.module_from_spec(spec)
@@ -78,7 +78,7 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
                     continue
                 if isinstance(obj, FunctionTool):
                     picked = obj
-                    print(f"[Tool Discovery] Loaded (FunctionTool): {obj.name}")
+                    logger.debug("Loaded FunctionTool %s", obj.name)
                     break
 
             # Fallback: first plain function defined in the module.
@@ -92,17 +92,13 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
                     name, fn = local_functions[0]
                     description = (fn.__doc__ or f"Tool: {name}").strip()
                     picked = tool(fn, name=name, description=description)
-                    print(f"[Tool Discovery] Loaded (auto-wrapped): {name}")
-                    print(f"[Tool Discovery]   Description: {description}")
+                    logger.debug("Auto-wrapped tool %s with description %s", name, description)
 
             if picked is not None:
                 tools.append(picked)
         except Exception as exc:
-            import traceback
-
-            print(f"[Tool Discovery] ERROR loading {filename}: {exc}")
-            traceback.print_exc()
-            logger.error("Failed to load tool from %s: %s", filename, exc)
+            logger.warning("Failed to load tool from %s: %s", filename, exc, exc_info=True)
 
     _DISCOVERED_TOOLS_CACHE[resolved_root] = tools
+    logger.info("Discovered %d user tool(s) from %s", len(tools), tools_dir)
     return list(tools)

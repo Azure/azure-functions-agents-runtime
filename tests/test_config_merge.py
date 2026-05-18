@@ -174,6 +174,44 @@ def test_compose_copies_logger_into_metadata() -> None:
     assert resolved.metadata["logger"] is False
 
 
+def test_compose_warns_on_filtered_mcp_names(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    global_config = GlobalConfig(mcp=["foo", "bar"])
+
+    with caplog.at_level(logging.WARNING):
+        resolved = compose(
+            AgentSpec(name="Agent", description="desc", is_main=True),
+            global_config,
+            discovered_mcp_names=["bar"],
+            discovered_skill_names=[],
+        )
+
+    assert resolved.enabled_mcp_names == ["bar"]
+    messages = [record.getMessage() for record in caplog.records]
+    assert any(
+        "Filtering out MCP server reference(s) not defined in mcp.json: foo" in message
+        for message in messages
+    )
+
+
+def test_compose_does_not_warn_when_all_mcp_names_discovered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    global_config = GlobalConfig(mcp=["foo"])
+
+    with caplog.at_level(logging.WARNING):
+        resolved = compose(
+            AgentSpec(name="Agent", description="desc", is_main=True),
+            global_config,
+            discovered_mcp_names=["foo"],
+            discovered_skill_names=[],
+        )
+
+    assert resolved.enabled_mcp_names == ["foo"]
+    assert caplog.records == []
+
+
 def test_compose_preserves_substitute_variables_flag() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", substitute_variables=False, is_main=True),

@@ -101,15 +101,19 @@ def validate_resolved_agent(
         )
 
     requested_mcp = set(all_global_mcp)
-    requested_excludes = list(getattr(resolved, "mcp_exclude_names", []) or [])
-    if not requested_excludes:
-        requested_excludes = list(getattr(resolved, "enabled_mcp_names", []) or [])
-    for name in requested_excludes:
+    exclude_names = list(getattr(resolved, "mcp_exclude_names", []) or [])
+    enabled_names = list(getattr(resolved, "enabled_mcp_names", []) or [])
+    mcp_references = (
+        [(name, "mcp.exclude") for name in exclude_names]
+        if exclude_names
+        else [(name, "mcp") for name in enabled_names]
+    )
+    for name, field in mcp_references:
         if name not in requested_mcp:
             raise ValueError(
                 _format_error(
                     source_file,
-                    "mcp.exclude",
+                    field,
                     f"Unknown MCP server reference `{name}`.",
                     "#mcp",
                 )
