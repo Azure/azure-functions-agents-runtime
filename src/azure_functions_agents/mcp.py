@@ -18,12 +18,12 @@ SSE-only MCP servers are NOT supported by MAF v1.2.x. Declare them with
 from __future__ import annotations
 
 import json
-import logging
 import os
 from typing import Any, Dict, List, Optional, Union
 
 from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
 
+from ._logger import logger
 from .config import get_app_root
 
 MCPTool = Union[MCPStdioTool, MCPStreamableHTTPTool]
@@ -45,7 +45,7 @@ def _build_mcp_tool(name: str, server: Dict[str, Any]) -> Optional[MCPTool]:
     if "command" in server or server_type == "local" or server_type == "stdio":
         command = str(server.get("command", "")).strip()
         if not command:
-            logging.warning(f"MCP server '{name}': missing 'command', skipping")
+            logger.warning("MCP server '%s': missing 'command', skipping", name)
             return None
         return MCPStdioTool(
             name=name,
@@ -57,14 +57,15 @@ def _build_mcp_tool(name: str, server: Dict[str, Any]) -> Optional[MCPTool]:
 
     if "url" in server or server_type in {"http", "sse", "streamable-http"}:
         if server_type == "sse":
-            logging.warning(
-                f"MCP server '{name}': SSE transport is not supported by the MAF runtime; "
-                "use 'http' (streamable-HTTP) or a stdio bridge."
+            logger.warning(
+                "MCP server '%s': SSE transport is not supported by the MAF runtime; "
+                "use 'http' (streamable-HTTP) or a stdio bridge.",
+                name,
             )
             return None
         url = str(server.get("url", "")).strip()
         if not url:
-            logging.warning(f"MCP server '{name}': missing 'url', skipping")
+            logger.warning("MCP server '%s': missing 'url', skipping", name)
             return None
         headers = server.get("headers")
         header_provider = None
@@ -82,9 +83,7 @@ def _build_mcp_tool(name: str, server: Dict[str, Any]) -> Optional[MCPTool]:
             header_provider=header_provider,
         )
 
-    logging.warning(
-        f"MCP server '{name}': unrecognized config (no 'command' or 'url'), skipping"
-    )
+    logger.warning("MCP server '%s': unrecognized config (no 'command' or 'url'), skipping", name)
     return None
 
 
@@ -103,12 +102,12 @@ def _load_mcp_tools_from_file() -> List[MCPTool]:
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except Exception as e:
-            logging.warning(f"Failed to read MCP config from {path}: {e}")
+            logger.warning("Failed to read MCP config from %s: %s", path, e)
             continue
 
         servers = data.get("servers", {})
         if not isinstance(servers, dict):
-            logging.warning(f"Invalid MCP config in {path}: 'servers' must be an object")
+            logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
             return []
 
         tools: List[MCPTool] = []
@@ -121,9 +120,9 @@ def _load_mcp_tools_from_file() -> List[MCPTool]:
                 tools.append(built)
 
         if tools:
-            logging.info(f"Loaded {len(tools)} MCP server(s) from {path}")
+            logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
         else:
-            logging.info(f"No valid MCP servers found in {path}")
+            logger.info("No valid MCP servers found in %s", path)
         return tools
 
     return []

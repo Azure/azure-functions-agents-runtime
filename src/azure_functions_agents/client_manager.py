@@ -28,7 +28,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, Optional
 
-logger = logging.getLogger(__name__)
+from ._logger import logger
 
 
 # ---------------------------------------------------------------------------

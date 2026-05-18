@@ -35,6 +35,10 @@ Connector tools (Teams, Office 365, SQL, Salesforce, etc.) require an optional e
 pip install "azurefunctions-agents-runtime[connectors]"
 ```
 
+<<<<<<< HEAD
+=======
+
+>>>>>>> b60b0883341572b030f5452ffe40d103d3c24b77
 ## Model Provider Configuration
 
 The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Azure AI Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
@@ -423,7 +427,7 @@ When the agent uses connector tools or `execution_sandbox`, the function app's *
 
 | Setting | Purpose |
 |---|---|
-| `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` (legacy alias `COPILOT_APP_ROOT` still accepted with a deprecation warning) |
+| `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
 | `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage (legacy alias `CODE_ASSISTANT_CONFIG_PATH` still accepted) |
 | `AGENT_TIMEOUT` | Per-call timeout in seconds (default `900`) |
 | `MAF_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |

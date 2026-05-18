@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import re
 import urllib.parse
 from typing import Any, Dict, List, Optional
@@ -23,6 +22,8 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from agent_framework import FunctionTool, tool
 from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
+
+from ._logger import logger
 from pydantic import BaseModel, Field
 
 from .config import resolve_env_var
@@ -222,7 +223,7 @@ async def _ensure_shared_resources():
             _credential, "https://dynamicsessions.io/.default"
         )
         _http_session = aiohttp.ClientSession()
-        logging.info(
+        logger.debug(
             "execution_sandbox: shared credential, token provider, and HTTP session initialized"
         )
 
@@ -250,16 +251,16 @@ def create_sandbox_tools(
     """
     raw_endpoint = config.get("session_pool_management_endpoint", "")
     if not raw_endpoint:
-        logging.warning("execution_sandbox: missing 'session_pool_management_endpoint', skipping")
+        logger.warning("execution_sandbox: missing 'session_pool_management_endpoint', skipping")
         return []
 
     endpoint = resolve_env_var(str(raw_endpoint))
     if not endpoint or endpoint.startswith("$") or endpoint.startswith("%"):
-        logging.warning(f"execution_sandbox: could not resolve endpoint '{raw_endpoint}', skipping")
+        logger.warning("execution_sandbox: could not resolve endpoint '%s', skipping", raw_endpoint)
         return []
 
     aca_session_id = fallback_session_id or "default"
-    logging.info(
+    logger.info(
         f"execution_sandbox: creating tool with endpoint {endpoint} (aca_session={aca_session_id})"
     )
 
@@ -275,7 +276,7 @@ def create_sandbox_tools(
         if not code.strip():
             return json.dumps({"error": "No code provided"})
 
-        logging.info(
+        logger.info(
             f"execution_sandbox: executing code in ACA session {aca_session_id}"
         )
 
@@ -291,17 +292,17 @@ def create_sandbox_tools(
             result = await _execute_code(
                 endpoint, code, aca_session_id, _token_provider, _http_session
             )
-            logging.info(
+            logger.info(
                 f"execution_sandbox: ACA session {aca_session_id} completed successfully"
             )
             return result
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
-            logging.error(
+            logger.error(
                 f"execution_sandbox: ACA session {aca_session_id} failed: {error_msg}"
             )
             return json.dumps({"error": error_msg})
 
-    logging.info("execution_sandbox: execute_python tool created")
+    logger.info("execution_sandbox: execute_python tool created")
     return [execute_python]
 

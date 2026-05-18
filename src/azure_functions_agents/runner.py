@@ -41,14 +41,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, AsyncIterator, Dict, List, Optional
 
+from ._logger import logger
 from .client_manager import get_client_manager
 from .config import resolve_config_dir
 from .connector_tool_cache import get_connector_tools
 from .mcp import get_cached_mcp_tools
 from .skills import get_cached_skills_text
 from .tools import _REGISTERED_TOOLS_CACHE
-
-logger = logging.getLogger(__name__)
 
 
 # ---------------------------------------------------------------------------

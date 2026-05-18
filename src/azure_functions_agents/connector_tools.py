@@ -1,12 +1,12 @@
 from __future__ import annotations
 
 import json
-import logging
 import re
 from urllib.parse import quote
 
 from agent_framework import FunctionTool
 
+from ._logger import logger
 from .arm import ArmClient, DataPlaneClient
 from .connectors import ConnectionInfo, ParsedOperation, ParsedParameter
 
@@ -107,7 +107,7 @@ def generate_tools(
                 tool_name = f"{effective_prefix[:prefix_budget]}{suffix}"
             else:
                 tool_name = tool_name[:64]
-            logging.warning(f"Tool name truncated to 64 chars: '{tool_name}'")
+            logger.warning("Tool name truncated to 64 chars: '%s'", tool_name)
 
         tool_name = tool_name[:64]
 

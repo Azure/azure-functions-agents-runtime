@@ -1,0 +1,10 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "ACA_SESSION_POOL_ENDPOINT": "https://northcentralus.dynamicsessions.io/subscriptions/e543b0ef-003a-4ef2-ab3c-7a81f486bede/resourceGroups/agent-runtime/sessionPools/gav-session-ppool",
+    "O365_CONNECTION_ID": "/subscriptions/e543b0ef-003a-4ef2-ab3c-7a81f486bede/resourceGroups/TestResources/providers/Microsoft.Web/aigateways/gav-ai-gateway/connections/Office365-b2dz83",
+    "TO_EMAIL": "gaaguiar@microsoft.com"
+  }
+}
