@@ -162,7 +162,7 @@ trigger:
   type: http_trigger
   args:
     route: string          # Required. URL path for the endpoint
-    methods: string[]      # Optional. Array of HTTP methods. Defaults to ["GET", "POST"]
+    methods: string[]      # Optional. Array of HTTP methods. Defaults to ["POST"]
     auth_level: string     # Optional. One of: anonymous, function, admin. Defaults to function
 ```
 

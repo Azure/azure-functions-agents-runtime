@@ -109,12 +109,14 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
 
     assert response.status_code == 200
     html = _response_text(response)
-    # Confirm the chat UI uses the prefix-tolerant regex so non-main pages also
+    # Confirm the chat UI uses the prefix-preserving regex so non-main pages also
     # work when served behind Azure Functions' default `api` route prefix or
     # any reverse-proxy prefix (matches the trailing `/agents/{slug}` segment).
-    assert r'pathname.match(/\/agents\/([^/]+)\/?$/)' in html
-    # Fallback when no /agents/{slug} segment matches (e.g., main agent page).
-    assert ': "/agent";' in html
+    assert r'pathname.match(/^(.*)\/agents\/([^/]+)\/?$/)' in html
+    # Fallback when no /agents/{slug} segment matches preserves the page prefix
+    # while still resolving `/` to `/agent`.
+    assert 'window.location.pathname === "/"' in html
+    assert 'window.location.pathname.endsWith("/")' in html
 
 
 def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names(
