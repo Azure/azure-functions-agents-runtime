@@ -14,16 +14,25 @@ from azure_functions_agents.config.validation import (
 
 
 @pytest.mark.parametrize(
-    ("field", "target"),
+    ("field", "target", "spec_link"),
     [
-        ("runtime", None),
-        ("execution_sandbox", "system_tools.execute_in_sessions"),
-        ("tools_from_connections", "system_tools.tools_from_connections"),
+        ("runtime", None, "docs/front-matter-spec.md"),
+        (
+            "execution_sandbox",
+            "system_tools.execute_in_sessions",
+            "docs/front-matter-spec.md#system_tools",
+        ),
+        (
+            "tools_from_connections",
+            "system_tools.tools_from_connections",
+            "docs/front-matter-spec.md#system_tools",
+        ),
     ],
 )
 def test_validate_agent_frontmatter_legacy_fields(
     field: str,
     target: str | None,
+    spec_link: str,
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "agent.agent.md"
@@ -32,21 +41,32 @@ def test_validate_agent_frontmatter_legacy_fields(
     message = str(exc_info.value)
     assert field in message
     assert str(source) in message
-    assert "docs/front-matter-spec.md" in message
+    assert spec_link in message
     if target is not None:
         assert target in message
+    if field == "runtime":
+        assert "docs/front-matter-spec.md#system_tools" not in message
 
 
 @pytest.mark.parametrize(
-    ("field", "target"),
+    ("field", "target", "spec_link"),
     [
-        ("execution_sandbox", "system_tools.execute_in_sessions"),
-        ("tools_from_connections", "system_tools.tools_from_connections"),
+        (
+            "execution_sandbox",
+            "system_tools.execute_in_sessions",
+            "docs/front-matter-spec.md#system_tools",
+        ),
+        (
+            "tools_from_connections",
+            "system_tools.tools_from_connections",
+            "docs/front-matter-spec.md#system_tools",
+        ),
     ],
 )
 def test_validate_global_config_dict_legacy_fields(
     field: str,
     target: str,
+    spec_link: str,
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "agents.config.yaml"
@@ -55,7 +75,7 @@ def test_validate_global_config_dict_legacy_fields(
     message = str(exc_info.value)
     assert field in message
     assert str(source) in message
-    assert "docs/front-matter-spec.md" in message
+    assert spec_link in message
     assert target in message
 
 

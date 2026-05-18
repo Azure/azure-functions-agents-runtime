@@ -83,65 +83,65 @@ That ordering matters because later modules assume earlier stages have already r
 
 ## 4. Pipeline stages
 
-The `create_function_app()` docstring in `src/azure_functions_agents/app.py:39-48` is the source of truth. The steps below restate it in module terms.
+The `create_function_app()` docstring in `src/azure_functions_agents/app.py:create_function_app()` is the source of truth. The steps below restate it in module terms.
 
 1. **Resolve app root**
-   - **Implemented by:** `src/azure_functions_agents/app.py:36-53`, `src/azure_functions_agents/config/paths.py:15-31`
+   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/config/paths.py`
    - **Input:** optional `app_root: Path | None` plus environment variables such as `AZURE_FUNCTIONS_AGENTS_APP_ROOT` and `AzureWebJobsScriptRoot`
    - **Output:** `resolved_root: Path`
    - **Notes:** this is the root path handed to every later loader/discovery function. `app.py` also calls `_allow_skill_reads()` immediately afterwards so built-in file readers can safely access the project's `skills/` directory.
 
 2. **Load global `agents.config.yaml`**
-   - **Implemented by:** `src/azure_functions_agents/config/loader.py:84-108`
+   - **Implemented by:** `src/azure_functions_agents/config/loader.py:load_global_config()`
    - **Input:** `app_root: Path`
    - **Output:** `GlobalConfig`
    - **Notes:** missing config is valid and becomes `GlobalConfig()`. String values are normalized through `config/env.py`, so env-var references are resolved before the Pydantic model is materialized.
 
 3. **Load all agent markdown files**
-   - **Implemented by:** `src/azure_functions_agents/config/loader.py:56-81`, `src/azure_functions_agents/config/loader.py:111-125`
+   - **Implemented by:** `src/azure_functions_agents/config/loader.py:_load_agent_spec()`, `src/azure_functions_agents/config/loader.py:load_agent_specs()`
    - **Input:** `app_root: Path`
    - **Output:** `list[AgentSpec]`
    - **Notes:** each file is parsed as YAML front matter plus markdown body. The loader stamps `source_file`, sets `is_main` when the filename is `main.agent.md`, and stores the markdown body in `AgentSpec.instructions`.
 
 4. **Discover runtime inventories from disk**
-   - **Implemented by:** `src/azure_functions_agents/app.py:53-59`, `src/azure_functions_agents/discovery/tools.py:20-108`, `src/azure_functions_agents/discovery/mcp.py:80-124`, `src/azure_functions_agents/discovery/skills.py:47-89`, `src/azure_functions_agents/discovery/builtin_tools.py:13-21`, `src/azure_functions_agents/discovery/builtin_tools.py:314`
+   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`, `src/azure_functions_agents/discovery/builtin_tools.py`
    - **Input:** `app_root: Path`
    - **Output:** user tools as `list[FunctionTool]`, MCP servers as `dict[str, MCPTool]`, skills as `dict[str, str]`, plus built-ins as `list[FunctionTool]`
    - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. MCP discovery is a translation step too: entries from `mcp.json` become ready-to-use MAF MCP tool objects.
 
 5. **Compose a per-agent runtime view**
-   - **Implemented by:** `src/azure_functions_agents/config/merge.py:110-169`
+   - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
    - **Input:** `AgentSpec`, `GlobalConfig`, `discovered_mcp_names: list[str]`, `discovered_skill_names: list[str]`
    - **Output:** `ResolvedAgent`
    - **Notes:** this is where precedence rules are applied. Model and timeout fall through agent config, global config, environment, and defaults; capability filters turn the global/shared inventories into per-agent allow/deny decisions.
 
 6. **Validate the merged configuration**
-   - **Implemented by:** `src/azure_functions_agents/config/validation.py:65-81`, `src/azure_functions_agents/config/validation.py:84-133`
+   - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_global_mcp_references()`, `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
    - **Input:** global MCP references as `list[str]`, discovered MCP/skill names as `list[str]`, and each `ResolvedAgent`
    - **Output:** the same validated `ResolvedAgent` (or an exception that skips registration for that agent)
    - **Notes:** validation deliberately happens twice in the overall pipeline: once for global MCP references, once for each fully merged agent. That split keeps "bad shared config" separate from "bad per-agent overrides."
 
 7. **Build per-agent capabilities**
-   - **Implemented by:** `src/azure_functions_agents/registration/capabilities.py:33-78`
+   - **Implemented by:** `src/azure_functions_agents/registration/capabilities.py:build_capabilities()`
    - **Input:** `ResolvedAgent`, discovered user tools, built-in tools, discovered MCP tools, discovered skill texts
    - **Output:** `AgentCapabilities`
    - **Notes:** this stage converts name-based filters into actual runtime objects. After this point, the registration and runner layers do not need to reason about `exclude` lists; they only consume concrete tool lists and the final concatenated `skills_text`.
 
 8. **Create the Azure Functions app container**
-   - **Implemented by:** `src/azure_functions_agents/app.py:75`
+   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`
    - **Input:** startup defaults such as `http_auth_level=func.AuthLevel.FUNCTION`
    - **Output:** `azure.functions.FunctionApp`
    - **Notes:** only one `FunctionApp` is created per startup pass. Every subsequent registration call mutates this object by attaching decorators and handlers.
 
 9. **Register triggers and debug endpoints**
-   - **Implemented by:** `src/azure_functions_agents/app.py:76-99`, `src/azure_functions_agents/registration/triggers.py:167-216`, `src/azure_functions_agents/registration/endpoints.py:362-421`, `src/azure_functions_agents/registration/_handlers.py:166-227`
+   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/registration/triggers.py:register_agent()`, `src/azure_functions_agents/registration/endpoints.py:register_debug_endpoints()`, `src/azure_functions_agents/registration/_handlers.py`
    - **Input:** `FunctionApp`, `ResolvedAgent`, `AgentCapabilities`
    - **Output:** the same `FunctionApp`, now decorated with trigger bindings, HTTP routes, SSE streaming routes, and/or MCP endpoints
    - **Notes:** non-main agents go through `register_agent()` when they have a `trigger`. Any agent with debug exposure enabled also goes through `register_debug_endpoints()`, which can add chat UI, `/chat`, `/chatstream`, and MCP surfaces.
 
 ### Where the registration stage hands off to execution
 
-Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities`; the runner then asks the active `ClientManager` to build a chat client and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py:280-502`, `src/azure_functions_agents/client_manager.py:37-238`).
+Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities`; the runner then asks the active `ClientManager` to build a chat client and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
 ### Registration paths in practice
 
@@ -174,19 +174,19 @@ The runner therefore focuses on execution concerns: session history, lock manage
 
 These are the main "passport" objects that move through the pipeline:
 
-- `AgentSpec` — raw parsed front matter plus markdown body for one `.agent.md` file. Defined at `src/azure_functions_agents/config/schema.py:108`.
+- `AgentSpec` — raw parsed front matter plus markdown body for one `.agent.md` file. Defined in `src/azure_functions_agents/config/schema.py` as `AgentSpec`.
   - **Created by:** `config/loader.py:_load_agent_spec()`
   - **Consumed by:** `config/merge.py:compose()`
-- `GlobalConfig` — parsed `agents.config.yaml`, including shared MCP, system-tool, model, timeout, and tool-filter defaults. Defined at `src/azure_functions_agents/config/schema.py:96`.
+- `GlobalConfig` — parsed `agents.config.yaml`, including shared MCP, system-tool, model, timeout, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
   - **Created by:** `config/loader.py:load_global_config()`
   - **Consumed by:** `config/merge.py:compose()` and `config/validation.py:validate_global_mcp_references()`
-- `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined at `src/azure_functions_agents/config/schema.py:134`.
+- `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
   - **Created by:** `config/merge.py:compose()`
   - **Consumed by:** validation, capability building, trigger registration, endpoint registration, and sandbox-tool assembly
-- `AgentCapabilities` — final filtered bundle of user tools, MCP tools, skills text, and connector-tool enablement. Defined at `src/azure_functions_agents/registration/capabilities.py:13`.
+- `AgentCapabilities` — final filtered bundle of user tools, MCP tools, skills text, and connector-tool enablement. Defined in `src/azure_functions_agents/registration/capabilities.py` as `AgentCapabilities`.
   - **Created by:** `registration/capabilities.py:build_capabilities()`
   - **Consumed by:** `registration/triggers.py`, `registration/endpoints.py`, and the handler closures they create
-- `azure.functions.FunctionApp` — the final Azure Functions app object created in `src/azure_functions_agents/app.py:75` and returned by `create_function_app()` in `src/azure_functions_agents/app.py:36-107`.
+- `azure.functions.FunctionApp` — the final Azure Functions app object created in `src/azure_functions_agents/app.py:create_function_app()` and returned to the host after registration completes.
   - **Created by:** `app.py:create_function_app()`
   - **Consumed by:** Azure Functions itself after the host imports the module and inspects the registered bindings
 
@@ -214,19 +214,19 @@ This split keeps parsing, policy, Azure binding registration, and runtime execut
 
 ### Custom inference client
 
-To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py:37-238` and the README section [Plugging in a custom client manager](../README.md#plugging-in-a-custom-client-manager).
+To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and the README section [Plugging in a custom client manager](../README.md#plugging-in-a-custom-client-manager).
 
 This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it.
 
 ### Custom tools
 
-To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:20-108`, and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:29-95`.
+To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:tool()`.
 
 These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside built-in, connector, sandbox, and MCP tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 
 ### Per-agent capability filtering
 
-Each agent can narrow the shared inventory with front-matter `mcp`, `tools`, and `skills` settings; the runtime applies those filters when it builds `AgentCapabilities`. See `src/azure_functions_agents/registration/capabilities.py:33-78` and the detailed field reference in [`docs/front-matter-spec.md`](front-matter-spec.md).
+Each agent can narrow the shared inventory with front-matter `mcp`, `tools`, and `skills` settings; the runtime applies those filters when it builds `AgentCapabilities`. See `src/azure_functions_agents/registration/capabilities.py:build_capabilities()` and the detailed field reference in [`docs/front-matter-spec.md`](front-matter-spec.md).
 
 This design keeps global config declarative: shared config says what exists, while agent front matter says what to exclude or opt out of. That separation is the reason the runtime has both a discovery stage and a capability-filtering stage instead of folding them together.
 

@@ -15,7 +15,6 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     ToolsFromConnectionEntry,
 )
-from azure_functions_agents.config.validation import validate_resolved_agent
 
 DEFAULT_TIMEOUT = 900.0
 
@@ -161,9 +160,4 @@ def compose(
         source_file=spec.source_file,
     )
 
-    validate_resolved_agent(
-        resolved,
-        all_global_mcp=global_mcp,
-        discovered_skills=skill_pool,
-    )
     return resolved

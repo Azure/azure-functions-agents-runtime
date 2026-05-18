@@ -9,25 +9,27 @@ from azure_functions_agents._logger import logger as _logger
 
 LEGACY_FIELDS_AGENT = {
     "runtime": (
-        "Removed in 1.0.0. Only the Microsoft Agent Framework is supported. Remove this field."
+        "Removed in 1.0.0. Only the Microsoft Agent Framework is supported. Remove this field.",
+        "",
     ),
     "execution_sandbox": (
-        "Moved to the global agents.config.yaml under `system_tools.execute_in_sessions`. "
-        "See docs/front-matter-spec.md#system_tools."
+        "Moved to the global agents.config.yaml under `system_tools.execute_in_sessions`.",
+        "#system_tools",
     ),
     "tools_from_connections": (
-        "Moved to the global agents.config.yaml under `system_tools.tools_from_connections`. "
-        "See docs/front-matter-spec.md#system_tools."
+        "Moved to the global agents.config.yaml under `system_tools.tools_from_connections`.",
+        "#system_tools",
     ),
 }
 
 LEGACY_FIELDS_GLOBAL = {
     "execution_sandbox": (
-        "Renamed to `system_tools.execute_in_sessions`. See docs/front-matter-spec.md#system_tools."
+        "Renamed to `system_tools.execute_in_sessions`.",
+        "#system_tools",
     ),
     "tools_from_connections": (
-        "Moved under `system_tools.tools_from_connections`. "
-        "See docs/front-matter-spec.md#system_tools."
+        "Moved under `system_tools.tools_from_connections`.",
+        "#system_tools",
     ),
 }
 
@@ -38,28 +40,26 @@ def _format_error(
     source_file: str | Path,
     field: str,
     message: str,
-    spec_link: str = _SPEC_LINK_DEFAULT,
+    spec_anchor: str = "",
 ) -> str:
-    suffix = "" if "See " in message else f" See {spec_link}"
-    return f"{Path(source_file)}: field `{field}`: {message}{suffix}"
+    spec_link = f"{_SPEC_LINK_DEFAULT}{spec_anchor}"
+    normalized_message = message if message.endswith(".") else f"{message}."
+    suffix = "" if "See " in normalized_message else f" See {spec_link}."
+    return f"{Path(source_file)}: field `{field}`: {normalized_message}{suffix}"
 
 
 def validate_agent_frontmatter(metadata: dict[str, Any], source_file: str | Path) -> None:
     """Raise ValueError with a clear message if metadata contains a legacy field."""
-    for field, message in LEGACY_FIELDS_AGENT.items():
+    for field, (message, spec_anchor) in LEGACY_FIELDS_AGENT.items():
         if field in metadata:
-            raise ValueError(
-                _format_error(source_file, field, message, "docs/front-matter-spec.md#system_tools")
-            )
+            raise ValueError(_format_error(source_file, field, message, spec_anchor))
 
 
 def validate_global_config_dict(data: dict[str, Any], source_file: str | Path) -> None:
     """Raise ValueError if agents.config.yaml uses legacy field names."""
-    for field, message in LEGACY_FIELDS_GLOBAL.items():
+    for field, (message, spec_anchor) in LEGACY_FIELDS_GLOBAL.items():
         if field in data:
-            raise ValueError(
-                _format_error(source_file, field, message, "docs/front-matter-spec.md#system_tools")
-            )
+            raise ValueError(_format_error(source_file, field, message, spec_anchor))
 
 
 def validate_global_mcp_references(

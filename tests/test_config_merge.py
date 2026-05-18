@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -28,6 +29,7 @@ from azure_functions_agents.config.schema import (
     ToolsFromConnectionEntry,
     TriggerSpec,
 )
+from azure_functions_agents.config.validation import validate_resolved_agent
 
 
 def test_resolve_model_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -181,6 +183,39 @@ def test_compose_preserves_substitute_variables_flag() -> None:
     )
 
     assert resolved.substitute_variables is False
+
+
+def test_compose_defers_warning_only_validation(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    spec = AgentSpec(
+        name="Agent",
+        description="desc",
+        is_main=True,
+        skills=SkillsFilter(exclude=["missing-skill"]),
+        tools=ToolsFilter(exclude=["bash"]),
+    )
+
+    with caplog.at_level(logging.WARNING):
+        resolved = compose(
+            spec,
+            GlobalConfig(),
+            discovered_mcp_names=[],
+            discovered_skill_names=["known-skill"],
+        )
+
+    assert caplog.records == []
+
+    with caplog.at_level(logging.WARNING):
+        validate_resolved_agent(
+            resolved,
+            all_global_mcp=[],
+            discovered_skills=["known-skill"],
+        )
+
+    messages = [record.getMessage() for record in caplog.records]
+    assert any("skills.exclude" in message for message in messages)
+    assert any("tools.exclude" in message for message in messages)
 
 
 def test_resolve_debug_explicit_false() -> None:

@@ -81,6 +81,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 discovered_mcp_names=mcp_names,
                 discovered_skill_names=skill_names,
             )
+            # Validation is owned by the app factory; compose() stays a pure translation step.
             validate_resolved_agent(
                 resolved,
                 all_global_mcp=global_config.mcp,

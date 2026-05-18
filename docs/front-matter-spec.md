@@ -239,29 +239,30 @@ debug:
 **Endpoint Details:**
 
 **`chat: true`** — Interactive Chat UI
-- **Endpoints:**
-  - `GET /`
-  - `POST /agent/chat`
-  - `POST /agent/chatstream`
+- **Routes by agent type:** `{slug}` below is the sanitized filename-based value described in [Function name resolution](#function-name-resolution).
+
+  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `debug.mcp: true` |
+  | --- | --- | --- | --- | --- |
+  | `main.agent.md` | `/` | `/agent/chat` | `/agent/chatstream` | Registers the `main` MCP tool through the shared runtime MCP webhook |
+  | Any other `.agent.md` with `debug.chat: true` | `/agents/{slug}/` | `/agents/{slug}/chat` | `/agents/{slug}/chatstream` | Registers an MCP tool named `{slug}` through the shared runtime MCP webhook |
 - **Purpose:** Browser-based chat interface for manual testing and interaction
 - **Behavior:** Also registers the backing REST endpoints the built-in page calls, so `debug.chat: true` is self-sufficient
 - **Use case:** Test any agent (timer, queue, HTTP) via a web UI during development
 
 **`http: true`** — REST API Endpoints
-- **Endpoints:**
-  - `POST /agent/chat` — Non-streaming chat endpoint (returns full response)
-  - `POST /agent/chatstream` — Streaming chat endpoint (Server-Sent Events)
+- **Routes:** Registers the same `POST` routes shown above for the relevant agent type, but without the chat UI page
 - **Behavior:** Useful when you want programmatic access without exposing the chat page
 - **Request body:** `{"prompt": "your question or instruction"}`
 - **Response:** JSON with `session_id`, `response`, `tool_calls`, etc.
 - **Use case:** Programmatic access to the agent, integration testing, API clients
 
 **`mcp: true`** — MCP Tool Registration
-- **Tool name:** Derived from agent `name` field (e.g., "Daily Azure Report" → `daily_azure_report`)
+- **Tool name:** Derived from the sanitized agent filename slug described in [Function name resolution](#function-name-resolution) (for example, `daily_azure_report.agent.md` → `daily_azure_report`)
 - **Tool description:** From agent `description` field
 - **Tool trigger:** `mcpToolTrigger`
 - **Input:** `{"prompt": "string"}`
 - **Output:** JSON response from the agent
+- **Route behavior:** Does not create a per-agent `/agents/{slug}` MCP route; it registers a tool on the shared runtime MCP transport
 - **Use case:** Enable agent-to-agent communication — other agents can invoke this agent as a tool
 
 **Examples:**
