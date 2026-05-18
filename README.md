@@ -162,6 +162,8 @@ Your agent is now running at `http://localhost:7071/` with a built-in chat UI, H
 
 ## Features
 
+**Architecture overview:** see [`docs/architecture.md`](docs/architecture.md) for the module map and data flow pipeline.
+
 ### `main.agent.md`
 
 Define an agent with a markdown file. When `main.agent.md` is present, the runtime automatically registers:
