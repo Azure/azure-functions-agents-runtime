@@ -600,7 +600,7 @@ Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
 
 For YAML/JSON configuration fields, substitution only happens when the entire string value is exactly `$VAR` or `%VAR%`. For markdown bodies, substitution can occur inline anywhere outside fenced code blocks.
 
-If a referenced environment variable is not set, the original placeholder text is left as a literal value. No error is raised and no empty string is substituted.
+If a referenced environment variable is not set, the original placeholder text is left literal. String-typed fields keep that literal value; non-string fields still undergo normal schema validation, so entries such as `timeout: $TIMEOUT` raise a validation error.
 
 Text inside fenced code blocks (` ``` `) in the markdown body is not substituted, so documentation examples remain literal.
 
@@ -962,7 +962,7 @@ The `main.agent.md` file is special:
   - `GET /` — Chat UI page
   - `POST /agent/chat` — Non-streaming chat endpoint
   - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
-  - MCP tool registration — Tool name derived from `name` field, exposed as `mcpToolTrigger`
+  - MCP tool registration — Tool name derived from the sanitized filename slug (`main` for `main.agent.md`), exposed as `mcpToolTrigger`
 - **No trigger required** — Uses HTTP by default; can be omitted from front matter
 
 Other agents require an explicit `trigger` definition and have `debug: false` (all debug endpoints disabled) by default.
