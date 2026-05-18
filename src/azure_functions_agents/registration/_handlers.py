@@ -175,7 +175,7 @@ def make_agent_handler(
     # expected type (e.g. ``func.TimerRequest``) and rejects ``Any``. Leaving
     # the parameter unannotated tells the worker to skip that type check, so
     # this single handler can be reused across all non-HTTP trigger types.
-    async def _handler(trigger_data) -> None:
+    async def _handler(trigger_data) -> None:  # type: ignore[no-untyped-def]
         logger.info("Agent '%s' triggered", resolved.name)
 
         try:

@@ -81,12 +81,22 @@ def _register_http_agent(
 ) -> None:
     route = trigger_params.get("route")
     if not route:
-        logger.warning("Skipping '%s': http_trigger requires 'route'", function_name)
-        return
+        raise ValueError(
+            f"Agent '{resolved.name}' ({resolved.source_file}): "
+            "http_trigger requires 'route' in trigger.args. "
+            "See docs/front-matter-spec.md#http-trigger."
+        )
 
     methods = trigger_params.get("methods", ["POST"])
-    auth_str = str(trigger_params.get("auth_level", "FUNCTION")).lower()
-    auth_level = AUTH_LEVEL_MAP.get(auth_str, func.AuthLevel.FUNCTION)
+    auth_str = str(trigger_params.get("auth_level", "function")).lower()
+    if auth_str not in AUTH_LEVEL_MAP:
+        valid = ", ".join(sorted(AUTH_LEVEL_MAP))
+        raise ValueError(
+            f"Agent '{resolved.name}' ({resolved.source_file}): "
+            f"invalid auth_level '{auth_str}'. Must be one of: {valid}. "
+            "See docs/front-matter-spec.md#auth_level."
+        )
+    auth_level = AUTH_LEVEL_MAP[auth_str]
     handler = make_http_agent_handler(resolved, capabilities)
 
     decorated = app.route(
@@ -169,14 +179,7 @@ def register_agent(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
 ) -> None:
-    """Register a non-main agent's trigger on the FunctionApp."""
-    if resolved.is_main:
-        logger.debug(
-            "register_agent called with a main agent (%s) — ignoring; main agents are registered via debug endpoints.",
-            resolved.name,
-        )
-        return
-
+    """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
         logger.warning(
             "Skipping '%s': resolved agent has no trigger",
@@ -189,6 +192,14 @@ def register_agent(
     function_name = _function_name_from_source(resolved.source_file, resolved.name)
 
     _configure_connector_tools_if_needed(resolved, capabilities)
+
+    if resolved.is_main and trigger_type == "http_trigger":
+        logger.debug(
+            "Skipping http_trigger registration for main agent '%s'; "
+            "HTTP routes are provided by the debug endpoints.",
+            resolved.name,
+        )
+        return
 
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)

@@ -93,7 +93,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 discovered_mcp_tools=mcp_tools,
                 discovered_skills=skill_texts,
             )
-            if resolved.trigger is not None and not resolved.is_main:
+            if resolved.trigger is not None:
                 register_agent(app, resolved, capabilities)
             if _debug_enabled(resolved.debug):
                 register_debug_endpoints(app, resolved, capabilities)

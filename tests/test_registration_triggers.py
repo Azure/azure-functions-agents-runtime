@@ -87,13 +87,13 @@ def _stub_handler(*args: Any, **kwargs: Any) -> Any:
     return None
 
 
-def _resolved_agent(*, trigger: TriggerSpec) -> ResolvedAgent:
+def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedAgent:
     return ResolvedAgent(
         name="Daily Report",
         description="desc",
         trigger=trigger,
         instructions="Run the timer workflow.",
-        is_main=False,
+        is_main=is_main,
         debug=DebugConfig(),
         model=None,
         timeout=1.0,
@@ -289,6 +289,82 @@ def test_register_agent_propagates_http_trigger_registration_failures(
         register_agent(app, resolved, AgentCapabilities())
 
 
+def test_register_agent_raises_when_http_trigger_missing_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="http_trigger", args={"methods": ["POST"]})
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    with pytest.raises(ValueError, match="route"):
+        register_agent(app, resolved, AgentCapabilities())
+
+
+def test_register_agent_raises_on_invalid_auth_level(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": "reports", "methods": ["POST"], "auth_level": "adminn"},
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    with pytest.raises(
+        ValueError, match=r"admin, anonymous, function|anonymous, function, admin"
+    ):
+        register_agent(app, resolved, AgentCapabilities())
+
+
+@pytest.mark.parametrize(
+    ("auth_level", "expected"),
+    [
+        ("anonymous", func.AuthLevel.ANONYMOUS),
+        ("function", func.AuthLevel.FUNCTION),
+        ("admin", func.AuthLevel.ADMIN),
+    ],
+)
+def test_register_agent_accepts_valid_auth_levels(
+    monkeypatch: pytest.MonkeyPatch,
+    auth_level: str,
+    expected: func.AuthLevel,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": f"{auth_level}-reports", "auth_level": auth_level},
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    register_agent(app, resolved, AgentCapabilities())
+
+    assert app.trigger_calls == [
+        (
+            "route",
+            {
+                "route": f"{auth_level}-reports",
+                "methods": ["POST"],
+                "auth_level": expected,
+            },
+        )
+    ]
+
+
 def test_register_agent_propagates_connector_trigger_registration_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -355,6 +431,84 @@ def test_register_agent_dispatches_dotted_trigger_types_to_connector_registratio
         )
     ]
     assert builtin_calls == []
+
+
+def test_register_agent_registers_non_http_trigger_on_main_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="timer_trigger", args={"schedule": "0 0 * * * *"}),
+        is_main=True,
+    )
+    app = FakeFunctionApp()
+    capabilities = AgentCapabilities()
+    builtin_calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers._register_builtin_agent",
+        lambda *args: builtin_calls.append(args),
+    )
+
+    register_agent(app, resolved, capabilities)
+
+    assert builtin_calls == [
+        (
+            app,
+            resolved,
+            capabilities,
+            _function_name_from_source(resolved.source_file, resolved.name),
+            {"schedule": "0 0 * * * *"},
+            "timer_trigger",
+        )
+    ]
+
+
+def test_register_agent_skips_http_trigger_on_main_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="http_trigger", args={"route": "reports"}),
+        is_main=True,
+    )
+    app = FakeFunctionApp()
+    http_calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers._register_http_agent",
+        lambda *args: http_calls.append(args),
+    )
+
+    register_agent(app, resolved, AgentCapabilities())
+
+    assert http_calls == []
+    assert app.trigger_calls == []
+
+
+def test_register_agent_registers_connector_trigger_on_main_agent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="teams.foo_trigger", args={"connection": "example"}),
+        is_main=True,
+    )
+    app = FakeFunctionApp()
+    capabilities = AgentCapabilities()
+    connector_calls: list[tuple[Any, ...]] = []
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers._register_connector_agent",
+        lambda *args: connector_calls.append(args),
+    )
+
+    register_agent(app, resolved, capabilities)
+
+    assert connector_calls == [
+        (
+            app,
+            resolved,
+            capabilities,
+            _function_name_from_source(resolved.source_file, resolved.name),
+            {"connection": "example"},
+            "teams.foo_trigger",
+        )
+    ]
 
 
 def test_register_agent_dispatches_prefixed_connector_trigger_types_to_connector_registration(
