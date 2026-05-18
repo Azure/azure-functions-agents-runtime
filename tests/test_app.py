@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import textwrap
 from pathlib import Path
 
@@ -27,7 +28,10 @@ def _function_names(app: func.FunctionApp) -> list[str]:
     return [function.get_function_name() for function in app.get_functions()]
 
 
-def test_create_function_app_auto_suffixes_duplicate_function_names(tmp_path: Path) -> None:
+def test_create_function_app_auto_suffixes_duplicate_function_names(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
     _write_agent(
         tmp_path,
         "daily-report.agent.md",
@@ -53,9 +57,12 @@ def test_create_function_app_auto_suffixes_duplicate_function_names(tmp_path: Pa
         """,
     )
 
-    app = create_function_app(tmp_path)
+    with caplog.at_level(logging.WARNING):
+        app = create_function_app(tmp_path)
 
     assert _function_names(app) == ["daily_report", "daily_report_2"]
+    assert "Function name collision" in caplog.text
+    assert "daily_report.agent.md" in caplog.text
 
 
 def test_create_function_app_raises_on_missing_http_route(tmp_path: Path) -> None:

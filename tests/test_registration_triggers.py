@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 import textwrap
 from pathlib import Path
@@ -190,17 +191,41 @@ def test_function_name_from_source_falls_back_to_display_name(
     assert "missing source_file" in caplog.text
 
 
-def test_allocate_unique_function_name_auto_suffixes_collisions() -> None:
+def test_allocate_unique_function_name_warns_on_collision(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     registered_names = {"daily_report"}
 
-    function_name = allocate_unique_function_name(
-        "daily-report.agent.md",
-        "Daily Report",
-        registered_names,
-    )
+    with caplog.at_level(logging.WARNING):
+        function_name = allocate_unique_function_name(
+            "/path/daily-report.agent.md",
+            "Daily Report",
+            registered_names,
+        )
 
     assert function_name == "daily_report_2"
     assert registered_names == {"daily_report", "daily_report_2"}
+    assert "Function name collision" in caplog.text
+    assert "/path/daily-report.agent.md" in caplog.text
+    assert "'daily_report'" in caplog.text
+    assert "'daily_report_2'" in caplog.text
+
+
+def test_allocate_unique_function_name_no_warning_for_unique_name(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    registered_names: set[str] = set()
+
+    with caplog.at_level(logging.WARNING):
+        function_name = allocate_unique_function_name(
+            "/path/daily-report.agent.md",
+            "Daily Report",
+            registered_names,
+        )
+
+    assert function_name == "daily_report"
+    assert registered_names == {"daily_report"}
+    assert caplog.records == []
 
 
 def test_register_agent_missing_source_file_warns_and_falls_back(
@@ -226,6 +251,7 @@ def test_register_agent_missing_source_file_warns_and_falls_back(
 
 def test_register_agent_auto_suffixes_duplicate_function_names_with_registry(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
     _write_timer_agent(tmp_path, "daily-report.agent.md", "Daily Report Dash")
@@ -238,11 +264,14 @@ def test_register_agent_auto_suffixes_duplicate_function_names_with_registry(
         lambda *args, **kwargs: _stub_handler,
     )
 
-    for resolved in resolved_agents:
-        register_agent(app, resolved, AgentCapabilities(), registered_names=registered_names)
+    with caplog.at_level(logging.WARNING):
+        for resolved in resolved_agents:
+            register_agent(app, resolved, AgentCapabilities(), registered_names=registered_names)
 
     assert app.function_names == ["daily_report", "daily_report_2"]
     assert registered_names == {"daily_report", "daily_report_2"}
+    assert "Function name collision" in caplog.text
+    assert "daily_report.agent.md" in caplog.text
 
 
 def test_register_agent_keeps_literal_trigger_args_when_substitution_disabled(
