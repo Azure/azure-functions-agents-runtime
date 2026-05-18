@@ -1,7 +1,7 @@
 """Debug HTTP/UI/MCP endpoint registration for resolved agents.
 
 Per-app non-main debug route slugs are tracked on the ``FunctionApp`` instance
-via a private ``_afa_debug_slug_names`` mapping. Storing the registry on the app
+via a private ``_afa_debug_slug_names`` set. Storing the registry on the app
 keeps tests isolated without relying on global module state.
 """
 
@@ -20,7 +20,7 @@ from .._logger import logger
 from ..config import ResolvedAgent
 from ..system_tools.connectors.cache import configure_connector_tools
 from ._handlers import build_sandbox_tools_for_session
-from ._naming import _function_name_from_source, _safe_function_name
+from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_debug_slug
 from .capabilities import AgentCapabilities
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
@@ -67,10 +67,10 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _debug_slug_registry(app: func.FunctionApp) -> dict[str, str]:
+def _debug_slug_registry(app: func.FunctionApp) -> set[str]:
     registry = getattr(app, _DEBUG_SLUG_ATTR, None)
     if registry is None:
-        registry = {}
+        registry = set()
         setattr(app, _DEBUG_SLUG_ATTR, registry)
     return registry
 
@@ -82,22 +82,15 @@ def reset_debug_slug_registry(app: func.FunctionApp) -> None:
     ``FunctionApp`` instance.
     """
 
-    setattr(app, _DEBUG_SLUG_ATTR, {})
+    setattr(app, _DEBUG_SLUG_ATTR, set())
 
 
 def _ensure_unique_non_main_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
-    slug = _function_name_from_source(resolved.source_file, resolved.name)
-    registry = _debug_slug_registry(app)
-    existing_source = registry.get(slug)
-    if existing_source is not None:
-        raise ValueError(
-            "Debug slug collision for non-main agents: "
-            f"'{existing_source}' and '{resolved.source_file or resolved.name}' sanitize to the same debug slug '{slug}'. "
-            "Rename one so the sanitized slug is unique (for example, "
-            "'daily-report.agent.md' and 'daily_report.agent.md')."
-        )
-    registry[slug] = str(resolved.source_file or resolved.name)
-    return slug
+    return allocate_unique_debug_slug(
+        resolved.source_file,
+        resolved.name,
+        _debug_slug_registry(app),
+    )
 
 
 def _configure_connector_tools_if_needed(
@@ -364,14 +357,18 @@ def register_debug_endpoints(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
+    slug: str | None = None,
 ) -> None:
     """Register debug chat UI, REST chat, and MCP endpoints for one agent."""
 
     _configure_connector_tools_if_needed(resolved, capabilities)
 
-    slug = _function_name_from_source(resolved.source_file, resolved.name)
+    slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
     if not resolved.is_main and (resolved.debug.chat or resolved.debug.http or resolved.debug.mcp):
-        slug = _ensure_unique_non_main_slug(app, resolved)
+        if slug in _debug_slug_registry(app):
+            slug = _ensure_unique_non_main_slug(app, resolved)
+        else:
+            _debug_slug_registry(app).add(slug)
 
     base_function_name = _safe_function_name(
         ("main" if resolved.is_main else f"agent_{slug}") + "_debug"

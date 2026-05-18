@@ -16,6 +16,7 @@ from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skill_texts
 from .discovery.tools import discover_user_tools
+from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_debug_endpoints
 from .registration.triggers import register_agent
@@ -94,10 +95,23 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_mcp_tools=mcp_tools,
             discovered_skills=skill_texts,
         )
+        allocated_name: str | None = None
+        if not resolved.is_main and (resolved.trigger is not None or _debug_enabled(resolved.debug)):
+            allocated_name = allocate_unique_function_name(
+                resolved.source_file,
+                resolved.name,
+                registered_names,
+            )
         if resolved.trigger is not None:
-            register_agent(app, resolved, capabilities, registered_names=registered_names)
+            register_agent(
+                app,
+                resolved,
+                capabilities,
+                registered_names=registered_names if allocated_name is None else None,
+                function_name=allocated_name,
+            )
         if _debug_enabled(resolved.debug):
-            register_debug_endpoints(app, resolved, capabilities)
+            register_debug_endpoints(app, resolved, capabilities, slug=allocated_name)
 
     if not agent_specs:
         logger.info("No agent files found.")

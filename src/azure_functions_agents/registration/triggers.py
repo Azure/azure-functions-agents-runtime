@@ -184,6 +184,7 @@ def register_agent(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     registered_names: set[str] | None = None,
+    function_name: str | None = None,
 ) -> None:
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
@@ -195,9 +196,10 @@ def register_agent(
 
     trigger_type = resolved.trigger.type.strip()
     trigger_params = dict(resolved.trigger.args or {})
-    if registered_names is None:
+    if function_name is None and registered_names is None:
         function_name = _function_name_from_source(resolved.source_file, resolved.name)
-    else:
+    elif function_name is None:
+        assert registered_names is not None
         function_name = allocate_unique_function_name(
             resolved.source_file,
             resolved.name,

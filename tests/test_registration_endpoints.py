@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -159,7 +160,8 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
     ]
 
 
-def test_register_debug_endpoints_reports_sanitized_slug_collisions(
+def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
+    caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
@@ -168,18 +170,17 @@ def test_register_debug_endpoints_reports_sanitized_slug_collisions(
     source_a.write_text("---\nname: Daily Report Dash\n---\n", encoding="utf-8")
     source_b.write_text("---\nname: Daily Report Underscore\n---\n", encoding="utf-8")
 
-    register_debug_endpoints(
-        app,
-        _resolved_agent(
-            name="Daily Report Dash",
-            is_main=False,
-            debug=DebugConfig(chat=True),
-            source_file=source_a,
-        ),
-        AgentCapabilities(),
-    )
-
-    with pytest.raises(ValueError, match="sanitize to the same debug slug 'daily_report'") as exc_info:
+    with caplog.at_level(logging.WARNING):
+        register_debug_endpoints(
+            app,
+            _resolved_agent(
+                name="Daily Report Dash",
+                is_main=False,
+                debug=DebugConfig(chat=True),
+                source_file=source_a,
+            ),
+            AgentCapabilities(),
+        )
         register_debug_endpoints(
             app,
             _resolved_agent(
@@ -191,7 +192,17 @@ def test_register_debug_endpoints_reports_sanitized_slug_collisions(
             AgentCapabilities(),
         )
 
-    assert "Rename one so the sanitized slug is unique" in str(exc_info.value)
+    assert [route["route"] for route in app.routes] == [
+        "agents/daily_report/",
+        "agents/daily_report/chat",
+        "agents/daily_report/chatstream",
+        "agents/daily_report_2/",
+        "agents/daily_report_2/chat",
+        "agents/daily_report_2/chatstream",
+    ]
+    assert "Debug slug collision" in caplog.text
+    assert "'daily_report.agent.md' would register at '/agents/daily_report/'" in caplog.text
+    assert "Registering at '/agents/daily_report_2/'" in caplog.text
 
 
 def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(

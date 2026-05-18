@@ -944,8 +944,9 @@ For non-main agents, two related identifiers are derived from the source filenam
 
 - **Debug slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `debug.mcp: true`):
   - Uses the same filename sanitization rules.
-  - Does **not** auto-suffix on collision.
-  - Two files that sanitize to the same slug raise a startup `ValueError`, so one of the files must be renamed to keep HTTP routes and MCP tool names unique.
+  - Uses the same collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, append `_2`, `_3`, and so on until the slug is unique.
+  - In practice, the debug slug stays paired with the allocated Azure Function name for the same agent (for example, `daily_report_2` maps to `/agents/daily_report_2/`).
+  - Example: `daily-report.agent.md` → `/agents/daily_report/`; if `daily_report.agent.md` also exists, the second debug slug becomes `/agents/daily_report_2/`.
 
 In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
 
