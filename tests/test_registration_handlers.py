@@ -231,6 +231,29 @@ def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) ->
     assert run_kwargs["sandbox_tools"] == ["sandbox:generated-session"]
 
 
+def test_http_handler_passes_instructions_only_as_system_message(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured["prompt"] = args[0]
+        captured["instructions"] = kwargs["instructions"]
+        return SimpleNamespace(content="plain text", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 200
+    assert captured["instructions"] == "Return JSON"
+    assert "Return JSON" not in captured["prompt"]
+    assert 'HTTP request data:\n```json\n{"hello": "world"}\n```' in captured["prompt"]
+
+
 def test_non_http_handler_generates_fresh_session_id_per_invocation(monkeypatch: Any) -> None:
     sandbox_session_ids: list[str | None] = []
     run_session_ids: list[str | None] = []
@@ -268,6 +291,34 @@ def test_non_http_handler_generates_fresh_session_id_per_invocation(monkeypatch:
 
     assert sandbox_session_ids == ["session-one", "session-two"]
     assert run_session_ids == ["session-one", "session-two"]
+
+
+def test_non_http_handler_passes_instructions_only_as_system_message(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured["prompt"] = args[0]
+        captured["instructions"] = kwargs["instructions"]
+        return SimpleNamespace(
+            content="ok",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_agent_handler(_resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities())
+
+    asyncio.run(handler({"message": "hello"}))
+
+    assert captured["instructions"] == "Return JSON"
+    assert "Return JSON" not in captured["prompt"]
+    assert captured["prompt"] == (
+        'Triggered by: queue_trigger\n\nTrigger data:\n```json\n{"message": "hello"}\n```'
+    )
 
 
 def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:

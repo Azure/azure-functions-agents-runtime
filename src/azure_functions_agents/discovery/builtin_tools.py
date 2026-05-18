@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 import re
 import tempfile
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -11,30 +11,39 @@ from pydantic import BaseModel, Field
 from .._function_tool import FunctionTool, tool
 
 _ALLOWED_READ_DIRS = [
-    os.path.normpath(tempfile.gettempdir()),
+    str(Path(tempfile.gettempdir()).resolve(strict=False)),
 ]
 
 
 def add_allowed_read_dir(path: str) -> None:
-    normalized = os.path.normpath(path)
-    if normalized not in _ALLOWED_READ_DIRS:
-        _ALLOWED_READ_DIRS.append(normalized)
+    resolved = str(Path(path).resolve(strict=False))
+    if resolved not in _ALLOWED_READ_DIRS:
+        _ALLOWED_READ_DIRS.append(resolved)
+
+
+def _resolve_allowed_path(path: str) -> tuple[Path | None, str | None]:
+    requested = Path(path).resolve(strict=False)
+    allowed = any(
+        requested == allowed_path or requested.is_relative_to(allowed_path)
+        for allowed_dir in _ALLOWED_READ_DIRS
+        for allowed_path in [Path(allowed_dir).resolve(strict=False)]
+    )
+    if not allowed:
+        return None, json.dumps({"error": "Access denied: path is not in an allowed directory"})
+    if not requested.is_file():
+        return None, json.dumps({"error": f"File not found: {path}"})
+    return requested, None
 
 
 def _check_access(path: str) -> str | None:
     """Return an error JSON string if the path is not allowed, else None."""
-    requested = os.path.normpath(path)
-    allowed = any(requested.startswith(d + os.sep) or requested == d for d in _ALLOWED_READ_DIRS)
-    if not allowed:
-        return json.dumps({"error": "Access denied: path is not in an allowed directory"})
-    if not os.path.isfile(requested):
-        return json.dumps({"error": f"File not found: {path}"})
-    return None
+    _, err = _resolve_allowed_path(path)
+    return err
 
 
-def _read_lines(path: str) -> list[str]:
+def _read_lines(path: Path) -> list[str]:
     """Read all lines from a file."""
-    with open(os.path.normpath(path), encoding="utf-8", errors="replace") as f:
+    with path.open(encoding="utf-8", errors="replace") as f:
         return f.readlines()
 
 
@@ -63,11 +72,11 @@ class ViewParams(BaseModel):
     schema=ViewParams,
 )
 async def view(params: ViewParams) -> str:
-    err = _check_access(params.path)
+    resolved_path, err = _resolve_allowed_path(params.path)
     if err:
         return err
 
-    lines = _read_lines(params.path)
+    lines = _read_lines(resolved_path)
     total = len(lines)
     start = (params.start_line or 1) - 1
     end = params.end_line or total
@@ -101,11 +110,11 @@ class HeadParams(BaseModel):
     schema=HeadParams,
 )
 async def head(params: HeadParams) -> str:
-    err = _check_access(params.path)
+    resolved_path, err = _resolve_allowed_path(params.path)
     if err:
         return err
 
-    all_lines = _read_lines(params.path)
+    all_lines = _read_lines(resolved_path)
     n = max(1, params.lines or 10)
     return json.dumps(
         {
@@ -133,11 +142,11 @@ class TailParams(BaseModel):
     schema=TailParams,
 )
 async def tail(params: TailParams) -> str:
-    err = _check_access(params.path)
+    resolved_path, err = _resolve_allowed_path(params.path)
     if err:
         return err
 
-    all_lines = _read_lines(params.path)
+    all_lines = _read_lines(resolved_path)
     n = max(1, params.lines or 10)
     selected = all_lines[-n:] if n < len(all_lines) else all_lines
     return json.dumps(
@@ -178,11 +187,11 @@ class GrepParams(BaseModel):
     schema=GrepParams,
 )
 async def grep(params: GrepParams) -> str:
-    err = _check_access(params.path)
+    resolved_path, err = _resolve_allowed_path(params.path)
     if err:
         return err
 
-    lines = _read_lines(params.path)
+    lines = _read_lines(resolved_path)
     flags = re.IGNORECASE if params.ignore_case else 0
     limit = max(1, params.max_results or 50)
 
@@ -239,12 +248,12 @@ class JqParams(BaseModel):
     schema=JqParams,
 )
 async def jq(params: JqParams) -> str:
-    err = _check_access(params.path)
+    resolved_path, err = _resolve_allowed_path(params.path)
     if err:
         return err
 
     try:
-        with open(os.path.normpath(params.path), encoding="utf-8") as f:
+        with resolved_path.open(encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as exc:
         return json.dumps({"error": f"Invalid JSON: {exc}"})

@@ -8,5 +8,5 @@ system_tools:
     - connection_id: $O365_CONNECTION_ID
 
 # Default runtime configuration
-model: gpt-4o
+model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 900

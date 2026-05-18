@@ -10,5 +10,5 @@ mcp:
   - microsoft-learn
 
 # Default runtime configuration
-model: gpt-4o
+model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 900

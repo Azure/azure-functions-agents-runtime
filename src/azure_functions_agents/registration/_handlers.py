@@ -175,18 +175,15 @@ def make_agent_handler(
     # expected type (e.g. ``func.TimerRequest``) and rejects ``Any``. Leaving
     # the parameter unannotated tells the worker to skip that type check, so
     # this single handler can be reused across all non-HTTP trigger types.
-    async def _handler(trigger_data) -> None:  # noqa: ANN001
+    async def _handler(trigger_data) -> None:
         logger.info("Agent '%s' triggered", resolved.name)
 
         try:
             session_id = _new_session_id()
             data_json = serialize_trigger_data(trigger_data)
-            parts: list[str] = []
-            if resolved.instructions:
-                parts.append(resolved.instructions)
-            parts.append(
+            parts: list[str] = [
                 f"Triggered by: {trigger_type}\n\nTrigger data:\n```json\n{data_json}\n```"
-            )
+            ]
             prompt = "\n\n".join(parts)
 
             result = await _run_agent(
@@ -255,8 +252,6 @@ def make_http_agent_handler(
                 return validation_error
 
             parts: list[str] = []
-            if resolved.instructions:
-                parts.append(resolved.instructions)
             parts.extend(_response_format_instructions(resolved))
             parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
             prompt = "\n\n".join(parts)

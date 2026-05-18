@@ -6,5 +6,5 @@ system_tools:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 # Default runtime configuration
-model: gpt-4o
+model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 900

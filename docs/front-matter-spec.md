@@ -152,16 +152,16 @@ Fields are organized into categories based on how they can be used:
 - **Type:** `object`
 - **Typical location:** Agent only
 - **Can override:** N/A (agent-specific only)
-- **Description:** Defines how the agent is invoked. If omitted, defaults to HTTP trigger with default settings.
+- **Description:** Defines how the agent is invoked. Required for all agents except `main.agent.md`. If `main.agent.md` omits `trigger`, it uses the default HTTP trigger settings.
 - **Structure:** `type` field specifies the trigger type, `args` contains type-specific configuration
 - **Important:** Only **one trigger per agent file** is allowed
 
-#### **HTTP Trigger** (default)
+#### **HTTP Trigger**
 ```yaml
 trigger:
   type: http_trigger
   args:
-    route: string          # Optional. Custom route path. Defaults to function name
+    route: string          # Required. URL path for the endpoint
     methods: string[]      # Optional. Array of HTTP methods. Defaults to ["GET", "POST"]
     auth_level: string     # Optional. One of: anonymous, function, admin. Defaults to function
 ```

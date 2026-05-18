@@ -62,22 +62,14 @@ def _register_builtin_agent(
     trigger_params = dict(trigger_params)
     trigger_params["arg_name"] = "trigger_data"
 
-    try:
-        decorated = decorator_fn(**trigger_params)(handler)
-        decorated = app.function_name(name=function_name)(decorated)
-        logger.info(
-            "Registered '%s' (%s) — %s",
-            function_name,
-            trigger_type,
-            resolved.name,
-        )
-    except Exception as exc:
-        logger.error(
-            "Failed to register '%s' (%s): %s",
-            function_name,
-            trigger_type,
-            exc,
-        )
+    decorated = decorator_fn(**trigger_params)(handler)
+    decorated = app.function_name(name=function_name)(decorated)
+    logger.info(
+        "Registered '%s' (%s) — %s",
+        function_name,
+        trigger_type,
+        resolved.name,
+    )
 
 
 def _register_http_agent(
@@ -97,22 +89,19 @@ def _register_http_agent(
     auth_level = AUTH_LEVEL_MAP.get(auth_str, func.AuthLevel.FUNCTION)
     handler = make_http_agent_handler(resolved, capabilities)
 
-    try:
-        decorated = app.route(
-            route=route,
-            methods=methods,
-            auth_level=auth_level,
-        )(handler)
-        decorated = app.function_name(name=function_name)(decorated)
-        logger.info(
-            "Registered HTTP agent '%s' at /%s (%s) — %s",
-            function_name,
-            route,
-            methods,
-            resolved.name,
-        )
-    except Exception as exc:
-        logger.error("Failed to register HTTP agent '%s': %s", function_name, exc)
+    decorated = app.route(
+        route=route,
+        methods=methods,
+        auth_level=auth_level,
+    )(handler)
+    decorated = app.function_name(name=function_name)(decorated)
+    logger.info(
+        "Registered HTTP agent '%s' at /%s (%s) — %s",
+        function_name,
+        route,
+        methods,
+        resolved.name,
+    )
 
 
 def _register_connector_agent(
@@ -165,22 +154,14 @@ def _register_connector_agent(
 
     handler = make_agent_handler(resolved, trigger_type, capabilities)
 
-    try:
-        decorated = decorator_fn(**trigger_params)(handler)
-        decorated = app.function_name(name=function_name)(decorated)
-        logger.info(
-            "Registered '%s' (%s) — %s",
-            function_name,
-            trigger_type,
-            resolved.name,
-        )
-    except Exception as exc:
-        logger.error(
-            "Failed to register '%s' (%s): %s",
-            function_name,
-            trigger_type,
-            exc,
-        )
+    decorated = decorator_fn(**trigger_params)(handler)
+    decorated = app.function_name(name=function_name)(decorated)
+    logger.info(
+        "Registered '%s' (%s) — %s",
+        function_name,
+        trigger_type,
+        resolved.name,
+    )
 
 
 def register_agent(
@@ -213,7 +194,7 @@ def register_agent(
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
         return
 
-    if trigger_type.startswith("connectors."):
+    if "." in trigger_type:
         _register_connector_agent(
             app,
             resolved,
