@@ -523,12 +523,10 @@
 		const defaultBaseUrl = `${location.protocol}//${location.host}`;
 
 		function getApiBasePath() {
-			const path = window.location.pathname.replace(/\/+$/, "");
-			const match = path.match(/^(\/agents\/[^/]+)$/);
-			if (match) {
-				return match[1];
-			}
-			return "/agent";
+			// Match /agents/{slug} anywhere in the path so routing works under
+			// arbitrary prefixes (Azure Functions default 'api' prefix, reverse proxies, etc.).
+			const match = window.location.pathname.match(/\/agents\/([^/]+)\/?$/);
+			return match ? `/agents/${match[1]}` : "/agent";
 		}
 
 		const state = {

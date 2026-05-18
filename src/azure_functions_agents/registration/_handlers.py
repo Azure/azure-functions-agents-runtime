@@ -10,7 +10,7 @@ from importlib import import_module
 from typing import Any, cast
 
 import azure.functions as func
-import jsonschema
+import jsonschema  # type: ignore[import-untyped]
 from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger

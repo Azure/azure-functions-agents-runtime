@@ -8,6 +8,8 @@ from typing import Any, TypeVar, overload
 from agent_framework import FunctionTool
 from pydantic import BaseModel
 
+__all__ = ["FunctionTool", "tool"]
+
 SchemaT = TypeVar("SchemaT", bound=BaseModel)
 
 

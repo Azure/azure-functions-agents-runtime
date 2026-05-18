@@ -180,7 +180,7 @@ async def _build_agent_session_history(
     """
     # Imported here so a missing optional dependency surfaces only when actually
     # needed (e.g. tests that don't run the runtime path).
-    from agent_framework import (  # type: ignore[attr-defined]  # MAF re-exports these runtime classes dynamically.
+    from agent_framework import (
         Agent,
         AgentSession,
         FileHistoryProvider,

@@ -6,11 +6,13 @@ import os
 import re
 from typing import Any
 
-_PERCENT_PATTERN = re.compile(r"^%([^%]+)%$")
-_DOLLAR_PATTERN = re.compile(r"^\$([A-Za-z_][A-Za-z0-9_]*)$")
+_VAR_NAME_FRAGMENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
-_INLINE_DOLLAR_PATTERN = re.compile(r"\$([A-Za-z_][A-Za-z0-9_]*)")
-_INLINE_PERCENT_PATTERN = re.compile(r"%([A-Za-z_][A-Za-z0-9_]*)%")
+_PERCENT_PATTERN = re.compile(rf"^%({_VAR_NAME_FRAGMENT})%$")
+_DOLLAR_PATTERN = re.compile(rf"^\$({_VAR_NAME_FRAGMENT})$")
+
+_INLINE_DOLLAR_PATTERN = re.compile(rf"\$({_VAR_NAME_FRAGMENT})")
+_INLINE_PERCENT_PATTERN = re.compile(rf"%({_VAR_NAME_FRAGMENT})%")
 
 
 def resolve_env_var(value: str) -> str:

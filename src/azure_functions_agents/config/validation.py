@@ -96,7 +96,7 @@ def validate_resolved_agent(
                 source_file,
                 "trigger",
                 "Required for non-main agents.",
-                "docs/front-matter-spec.md#trigger",
+                "#trigger",
             )
         )
 
@@ -111,7 +111,7 @@ def validate_resolved_agent(
                     source_file,
                     "mcp.exclude",
                     f"Unknown MCP server reference `{name}`.",
-                    "docs/front-matter-spec.md#mcp",
+                    "#mcp",
                 )
             )
 

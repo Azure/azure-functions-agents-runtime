@@ -92,8 +92,9 @@ def _ensure_unique_non_main_slug(app: func.FunctionApp, resolved: ResolvedAgent)
     if existing_source is not None:
         raise ValueError(
             "Debug slug collision for non-main agents: "
-            f"'{existing_source}' and '{resolved.source_file or resolved.name}' both map to '{slug}'. "
-            "This likely means two .agent.md files share the same filename stem."
+            f"'{existing_source}' and '{resolved.source_file or resolved.name}' sanitize to the same debug slug '{slug}'. "
+            "Rename one so the sanitized slug is unique (for example, "
+            "'daily-report.agent.md' and 'daily_report.agent.md')."
         )
     registry[slug] = str(resolved.source_file or resolved.name)
     return slug

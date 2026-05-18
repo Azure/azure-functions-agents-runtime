@@ -23,6 +23,20 @@ def test_resolve_env_var_percent(monkeypatch: pytest.MonkeyPatch) -> None:
     assert resolve_env_var("%FOO%") == "%FOO%"
 
 
+def test_full_string_percent_rejects_invalid_var_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("1 BAD-NAME", "value")
+    assert resolve_env_var("%1 BAD-NAME%") == "%1 BAD-NAME%"
+
+
+def test_full_string_percent_accepts_valid_var_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOO", "bar")
+    assert resolve_env_var("%FOO%") == "bar"
+
+
 def test_resolve_env_var_plain() -> None:
     assert resolve_env_var("plain") == "plain"
 

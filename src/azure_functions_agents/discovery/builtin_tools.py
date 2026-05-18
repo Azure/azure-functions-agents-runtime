@@ -21,7 +21,7 @@ def add_allowed_read_dir(path: str) -> None:
         _ALLOWED_READ_DIRS.append(resolved)
 
 
-def _resolve_allowed_path(path: str) -> tuple[Path | None, str | None]:
+def _resolve_allowed_path(path: str) -> Path:
     requested = Path(path).resolve(strict=False)
     allowed = any(
         requested == allowed_path or requested.is_relative_to(allowed_path)
@@ -29,16 +29,19 @@ def _resolve_allowed_path(path: str) -> tuple[Path | None, str | None]:
         for allowed_path in [Path(allowed_dir).resolve(strict=False)]
     )
     if not allowed:
-        return None, json.dumps({"error": "Access denied: path is not in an allowed directory"})
+        raise PermissionError("Access denied: path is not in an allowed directory")
     if not requested.is_file():
-        return None, json.dumps({"error": f"File not found: {path}"})
-    return requested, None
+        raise FileNotFoundError(f"File not found: {path}")
+    return requested
 
 
 def _check_access(path: str) -> str | None:
     """Return an error JSON string if the path is not allowed, else None."""
-    _, err = _resolve_allowed_path(path)
-    return err
+    try:
+        _resolve_allowed_path(path)
+    except (FileNotFoundError, PermissionError) as exc:
+        return json.dumps({"error": str(exc)})
+    return None
 
 
 def _read_lines(path: Path) -> list[str]:
@@ -72,9 +75,10 @@ class ViewParams(BaseModel):
     schema=ViewParams,
 )
 async def view(params: ViewParams) -> str:
-    resolved_path, err = _resolve_allowed_path(params.path)
-    if err:
-        return err
+    try:
+        resolved_path = _resolve_allowed_path(params.path)
+    except (FileNotFoundError, PermissionError) as exc:
+        return json.dumps({"error": str(exc)})
 
     lines = _read_lines(resolved_path)
     total = len(lines)
@@ -110,9 +114,10 @@ class HeadParams(BaseModel):
     schema=HeadParams,
 )
 async def head(params: HeadParams) -> str:
-    resolved_path, err = _resolve_allowed_path(params.path)
-    if err:
-        return err
+    try:
+        resolved_path = _resolve_allowed_path(params.path)
+    except (FileNotFoundError, PermissionError) as exc:
+        return json.dumps({"error": str(exc)})
 
     all_lines = _read_lines(resolved_path)
     n = max(1, params.lines or 10)
@@ -142,9 +147,10 @@ class TailParams(BaseModel):
     schema=TailParams,
 )
 async def tail(params: TailParams) -> str:
-    resolved_path, err = _resolve_allowed_path(params.path)
-    if err:
-        return err
+    try:
+        resolved_path = _resolve_allowed_path(params.path)
+    except (FileNotFoundError, PermissionError) as exc:
+        return json.dumps({"error": str(exc)})
 
     all_lines = _read_lines(resolved_path)
     n = max(1, params.lines or 10)
@@ -187,9 +193,10 @@ class GrepParams(BaseModel):
     schema=GrepParams,
 )
 async def grep(params: GrepParams) -> str:
-    resolved_path, err = _resolve_allowed_path(params.path)
-    if err:
-        return err
+    try:
+        resolved_path = _resolve_allowed_path(params.path)
+    except (FileNotFoundError, PermissionError) as exc:
+        return json.dumps({"error": str(exc)})
 
     lines = _read_lines(resolved_path)
     flags = re.IGNORECASE if params.ignore_case else 0
@@ -248,9 +255,10 @@ class JqParams(BaseModel):
     schema=JqParams,
 )
 async def jq(params: JqParams) -> str:
-    resolved_path, err = _resolve_allowed_path(params.path)
-    if err:
-        return err
+    try:
+        resolved_path = _resolve_allowed_path(params.path)
+    except (FileNotFoundError, PermissionError) as exc:
+        return json.dumps({"error": str(exc)})
 
     try:
         with resolved_path.open(encoding="utf-8") as f:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import frontmatter
 import yaml  # type: ignore[import-untyped]  # PyYAML does not ship inline typing here.
@@ -34,12 +34,12 @@ def _resolve_strings(value: Any) -> Any:
 
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
-    return _resolve_strings(normalized)
+    return cast(dict[str, Any], _resolve_strings(normalized))
 
 
 def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(metadata)
-    return _resolve_strings(normalized)
+    return cast(dict[str, Any], _resolve_strings(normalized))
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:

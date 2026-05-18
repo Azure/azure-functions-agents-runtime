@@ -123,8 +123,12 @@ def test_validate_resolved_agent_requires_trigger_for_non_main(
         metadata={},
         source_file=str(source),
     )
-    with pytest.raises(ValueError, match=r"trigger"):
+    with pytest.raises(ValueError) as exc_info:
         validate_resolved_agent(resolved, all_global_mcp=[], discovered_skills=[])
+    message = str(exc_info.value)
+    assert "field `trigger`" in message
+    assert message.count("docs/front-matter-spec.md#trigger") == 1
+    assert "docs/front-matter-spec.mddocs/front-matter-spec.md#trigger" not in message
 
 
 def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
@@ -151,8 +155,12 @@ def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
         metadata={},
         source_file=str(source),
     )
-    with pytest.raises(ValueError, match=r"mcp\.exclude"):
+    with pytest.raises(ValueError) as exc_info:
         validate_resolved_agent(resolved, all_global_mcp=["known"], discovered_skills=[])
+    message = str(exc_info.value)
+    assert "field `mcp.exclude`" in message
+    assert message.count("docs/front-matter-spec.md#mcp") == 1
+    assert "docs/front-matter-spec.mddocs/front-matter-spec.md#mcp" not in message
 
 
 def test_validate_global_mcp_references_no_missing_is_silent() -> None:

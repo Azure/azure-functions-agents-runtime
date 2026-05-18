@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import azure.functions as func
+import pytest
 
 from azure_functions_agents.config.schema import DebugConfig, ResolvedAgent, ToolsFilter
 from azure_functions_agents.registration.capabilities import AgentCapabilities
@@ -108,8 +109,12 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
 
     assert response.status_code == 200
     html = _response_text(response)
-    assert 'path.match(/^(\\/agents\\/[^/]+)$/)' in html
-    assert 'return "/agent";' in html
+    # Confirm the chat UI uses the prefix-tolerant regex so non-main pages also
+    # work when served behind Azure Functions' default `api` route prefix or
+    # any reverse-proxy prefix (matches the trailing `/agents/{slug}` segment).
+    assert r'pathname.match(/\/agents\/([^/]+)\/?$/)' in html
+    # Fallback when no /agents/{slug} segment matches (e.g., main agent page).
+    assert ': "/agent";' in html
 
 
 def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names(
@@ -150,6 +155,41 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
         "agents/daily_report_b/chat",
         "agents/daily_report_b/chatstream",
     ]
+
+
+def test_register_debug_endpoints_reports_sanitized_slug_collisions(
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    source_a = tmp_path / "daily-report.agent.md"
+    source_b = tmp_path / "daily_report.agent.md"
+    source_a.write_text("---\nname: Daily Report Dash\n---\n", encoding="utf-8")
+    source_b.write_text("---\nname: Daily Report Underscore\n---\n", encoding="utf-8")
+
+    register_debug_endpoints(
+        app,
+        _resolved_agent(
+            name="Daily Report Dash",
+            is_main=False,
+            debug=DebugConfig(chat=True),
+            source_file=source_a,
+        ),
+        AgentCapabilities(),
+    )
+
+    with pytest.raises(ValueError, match="sanitize to the same debug slug 'daily_report'") as exc_info:
+        register_debug_endpoints(
+            app,
+            _resolved_agent(
+                name="Daily Report Underscore",
+                is_main=False,
+                debug=DebugConfig(chat=True),
+                source_file=source_b,
+            ),
+            AgentCapabilities(),
+        )
+
+    assert "Rename one so the sanitized slug is unique" in str(exc_info.value)
 
 
 def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
