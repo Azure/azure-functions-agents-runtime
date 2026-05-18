@@ -8,18 +8,18 @@
 
 ```mermaid
 flowchart LR
-    A["Agent project inputs<br/>*.agent.md<br/>agents.config.yaml<br/>mcp.json<br/>skills/<br/>tools/"] -->|Path --> get_app_root()| B["config/paths.py"]
-    B -->|app_root: Path| C["config/loader.py<br/>load_global_config()<br/>load_agent_specs()"]
-    A -->|Path --> discover_*()| D["discovery/*<br/>skills + tools + MCP"]
-    C -->|GlobalConfig + list[AgentSpec]| E["config/merge.py<br/>compose()"]
-    D -->|discovered inventories| E
-    E -->|ResolvedAgent| F["config/validation.py<br/>validate_resolved_agent()"]
-    F -->|ResolvedAgent| G["registration/capabilities.py<br/>build_capabilities()"]
-    G -->|AgentCapabilities| H["registration/triggers.py<br/>registration/endpoints.py"]
-    H -->|Decorators applied| I["azure.functions.FunctionApp"]
-    J["client_manager.py<br/>ClientManager"] -.->|chat client| K["runner.py<br/>run_agent()<br/>run_agent_stream()"]
-    H -.->|handler closures + ResolvedAgent + AgentCapabilities| K
-    K -.->|prompt + tools + session| L["Microsoft Agent Framework"]
+    A["Agent project inputs<br/>*.agent.md<br/>agents.config.yaml<br/>mcp.json<br/>skills/<br/>tools/"] -->|"Path"| B["config/paths.py"]
+    B -->|"app_root: Path"| C["config/loader.py<br/>load_global_config<br/>load_agent_specs"]
+    A -->|"Path"| D["discovery/*<br/>skills + tools + MCP"]
+    C -->|"GlobalConfig + list of AgentSpec"| E["config/merge.py<br/>compose"]
+    D -->|"discovered inventories"| E
+    E -->|"ResolvedAgent"| F["config/validation.py<br/>validate_resolved_agent"]
+    F -->|"ResolvedAgent"| G["registration/capabilities.py<br/>build_capabilities"]
+    G -->|"AgentCapabilities"| H["registration/triggers.py<br/>registration/endpoints.py"]
+    H -->|"Decorators applied"| I["azure.functions.FunctionApp"]
+    J["client_manager.py<br/>ClientManager"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream"]
+    H -.->|"handler closures + ResolvedAgent + AgentCapabilities"| K
+    K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
 ```
 
 Read left to right: files on disk become typed config, typed config becomes a `ResolvedAgent`, and each resolved agent is registered as Azure Functions bindings plus optional debug endpoints.
