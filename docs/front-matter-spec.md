@@ -931,31 +931,23 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 
 ### Function name resolution
 
-For non-main agents, the registered Azure Function name is derived from the **source filename**, not from the frontmatter `name:` field:
+For non-main agents, two related identifiers are derived from the source filename. The frontmatter `name:` field remains display-only and is never used for either identifier.
 
-1. Start with the agent filename
-2. Remove the `.agent.md` suffix
-3. Sanitize the remaining base name for Azure Functions registration
+- **Azure Function name** (used for host indexing and `admin/functions/{name}` URLs):
+  - Start with the agent filename stem (remove `.agent.md`).
+  - Sanitize it for Azure Functions registration:
+    - Replace characters outside `[A-Za-z0-9_]` with `_`
+    - Trim leading/trailing underscores
+    - Prefix `fn_` if the result would otherwise start with a digit
+  - If another agent in the same `create_function_app()` call already uses that sanitized name, append `_2`, `_3`, and so on until the name is unique.
+  - Example: `daily-report.agent.md` → `daily_report`; if `daily_report.agent.md` also exists, the second Azure Function name becomes `daily_report_2`.
 
-The sanitizer:
-- Replaces characters outside `[A-Za-z0-9_]` with `_`
-- Trims leading/trailing underscores
-- Prefixes `fn_` if the result would otherwise start with a digit
+- **Debug slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `debug.mcp: true`):
+  - Uses the same filename sanitization rules.
+  - Does **not** auto-suffix on collision.
+  - Two files that sanitize to the same slug raise a startup `ValueError`, so one of the files must be renamed to keep HTTP routes and MCP tool names unique.
 
-Examples:
-- `main.agent.md` → `main`
-- `daily_azure_report.agent.md` → `daily_azure_report`
-- `daily-report.agent.md` → `daily_report`
-
-The frontmatter `name:` field remains display-only. It is used for chat UI titles, descriptions, and logs, but it does **not** affect any registered Azure Function identifier, debug route slug, or MCP tool identifier.
-
-The same filename-based sanitized value is also used as the non-main debug slug for:
-- `GET /agents/{slug}/`
-- `POST /agents/{slug}/chat`
-- `POST /agents/{slug}/chatstream`
-- The MCP tool name exposed when `debug.mcp: true`
-
-In other words, the display `name:` field is never used to derive routes or runtime identifiers; it is presentation-only. See also [`name`](#name).
+In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
 
 **Main agent behavior:**
 The `main.agent.md` file is special:

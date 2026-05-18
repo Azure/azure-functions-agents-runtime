@@ -59,7 +59,7 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
    az functionapp keys list -g <resource-group> -n <function-app-name> --query "masterKey" -o tsv
 
    # Trigger the function
-   curl -X POST "https://<function-app-name>.azurewebsites.net/admin/functions/daily_tech_news_agent" \
+   curl -X POST "https://<function-app-name>.azurewebsites.net/admin/functions/daily_tech_news" \
      -H "x-functions-key: <master-key>" \
      -H "Content-Type: application/json" \
      -d '{}'
@@ -97,7 +97,7 @@ Since this is timer-triggered, you can manually invoke it:
 ```bash
 # In a new terminal, get the function host's endpoint
 # Timer functions are triggered via HTTP admin endpoint
-curl -X POST http://localhost:7071/admin/functions/daily_tech_news_agent \
+curl -X POST http://localhost:7071/admin/functions/daily_tech_news \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -105,7 +105,7 @@ curl -X POST http://localhost:7071/admin/functions/daily_tech_news_agent \
 **PowerShell:**
 
 ```powershell
-Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_tech_news_agent" `
+Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_tech_news" `
   -Method POST `
   -ContentType "application/json" `
   -Body '{}'

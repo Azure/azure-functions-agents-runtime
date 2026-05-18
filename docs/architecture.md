@@ -47,7 +47,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json` / `.vscode/mcp.json` and translates server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
 | `azure_functions_agents/discovery/builtin_tools.py` | Provides built-in file-reading/search tools behind an allow-list and path-containment checks. | `BUILTIN_TOOLS`, `add_allowed_read_dir()` |
 | `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory. | `AgentCapabilities`, `build_capabilities()` |
-| `azure_functions_agents/registration/_naming.py` | Derives Azure-safe function names and debug slugs from `.agent.md` filenames. | `_safe_function_name()`, `_function_name_from_source()` |
+| `azure_functions_agents/registration/_naming.py` | Derives Azure-safe function names and debug slugs from `.agent.md` filenames; allocates unique function names via `allocate_unique_function_name()` when sanitized stems collide. | `_safe_function_name()`, `_function_name_from_source()` |
 | `azure_functions_agents/registration/_handlers.py` | Builds the callable closures that turn incoming trigger data or HTTP bodies into runner prompts. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()` |
 | `azure_functions_agents/registration/triggers.py` | Registers each non-main agent trigger, dispatching between built-in, HTTP, and connector trigger paths. | `register_agent()` |
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP endpoints for agents with debug exposure. | `register_debug_endpoints()` |
@@ -137,7 +137,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/registration/triggers.py:register_agent()`, `src/azure_functions_agents/registration/endpoints.py:register_debug_endpoints()`, `src/azure_functions_agents/registration/_handlers.py`
    - **Input:** `FunctionApp`, `ResolvedAgent`, `AgentCapabilities`
    - **Output:** the same `FunctionApp`, now decorated with trigger bindings, HTTP routes, SSE streaming routes, and/or MCP endpoints
-   - **Notes:** non-main agents go through `register_agent()` when they have a `trigger`. Any agent with debug exposure enabled also goes through `register_debug_endpoints()`, which can add chat UI, `/chat`, `/chatstream`, and MCP surfaces.
+   - **Notes:** non-main agents go through `register_agent()` when they have a `trigger`. Any agent with debug exposure enabled also goes through `register_debug_endpoints()`, which can add chat UI, `/chat`, `/chatstream`, and MCP surfaces. During this step, `create_function_app()` threads a shared `registered_names` set into `register_agent()` so duplicate sanitized function-name stems are auto-suffixed instead of colliding during Azure Functions host indexing.
 
 ### Where the registration stage hands off to execution
 
@@ -146,9 +146,9 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 ### Registration paths in practice
 
 - **Main agent with debug enabled:** `create_function_app()` skips `register_agent()` because `main.agent.md` has no normal trigger, but `register_debug_endpoints()` exposes the chat UI, REST, SSE, and MCP surfaces for interactive use.
-- **Non-main HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which validates JSON input and optionally validates the model's JSON-shaped response before replying.
-- **Non-main built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which serializes the trigger payload to JSON, turns it into a prompt, and sends it to `runner.run_agent()`.
-- **Connector trigger:** `registration/triggers.py` resolves the dotted connector decorator dynamically and then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path.
+- **Non-main HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which validates JSON input and optionally validates the model's JSON-shaped response before replying. Before the decorator is applied, `create_function_app()` and `register_agent()` coordinate through a shared `registered_names` set so duplicate sanitized stems become `name`, `name_2`, `name_3`, and so on.
+- **Non-main built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which serializes the trigger payload to JSON, turns it into a prompt, and sends it to `runner.run_agent()`. The same shared `registered_names` tracking means host-level Azure Function names auto-suffix on collision rather than failing registration.
+- **Connector trigger:** `registration/triggers.py` resolves the dotted connector decorator dynamically and then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path. Connector-backed agents participate in the same per-app `registered_names` allocation flow.
 
 ### Where connector and sandbox tools enter
 
