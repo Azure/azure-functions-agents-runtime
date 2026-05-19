@@ -43,7 +43,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `model`, `timeout`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `version`, `mcp`, `system_tools`, `model`, `timeout`, `tools` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -57,6 +57,7 @@ Optional file in the root directory that defines infrastructure and capabilities
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
+- `version` — Optional string identifying the configuration schema/version (e.g., `"1.0"`). Used for tracking changes to the global config over time. Not validated against any specific value; treat it as informational metadata.
 - `mcp` — Array of MCP server names (servers must be defined in `mcp.json`)
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
