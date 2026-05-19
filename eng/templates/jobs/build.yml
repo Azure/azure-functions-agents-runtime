@@ -1,0 +1,32 @@
+jobs:
+  - job: "Build"
+    displayName: 'Build Azure Functions Agent Runtime'
+
+    pool:
+      name: 1es-pool-azfunc-public
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    strategy:
+      matrix:
+        Python313:
+          PYTHON_VERSION: '3.13'
+        Python314:
+          PYTHON_VERSION: '3.14'
+
+    steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: $(PYTHON_VERSION)
+      - bash: |
+          python --version
+        displayName: 'Check python version'
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: 'public/PythonSDK_PublicPackages'
+      - bash: |
+          python -m pip install -U pip
+          python -m pip install build
+          python -m build
+        displayName: 'Build Azure Functions Agent Runtime for $(PYTHON_VERSION)'
