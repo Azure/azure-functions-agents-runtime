@@ -1,2 +1,2 @@
-azurefunctions-agents-runtime[connectors]
+-e ../../..[connectors]
 jmespath

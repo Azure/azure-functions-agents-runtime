@@ -162,6 +162,8 @@ Your agent is now running at `http://localhost:7071/` with a built-in chat UI, H
 
 ## Features
 
+**Architecture overview:** see [`docs/architecture.md`](docs/architecture.md) for the module map and data flow pipeline.
+
 ### `main.agent.md`
 
 Define an agent with a markdown file. When `main.agent.md` is present, the runtime automatically registers:
@@ -170,6 +172,8 @@ Define an agent with a markdown file. When `main.agent.md` is present, the runti
 - **HTTP APIs** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
 - **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
 - **Session persistence** — multi-turn conversations stored on Azure Files via MAF's `FileHistoryProvider`
+
+Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug.chat: true` (or `debug: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 ### Event-driven agents (`<name>.agent.md`)
 
@@ -206,10 +210,11 @@ system_tools:
 # For triggered agents only (not `main.agent.md`):
 trigger:
   type: timer_trigger      # or queue_trigger, teams.new_channel_message_trigger, etc.
-  schedule: "0 0 9 * * *"  # trigger-specific params passed as kwargs
+  args:
+    schedule: "0 0 9 * * *"  # trigger-specific params passed as kwargs
 
 logger: true               # optional, default true
-substitute_variables: true # optional, default true — inline $VAR / %VAR% replacement in body
+substitute_variables: true # optional, default true — env-var replacement in frontmatter + body
 
 # For HTTP-triggered agents: expected response format
 response_example: |        # optional — agent returns structured JSON matching this example
@@ -227,7 +232,7 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`main.agent.md`** — creates HTTP chat, MCP, and UI endpoints. No other triggers are supported in this file.
-- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. The filename (minus `.agent.md`) becomes the function name.
+- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. With `debug.chat: true` (or `debug: true`), it also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`. The sanitized filename stem becomes the base Azure Function name. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the non-main debug slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#debug`](docs/front-matter-spec.md#debug).
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -262,9 +267,10 @@ HTTP-triggered agents expose REST API endpoints that accept JSON input and retur
 name: Summarize
 trigger:
   type: http_trigger
-  route: summarize
-  methods: ["POST"]
-  auth_level: FUNCTION     # ANONYMOUS | FUNCTION | ADMIN (default: FUNCTION)
+  args:
+    route: summarize
+    methods: ["POST"]
+    auth_level: FUNCTION     # ANONYMOUS | FUNCTION | ADMIN (default: FUNCTION)
 response_example: |
   {
     "summary": "A brief summary of the content",
@@ -282,9 +288,7 @@ The agent receives the HTTP request body as input and is instructed to return JS
 
 ### Environment variable substitution
 
-#### Frontmatter values
-
-String values in `trigger.*` (except `type`), `system_tools.tools_from_connections[].connection_id`, and `system_tools.execute_in_sessions.session_pool_management_endpoint` support `$VAR` or `%VAR%` syntax (full-string match only).
+`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders in every string value in `agents.config.yaml`, every string value in agent frontmatter, and inline in the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
 
 #### Agent instructions (markdown body)
 
@@ -308,7 +312,7 @@ If a referenced variable is not set, the original `$VAR_NAME` or `%VAR_NAME%` te
 
 Text inside fenced code blocks (`` ``` ``) is **not** substituted, so documentation examples in your instructions are preserved.
 
-To disable substitution for an agent, set `substitute_variables: false` in the frontmatter:
+To disable both frontmatter and body substitution for an agent, set `substitute_variables: false` in the frontmatter:
 
 ```yaml
 ---
@@ -318,6 +322,8 @@ substitute_variables: false
 
 Instructions with literal $VAR references that should not be replaced.
 ```
+
+> **Note**: `substitute_variables` itself is read before env-var substitution. It must be a literal boolean (`true` or `false`). Setting `substitute_variables: $MY_FLAG` will not be resolved and defaults to `true`.
 
 ## Custom Python tools
 
@@ -341,16 +347,18 @@ When a `main.agent.md` file exists in your app root, the runtime automatically r
 
 ### Chat UI
 
-A built-in single-page chat interface served at the app root (`/`). No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed.
+A built-in single-page chat interface served at `/` for the main agent, and at `/agents/{slug}/` for any non-main agent with `debug.chat: true` (or `debug: true`). For non-main agents, `{slug}` comes from the `.agent.md` filename after sanitization, not from the display `name:` field. No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
 ### HTTP Chat API
 
-Two POST endpoints for programmatic access:
+POST endpoints for programmatic access:
 
-- **`POST /agent/chat`** — JSON request/response. Returns `session_id`, `response`, and `tool_calls`.
-- **`POST /agent/chatstream`** — streaming Server-Sent Events (SSE). Events include `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error`.
+- **Main agent:** `POST /agent/chat` and `POST /agent/chatstream`
+- **Non-main agent with `debug.chat: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream` (`{slug}` comes from the `.agent.md` filename after sanitization)
+
+The JSON endpoint returns `session_id`, `response`, and `tool_calls`. The streaming endpoint uses Server-Sent Events (SSE) with `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error` events.
 
 Pass `x-ms-session-id` header to continue a conversation across requests. If omitted, a new session is created automatically.
 
@@ -360,7 +368,7 @@ An MCP-compatible endpoint at `/runtime/webhooks/mcp` that any MCP client (VS Co
 
 ### Without `main.agent.md`
 
-If there's no `main.agent.md`, the HTTP chat, MCP, and UI endpoints are all disabled. The app only runs triggered functions.
+If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and `/runtime/webhooks/mcp` endpoint are disabled. The app still runs triggered functions, and non-main agents can still opt into per-agent chat surfaces with `debug.chat: true` (or `debug: true`). See [`docs/front-matter-spec.md#debug`](docs/front-matter-spec.md#debug).
 
 ## MCP Server Configuration
 

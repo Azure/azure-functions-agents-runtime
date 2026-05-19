@@ -1,12 +1,12 @@
 # Global configuration for all agents in this function app
 
 # Shared infrastructure
-execution_sandbox:
-  session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-
-tools_from_connections:
-  - connection_id: $O365_CONNECTION_ID
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  tools_from_connections:
+    - connection_id: $O365_CONNECTION_ID
 
 # Default runtime configuration
-model: gpt-4o
+model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 900

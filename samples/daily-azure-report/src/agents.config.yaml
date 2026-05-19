@@ -1,13 +1,14 @@
 # Global configuration for all agents in this function app
 
 # Shared infrastructure - Email capabilities via Office 365 connector
-tools_from_connections:
-  - connection_id: $O365_CONNECTION_ID
+system_tools:
+  tools_from_connections:
+    - connection_id: $O365_CONNECTION_ID
 
 # Available MCP servers (defined in mcp.json)
 mcp:
   - microsoft-learn
 
 # Default runtime configuration
-model: gpt-4o
+model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 900

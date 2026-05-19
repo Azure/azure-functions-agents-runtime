@@ -8,8 +8,8 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 ## Features
 
-- **Timer trigger** — `daily_azure_report_agent` runs daily at 15:00 UTC, emails a report of resources created or changed in the last 24 hours
-- **HTTP trigger** — `resource_summary_agent` at `POST /resource-summary` returns a structured JSON summary of all resources by type and location
+- **Timer trigger** — `daily_azure_report` runs daily at 15:00 UTC, emails a report of resources created or changed in the last 24 hours
+- **HTTP trigger** — `resource_summary` at `POST /resource-summary` returns a structured JSON summary of all resources by type and location
 - **Custom `azure_rest` tool** — makes authenticated ARM REST API calls using the function app's managed identity, with JMESPath query support
 - **Office 365 connector** — sends the report via email
 - **Microsoft Learn MCP server** — gives the agent access to Azure documentation for looking up correct API paths and versions
@@ -65,7 +65,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    az functionapp keys list -g <resource-group> -n <function-app-name> --query "masterKey" -o tsv
 
    # Trigger the function
-   curl -X POST "https://<function-app-name>.azurewebsites.net/admin/functions/daily_azure_report_agent" \
+   curl -X POST "https://<function-app-name>.azurewebsites.net/admin/functions/daily_azure_report" \
      -H "x-functions-key: <master-key>" \
      -H "Content-Type: application/json" \
      -d '{}'
@@ -105,7 +105,7 @@ Without `O365_CONNECTION_ID`:
 **Bash:**
 
 ```bash
-curl -X POST http://localhost:7071/admin/functions/daily_azure_report_agent \
+curl -X POST http://localhost:7071/admin/functions/daily_azure_report \
   -H "Content-Type: application/json" \
   -d '{}'
 ```
@@ -113,7 +113,7 @@ curl -X POST http://localhost:7071/admin/functions/daily_azure_report_agent \
 **PowerShell:**
 
 ```powershell
-Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_azure_report_agent" `
+Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_azure_report" `
   -Method POST `
   -ContentType "application/json" `
   -Body '{}'
