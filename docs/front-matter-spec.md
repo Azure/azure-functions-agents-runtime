@@ -18,18 +18,18 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - System tools (`system_tools`)
   - Code execution sandbox configuration
   - Connector tools
-- Default runtime settings (model, timeout)
+- Default runtime settings (`agent-configuration`, plus legacy `model`/`timeout` shorthands)
 
 **Agent front matter:**
 - **Inherits all auto-discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
-- Can **override** runtime settings (model, timeout)
+- Can **override** runtime settings (endpoint, model, temperature, timeout)
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
 ### Configuration Precedence
 
-For runtime settings (model, timeout):
+For runtime settings (provider, endpoint, model, temperature, timeout):
 1. **Agent front matter** — Explicit overrides in `.agent.md` files
 2. **Global configuration** — Values in `agents.config.yaml`
 3. **Environment variables** — App settings and env vars
@@ -43,8 +43,8 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `model`, `timeout`, `tools` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `agent-configuration`, `endpoint`, `model`, `temperature`, `timeout`, `tools` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `agent-configuration`, `endpoint`, `model`, `temperature`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -61,7 +61,10 @@ Optional file in the root directory that defines infrastructure and capabilities
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
   - `tools_from_connections` — Array of connector configurations
+- `agent-configuration` — Object specifying provider-agnostic runtime defaults (`provider`, `endpoint`, `model`, `temperature`, `timeout`)
+- `endpoint` — String specifying default provider endpoint (legacy shorthand; prefer `agent-configuration.endpoint`)
 - `model` — String specifying default LLM model identifier
+- `temperature` — Number specifying default model temperature
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
 
@@ -79,7 +82,10 @@ YAML front matter at the top of each agent file.
 
 **Optional properties:**
 - `debug` — Object or boolean for enabling debugging/testing endpoints
+- `agent-configuration` — Object to override provider-agnostic runtime settings
+- `endpoint` — String to override global provider endpoint (legacy shorthand; prefer `agent-configuration.endpoint`)
 - `model` — String to override global default model
+- `temperature` — Number to override global default model temperature
 - `timeout` — Number to override global default timeout
 - `system_tools` — Object to opt out of system tools
 - `mcp` — Object with exclude lists to filter MCP servers
@@ -116,7 +122,10 @@ Fields are organized into categories based on how they can be used:
   - `tools_from_connections` — Connector-based tools
 
 **Runtime Settings (Global defaults, overridable in agents):**
+- `agent-configuration` — Provider-agnostic runtime settings block
+- `endpoint` — Provider endpoint
 - `model` — LLM selection
+- `temperature` — Model response randomness
 - `timeout` — Execution time limit
 
 **Agent-Specific (Agent front matter only):**
@@ -314,12 +323,58 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 
 ---
 
+#### `agent-configuration`
+- **Type:** `object`
+- **Location:** Global (`agents.config.yaml`) for defaults, Agent (front matter) for overrides
+- **Can override:** Yes
+- **Description:** Provider-agnostic LLM runtime settings. Prefer this block for new applications so endpoint/model changes stay isolated if the runtime switches agent harnesses in the future. The legacy top-level `endpoint`, `model`, `temperature`, and `timeout` fields remain supported as shorthands.
+- **Precedence:** Agent `agent-configuration` → Agent shorthand fields → Global `agent-configuration` → Global shorthand fields → Environment variables → Framework defaults
+
+**Structure:**
+```yaml
+agent-configuration:
+  provider: foundry                  # optional: openai, azure-openai, foundry
+  endpoint: $FOUNDRY_PROJECT_ENDPOINT
+  model: gpt-4o-mini
+  temperature: 0.2
+  timeout: 900
+```
+
+**Agent override:**
+```yaml
+agent-configuration:
+  endpoint: $AGENT_PROJECT_ENDPOINT
+  model: gpt-4.1
+  temperature: 0.1
+```
+
+---
+
+#### `endpoint`
+- **Type:** `string`
+- **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
+- **Can override:** Yes
+- **Description:** Provider endpoint for the configured LLM backend. For the current Microsoft Agent Framework harness this maps to `project_endpoint` for Foundry, `azure_endpoint` for Azure OpenAI, and `base_url` for OpenAI-compatible endpoints.
+- **Recommendation:** Prefer `agent-configuration.endpoint` for new applications.
+
+**Global default:**
+```yaml
+endpoint: $FOUNDRY_PROJECT_ENDPOINT
+```
+
+**Agent override:**
+```yaml
+endpoint: $AGENT_PROJECT_ENDPOINT
+```
+
+---
+
 #### `model`
 - **Type:** `string`
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Specifies which LLM to use for the agent. Valid model identifiers include `claude-sonnet-4`, `gpt-4o`, `gpt-4o-mini`, `o1`, `o1-mini`.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `COPILOT_MODEL` env var → `"claude-sonnet-4"` (default)
+- **Precedence:** Agent `agent-configuration.model` → Agent `model` → Global `agent-configuration.model` → Global `model` → `MAF_MODEL` env var → framework default
 
 **Global default:**
 ```yaml
@@ -331,7 +386,26 @@ model: gpt-4o
 model: gpt-4o-mini  # Use faster model for this agent
 ```
 
-**Note:** Model parameters (temperature, max_tokens, etc.) are configured globally via environment variables or SDK configuration, not in the front matter.
+**Recommendation:** Prefer `agent-configuration.model` for new applications.
+
+---
+
+#### `temperature`
+- **Type:** `number`
+- **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
+- **Can override:** Yes
+- **Description:** Optional model temperature forwarded to the agent backend as a default chat option.
+- **Recommendation:** Prefer `agent-configuration.temperature` for new applications.
+
+**Global default:**
+```yaml
+temperature: 0.2
+```
+
+**Agent override:**
+```yaml
+temperature: 0.1
+```
 
 ---
 
@@ -340,7 +414,7 @@ model: gpt-4o-mini  # Use faster model for this agent
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Maximum execution time in seconds for the agent.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `COPILOT_AGENT_TIMEOUT` env var → `900` seconds (default)
+- **Precedence:** Agent `agent-configuration.timeout` → Agent `timeout` → Global `agent-configuration.timeout` → Global `timeout` → `AGENT_TIMEOUT` env var → `900` seconds (default)
 
 **Global default:**
 ```yaml
@@ -351,6 +425,8 @@ timeout: 900  # 15 minutes
 ```yaml
 timeout: 60  # 1 minute for fast agent
 ```
+
+**Recommendation:** Prefer `agent-configuration.timeout` for new applications.
 
 ---
 
@@ -649,8 +725,12 @@ system_tools:
     - connection_id: $O365_CONNECTION_ID
 
 # Global defaults
-model: gpt-4o
-timeout: 900
+agent-configuration:
+  provider: foundry
+  endpoint: $FOUNDRY_PROJECT_ENDPOINT
+  model: gpt-4o
+  temperature: 0.2
+  timeout: 900
 
 # Available MCP servers
 mcp:
@@ -760,8 +840,10 @@ system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
-model: claude-sonnet-4
-timeout: 600
+agent-configuration:
+  endpoint: $FOUNDRY_PROJECT_ENDPOINT
+  model: claude-sonnet-4
+  timeout: 600
 ```
 
 **Agent (`main.agent.md`):**
@@ -784,8 +866,10 @@ system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
-model: gpt-4o
-timeout: 900
+agent-configuration:
+  endpoint: $FOUNDRY_PROJECT_ENDPOINT
+  model: gpt-4o
+  timeout: 900
 
 mcp:
   - microsoft-learn
@@ -802,8 +886,10 @@ trigger:
   type: http_trigger
 
 # Runtime overrides
-model: gpt-4o-mini  # Override: use faster model instead of global default
-timeout: 60         # Override: shorter timeout instead of global default
+agent-configuration:
+  model: gpt-4o-mini  # Override: use faster model instead of global default
+  temperature: 0.1
+  timeout: 60         # Override: shorter timeout instead of global default
 
 # Capability filters
 system_tools:
@@ -816,7 +902,7 @@ skills:
 
 You are a fast agent optimized for simple queries.
 ```
-*Note: This agent overrides runtime settings (model, timeout), opts out of the sandbox, and excludes specific MCP servers and skills.*
+*Note: This agent overrides runtime settings (model, temperature, timeout), opts out of the sandbox, and excludes specific MCP servers and skills.*
 
 ### Example 4: Agent Using Exclude Pattern
 
@@ -897,7 +983,15 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 - `system_tools` (object)
   - `execute_in_sessions` (object)
   - `tools_from_connections` (array)
+- `agent-configuration` (object)
+  - `provider` (string)
+  - `endpoint` (string)
+  - `model` (string)
+  - `temperature` (number)
+  - `timeout` (number)
+- `endpoint` (string)
 - `model` (string)
+- `temperature` (number)
 - `timeout` (number)
 - `tools` (object)
 

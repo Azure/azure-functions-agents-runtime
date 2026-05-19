@@ -102,6 +102,7 @@ class AgentConfiguration(BaseModel):
     endpoint: str | None = None
     model: str | None = None
     temperature: float | None = None
+    timeout: float | None = None
 
 
 class GlobalConfig(BaseModel):

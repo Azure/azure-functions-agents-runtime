@@ -62,22 +62,13 @@ def _resolve_endpoint(spec: AgentSpec, global_config: GlobalConfig) -> str | Non
 
 
 def _resolve_temperature(spec: AgentSpec, global_config: GlobalConfig) -> float | None:
-    return (
-        (spec.agent_configuration.temperature if spec.agent_configuration else None)
-        if (spec.agent_configuration and spec.agent_configuration.temperature is not None)
-        else (
-            spec.temperature
-            if spec.temperature is not None
-            else (
-                global_config.agent_configuration.temperature
-                if (
-                    global_config.agent_configuration
-                    and global_config.agent_configuration.temperature is not None
-                )
-                else global_config.temperature
-            )
-        )
-    )
+    if spec.agent_configuration and spec.agent_configuration.temperature is not None:
+        return spec.agent_configuration.temperature
+    if spec.temperature is not None:
+        return spec.temperature
+    if global_config.agent_configuration and global_config.agent_configuration.temperature is not None:
+        return global_config.agent_configuration.temperature
+    return global_config.temperature
 
 
 def _resolved_agent_configuration(
@@ -93,8 +84,12 @@ def _resolved_agent_configuration(
 
 
 def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
+    if spec.agent_configuration and spec.agent_configuration.timeout is not None:
+        return spec.agent_configuration.timeout
     if spec.timeout is not None:
         return spec.timeout
+    if global_config.agent_configuration and global_config.agent_configuration.timeout is not None:
+        return global_config.agent_configuration.timeout
     if global_config.timeout is not None:
         return global_config.timeout
     env_timeout = os.environ.get("AGENT_TIMEOUT")

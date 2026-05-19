@@ -20,6 +20,7 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
               provider: foundry
               endpoint: https://foundry.example.test
               temperature: 0.4
+              timeout: 30
             model: gpt-4o
             timeout: 12
             system_tools:
@@ -38,6 +39,7 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
     assert config.agent_configuration.provider == "foundry"
     assert config.agent_configuration.endpoint == "https://foundry.example.test"
     assert config.agent_configuration.temperature == 0.4
+    assert config.agent_configuration.timeout == 30
     assert config.timeout == 12
     assert config.mcp == ["learn"]
     assert config.system_tools is not None
@@ -199,6 +201,7 @@ def test_load_agent_specs_accepts_endpoint_and_agent_configuration(
               provider: foundry
               model: gpt-4.1
               temperature: 0.2
+              timeout: 45
             ---
             Hello
             """
@@ -212,6 +215,7 @@ def test_load_agent_specs_accepts_endpoint_and_agent_configuration(
     assert spec.agent_configuration.provider == "foundry"
     assert spec.agent_configuration.model == "gpt-4.1"
     assert spec.agent_configuration.temperature == 0.2
+    assert spec.agent_configuration.timeout == 45
 
 
 def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(

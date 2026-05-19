@@ -67,24 +67,28 @@ def test_resolve_model_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_resolve_agent_configuration_precedence() -> None:
     global_config = GlobalConfig(
         endpoint="https://global-legacy.example.test",
+        timeout=20,
         temperature=0.7,
         agent_configuration=AgentConfiguration(
             provider="foundry",
             endpoint="https://global.example.test",
             model="global-model",
             temperature=0.5,
+            timeout=15,
         ),
     )
     spec = AgentSpec(
         name="A",
         description="B",
         endpoint="https://agent-legacy.example.test",
+        timeout=10,
         temperature=0.3,
         agent_configuration=AgentConfiguration(
             provider="azure-openai",
             endpoint="https://agent.example.test",
             model="agent-model",
             temperature=0.2,
+            timeout=5,
         ),
     )
 
@@ -92,6 +96,7 @@ def test_resolve_agent_configuration_precedence() -> None:
     assert _resolve_endpoint(spec, global_config) == "https://agent.example.test"
     assert _resolve_model(spec, global_config) == "agent-model"
     assert _resolve_temperature(spec, global_config) == 0.2
+    assert _resolve_timeout(spec, global_config) == 5
 
 
 def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
