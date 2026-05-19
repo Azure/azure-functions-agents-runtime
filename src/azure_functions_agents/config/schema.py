@@ -98,11 +98,24 @@ class GlobalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    version: str | None = None
     mcp: list[str] = Field(default_factory=list)
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def _coerce_version(cls, value: Any) -> Any:
+        # Accept numeric versions like `1` or `1.0` in YAML and store as string.
+        if value is None or isinstance(value, str):
+            return value
+        if isinstance(value, bool):
+            raise ValueError("version must be a string")
+        if isinstance(value, (int, float)):
+            return str(value)
+        raise ValueError("version must be a string")
 
 
 class AgentSpec(BaseModel):

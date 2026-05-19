@@ -1,4 +1,5 @@
 # Global configuration for all agents in this function app
+version: "1.0"
 
 # Shared infrastructure - Email capabilities via Office 365 connector
 system_tools:

@@ -66,6 +66,7 @@ def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) ->
 def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path) == load_global_config(tmp_path)
     assert load_global_config(tmp_path).model_dump() == {
+        "version": None,
         "mcp": [],
         "system_tools": None,
         "model": None,
@@ -79,6 +80,29 @@ def test_load_global_config_malformed_yaml(tmp_path: Path) -> None:
     source.write_text("mcp: [oops", encoding="utf-8")
     with pytest.raises(ValueError, match=re.escape(str(source))):
         load_global_config(tmp_path)
+
+
+def test_load_global_config_with_version(tmp_path: Path) -> None:
+    (tmp_path / "agents.config.yaml").write_text(
+        textwrap.dedent(
+            """
+            version: "1.0"
+            model: gpt-4o
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    config = load_global_config(tmp_path)
+    assert config.version == "1.0"
+    assert config.model == "gpt-4o"
+
+
+def test_load_global_config_version_coerces_numeric(tmp_path: Path) -> None:
+    (tmp_path / "agents.config.yaml").write_text("version: 1\n", encoding="utf-8")
+
+    config = load_global_config(tmp_path)
+    assert config.version == "1"
 
 
 def test_load_agent_specs_reads_files_and_substitutes(
