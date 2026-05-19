@@ -19,10 +19,12 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     TriggerSpec,
 )
-from azure_functions_agents.registration.capabilities import AgentCapabilities
-from azure_functions_agents.registration.triggers import (
+from azure_functions_agents.registration._naming import (
     _function_name_from_source,
     _safe_function_name,
+)
+from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.registration.triggers import (
     allocate_unique_function_name,
     register_agent,
 )

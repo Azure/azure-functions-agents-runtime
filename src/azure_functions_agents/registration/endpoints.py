@@ -60,6 +60,7 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
     runner_module = import_module("azure_functions_agents.runner")
     return runner_module.run_agent_stream(*args, **kwargs)
 
+
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     value = payload.get("sessionId") or payload.get("sessionid")
     if isinstance(value, str) and value.strip():

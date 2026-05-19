@@ -17,12 +17,10 @@ from ._handlers import (
     make_http_agent_handler,
     normalize_timer_schedule,
 )
-from ._naming import _safe_function_name, allocate_unique_function_name
+from ._naming import allocate_unique_function_name
 from .capabilities import AgentCapabilities
 
 __all__ = [
-    "_function_name_from_source",
-    "_safe_function_name",
     "allocate_unique_function_name",
     "register_agent",
 ]
