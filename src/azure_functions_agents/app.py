@@ -11,7 +11,7 @@ from ._logger import logger
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
-from .config.validation import validate_global_mcp_references, validate_resolved_agent
+from .config.validation import validate_resolved_agent
 from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skill_texts
@@ -60,14 +60,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     skill_texts = discover_skill_texts(resolved_root)
     skill_names = list(skill_texts)
     mcp_names = list(mcp_tools)
-    global_config_path = resolved_root / "agents.config.yaml"
-
-    validate_global_mcp_references(
-        global_config.mcp,
-        mcp_names,
-        source_file=global_config_path if global_config_path.exists() else None,
-    )
-
     if global_config.system_tools and global_config.system_tools.tools_from_connections:
         configure_connector_tools(
             [entry.model_dump() for entry in global_config.system_tools.tools_from_connections]
@@ -85,7 +77,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         # Validation is owned by the app factory; compose() stays a pure translation step.
         validate_resolved_agent(
             resolved,
-            all_global_mcp=global_config.mcp,
+            discovered_mcp_names=mcp_names,
             discovered_skills=skill_names,
         )
         capabilities = build_capabilities(

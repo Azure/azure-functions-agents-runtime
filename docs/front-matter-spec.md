@@ -4,15 +4,14 @@
 
 Azure Functions agents use a **two-tier configuration system**:
 
-1. **Global Configuration** (`agents.config.yaml`) — Infrastructure and capabilities available to all agents
+1. **Global Configuration** (`agents.config.yaml`) — Infrastructure and runtime defaults
 2. **Agent-Specific Configuration** (`.agent.md` front matter) — Agent behavior, triggers, and capability filtering
 
 Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
 
 ### Configuration Model
 
-**Global configuration defines infrastructure:**
-- MCP servers (defined in `mcp.json`, referenced in `agents.config.yaml`)
+**Global configuration defines infrastructure and defaults:**
 - Skills (auto-discovered from `skills/` directory)
 - Custom tools (auto-discovered from `tools/` directory)
 - System tools (`system_tools`)
@@ -20,8 +19,11 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Connector tools
 - Default runtime settings (model, timeout)
 
+**MCP server discovery:**
+- MCP servers (defined in `mcp.json` or `.vscode/mcp.json`)
+
 **Agent front matter:**
-- **Inherits all auto-discovered capabilities by default**
+- **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
 - Must define **trigger** (how the agent is invoked)
@@ -36,14 +38,14 @@ For runtime settings (model, timeout):
 4. **Framework defaults** — Built-in default values
 
 For capabilities (MCP, skills, tools):
-1. **Auto-discovered and referenced** — MCP servers referenced in `agents.config.yaml` (defined in `mcp.json`), skills and tools auto-discovered from their directories
+1. **Auto-discovered** — MCP servers from `mcp.json` or `.vscode/mcp.json`, plus skills and tools from their directories
 2. **Filtered per-agent** using exclude lists in agent front matter
 
 ### Quick Reference: Required vs Optional
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `model`, `timeout`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -52,12 +54,11 @@ For capabilities (MCP, skills, tools):
 ## Configuration Files
 
 ### Global Configuration (`agents.config.yaml`)
-Optional file in the root directory that defines infrastructure and capabilities available to all agents.
+Optional file in the root directory that defines shared infrastructure and runtime defaults for all agents.
 
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
-- `mcp` — Array of MCP server names (servers must be defined in `mcp.json`)
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
   - `tools_from_connections` — Array of connector configurations
@@ -65,9 +66,9 @@ Optional file in the root directory that defines infrastructure and capabilities
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
 
-**Note:** Skills (from `skills/` directory) and custom tools (from `tools/` directory) are automatically discovered and do not need to be listed in global configuration. Agents can filter them out using exclude lists.
+**Note:** MCP servers (from `mcp.json` or `.vscode/mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
-**Key principle:** Global config defines **what's available**. Agents filter **what they use**.
+**Key principle:** `agents.config.yaml` defines shared runtime configuration. Agents filter discovered capabilities and choose what they use.
 
 ### Agent Configuration (`.agent.md` front matter)
 YAML front matter at the top of each agent file.
@@ -82,7 +83,7 @@ YAML front matter at the top of each agent file.
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `system_tools` — Object to opt out of system tools
-- `mcp` — Object with exclude lists to filter MCP servers
+- `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
 - `input_schema` — Object, JSON Schema for HTTP request validation
@@ -107,8 +108,8 @@ Fields are organized into categories based on how they can be used:
 
 ### Field Categories
 
-**Infrastructure (Global only, filtered in agents):**
-- `mcp` — MCP server references (global) or exclude lists (agent)
+**Infrastructure (Discovered capabilities, filtered in agents):**
+- `mcp` — MCP servers discovered from `mcp.json` or `.vscode/mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
@@ -409,13 +410,7 @@ system_tools:
     - connection_id: $OUTLOOK_CONNECTION_ID
 ```
 
-**Note:** This field enables dynamic tool generation from connector APIs. An alternative approach is to use connectors via their MCP (Model Context Protocol) servers through the `mcp` field, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
-
-**MCP alternative:**
-```yaml
-mcp:
-  - office365-connector  # Use connector via MCP instead
-```
+**Note:** This field enables dynamic tool generation from connector APIs. Connector-backed MCP servers are defined in `mcp.json` or `.vscode/mcp.json` and participate in the standard MCP discovery flow, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
 
 ---
 
@@ -451,18 +446,15 @@ tools: false
 ---
 
 #### `mcp`
-- **Type:** `array` or `object`
-- **Location:** Global (`agents.config.yaml`) for references, Agent (front matter) for filtering
-- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.config.yaml`, list which servers are available to agents. Agents inherit all listed servers by default and can use exclude lists to filter.
+- **Type:** `boolean` or `object`
+- **Location:** Agent (front matter) for filtering
+- **Description:** MCP server filtering. MCP servers are discovered from `mcp.json` or `.vscode/mcp.json`. Agents inherit all discovered servers by default. Use `false` to disable MCP for an agent, or use `exclude` to hide specific servers.
 
-**Global configuration (in `agents.config.yaml`) - List available servers:**
+**Default behavior - Inherit all discovered servers:**
 ```yaml
-mcp:
-  - microsoft-learn
-  - azure-devops
-  - custom-api
+# Omit `mcp`, set it to null, or use:
+mcp: true
 ```
-*Note: These server names must be defined in `mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.*
 
 **Agent filtering - Use exclude lists:**
 ```yaml
@@ -476,7 +468,7 @@ mcp:
 mcp: false
 ```
 
-**Note:** Agents inherit all globally defined MCP servers by default. Use `exclude` to filter out unwanted servers.
+**Note:** `mcp.exclude` entries must match MCP servers discovered from `mcp.json` or `.vscode/mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.
 
 ---
 
@@ -637,7 +629,7 @@ With `substitute_variables: false`, `model`, `response_example`, and `$TO_EMAIL`
 
 ### Example 1: Multi-Agent Application with Global Configuration
 
-This example demonstrates the recommended pattern: define all infrastructure globally and filter per-agent as needed.
+This example demonstrates the recommended pattern: define shared runtime configuration in `agents.config.yaml`, discover MCP servers from `mcp.json`, and filter capabilities per-agent as needed.
 
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
@@ -651,11 +643,6 @@ system_tools:
 # Global defaults
 model: gpt-4o
 timeout: 900
-
-# Available MCP servers
-mcp:
-  - microsoft-learn
-  - azure-devops
 
 # Global tool configuration
 tools:
@@ -671,7 +658,7 @@ description: A helpful assistant with Python code execution capabilities
 
 You are a helpful assistant. If you need to get up to date information, browse the web for it.
 ```
-*Note: This agent inherits all global capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools, model, timeout).*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools).*
 
 **Resource Summary Agent (`resource_summary.agent.md`):**
 ```yaml
@@ -708,7 +695,7 @@ response_schema:
 
 Given the subscription ID in the request body, list all resources and return a structured summary.
 ```
-*Note: This agent inherits all global capabilities.*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities.*
 
 **Daily Report Agent (`daily_report.agent.md`):**
 ```yaml
@@ -724,7 +711,7 @@ trigger:
 
 When triggered, list all resources in subscription $SUBSCRIPTION_ID, filter for changes in the last 24 hours, and email a report to $TO_EMAIL.
 ```
-*Note: This agent inherits all global capabilities.*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities.*
 
 **Timer Agent with HTTP and MCP Endpoints (`scheduled_task.agent.md`):**
 ```yaml
@@ -776,7 +763,7 @@ You are a helpful assistant. If you need to run Python code or perform calculati
 
 ### Example 3: Agent with Runtime Overrides and Capability Filtering
 
-This example shows how to override runtime settings and filter capabilities per-agent.
+This example shows how to override runtime settings and filter capabilities per-agent. Assume `mcp.json` or `.vscode/mcp.json` includes an `experimental-server` entry.
 
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
@@ -786,10 +773,6 @@ system_tools:
 
 model: gpt-4o
 timeout: 900
-
-mcp:
-  - microsoft-learn
-  - azure-devops
 ```
 
 **Agent with Overrides (`fast_agent.agent.md`):**
@@ -809,7 +792,7 @@ timeout: 60         # Override: shorter timeout instead of global default
 system_tools:
   execute_in_sessions: false  # Opt out of code execution for security/performance
 mcp:
-  exclude: ["experimental-server"]  # Exclude specific MCP servers
+  exclude: ["experimental-server"]  # Exclude a discovered MCP server
 skills:
   exclude: ["admin-tools"]  # Exclude specific skills
 ---
@@ -820,17 +803,13 @@ You are a fast agent optimized for simple queries.
 
 ### Example 4: Agent Using Exclude Pattern
 
+Assume `mcp.json` defines the `microsoft-learn`, `azure-devops`, `github-copilot`, and `custom-api` servers used in this example.
+
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-
-mcp:
-  - microsoft-learn
-  - azure-devops
-  - github-copilot
-  - custom-api
 
 tools:
   exclude: ["bash", "execute_shell"]  # Exclude dangerous tools globally
@@ -893,7 +872,6 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 ### Supported Properties
 
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
-- `mcp` (array of strings)
 - `system_tools` (object)
   - `execute_in_sessions` (object)
   - `tools_from_connections` (array)
@@ -916,7 +894,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
 10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
 11. **Tool references:** Tools in `tools.exclude` must exist in `tools/` directory or be built-in tools
-12. **MCP server references:** Servers in `mcp.exclude` must be defined in the global `mcp` list in `agents.config.yaml`
+12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json` or `.vscode/mcp.json`
 13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
 15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 

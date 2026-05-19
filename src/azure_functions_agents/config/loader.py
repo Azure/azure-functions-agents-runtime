@@ -16,10 +16,6 @@ from azure_functions_agents.config.env import (
     substitute_env_vars_in_text,
 )
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
-from azure_functions_agents.config.validation import (
-    validate_agent_frontmatter,
-    validate_global_config_dict,
-)
 
 
 def _resolve_strings(value: Any) -> Any:
@@ -60,7 +56,6 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         raise ValueError(f"{source_file}: invalid YAML frontmatter: {exc}") from exc
 
     metadata = dict(post.metadata or {})
-    validate_agent_frontmatter(metadata, source_file)
     substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
 
     normalized = dict(metadata)
@@ -100,7 +95,6 @@ def load_global_config(app_root: Path) -> GlobalConfig:
             f"{source_file}: field `<root>`: expected a YAML mapping. See docs/front-matter-spec.md"
         )
 
-    validate_global_config_dict(data, source_file)
     normalized = _normalize_global_config_dict(data)
     try:
         return GlobalConfig.model_validate(normalized)

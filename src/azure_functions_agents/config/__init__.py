@@ -41,17 +41,11 @@ from azure_functions_agents.config.schema import (
     TriggerSpec,
 )
 from azure_functions_agents.config.validation import (
-    LEGACY_FIELDS_AGENT,
-    LEGACY_FIELDS_GLOBAL,
-    validate_agent_frontmatter,
-    validate_global_config_dict,
     validate_resolved_agent,
 )
 
 __all__ = [
     "DEFAULT_TIMEOUT",
-    "LEGACY_FIELDS_AGENT",
-    "LEGACY_FIELDS_GLOBAL",
     "_DOLLAR_PATTERN",
     "_INLINE_DOLLAR_PATTERN",
     "_INLINE_PERCENT_PATTERN",
@@ -82,7 +76,5 @@ __all__ = [
     "resolve_env_var",
     "set_app_root",
     "substitute_env_vars_in_text",
-    "validate_agent_frontmatter",
-    "validate_global_config_dict",
     "validate_resolved_agent",
 ]
