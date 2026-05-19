@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -90,3 +91,41 @@ def test_clear_mcp_cache_reruns_discovery(
     discover_mcp_servers(tmp_path)
 
     assert read_count == 2
+
+
+def test_discover_mcp_servers_handles_top_level_list(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / ".vscode").mkdir()
+    config_path = tmp_path / ".vscode" / "mcp.json"
+    config_path.write_text("[1, 2, 3]", encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+    assert any(
+        record.levelno == logging.WARNING
+        and record.getMessage()
+        == f"Ignoring {config_path}: expected a JSON object at the top level, got list."
+        for record in caplog.records
+    )
+
+
+def test_discover_mcp_servers_handles_top_level_string(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    (tmp_path / ".vscode").mkdir()
+    config_path = tmp_path / ".vscode" / "mcp.json"
+    config_path.write_text(json.dumps("hello"), encoding="utf-8")
+
+    with caplog.at_level(logging.WARNING):
+        discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+    assert any(
+        record.levelno == logging.WARNING
+        and record.getMessage()
+        == f"Ignoring {config_path}: expected a JSON object at the top level, got str."
+        for record in caplog.records
+    )

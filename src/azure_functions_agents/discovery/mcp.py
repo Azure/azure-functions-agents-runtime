@@ -98,6 +98,15 @@ def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
             logger.warning("Failed to read MCP config from %s: %s", path, exc)
             continue
 
+        if not isinstance(data, dict):
+            logger.warning(
+                "Ignoring %s: expected a JSON object at the top level, got %s.",
+                path,
+                type(data).__name__,
+            )
+            _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
+            return {}
+
         servers = data.get("servers", {})
         if not isinstance(servers, dict):
             logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
