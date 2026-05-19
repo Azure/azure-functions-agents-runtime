@@ -93,6 +93,17 @@ class SystemToolsAgentOverride(BaseModel):
     execute_in_sessions: bool | None = None
 
 
+class AgentConfiguration(BaseModel):
+    """Provider-agnostic LLM runtime settings shared by global and agent config."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    provider: str | None = None
+    endpoint: str | None = None
+    model: str | None = None
+    temperature: float | None = None
+
+
 class GlobalConfig(BaseModel):
     """Top-level agents.config.yaml schema."""
 
@@ -100,7 +111,10 @@ class GlobalConfig(BaseModel):
 
     mcp: list[str] = Field(default_factory=list)
     system_tools: SystemToolsConfig | None = None
+    agent_configuration: AgentConfiguration | None = None
+    endpoint: str | None = None
     model: str | None = None
+    temperature: float | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
 
@@ -114,7 +128,10 @@ class AgentSpec(BaseModel):
     description: str
     trigger: TriggerSpec | None = None
     debug: bool | DebugConfig | None = None
+    agent_configuration: AgentConfiguration | None = None
+    endpoint: str | None = None
     model: str | None = None
+    temperature: float | None = None
     timeout: float | None = None
     logger: bool | None = None
     substitute_variables: bool = True
@@ -142,7 +159,10 @@ class ResolvedAgent(BaseModel):
     instructions: str
     is_main: bool
     debug: DebugConfig
+    provider: str | None = None
+    endpoint: str | None = None
     model: str | None
+    temperature: float | None = None
     timeout: float
     enabled_mcp_names: list[str]
     enabled_skills_names: list[str]

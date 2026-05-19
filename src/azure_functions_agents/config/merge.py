@@ -6,6 +6,7 @@ import os
 
 from azure_functions_agents._logger import logger
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     AgentSpec,
     DebugConfig,
     ExecuteInSessionsConfig,
@@ -33,7 +34,62 @@ def _resolve_debug(spec: AgentSpec) -> DebugConfig:
 
 
 def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    return spec.model or global_config.model or os.environ.get("MAF_MODEL")
+    return (
+        (spec.agent_configuration.model if spec.agent_configuration else None)
+        or spec.model
+        or (global_config.agent_configuration.model if global_config.agent_configuration else None)
+        or global_config.model
+        or os.environ.get("MAF_MODEL")
+    )
+
+
+def _resolve_provider(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
+    return (
+        (spec.agent_configuration.provider if spec.agent_configuration else None)
+        or (global_config.agent_configuration.provider if global_config.agent_configuration else None)
+        or None
+    )
+
+
+def _resolve_endpoint(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
+    return (
+        (spec.agent_configuration.endpoint if spec.agent_configuration else None)
+        or spec.endpoint
+        or (global_config.agent_configuration.endpoint if global_config.agent_configuration else None)
+        or global_config.endpoint
+        or None
+    )
+
+
+def _resolve_temperature(spec: AgentSpec, global_config: GlobalConfig) -> float | None:
+    return (
+        (spec.agent_configuration.temperature if spec.agent_configuration else None)
+        if (spec.agent_configuration and spec.agent_configuration.temperature is not None)
+        else (
+            spec.temperature
+            if spec.temperature is not None
+            else (
+                global_config.agent_configuration.temperature
+                if (
+                    global_config.agent_configuration
+                    and global_config.agent_configuration.temperature is not None
+                )
+                else global_config.temperature
+            )
+        )
+    )
+
+
+def _resolved_agent_configuration(
+    spec: AgentSpec,
+    global_config: GlobalConfig,
+) -> AgentConfiguration:
+    return AgentConfiguration(
+        provider=_resolve_provider(spec, global_config),
+        endpoint=_resolve_endpoint(spec, global_config),
+        model=_resolve_model(spec, global_config),
+        temperature=_resolve_temperature(spec, global_config),
+    )
 
 
 def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
@@ -137,6 +193,8 @@ def compose(
     if spec.logger is not None:
         metadata["logger"] = spec.logger
 
+    agent_configuration = _resolved_agent_configuration(spec, global_config)
+
     resolved = ResolvedAgent(
         name=spec.name,
         description=spec.description,
@@ -144,7 +202,10 @@ def compose(
         instructions=spec.instructions,
         is_main=spec.is_main,
         debug=_resolve_debug(spec),
-        model=_resolve_model(spec, global_config),
+        provider=agent_configuration.provider,
+        endpoint=agent_configuration.endpoint,
+        model=agent_configuration.model,
+        temperature=agent_configuration.temperature,
         timeout=_resolve_timeout(spec, global_config),
         enabled_mcp_names=enabled_mcp,
         enabled_skills_names=enabled_skills,

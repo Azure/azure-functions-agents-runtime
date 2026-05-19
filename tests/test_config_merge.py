@@ -8,8 +8,11 @@ import pytest
 from azure_functions_agents.config.merge import (
     DEFAULT_TIMEOUT,
     _resolve_debug,
+    _resolve_endpoint,
     _resolve_model,
+    _resolve_provider,
     _resolve_sandbox,
+    _resolve_temperature,
     _resolve_timeout,
     apply_mcp_filter,
     apply_skills_filter,
@@ -17,6 +20,7 @@ from azure_functions_agents.config.merge import (
     compose,
 )
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     AgentSpec,
     DebugConfig,
     ExecuteInSessionsConfig,
@@ -34,15 +38,60 @@ from azure_functions_agents.config.validation import validate_resolved_agent
 
 def test_resolve_model_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("MAF_MODEL", "env-model")
-    global_config = GlobalConfig(model="global-model")
+    global_config = GlobalConfig(
+        model="global-model",
+        agent_configuration=AgentConfiguration(model="global-config-model"),
+    )
+    assert (
+        _resolve_model(
+            AgentSpec(
+                name="A",
+                description="B",
+                model="agent-model",
+                agent_configuration=AgentConfiguration(model="agent-config-model"),
+            ),
+            global_config,
+        )
+        == "agent-config-model"
+    )
     assert (
         _resolve_model(AgentSpec(name="A", description="B", model="agent-model"), global_config)
         == "agent-model"
     )
-    assert _resolve_model(AgentSpec(name="A", description="B"), global_config) == "global-model"
+    assert _resolve_model(AgentSpec(name="A", description="B"), global_config) == "global-config-model"
     assert _resolve_model(AgentSpec(name="A", description="B"), GlobalConfig()) == "env-model"
     monkeypatch.delenv("MAF_MODEL", raising=False)
     assert _resolve_model(AgentSpec(name="A", description="B"), GlobalConfig()) is None
+
+
+def test_resolve_agent_configuration_precedence() -> None:
+    global_config = GlobalConfig(
+        endpoint="https://global-legacy.example.test",
+        temperature=0.7,
+        agent_configuration=AgentConfiguration(
+            provider="foundry",
+            endpoint="https://global.example.test",
+            model="global-model",
+            temperature=0.5,
+        ),
+    )
+    spec = AgentSpec(
+        name="A",
+        description="B",
+        endpoint="https://agent-legacy.example.test",
+        temperature=0.3,
+        agent_configuration=AgentConfiguration(
+            provider="azure-openai",
+            endpoint="https://agent.example.test",
+            model="agent-model",
+            temperature=0.2,
+        ),
+    )
+
+    assert _resolve_provider(spec, global_config) == "azure-openai"
+    assert _resolve_endpoint(spec, global_config) == "https://agent.example.test"
+    assert _resolve_model(spec, global_config) == "agent-model"
+    assert _resolve_temperature(spec, global_config) == 0.2
 
 
 def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -153,6 +202,8 @@ def test_compose_end_to_end() -> None:
 
     assert global_config.system_tools is not None
     assert resolved.model == "global-model"
+    assert resolved.endpoint is None
+    assert resolved.temperature is None
     assert resolved.timeout == 10
     assert resolved.enabled_mcp_names == ["learn"]
     assert resolved.enabled_skills_names == ["public"]

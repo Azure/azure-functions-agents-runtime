@@ -34,11 +34,15 @@ def _resolve_strings(value: Any) -> Any:
 
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
+    if "agent-configuration" in normalized:
+        normalized["agent_configuration"] = normalized.pop("agent-configuration")
     return cast(dict[str, Any], _resolve_strings(normalized))
 
 
 def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(metadata)
+    if "agent-configuration" in normalized:
+        normalized["agent_configuration"] = normalized.pop("agent-configuration")
     return cast(dict[str, Any], _resolve_strings(normalized))
 
 

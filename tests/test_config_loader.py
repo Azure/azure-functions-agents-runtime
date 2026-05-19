@@ -16,6 +16,10 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
             """
             mcp:
               - learn
+            agent-configuration:
+              provider: foundry
+              endpoint: https://foundry.example.test
+              temperature: 0.4
             model: gpt-4o
             timeout: 12
             system_tools:
@@ -30,6 +34,10 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
 
     config = load_global_config(tmp_path)
     assert config.model == "gpt-4o"
+    assert config.agent_configuration is not None
+    assert config.agent_configuration.provider == "foundry"
+    assert config.agent_configuration.endpoint == "https://foundry.example.test"
+    assert config.agent_configuration.temperature == 0.4
     assert config.timeout == 12
     assert config.mcp == ["learn"]
     assert config.system_tools is not None
@@ -68,7 +76,10 @@ def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path).model_dump() == {
         "mcp": [],
         "system_tools": None,
+        "agent_configuration": None,
+        "endpoint": None,
         "model": None,
+        "temperature": None,
         "timeout": None,
         "tools": None,
     }
@@ -170,6 +181,37 @@ def test_load_agent_specs_resolves_frontmatter_strings(
     [spec] = load_agent_specs(tmp_path)
     assert spec.model == "gpt-4.1-mini"
     assert spec.response_example == '{"status":"ok"}'
+
+
+def test_load_agent_specs_accepts_endpoint_and_agent_configuration(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("PROJECT_ENDPOINT", "https://foundry.example.test")
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            endpoint: $PROJECT_ENDPOINT
+            agent-configuration:
+              provider: foundry
+              model: gpt-4.1
+              temperature: 0.2
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    [spec] = load_agent_specs(tmp_path)
+    assert spec.endpoint == "https://foundry.example.test"
+    assert spec.agent_configuration is not None
+    assert spec.agent_configuration.provider == "foundry"
+    assert spec.agent_configuration.model == "gpt-4.1"
+    assert spec.agent_configuration.temperature == 0.2
 
 
 def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(

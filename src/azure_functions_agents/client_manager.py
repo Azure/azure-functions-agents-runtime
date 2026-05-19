@@ -16,7 +16,7 @@ ABC surface
 * :meth:`ClientManager.resolve_model` — pick the actual model/deployment to
   use given an optional per-call request.
 * :meth:`ClientManager.build_chat_client` — return a fresh ``ChatClient``
-  bound to a specific model.
+  bound to a specific provider endpoint/model.
 * :meth:`ClientManager.close` — release any resources held by the manager
   (called from the application's shutdown hook).
 """
@@ -49,7 +49,13 @@ class ClientManager(ABC):
         """
 
     @abstractmethod
-    def build_chat_client(self, model: str | None) -> Any:
+    def build_chat_client(
+        self,
+        model: str | None,
+        *,
+        endpoint: str | None = None,
+        provider: str | None = None,
+    ) -> Any:
         """Construct and return a chat client for the given model.
 
         ``model`` may be ``None``, in which case the implementation MUST call
@@ -97,16 +103,22 @@ class MAFClientManager(ClientManager):
             return os.environ.get("FOUNDRY_MODEL") or _DEFAULT_FOUNDRY_MODEL
         return _DEFAULT_OPENAI_MODEL
 
-    def build_chat_client(self, model: str | None) -> Any:
-        provider = self._provider()
-        resolved = self.resolve_model(model)
-        logger.info("MAF provider=%s model=%s", provider, resolved)
+    def build_chat_client(
+        self,
+        model: str | None,
+        *,
+        endpoint: str | None = None,
+        provider: str | None = None,
+    ) -> Any:
+        provider = self._provider(provider)
+        resolved = self._resolve_model_for_provider(model, provider)
+        logger.info("MAF provider=%s model=%s endpoint=%s", provider, resolved, endpoint or "<env>")
         if provider == "openai":
-            return self._build_openai(resolved)
+            return self._build_openai(resolved, endpoint=endpoint)
         if provider == "azure_openai":
-            return self._build_azure_openai(resolved)
+            return self._build_azure_openai(resolved, endpoint=endpoint)
         if provider == "foundry":
-            return self._build_foundry(resolved)
+            return self._build_foundry(resolved, endpoint=endpoint)
         raise RuntimeError(
             f"Unknown MAF_PROVIDER '{provider}'. Use one of: openai, azure_openai, foundry."
         )
@@ -126,8 +138,8 @@ class MAFClientManager(ClientManager):
         return (os.environ.get(name) or "").strip()
 
     @classmethod
-    def _provider(cls) -> str:
-        explicit = cls._env("MAF_PROVIDER").lower()
+    def _provider(cls, requested: str | None = None) -> str:
+        explicit = (requested or cls._env("MAF_PROVIDER")).lower().replace("-", "_")
         if explicit:
             return explicit
         if cls._env("AZURE_OPENAI_ENDPOINT"):
@@ -145,26 +157,40 @@ class MAFClientManager(ClientManager):
         )
 
     @classmethod
-    def _build_openai(cls, model: str) -> Any:
+    def _resolve_model_for_provider(cls, requested: str | None, provider: str) -> str:
+        if requested:
+            return requested
+        env_override = os.environ.get("MAF_MODEL")
+        if env_override:
+            return env_override
+        if provider == "azure_openai":
+            return os.environ.get("AZURE_OPENAI_DEPLOYMENT") or _DEFAULT_OPENAI_MODEL
+        if provider == "foundry":
+            return os.environ.get("FOUNDRY_MODEL") or _DEFAULT_FOUNDRY_MODEL
+        return _DEFAULT_OPENAI_MODEL
+
+    @classmethod
+    def _build_openai(cls, model: str, *, endpoint: str | None = None) -> Any:
         from agent_framework.openai import OpenAIChatClient
 
         return OpenAIChatClient(
             model=model,
             api_key=cls._env("OPENAI_API_KEY") or None,
+            base_url=endpoint,
         )
 
     @classmethod
-    def _build_azure_openai(cls, model: str) -> Any:
+    def _build_azure_openai(cls, model: str, *, endpoint: str | None = None) -> Any:
         from agent_framework.openai import OpenAIChatClient
 
-        endpoint = cls._env("AZURE_OPENAI_ENDPOINT")
-        if not endpoint:
+        resolved_endpoint = endpoint or cls._env("AZURE_OPENAI_ENDPOINT")
+        if not resolved_endpoint:
             raise RuntimeError(
                 "MAF_PROVIDER=azure_openai requires AZURE_OPENAI_ENDPOINT to be set."
             )
         kwargs: dict[str, Any] = {
             "model": model,
-            "azure_endpoint": endpoint,
+            "azure_endpoint": resolved_endpoint,
         }
         # Only forward api_version when the user explicitly sets it. MAF defaults
         # to the Responses API ("preview") which rejects Chat Completions GA
@@ -182,15 +208,15 @@ class MAFClientManager(ClientManager):
         return OpenAIChatClient(**kwargs)
 
     @classmethod
-    def _build_foundry(cls, model: str) -> Any:
+    def _build_foundry(cls, model: str, *, endpoint: str | None = None) -> Any:
         from agent_framework.foundry import FoundryChatClient
         from azure.identity.aio import DefaultAzureCredential
 
-        endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
-        if not endpoint:
+        resolved_endpoint = endpoint or cls._env("FOUNDRY_PROJECT_ENDPOINT")
+        if not resolved_endpoint:
             raise RuntimeError("MAF_PROVIDER=foundry requires FOUNDRY_PROJECT_ENDPOINT to be set.")
         return FoundryChatClient(
-            project_endpoint=endpoint,
+            project_endpoint=resolved_endpoint,
             model=model,
             credential=DefaultAzureCredential(),
         )

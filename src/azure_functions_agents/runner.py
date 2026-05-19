@@ -172,6 +172,9 @@ async def _build_agent_session_history(
     skills_text: str | None,
     use_connector_tools: bool,
     model: str | None,
+    endpoint: str | None,
+    provider: str | None,
+    temperature: float | None,
     sandbox_tools: list[Any] | None,
 ) -> tuple[Any, Any, str]:
     """Construct the chat client, agent, AgentSession, and history provider.
@@ -189,7 +192,7 @@ async def _build_agent_session_history(
     # Build the chat client first so configuration errors surface BEFORE any
     # filesystem state is created.
     client_manager = get_client_manager()
-    chat_client = client_manager.build_chat_client(model)
+    chat_client = client_manager.build_chat_client(model, endpoint=endpoint, provider=provider)
 
     # Validate / generate session id.
     validated_id = _validate_session_id(session_id)
@@ -234,6 +237,7 @@ async def _build_agent_session_history(
         chat_client,
         instructions=_compose_instructions(instructions, skills_text=skills_text),
         tools=resolved_tools,
+        default_options={"temperature": temperature} if temperature is not None else None,
         context_providers=[history_provider],
     )
 
@@ -287,6 +291,9 @@ async def run_agent(
     skills_text: str | None = None,
     use_connector_tools: bool = True,
     model: str | None = None,
+    endpoint: str | None = None,
+    provider: str | None = None,
+    temperature: float | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
 ) -> AgentResult:
@@ -323,6 +330,13 @@ async def run_agent(
     model:
         Optional model/deployment override. When omitted the
         :class:`ClientManager` resolves the value from environment variables.
+    endpoint:
+        Optional provider endpoint override.
+    provider:
+        Optional backend provider override (for example ``openai``,
+        ``azure_openai``, or ``foundry``).
+    temperature:
+        Optional model temperature forwarded as the agent's default option.
     session_id:
         Optional session id for resuming a prior conversation. Must match
         ``[A-Za-z0-9._-]{1,128}``. When omitted, a fresh session is created
@@ -348,6 +362,9 @@ async def run_agent(
         skills_text=skills_text,
         use_connector_tools=use_connector_tools,
         model=model,
+        endpoint=endpoint,
+        provider=provider,
+        temperature=temperature,
         sandbox_tools=sandbox_tools,
     )
 
@@ -416,6 +433,9 @@ async def run_agent_stream(
     skills_text: str | None = None,
     use_connector_tools: bool = True,
     model: str | None = None,
+    endpoint: str | None = None,
+    provider: str | None = None,
+    temperature: float | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
 ) -> AsyncIterator[str]:
@@ -459,6 +479,9 @@ async def run_agent_stream(
             skills_text=skills_text,
             use_connector_tools=use_connector_tools,
             model=model,
+            endpoint=endpoint,
+            provider=provider,
+            temperature=temperature,
             sandbox_tools=sandbox_tools,
         )
     except Exception as exc:
