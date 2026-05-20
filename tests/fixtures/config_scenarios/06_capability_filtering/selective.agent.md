@@ -16,7 +16,6 @@ skills:
 tools:
   exclude:
     - web_fetch
-  custom_only: true
 ---
 
 You are an agent that prefers internal tools only.
