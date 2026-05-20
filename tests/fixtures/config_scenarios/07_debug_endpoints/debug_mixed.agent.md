@@ -1,0 +1,14 @@
+---
+name: Debug Mixed
+description: Agent that pins individual debug surfaces via the object form.
+trigger:
+  type: http_trigger
+  args:
+    route: "debug-mixed"
+debug:
+  chat: true
+  http: true
+  mcp: false
+---
+
+You are an agent with chat and http debug surfaces enabled but MCP exposure off.

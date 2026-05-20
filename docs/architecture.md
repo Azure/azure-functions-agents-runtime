@@ -37,14 +37,14 @@ A few boundaries are worth calling out explicitly:
 | --- | --- | --- |
 | `azure_functions_agents/app.py` | Top-level orchestrator that runs the startup pipeline and returns the configured app. | `create_function_app()` |
 | `azure_functions_agents/config/paths.py` | Resolves the app root and the optional config/history directory. | `set_app_root()`, `get_app_root()`, `resolve_config_dir()` |
-| `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion during config loading. | `resolve_env_var()`, `substitute_env_vars_in_text()`, `_to_bool()` |
+| `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion across config string values in YAML, JSON, front matter, and markdown body content. | `substitute_env_vars_in_value()`, `resolve_env_vars_in_data()`, `substitute_env_vars_in_text()`, `_to_bool()` |
 | `azure_functions_agents/config/schema.py` | Defines the Pydantic models for raw, global, and merged config. | `AgentSpec`, `GlobalConfig`, `ResolvedAgent`, `TriggerSpec`, `DebugConfig` |
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config. | `compose()` |
-| `azure_functions_agents/config/validation.py` | Enforces legacy-field rules and post-merge sanity checks. | `validate_agent_frontmatter()`, `validate_global_config_dict()`, `validate_global_mcp_references()`, `validate_resolved_agent()` |
+| `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents. | `validate_resolved_agent()` |
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the resolved name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
 | `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds `FunctionTool` values or wraps plain functions, and caches the result. | `discover_user_tools()` |
-| `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json` / `.vscode/mcp.json` and translates remote HTTP server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
+| `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json` / `.vscode/mcp.json`, applies `resolve_env_vars_in_data()`, and translates remote HTTP server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
 | `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory. | `AgentCapabilities`, `build_capabilities()` |
 | `azure_functions_agents/registration/_naming.py` | Derives Azure-safe function names and debug slugs from `.agent.md` filenames; allocates unique function names via `allocate_unique_function_name()` when sanitized stems collide. | `_safe_function_name()`, `_function_name_from_source()` |
 | `azure_functions_agents/registration/_handlers.py` | Builds the callable closures that turn incoming trigger data or HTTP bodies into runner prompts. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()` |
@@ -94,19 +94,19 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:load_global_config()`
    - **Input:** `app_root: Path`
    - **Output:** `GlobalConfig`
-   - **Notes:** missing config is valid and becomes `GlobalConfig()`. String values are normalized through `config/env.py`, so env-var references are resolved before the Pydantic model is materialized.
+   - **Notes:** missing config is valid and becomes `GlobalConfig()`. String values in `agents.config.yaml` are normalized through `config/env.py` via `resolve_env_vars_in_data()`, so env-var references are resolved before the Pydantic model is materialized.
 
 3. **Load all agent markdown files**
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:_load_agent_spec()`, `src/azure_functions_agents/config/loader.py:load_agent_specs()`
    - **Input:** `app_root: Path`
    - **Output:** `list[AgentSpec]`
-   - **Notes:** each file is parsed as YAML front matter plus markdown body. The loader stamps `source_file`, sets `is_main` when the filename is `main.agent.md`, and stores the markdown body in `AgentSpec.instructions`.
+   - **Notes:** each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file`, sets `is_main` when the filename is `main.agent.md`, and stores the markdown body in `AgentSpec.instructions`.
 
 4. **Discover runtime inventories from disk**
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
    - **Input:** `app_root: Path`
    - **Output:** user tools as `list[FunctionTool]`, MCP servers as `dict[str, MCPTool]`, skills as `dict[str, Path]` (skill name → skill directory)
-   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. MCP discovery is a translation step too: `mcp.json` entries become ready-to-use MAF MCP tool objects only when they declare `type: "http"` or `type: "streamable-http"` plus a `url`; other transport shapes are skipped with warnings. Skill discovery validates each `SKILL.md` frontmatter `name` against MAF's regex and fails fast on duplicates.
+   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. MCP discovery applies the same env-var substitution helper (`resolve_env_vars_in_data()`) to parsed `mcp.json` / `.vscode/mcp.json` data that the global-config loader applies to `agents.config.yaml`. MCP discovery is a translation step too: entries become ready-to-use MAF MCP tool objects only when they declare `type: "http"` or `type: "streamable-http"` plus a `url`; other transport shapes are skipped with warnings. Skill discovery validates each `SKILL.md` frontmatter `name` against MAF's regex and fails fast on duplicates.
 
 5. **Compose a per-agent runtime view**
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
@@ -115,10 +115,10 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Notes:** this is where precedence rules are applied. Model and timeout fall through agent config, global config, environment, and defaults; for model selection specifically, the explicit requested value wins, then provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry), then `MAF_MODEL`, then the provider default. Capability filters turn the global/shared inventories into per-agent allow/deny decisions.
 
 6. **Validate the merged configuration**
-   - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_global_mcp_references()`, `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
-   - **Input:** global MCP references as `list[str]`, discovered MCP/skill names as `list[str]`, and each `ResolvedAgent`
+   - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
+   - **Input:** each `ResolvedAgent`, discovered MCP server names as `list[str]`, and discovered skill names as `list[str]`
    - **Output:** the same validated `ResolvedAgent` (or an exception that skips registration for that agent)
-   - **Notes:** validation deliberately happens twice in the overall pipeline: once for global MCP references, once for each fully merged agent. That split keeps "bad shared config" separate from "bad per-agent overrides."
+   - **Notes:** validation checks that non-main agents define a trigger and that per-agent `mcp.exclude` entries match MCP servers discovered from `mcp.json` or `.vscode/mcp.json`. Unknown skill and tool excludes are logged as warnings during the same pass.
 
 7. **Build per-agent capabilities**
    - **Implemented by:** `src/azure_functions_agents/registration/capabilities.py:build_capabilities()`
@@ -176,9 +176,9 @@ These are the main "passport" objects that move through the pipeline:
 - `AgentSpec` — raw parsed front matter plus markdown body for one `.agent.md` file. Defined in `src/azure_functions_agents/config/schema.py` as `AgentSpec`.
   - **Created by:** `config/loader.py:_load_agent_spec()`
   - **Consumed by:** `config/merge.py:compose()`
-- `GlobalConfig` — parsed `agents.config.yaml`, including shared MCP, system-tool, model, timeout, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
+- `GlobalConfig` — parsed `agents.config.yaml`, including system-tool, model, timeout, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
   - **Created by:** `config/loader.py:load_global_config()`
-  - **Consumed by:** `config/merge.py:compose()` and `config/validation.py:validate_global_mcp_references()`
+  - **Consumed by:** `config/merge.py:compose()`
 - `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
   - **Created by:** `config/merge.py:compose()`
   - **Consumed by:** validation, capability building, trigger registration, endpoint registration, and sandbox-tool assembly

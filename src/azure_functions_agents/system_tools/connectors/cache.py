@@ -5,7 +5,7 @@ from typing import Any
 
 from ..._function_tool import FunctionTool
 from ..._logger import logger
-from ...config.env import resolve_env_var
+from ...config.env import substitute_env_vars_in_value
 from .arm import ArmClient, DataPlaneClient
 from .connectors import is_v2_connection, load_connection
 from .tools import generate_tools
@@ -32,10 +32,11 @@ class _ConnectorToolCache:
         if not specs:
             return
         existing_ids = {
-            resolve_env_var(str(spec.get("connection_id", ""))) for spec in self._connection_specs
+            substitute_env_vars_in_value(str(spec.get("connection_id", "")))
+            for spec in self._connection_specs
         }
         for spec in specs:
-            connection_id = resolve_env_var(str(spec.get("connection_id", "")))
+            connection_id = substitute_env_vars_in_value(str(spec.get("connection_id", "")))
             if connection_id and connection_id not in existing_ids:
                 self._connection_specs.append(spec)
                 existing_ids.add(connection_id)
@@ -57,7 +58,9 @@ class _ConnectorToolCache:
             all_tools: list[FunctionTool] = []
 
             has_v2 = any(
-                is_v2_connection(resolve_env_var(str(spec.get("connection_id", ""))))
+                is_v2_connection(
+                    substitute_env_vars_in_value(str(spec.get("connection_id", "")))
+                )
                 for spec in self._connection_specs
             )
             if has_v2:
@@ -69,7 +72,7 @@ class _ConnectorToolCache:
                     logger.warning("tools_from_connections entry missing 'connection_id', skipping")
                     continue
 
-                connection_id = resolve_env_var(str(raw_connection_id))
+                connection_id = substitute_env_vars_in_value(str(raw_connection_id))
                 if (
                     not connection_id
                     or connection_id.startswith("%")

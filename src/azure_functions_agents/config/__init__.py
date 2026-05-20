@@ -3,13 +3,13 @@
 from __future__ import annotations
 
 from azure_functions_agents.config.env import (
-    _DOLLAR_PATTERN,
     _INLINE_DOLLAR_PATTERN,
     _INLINE_PERCENT_PATTERN,
-    _PERCENT_PATTERN,
     _to_bool,
-    resolve_env_var,
+    has_unresolved_placeholders,
+    resolve_env_vars_in_data,
     substitute_env_vars_in_text,
+    substitute_env_vars_in_value,
 )
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import (
@@ -40,21 +40,13 @@ from azure_functions_agents.config.schema import (
     TriggerSpec,
 )
 from azure_functions_agents.config.validation import (
-    LEGACY_FIELDS_AGENT,
-    LEGACY_FIELDS_GLOBAL,
-    validate_agent_frontmatter,
-    validate_global_config_dict,
     validate_resolved_agent,
 )
 
 __all__ = [
     "DEFAULT_TIMEOUT",
-    "LEGACY_FIELDS_AGENT",
-    "LEGACY_FIELDS_GLOBAL",
-    "_DOLLAR_PATTERN",
     "_INLINE_DOLLAR_PATTERN",
     "_INLINE_PERCENT_PATTERN",
-    "_PERCENT_PATTERN",
     "AgentSpec",
     "DebugConfig",
     "ExecuteInSessionsConfig",
@@ -74,13 +66,13 @@ __all__ = [
     "apply_tools_filter",
     "compose",
     "get_app_root",
+    "has_unresolved_placeholders",
     "load_agent_specs",
     "load_global_config",
     "resolve_config_dir",
-    "resolve_env_var",
+    "resolve_env_vars_in_data",
     "set_app_root",
     "substitute_env_vars_in_text",
-    "validate_agent_frontmatter",
-    "validate_global_config_dict",
+    "substitute_env_vars_in_value",
     "validate_resolved_agent",
 ]

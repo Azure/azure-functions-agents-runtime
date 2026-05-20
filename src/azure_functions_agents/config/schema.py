@@ -97,7 +97,6 @@ class GlobalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mcp: list[str] = Field(default_factory=list)
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None

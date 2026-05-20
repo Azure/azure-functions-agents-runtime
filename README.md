@@ -288,31 +288,44 @@ The agent receives the HTTP request body as input and is instructed to return JS
 
 ### Environment variable substitution
 
-`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders in every string value in `agents.config.yaml`, every string value in agent frontmatter, and inline in the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
+`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders inline in every string value in `agents.config.yaml`, `mcp.json`, `.vscode/mcp.json`, agent frontmatter values, and the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
 
 #### Agent instructions (markdown body)
 
-Variable references in the agent's markdown body are replaced **inline** with environment variable values at load time. Both `$VAR_NAME` and `%VAR_NAME%` syntaxes are supported:
+Variable references are resolved inline at load time anywhere string values are supported. Both `$VAR_NAME` and `%VAR_NAME%` syntaxes are supported, where the identifier must match `[A-Za-z_][A-Za-z0-9_]*`:
 
 ```markdown
 ---
 name: Notifier
+description: Sends updates to $TEAM_NAME
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: "https://$HOST/api"
+  tools_from_connections:
+    - connection_id: $DEFAULT_CONNECTION_ID
 ---
 
 Send a daily summary email to $TO_EMAIL.
 Post a message to the %TEAM_NAME% team's General channel.
 ```
 
-If `TO_EMAIL=alice@example.com` and `TEAM_NAME=Engineering` are set in the environment, the agent instructions become:
+If `HOST=contoso.internal`, `DEFAULT_CONNECTION_ID=sql-prod`, `TO_EMAIL=alice@example.com`, and `TEAM_NAME=Engineering` are set in the environment, those values resolve inline:
 
+> `session_pool_management_endpoint: "https://contoso.internal/api"`
+>
+> `connection_id: sql-prod`
+>
 > Send a daily summary email to alice@example.com.
+>
 > Post a message to the Engineering team's General channel.
 
 If a referenced variable is not set, the original `$VAR_NAME` or `%VAR_NAME%` text is left unchanged.
 
-Text inside fenced code blocks (`` ``` ``) is **not** substituted, so documentation examples in your instructions are preserved.
+The runtime does **not** substitute dictionary keys, `${FOO}` brace syntax, identifiers starting with a digit such as `$9PORT`, or text inside fenced code blocks (`` ``` ``), so documentation examples in your instructions are preserved.
 
-To disable both frontmatter and body substitution for an agent, set `substitute_variables: false` in the frontmatter:
+For the `$IDENT` syntax, identifiers that include characters outside `[A-Za-z0-9_]` (for example `$VAR-NAME`) are matched greedily up to the first invalid character — so `$VAR-NAME` resolves to `<value-of-VAR>-NAME` when `VAR` is set, and stays `$VAR-NAME` when `VAR` is unset. The `%IDENT%` syntax requires a closing `%` immediately after the identifier, so tokens like `%VAR-NAME%` remain fully literal. Quote or escape the surrounding text if you need a `$IDENT` token to remain literal.
+
+To disable substitution for an agent's frontmatter values and markdown body, set `substitute_variables: false` in the frontmatter:
 
 ```yaml
 ---
@@ -374,12 +387,17 @@ If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and
 
 You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported (`type: "http"` or `"streamable-http"`).
 
+String values in `mcp.json` and `.vscode/mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields are `command`, `args`, `env` values, `url`, `headers` values, `type`, and `tools` entries. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
+
 ```json
 {
   "servers": {
     "microsoft-learn": {
       "type": "http",
-      "url": "https://learn.microsoft.com/api/mcp"
+      "url": "https://$MCP_HOST/api",
+      "headers": {
+        "Authorization": "Bearer $LEARN_MCP_TOKEN"
+      }
     },
     "custom-api": {
       "type": "streamable-http",
