@@ -321,7 +321,9 @@ If `HOST=contoso.internal`, `DEFAULT_CONNECTION_ID=sql-prod`, `TO_EMAIL=alice@ex
 
 If a referenced variable is not set, the original `$VAR_NAME` or `%VAR_NAME%` text is left unchanged.
 
-The runtime does **not** substitute dictionary keys, `${FOO}` brace syntax, invalid identifiers such as `$9PORT` or `$VAR-NAME`, or text inside fenced code blocks (`` ``` ``), so documentation examples in your instructions are preserved.
+The runtime does **not** substitute dictionary keys, `${FOO}` brace syntax, identifiers starting with a digit such as `$9PORT`, or text inside fenced code blocks (`` ``` ``), so documentation examples in your instructions are preserved.
+
+For the `$IDENT` syntax, identifiers that include characters outside `[A-Za-z0-9_]` (for example `$VAR-NAME`) are matched greedily up to the first invalid character — so `$VAR-NAME` resolves to `<value-of-VAR>-NAME` when `VAR` is set, and stays `$VAR-NAME` when `VAR` is unset. The `%IDENT%` syntax requires a closing `%` immediately after the identifier, so tokens like `%VAR-NAME%` remain fully literal. Quote or escape the surrounding text if you need a `$IDENT` token to remain literal.
 
 To disable substitution for an agent's frontmatter values and markdown body, set `substitute_variables: false` in the frontmatter:
 

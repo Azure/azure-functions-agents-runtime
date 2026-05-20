@@ -26,7 +26,7 @@ from pydantic import BaseModel, Field
 
 from .._function_tool import FunctionTool, tool
 from .._logger import logger
-from ..config.env import substitute_env_vars_in_value
+from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
 
 _API_VERSION = "2025-10-02-preview"
 
@@ -255,7 +255,7 @@ def create_sandbox_tools(
         return []
 
     endpoint = substitute_env_vars_in_value(str(raw_endpoint))
-    if not endpoint or endpoint.startswith("$") or endpoint.startswith("%"):
+    if not endpoint or has_unresolved_placeholders(endpoint):
         logger.warning("execution_sandbox: could not resolve endpoint '%s', skipping", raw_endpoint)
         return []
 

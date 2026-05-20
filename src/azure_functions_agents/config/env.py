@@ -26,6 +26,11 @@ def substitute_env_vars_in_value(value: str) -> str:
     return _INLINE_PERCENT_PATTERN.sub(_percent_replacer, value)
 
 
+def has_unresolved_placeholders(value: str) -> bool:
+    """Return True if the string still contains $VAR or %VAR% placeholders after substitution."""
+    return bool(_INLINE_DOLLAR_PATTERN.search(value) or _INLINE_PERCENT_PATTERN.search(value))
+
+
 def substitute_env_vars_in_text(text: str) -> str:
     """Perform inline env-var substitution outside fenced code blocks."""
     parts = text.split("```")

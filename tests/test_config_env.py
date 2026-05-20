@@ -4,6 +4,7 @@ import pytest
 
 from azure_functions_agents.config.env import (
     _to_bool,
+    has_unresolved_placeholders,
     resolve_env_vars_in_data,
     substitute_env_vars_in_text,
     substitute_env_vars_in_value,
@@ -70,6 +71,21 @@ def test_substitute_env_vars_in_value_url_with_inline_host(
     assert substitute_env_vars_in_value("https://$HOST/api") == "https://example.com/api"
 
 
+def test_has_unresolved_placeholders_url_with_inline_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("HOST", raising=False)
+    assert has_unresolved_placeholders("https://$HOST/api") is True
+
+    monkeypatch.setenv("HOST", "example.com")
+    resolved = substitute_env_vars_in_value("https://$HOST/api")
+    assert has_unresolved_placeholders(resolved) is False
+
+
+def test_has_unresolved_placeholders_plain_url() -> None:
+    assert has_unresolved_placeholders("https://example.com") is False
+
+
 def test_substitute_env_vars_in_value_same_var_multiple_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -105,6 +121,26 @@ def test_substitute_env_vars_in_value_empty_env_var_resolves_to_empty_string(
 
 def test_substitute_env_vars_in_value_undefined_inline_stays_literal() -> None:
     assert substitute_env_vars_in_value("Bearer $MISSING") == "Bearer $MISSING"
+
+
+def test_substitute_env_vars_in_value_partial_identifier_behavior(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VAR", "hello")
+    assert substitute_env_vars_in_value("$VAR-NAME") == "hello-NAME"
+
+    monkeypatch.delenv("VAR", raising=False)
+    assert substitute_env_vars_in_value("$VAR-NAME") == "$VAR-NAME"
+
+
+def test_substitute_env_vars_in_value_percent_partial_identifier_stays_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("VAR", "hello")
+    assert substitute_env_vars_in_value("%VAR-NAME%") == "%VAR-NAME%"
+
+    monkeypatch.delenv("VAR", raising=False)
+    assert substitute_env_vars_in_value("%VAR-NAME%") == "%VAR-NAME%"
 
 
 def test_resolve_env_vars_in_data_nested_dict_and_list(

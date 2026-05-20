@@ -604,7 +604,9 @@ Each placeholder is resolved with `os.environ.get(IDENT, original_placeholder)`.
 **What is not substituted**
 - Dictionary / object keys are never substituted; only values are substituted. For example, `"$KEY": "value"` keeps `"$KEY"` as the literal key.
 - `${FOO}` brace syntax is not supported because `{` immediately after `$` does not match the identifier regex.
-- Invalid identifier names such as `$1FOO` or `%bad-name%` do not match the supported syntax and remain literal.
+- Identifiers starting with a digit, such as `$9PORT`, do not match the supported syntax and remain literal.
+- For `$IDENT`, identifiers that include characters outside `[A-Za-z0-9_]` are matched up to the first invalid character. For example, `$VAR-NAME` becomes `<value-of-VAR>-NAME` when `VAR` is set, and remains `$VAR-NAME` when `VAR` is unset.
+- For `%IDENT%`, the closing `%` must immediately follow the identifier, so tokens like `%VAR-NAME%` remain fully literal regardless of whether `VAR` is set.
 - Text inside markdown fenced code blocks remains literal. This code-block exception applies only to the markdown body, not to YAML or JSON string values.
 
 Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent, defaults to `true`, and has no effect on the app-wide `agents.config.yaml`, `mcp.json`, or `.vscode/mcp.json` files.
