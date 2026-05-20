@@ -15,7 +15,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 - **Microsoft Learn MCP server** — gives the agent access to Azure documentation for looking up correct API paths and versions
 - **`azure-resources` skill** — packages ARM REST API knowledge (paths, api-versions, tips) so the agent instructions can focus on the job, not the technical details
 - **Interactive chat UI** — `main.agent.md` enables the built-in chat interface for ad-hoc Azure queries
-- **Variable substitution** — subscription ID and recipient email configured via environment variables, resolved at load time in the agent instructions
+- **Variable substitution** — subscription ID and recipient email configured via environment variables. Substitution applies to all config string values (agent instructions, `agents.config.yaml`, `mcp.json`)
 
 ## Prerequisites
 
@@ -163,5 +163,5 @@ Invoke-WebRequest -Uri "http://localhost:7071/resource-summary" `
   {"total_resources": 239, "by_type": {...}, "by_location": {...}}
   ```
 
-- `$SUBSCRIPTION_ID` and `$TO_EMAIL` in the agent instructions are replaced with actual values at load time (via environment variable substitution)
+- `$SUBSCRIPTION_ID` and `$TO_EMAIL` in the agent instructions are replaced with actual values at load time. Inline `$VAR` and `%VAR%` substitution applies to all config string values
 - `SUBSCRIPTION_ID` is automatically set from the deployment subscription — no manual input needed

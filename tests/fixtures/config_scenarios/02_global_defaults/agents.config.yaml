@@ -1,0 +1,7 @@
+# Global defaults shared by every agent in this app.
+model: gpt-4o
+timeout: 900
+
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: https://pool.example.test
