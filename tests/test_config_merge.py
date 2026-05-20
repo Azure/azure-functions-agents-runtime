@@ -174,7 +174,6 @@ def test_apply_tools_filter() -> None:
 
 def test_compose_end_to_end() -> None:
     global_config = GlobalConfig(
-        mcp=["learn", "ado", "ghost"],
         model="global-model",
         timeout=10,
         tools=ToolsFilter(exclude=["danger"]),
@@ -230,44 +229,6 @@ def test_compose_copies_logger_into_metadata() -> None:
     assert resolved.metadata["logger"] is False
 
 
-def test_compose_warns_on_filtered_mcp_names(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    global_config = GlobalConfig(mcp=["foo", "bar"])
-
-    with caplog.at_level(logging.WARNING):
-        resolved = compose(
-            AgentSpec(name="Agent", description="desc", is_main=True),
-            global_config,
-            discovered_mcp_names=["bar"],
-            discovered_skill_names=[],
-        )
-
-    assert resolved.enabled_mcp_names == ["bar"]
-    messages = [record.getMessage() for record in caplog.records]
-    assert any(
-        "Filtering out MCP server reference(s) not defined in mcp.json: foo" in message
-        for message in messages
-    )
-
-
-def test_compose_does_not_warn_when_all_mcp_names_discovered(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    global_config = GlobalConfig(mcp=["foo"])
-
-    with caplog.at_level(logging.WARNING):
-        resolved = compose(
-            AgentSpec(name="Agent", description="desc", is_main=True),
-            global_config,
-            discovered_mcp_names=["foo"],
-            discovered_skill_names=[],
-        )
-
-    assert resolved.enabled_mcp_names == ["foo"]
-    assert caplog.records == []
-
-
 def test_compose_preserves_substitute_variables_flag() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", substitute_variables=False, is_main=True),
@@ -303,7 +264,7 @@ def test_compose_defers_warning_only_validation(
     with caplog.at_level(logging.WARNING):
         validate_resolved_agent(
             resolved,
-            all_global_mcp=[],
+            discovered_mcp_names=[],
             discovered_skills=["known-skill"],
         )
 
@@ -373,3 +334,38 @@ def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
     assert disabled is False
     assert effective.exclude == []
     assert effective.custom_only is False
+
+
+def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", is_main=True),
+        GlobalConfig(),
+        discovered_mcp_names=["a", "b"],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.enabled_mcp_names == ["a", "b"]
+
+
+def test_compose_disables_mcp_when_agent_sets_mcp_false() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", is_main=True, mcp=False),
+        GlobalConfig(),
+        discovered_mcp_names=["a", "b"],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.enabled_mcp_names == []
+    assert resolved.mcp_disabled is True
+
+
+def test_compose_excludes_specific_mcp_servers() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", is_main=True, mcp=McpFilter(exclude=["a"])),
+        GlobalConfig(),
+        discovered_mcp_names=["a", "b", "c"],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.enabled_mcp_names == ["b", "c"]
+    assert resolved.mcp_exclude_names == ["a"]

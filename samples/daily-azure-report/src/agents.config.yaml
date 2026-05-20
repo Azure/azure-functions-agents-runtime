@@ -5,10 +5,6 @@ system_tools:
   tools_from_connections:
     - connection_id: $O365_CONNECTION_ID
 
-# Available MCP servers (defined in mcp.json)
-mcp:
-  - microsoft-learn
-
 # Default runtime configuration
 model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 900

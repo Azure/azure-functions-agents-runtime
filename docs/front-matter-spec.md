@@ -4,15 +4,14 @@
 
 Azure Functions agents use a **two-tier configuration system**:
 
-1. **Global Configuration** (`agents.config.yaml`) — Infrastructure and capabilities available to all agents
+1. **Global Configuration** (`agents.config.yaml`) — Infrastructure and runtime defaults
 2. **Agent-Specific Configuration** (`.agent.md` front matter) — Agent behavior, triggers, and capability filtering
 
 Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
 
 ### Configuration Model
 
-**Global configuration defines infrastructure:**
-- MCP servers (defined in `mcp.json`, referenced in `agents.config.yaml`)
+**Global configuration defines infrastructure and defaults:**
 - Skills (auto-discovered from `skills/` directory)
 - Custom tools (auto-discovered from `tools/` directory)
 - System tools (`system_tools`)
@@ -20,8 +19,11 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
   - Connector tools
 - Default runtime settings (`agent-configuration`, plus legacy `model`/`timeout` shorthands)
 
+**MCP server discovery:**
+- MCP servers (defined in `mcp.json` or `.vscode/mcp.json`)
+
 **Agent front matter:**
-- **Inherits all auto-discovered capabilities by default**
+- **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (endpoint, model, temperature, timeout)
 - Must define **trigger** (how the agent is invoked)
@@ -36,7 +38,7 @@ For runtime settings (provider, endpoint, model, temperature, timeout):
 4. **Framework defaults** — Built-in default values
 
 For capabilities (MCP, skills, tools):
-1. **Auto-discovered and referenced** — MCP servers referenced in `agents.config.yaml` (defined in `mcp.json`), skills and tools auto-discovered from their directories
+1. **Auto-discovered** — MCP servers from `mcp.json` or `.vscode/mcp.json`, plus skills and tools from their directories
 2. **Filtered per-agent** using exclude lists in agent front matter
 
 ### Quick Reference: Required vs Optional
@@ -52,12 +54,11 @@ For capabilities (MCP, skills, tools):
 ## Configuration Files
 
 ### Global Configuration (`agents.config.yaml`)
-Optional file in the root directory that defines infrastructure and capabilities available to all agents.
+Optional file in the root directory that defines shared infrastructure and runtime defaults for all agents.
 
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
-- `mcp` — Array of MCP server names (servers must be defined in `mcp.json`)
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
   - `tools_from_connections` — Array of connector configurations
@@ -68,9 +69,9 @@ Optional file in the root directory that defines infrastructure and capabilities
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
 
-**Note:** Skills (from `skills/` directory) and custom tools (from `tools/` directory) are automatically discovered and do not need to be listed in global configuration. Agents can filter them out using exclude lists.
+**Note:** MCP servers (from `mcp.json` or `.vscode/mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
-**Key principle:** Global config defines **what's available**. Agents filter **what they use**.
+**Key principle:** `agents.config.yaml` defines shared runtime configuration. Agents filter discovered capabilities and choose what they use.
 
 ### Agent Configuration (`.agent.md` front matter)
 YAML front matter at the top of each agent file.
@@ -88,7 +89,7 @@ YAML front matter at the top of each agent file.
 - `temperature` — Number to override global default model temperature
 - `timeout` — Number to override global default timeout
 - `system_tools` — Object to opt out of system tools
-- `mcp` — Object with exclude lists to filter MCP servers
+- `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
 - `input_schema` — Object, JSON Schema for HTTP request validation
@@ -113,8 +114,8 @@ Fields are organized into categories based on how they can be used:
 
 ### Field Categories
 
-**Infrastructure (Global only, filtered in agents):**
-- `mcp` — MCP server references (global) or exclude lists (agent)
+**Infrastructure (Discovered capabilities, filtered in agents):**
+- `mcp` — MCP servers discovered from `mcp.json` or `.vscode/mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
@@ -485,13 +486,7 @@ system_tools:
     - connection_id: $OUTLOOK_CONNECTION_ID
 ```
 
-**Note:** This field enables dynamic tool generation from connector APIs. An alternative approach is to use connectors via their MCP (Model Context Protocol) servers through the `mcp` field, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
-
-**MCP alternative:**
-```yaml
-mcp:
-  - office365-connector  # Use connector via MCP instead
-```
+**Note:** This field enables dynamic tool generation from connector APIs. Connector-backed MCP servers are defined in `mcp.json` or `.vscode/mcp.json` and participate in the standard MCP discovery flow, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
 
 ---
 
@@ -527,18 +522,15 @@ tools: false
 ---
 
 #### `mcp`
-- **Type:** `array` or `object`
-- **Location:** Global (`agents.config.yaml`) for references, Agent (front matter) for filtering
-- **Description:** MCP server configuration. MCP servers are defined in `mcp.json`. In `agents.config.yaml`, list which servers are available to agents. Agents inherit all listed servers by default and can use exclude lists to filter.
+- **Type:** `boolean` or `object`
+- **Location:** Agent (front matter) for filtering
+- **Description:** MCP server filtering. MCP servers are discovered from `mcp.json` or `.vscode/mcp.json`. Agents inherit all discovered servers by default. Use `false` to disable MCP for an agent, or use `exclude` to hide specific servers.
 
-**Global configuration (in `agents.config.yaml`) - List available servers:**
+**Default behavior - Inherit all discovered servers:**
 ```yaml
-mcp:
-  - microsoft-learn
-  - azure-devops
-  - custom-api
+# Omit `mcp`, set it to null, or use:
+mcp: true
 ```
-*Note: These server names must be defined in `mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.*
 
 **Agent filtering - Use exclude lists:**
 ```yaml
@@ -552,7 +544,7 @@ mcp:
 mcp: false
 ```
 
-**Note:** Agents inherit all globally defined MCP servers by default. Use `exclude` to filter out unwanted servers.
+**Note:** `mcp.exclude` entries must match MCP servers discovered from `mcp.json` or `.vscode/mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.
 
 ---
 
@@ -664,24 +656,41 @@ metadata:
 
 Environment variable substitution is resolved against the Azure Functions process environment. On Azure, Application Settings are exposed to the function host as environment variables, so placeholders can refer to either local environment variables or deployed app settings.
 
+**Scope**
+
+Inline substitution applies to all string values in:
+1. `agents.config.yaml`
+2. `mcp.json`
+3. `.vscode/mcp.json`
+4. Agent `*.agent.md` frontmatter values
+5. Agent `*.agent.md` markdown body
+
+For the markdown body, text inside fenced code blocks (` ``` `) is preserved and is not substituted.
+
 **Supported syntaxes**
-- `$VAR`
-- `%VAR%`
+- `$IDENT` — for example, `Authorization: Bearer $TOKEN`
+- `%IDENT%` — for example, `base_url: "https://%HOST%/api"`
 
-Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
+To keep placeholder-like text literal while leaving substitution enabled, escape it by doubling the placeholder sigil:
+- `$$IDENT` renders as literal `$IDENT`
+- `%%IDENT%%` renders as literal `%IDENT%`
 
-**Supported scope**
-1. Any string value in the global `agents.config.yaml` file (recursively)
-2. Any string value in agent frontmatter YAML metadata (recursively)
-3. Inline references in the agent markdown body, except inside fenced code blocks
+Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`. A full-string value such as `default_timeout: "$DEFAULT_TIMEOUT"` is also substituted.
 
-For YAML/JSON configuration fields, substitution only happens when the entire string value is exactly `$VAR` or `%VAR%`. For markdown bodies, substitution can occur inline anywhere outside fenced code blocks.
+**Resolution**
 
-If a referenced environment variable is not set, the original placeholder text is left literal. String-typed fields keep that literal value; non-string fields still undergo normal schema validation, so entries such as `timeout: $TIMEOUT` raise a validation error.
+Each placeholder is resolved with `os.environ.get(IDENT, original_placeholder)`. If a referenced environment variable is not set, the original placeholder text is left literal. String-typed fields keep that literal value; non-string fields still undergo normal schema validation, so entries such as `timeout: $TIMEOUT` raise a validation error.
 
-Text inside fenced code blocks (` ``` `) in the markdown body is not substituted, so documentation examples remain literal.
+**What is not substituted**
+- Dictionary / object keys are never substituted; only values are substituted. For example, `"$KEY": "value"` keeps `"$KEY"` as the literal key.
+- Escaped placeholders stay literal: `$$TOKEN` becomes `$TOKEN`, and `%%HOST%%` becomes `%HOST%`.
+- `${FOO}` brace syntax is not supported because `{` immediately after `$` does not match the identifier regex.
+- Identifiers starting with a digit, such as `$9PORT`, do not match the supported syntax and remain literal.
+- For `$IDENT`, identifiers that include characters outside `[A-Za-z0-9_]` are matched up to the first invalid character. For example, `$VAR-NAME` becomes `<value-of-VAR>-NAME` when `VAR` is set, and remains `$VAR-NAME` when `VAR` is unset.
+- For `%IDENT%`, the closing `%` must immediately follow the identifier, so tokens like `%VAR-NAME%` remain fully literal regardless of whether `VAR` is set.
+- Text inside markdown fenced code blocks remains literal. This code-block exception applies only to the markdown body, not to YAML or JSON string values.
 
-Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent and defaults to `true`.
+Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent, defaults to `true`, and has no effect on the app-wide `agents.config.yaml`, `mcp.json`, or `.vscode/mcp.json` files.
 
 > **Note**: `substitute_variables` itself is read before env-var substitution. It must be a literal boolean (`true` or `false`). Setting `substitute_variables: $MY_FLAG` will not be resolved and defaults to `true`.
 
@@ -713,7 +722,7 @@ With `substitute_variables: false`, `model`, `response_example`, and `$TO_EMAIL`
 
 ### Example 1: Multi-Agent Application with Global Configuration
 
-This example demonstrates the recommended pattern: define all infrastructure globally and filter per-agent as needed.
+This example demonstrates the recommended pattern: define shared runtime configuration in `agents.config.yaml`, discover MCP servers from `mcp.json`, and filter capabilities per-agent as needed.
 
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
@@ -732,11 +741,6 @@ agent-configuration:
   temperature: 0.2
   timeout: 900
 
-# Available MCP servers
-mcp:
-  - microsoft-learn
-  - azure-devops
-
 # Global tool configuration
 tools:
   exclude: ["bash", "execute_shell"]
@@ -751,7 +755,7 @@ description: A helpful assistant with Python code execution capabilities
 
 You are a helpful assistant. If you need to get up to date information, browse the web for it.
 ```
-*Note: This agent inherits all global capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools, model, timeout).*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools).*
 
 **Resource Summary Agent (`resource_summary.agent.md`):**
 ```yaml
@@ -788,7 +792,7 @@ response_schema:
 
 Given the subscription ID in the request body, list all resources and return a structured summary.
 ```
-*Note: This agent inherits all global capabilities.*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities.*
 
 **Daily Report Agent (`daily_report.agent.md`):**
 ```yaml
@@ -804,7 +808,7 @@ trigger:
 
 When triggered, list all resources in subscription $SUBSCRIPTION_ID, filter for changes in the last 24 hours, and email a report to $TO_EMAIL.
 ```
-*Note: This agent inherits all global capabilities.*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities.*
 
 **Timer Agent with HTTP and MCP Endpoints (`scheduled_task.agent.md`):**
 ```yaml
@@ -858,7 +862,7 @@ You are a helpful assistant. If you need to run Python code or perform calculati
 
 ### Example 3: Agent with Runtime Overrides and Capability Filtering
 
-This example shows how to override runtime settings and filter capabilities per-agent.
+This example shows how to override runtime settings and filter capabilities per-agent. Assume `mcp.json` or `.vscode/mcp.json` includes an `experimental-server` entry.
 
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
@@ -895,7 +899,7 @@ agent-configuration:
 system_tools:
   execute_in_sessions: false  # Opt out of code execution for security/performance
 mcp:
-  exclude: ["experimental-server"]  # Exclude specific MCP servers
+  exclude: ["experimental-server"]  # Exclude a discovered MCP server
 skills:
   exclude: ["admin-tools"]  # Exclude specific skills
 ---
@@ -906,17 +910,13 @@ You are a fast agent optimized for simple queries.
 
 ### Example 4: Agent Using Exclude Pattern
 
+Assume `mcp.json` defines the `microsoft-learn`, `azure-devops`, `github-copilot`, and `custom-api` servers used in this example.
+
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-
-mcp:
-  - microsoft-learn
-  - azure-devops
-  - github-copilot
-  - custom-api
 
 tools:
   exclude: ["bash", "execute_shell"]  # Exclude dangerous tools globally
@@ -979,7 +979,6 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 ### Supported Properties
 
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
-- `mcp` (array of strings)
 - `system_tools` (object)
   - `execute_in_sessions` (object)
   - `tools_from_connections` (array)
@@ -1002,7 +1001,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 1. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
 2. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
 3. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
-4. **Environment variables:** `$VAR` and `%VAR%` placeholders may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
+4. **Environment variables:** Inline `$VAR` and `%VAR%` placeholders in supported string values may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
 5. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
 6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
 7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
@@ -1010,7 +1009,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
 10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
 11. **Tool references:** Tools in `tools.exclude` must exist in `tools/` directory or be built-in tools
-12. **MCP server references:** Servers in `mcp.exclude` must be defined in the global `mcp` list in `agents.config.yaml`
+12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json` or `.vscode/mcp.json`
 13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
 15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 
