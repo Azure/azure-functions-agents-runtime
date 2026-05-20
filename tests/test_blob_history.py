@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
@@ -415,3 +415,73 @@ def test_container_create_called_once(fake_account: _FakeAccount) -> None:
     asyncio.run(provider.get_messages("sess-2"))
     # Across two sessions, container.create_container() runs once.
     assert fake_account.container_create_calls == [DEFAULT_CONTAINER_NAME]
+
+
+# ---------------------------------------------------------------------------
+# Identity-based credential precedence
+# ---------------------------------------------------------------------------
+
+
+class _CredentialSpy:
+    instances: ClassVar[list[dict[str, Any]]] = []
+
+    def __init__(self, **kwargs: Any) -> None:
+        type(self).instances.append(kwargs)
+
+
+class _BlobServiceClientSpy:
+    last_kwargs: ClassVar[dict[str, Any] | None] = None
+
+    def __init__(self, **kwargs: Any) -> None:
+        type(self).last_kwargs = kwargs
+
+
+@pytest.fixture
+def _credential_spies(monkeypatch: pytest.MonkeyPatch) -> type[_CredentialSpy]:
+    import azure.identity.aio
+    import azure.storage.blob.aio
+
+    _CredentialSpy.instances = []
+    _BlobServiceClientSpy.last_kwargs = None
+    monkeypatch.setattr(azure.identity.aio, "DefaultAzureCredential", _CredentialSpy)
+    monkeypatch.setattr(azure.storage.blob.aio, "BlobServiceClient", _BlobServiceClientSpy)
+    return _CredentialSpy
+
+
+def test_build_service_client_prefers_storage_specific_client_id(
+    monkeypatch: pytest.MonkeyPatch, _credential_spies: type[_CredentialSpy]
+) -> None:
+    monkeypatch.setenv("AzureWebJobsStorage__clientId", "storage-uaid")
+    monkeypatch.setenv("AZURE_CLIENT_ID", "app-uaid")
+    _blob_history._build_service_client(
+        connection_string=None,
+        blob_service_url="https://example.blob.core.windows.net",
+        credential=None,
+    )
+    assert _credential_spies.instances == [{"managed_identity_client_id": "storage-uaid"}]
+
+
+def test_build_service_client_falls_back_to_azure_client_id(
+    monkeypatch: pytest.MonkeyPatch, _credential_spies: type[_CredentialSpy]
+) -> None:
+    monkeypatch.delenv("AzureWebJobsStorage__clientId", raising=False)
+    monkeypatch.setenv("AZURE_CLIENT_ID", "app-uaid")
+    _blob_history._build_service_client(
+        connection_string=None,
+        blob_service_url="https://example.blob.core.windows.net",
+        credential=None,
+    )
+    assert _credential_spies.instances == [{"managed_identity_client_id": "app-uaid"}]
+
+
+def test_build_service_client_bare_credential_when_no_env(
+    monkeypatch: pytest.MonkeyPatch, _credential_spies: type[_CredentialSpy]
+) -> None:
+    monkeypatch.delenv("AzureWebJobsStorage__clientId", raising=False)
+    monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
+    _blob_history._build_service_client(
+        connection_string=None,
+        blob_service_url="https://example.blob.core.windows.net",
+        credential=None,
+    )
+    assert _credential_spies.instances == [{}]

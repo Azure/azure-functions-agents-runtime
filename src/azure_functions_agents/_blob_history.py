@@ -314,7 +314,11 @@ def _build_service_client(
     if credential is None:
         from azure.identity.aio import DefaultAzureCredential
 
-        client_id = (os.environ.get(_CLIENT_ID_ENV) or "").strip()
+        # Precedence: storage-specific identity (AzureWebJobsStorage__clientId) wins,
+        # then app-wide AZURE_CLIENT_ID, then bare DefaultAzureCredential().
+        client_id = (
+            os.environ.get(_CLIENT_ID_ENV) or os.environ.get("AZURE_CLIENT_ID") or ""
+        ).strip()
         credential = (
             DefaultAzureCredential(managed_identity_client_id=client_id)
             if client_id
