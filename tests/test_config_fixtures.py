@@ -483,3 +483,38 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
         "LOG_LEVEL": "debug",
         "API_KEY": "$UNSET_API_KEY",
     }
+
+
+# ---------------------------------------------------------------------------
+# 12 — escaped placeholders stay literal while substitution remains enabled
+# ---------------------------------------------------------------------------
+
+
+def test_escaped_placeholders_preserve_literal_sigils(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fixture = FIXTURES_ROOT / "12_escaped_placeholders"
+
+    monkeypatch.setenv("AGENT_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("TEAM", "platform")
+    monkeypatch.setenv("CONTACT_EMAIL", "ops@contoso.test")
+    monkeypatch.setenv("API_TOKEN", "leaked-token")
+    monkeypatch.setenv("TENANT_ID", "tenant-live")
+
+    specs = load_agent_specs(fixture, strict=True)
+
+    assert len(specs) == 1
+    spec = specs[0]
+    assert spec.name == "Escaped Literals"
+    assert spec.description == "Keep $API_TOKEN and %TENANT_ID% literal for platform."
+    assert spec.model == "gpt-4o-mini"
+    assert spec.metadata is not None
+    assert spec.metadata["literal_dollar"] == "$API_TOKEN"
+    assert spec.metadata["literal_percent"] == "%TENANT_ID%"
+    assert spec.metadata["mixed"] == "team-platform-uses-$API_TOKEN-and-%TENANT_ID%"
+
+    body = spec.instructions
+    assert "Render literal examples: $API_TOKEN and %TENANT_ID%." in body
+    assert "Still resolve normal placeholders: model gpt-4o-mini, contact ops@contoso.test." in body
+    assert "leaked-token" not in body
+    assert "tenant-live" not in body

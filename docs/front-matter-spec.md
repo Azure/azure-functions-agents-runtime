@@ -595,6 +595,10 @@ For the markdown body, text inside fenced code blocks (` ``` `) is preserved and
 - `$IDENT` — for example, `Authorization: Bearer $TOKEN`
 - `%IDENT%` — for example, `base_url: "https://%HOST%/api"`
 
+To keep placeholder-like text literal while leaving substitution enabled, escape it by doubling the placeholder sigil:
+- `$$IDENT` renders as literal `$IDENT`
+- `%%IDENT%%` renders as literal `%IDENT%`
+
 Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`. A full-string value such as `default_timeout: "$DEFAULT_TIMEOUT"` is also substituted.
 
 **Resolution**
@@ -603,6 +607,7 @@ Each placeholder is resolved with `os.environ.get(IDENT, original_placeholder)`.
 
 **What is not substituted**
 - Dictionary / object keys are never substituted; only values are substituted. For example, `"$KEY": "value"` keeps `"$KEY"` as the literal key.
+- Escaped placeholders stay literal: `$$TOKEN` becomes `$TOKEN`, and `%%HOST%%` becomes `%HOST%`.
 - `${FOO}` brace syntax is not supported because `{` immediately after `$` does not match the identifier regex.
 - Identifiers starting with a digit, such as `$9PORT`, do not match the supported syntax and remain literal.
 - For `$IDENT`, identifiers that include characters outside `[A-Za-z0-9_]` are matched up to the first invalid character. For example, `$VAR-NAME` becomes `<value-of-VAR>-NAME` when `VAR` is set, and remains `$VAR-NAME` when `VAR` is unset.

@@ -104,6 +104,16 @@ def test_substitute_env_vars_in_value_mixed_dollar_and_percent(
     assert substitute_env_vars_in_value("$A and %B%") == "x and y"
 
 
+def test_substitute_env_vars_in_value_escaped_placeholders_stay_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOO", "value")
+    assert (
+        substitute_env_vars_in_value("literal $$FOO and %%FOO%%, resolved $FOO and %FOO%")
+        == "literal $FOO and %FOO%, resolved value and value"
+    )
+
+
 def test_substitute_env_vars_in_value_trailing_literal_dollar_stays_literal() -> None:
     assert substitute_env_vars_in_value("trailing $") == "trailing $"
 
@@ -184,6 +194,16 @@ def test_substitute_env_vars_in_text_preserves_code_fences(
     monkeypatch.setenv("FOO", "value")
     text = "before $FOO\n```bash\necho $FOO\n```\nafter %FOO%"
     assert substitute_env_vars_in_text(text) == "before value\n```bash\necho $FOO\n```\nafter value"
+
+
+def test_substitute_env_vars_in_text_unescapes_literal_placeholders_outside_fences(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOO", "value")
+    text = "before $$FOO and %%FOO%%\n```bash\necho $$FOO and %%FOO%%\n```\nafter $FOO"
+    assert substitute_env_vars_in_text(text) == (
+        "before $FOO and %FOO%\n```bash\necho $$FOO and %%FOO%%\n```\nafter value"
+    )
 
 
 def test_to_bool() -> None:
