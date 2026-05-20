@@ -86,6 +86,23 @@ def test_has_unresolved_placeholders_plain_url() -> None:
     assert has_unresolved_placeholders("https://example.com") is False
 
 
+def test_has_unresolved_placeholders_escaped_dollar_not_flagged() -> None:
+    # $$TOKEN is an escaped literal — should not be treated as unresolved.
+    assert has_unresolved_placeholders("$$TOKEN") is False
+    assert has_unresolved_placeholders("prefix $$TOKEN suffix") is False
+
+
+def test_has_unresolved_placeholders_escaped_percent_not_flagged() -> None:
+    # %%TOKEN%% is an escaped literal — should not be treated as unresolved.
+    assert has_unresolved_placeholders("%%TOKEN%%") is False
+    assert has_unresolved_placeholders("prefix %%TOKEN%% suffix") is False
+
+
+def test_has_unresolved_placeholders_mixed_escaped_and_unresolved() -> None:
+    # $$ESCAPED is literal; $REAL is unresolved → True overall.
+    assert has_unresolved_placeholders("$$ESCAPED $REAL") is True
+
+
 def test_substitute_env_vars_in_value_same_var_multiple_times(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

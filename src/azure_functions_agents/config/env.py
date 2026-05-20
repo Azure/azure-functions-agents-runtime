@@ -62,7 +62,11 @@ def substitute_env_vars_in_value(value: str) -> str:
 
 def has_unresolved_placeholders(value: str) -> bool:
     """Return True if the string still contains $VAR or %VAR% placeholders after substitution."""
-    return bool(_INLINE_DOLLAR_PATTERN.search(value) or _INLINE_PERCENT_PATTERN.search(value))
+    # Mask escaped placeholders ($$IDENT / %%IDENT%%) with sentinels before checking so
+    # they are not confused with genuinely unresolved placeholders.
+    masked = _ESCAPED_DOLLAR_PATTERN.sub(_escaped_dollar_replacer, value)
+    masked = _ESCAPED_PERCENT_PATTERN.sub(_escaped_percent_replacer, masked)
+    return bool(_INLINE_DOLLAR_PATTERN.search(masked) or _INLINE_PERCENT_PATTERN.search(masked))
 
 
 def substitute_env_vars_in_text(text: str) -> str:
