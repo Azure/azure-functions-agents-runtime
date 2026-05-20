@@ -11,8 +11,9 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
+from agent_framework import MCPStdioTool
 
+import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.schema import (
     DebugConfig,
@@ -23,6 +24,22 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
+
+
+class _CapturedMCPStreamableHTTPTool:
+    def __init__(
+        self,
+        name: str,
+        url: str,
+        *,
+        allowed_tools: list[str] | None = None,
+        header_provider: object = None,
+        **_: object,
+    ) -> None:
+        self.name = name
+        self.url = url
+        self.allowed_tools = allowed_tools
+        self.header_provider = header_provider
 
 
 def _specs_by_name(specs):
@@ -438,6 +455,9 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NODE_BIN", "/usr/local/bin/node")
     monkeypatch.setenv("WORKSPACE_ROOT", "/srv/workspace")
     monkeypatch.setenv("MCP_LOG_LEVEL", "debug")
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
     # Intentionally leave UNSET_API_KEY unset to confirm it stays literal.
 
     # The agent file itself should also load cleanly through the loader.
@@ -455,12 +475,10 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     assert set(servers) == {"github", "filesystem"}
 
     github = servers["github"]
-    assert isinstance(github, MCPStreamableHTTPTool)
+    assert isinstance(github, _CapturedMCPStreamableHTTPTool)
     assert github.url == "https://api.githubcopilot.com/mcp/"
     assert github.allowed_tools == ["search_issues", "list_pull_requests"]
-    # agent-framework stores the header provider on the concrete tool as a
-    # private callback rather than exposing the constructor argument publicly.
-    header_provider = getattr(github, "_header_provider", None)
+    header_provider = github.header_provider
     assert callable(header_provider)
     headers = header_provider(None)
     assert headers == {
