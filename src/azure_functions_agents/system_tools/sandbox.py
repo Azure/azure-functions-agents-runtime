@@ -6,17 +6,20 @@ sessions (code-interpreter pools). Configured via the ``execution_sandbox``
 block in agent frontmatter.
 
 Each agent can have its own session pool endpoint. The ACA session id is
-derived from the runtime's ``session_id`` (passed in by the runner via
+usually derived from the runtime's ``session_id`` (passed in by the runner via
 ``fallback_session_id``) so REPL state — variables, imports, files, browser
-pages — persists across calls within a conversation.
+pages — persists across calls within a conversation. When no session id is
+available, a fresh GUID is generated for that tool instance.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import urllib.parse
+import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -151,6 +154,13 @@ def _build_url(endpoint: str, session_id: str) -> str:
     return f"{base}/executions?api-version={_API_VERSION}&identifier={encoded_id}"
 
 
+def _build_managed_identity_credential() -> DefaultAzureCredential:
+    client_id = os.environ.get("AZURE_CLIENT_ID")
+    if client_id:
+        return DefaultAzureCredential(managed_identity_client_id=client_id)
+    return DefaultAzureCredential()
+
+
 async def _execute_code(
     endpoint: str,
     code: str,
@@ -218,7 +228,7 @@ async def _ensure_shared_resources() -> None:
     async with _init_lock:
         if _token_provider is not None:
             return
-        _credential = DefaultAzureCredential()
+        _credential = _build_managed_identity_credential()
         _token_provider = get_bearer_token_provider(
             _credential, "https://dynamicsessions.io/.default"
         )
@@ -231,7 +241,7 @@ async def _ensure_shared_resources() -> None:
 def create_sandbox_tools(
     config: dict[str, Any],
     *,
-    fallback_session_id: str = "default",
+    fallback_session_id: str | None = None,
 ) -> list[FunctionTool]:
     """Create an ``execute_python`` tool bound to a specific ACA session pool.
 
@@ -245,7 +255,8 @@ def create_sandbox_tools(
         ``execute_python`` calls within the same conversation. The runner
         passes the resolved agent-runtime session id here. MAF does not
         currently expose the active session id to tools, so the runner bakes
-        it into the tool closure on every request.
+        it into the tool closure on every request. When omitted, a fresh GUID
+        is generated so independent invocations do not share a sandbox.
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """
@@ -259,7 +270,7 @@ def create_sandbox_tools(
         logger.warning("execution_sandbox: could not resolve endpoint '%s', skipping", raw_endpoint)
         return []
 
-    aca_session_id = fallback_session_id or "default"
+    aca_session_id = fallback_session_id or uuid.uuid4().hex
     logger.info(
         "execution_sandbox: creating tool with endpoint %s (aca_session=%s)",
         endpoint,

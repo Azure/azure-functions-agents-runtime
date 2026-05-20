@@ -7,10 +7,10 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build agents with markdown** — write instructions, configure triggers, and bind tools in `.agent.md` files
 - **Run on any Azure Functions trigger** — trigger agents on timer, queue, blob, HTTP, Event Hub, Service Bus, Cosmos DB, and more
 - **Connect to 1,400+ services** — Azure API Connections let agents trigger on and perform actions across Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors — no custom code required
-- **Extend with MCP servers** — plug in remote HTTP MCP servers and stdio MCP servers for additional capabilities
+- **Extend with MCP servers** — plug in remote HTTP MCP servers for additional capabilities
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
-- **Serverless with built-in session management** — scales to zero, persists multi-turn conversations on Azure Files
+- **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Azure AI Foundry credentials and the runtime auto-detects the right client
 
 ## Installation
@@ -46,13 +46,13 @@ The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI,
 
 You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|foundry`.
 
-| Provider          | Required env vars                                                                            | Notes                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| OpenAI            | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`)                               |                                                                                    |
-| Azure OpenAI      | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION`      | If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD).  |
-| Azure AI Foundry  | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | Always uses `DefaultAzureCredential`.                                              |
+| Provider          | Required env vars                                                                            | Notes                                                                                                                                 |
+| ----------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| OpenAI            | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`)                               | `MAF_MODEL` applies directly for OpenAI.                                                                                              |
+| Azure OpenAI      | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION`      | `AZURE_OPENAI_DEPLOYMENT` takes precedence over `MAF_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD); set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
+| Azure AI Foundry  | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | `FOUNDRY_MODEL` takes precedence over `MAF_MODEL`. Uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
 
-`MAF_MODEL` overrides the per-provider default when set.
+Model resolution precedence is: explicit requested model > provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry) > `MAF_MODEL` > provider default.
 
 ### Plugging in a custom client manager
 
@@ -171,7 +171,7 @@ Define an agent with a markdown file. When `main.agent.md` is present, the runti
 - **Chat UI** — built-in single-page web interface at the app root
 - **HTTP APIs** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
 - **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
-- **Session persistence** — multi-turn conversations stored on Azure Files via MAF's `FileHistoryProvider`
+- **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
 Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug.chat: true` (or `debug: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
@@ -184,11 +184,11 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
-- **Skills** — reusable prompt modules from `*.md` files under `skills/`
+- **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
 - **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
 - **Connector tools** — dynamically generated tools from Azure API Connections
-- **MCP servers** — connect to external MCP servers (HTTP or stdio) for additional tools
-- **Sandbox** — Python code execution via Azure Container Apps dynamic sessions
+- **MCP servers** — connect to external remote HTTP MCP servers for additional tools
+- **Sandbox** — Python code execution via Azure Container Apps dynamic sessions; if no explicit sandbox session id is supplied, each invocation gets a fresh GUID-backed session
 
 ## Agent File Format (`.agent.md`)
 
@@ -372,7 +372,7 @@ If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and
 
 ## MCP Server Configuration
 
-You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Both **HTTP (Streamable)** remote servers and **stdio** servers are supported.
+You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported (`type: "http"` or `"streamable-http"`).
 
 ```json
 {
@@ -381,10 +381,12 @@ You can give your agent access to external MCP servers by creating an `mcp.json`
       "type": "http",
       "url": "https://learn.microsoft.com/api/mcp"
     },
-    "filesystem": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/data"]
+    "custom-api": {
+      "type": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_TOKEN}"
+      }
     }
   }
 }
@@ -392,20 +394,34 @@ You can give your agent access to external MCP servers by creating an `mcp.json`
 
 Tools from configured MCP servers are automatically available to the agent at runtime. Each server entry supports:
 
-- **`type`** — `"http"` (Streamable HTTP transport) or `"stdio"`
-- **`url`** — the MCP server endpoint URL (HTTP only)
-- **`command`** + **`args`** + **`env`** — process spec (stdio only)
-- **`headers`** — optional HTTP headers (e.g. for authentication; HTTP only)
+- **`type`** — `"http"` or `"streamable-http"`
+- **`url`** — the MCP server endpoint URL (required)
+- **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 
-> **Note**: SSE-transport MCP servers (`type: "sse"`) are no longer supported. Use the Streamable HTTP transport (`type: "http"`) instead.
+> **Note**: Entries that do not provide `type: "http"` or `type: "streamable-http"` with a `url` are ignored with a warning. Use the remote HTTP transport instead.
 
 ## Session storage
 
-Multi-turn conversations are persisted as JSONL files using MAF's `FileHistoryProvider`. Storage path resolution:
+Multi-turn conversations are persisted as JSON Lines, one record per message:
 
-- When `CONTAINER_NAME` is set (Functions container) → `/code-assistant-session/agent-sessions/{session_id}.jsonl`
-- Otherwise: `{AZURE_FUNCTIONS_AGENTS_CONFIG_DIR}/agent-sessions/{session_id}.jsonl`, defaulting to `~/.azure-functions-agents/agent-sessions/`
+- **Deployed apps (recommended).** When `AzureWebJobsStorage` is configured —
+  as either a connection string or the identity-based
+  `AzureWebJobsStorage__blobServiceUri` setting that `azd` provisions —
+  history is written to **Azure Blob Storage** via the runtime's
+  `BlobHistoryProvider`. One Append Blob per session is stored under
+  `agent-sessions/{session_id}.jsonl` inside the
+  `azure-functions-agents` container (override with
+  `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER`). No file share, no storage
+  account key, no mount path; the same identity that the function app
+  already uses for `AzureWebJobsStorage` reads and writes sessions. In
+  multi-identity Function Apps, set `AZURE_CLIENT_ID` so
+  `DefaultAzureCredential` selects the intended managed identity.
+- **Local dev fallback.** When neither `AzureWebJobsStorage` nor
+  `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
+  `FileHistoryProvider` writing to
+  `{AZURE_FUNCTIONS_AGENTS_CONFIG_DIR}/agent-sessions/{session_id}.jsonl`,
+  defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
 
@@ -423,16 +439,16 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ### Required Azure App Settings
 
-Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, or `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`).
+Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_MODEL`). For Azure OpenAI and Foundry, the provider-specific deployment/model setting takes precedence over `MAF_MODEL`.
 
-When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup.
+When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls.
 
 ### Optional config overrides
 
 | Setting | Purpose |
 |---|---|
 | `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
-| `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage (legacy alias `CODE_ASSISTANT_CONFIG_PATH` still accepted) |
+| `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage |
 | `AGENT_TIMEOUT` | Per-call timeout in seconds (default `900`) |
 | `MAF_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 

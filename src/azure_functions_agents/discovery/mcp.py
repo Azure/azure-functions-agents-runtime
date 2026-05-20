@@ -6,11 +6,11 @@ import json
 from pathlib import Path
 from typing import Any
 
-from agent_framework import MCPStdioTool, MCPStreamableHTTPTool
+from agent_framework import MCPStreamableHTTPTool
 
 from .._logger import logger
 
-MCPTool = MCPStdioTool | MCPStreamableHTTPTool
+MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 
@@ -32,23 +32,15 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
         allowed_tools = None
 
     if "command" in server or server_type in {"local", "stdio"}:
-        command = str(server.get("command", "")).strip()
-        if not command:
-            logger.warning("MCP server '%s': missing 'command', skipping", name)
-            return None
-        return MCPStdioTool(
-            name=name,
-            command=command,
-            args=server.get("args") or None,
-            env=server.get("env") or None,
-            allowed_tools=allowed_tools,
-        )
+        logger.warning("MCP stdio transport is not supported; skipping server '%s'", name)
+        return None
 
-    if "url" in server or server_type in {"http", "sse", "streamable-http"}:
-        if server_type == "sse":
+    if "url" in server or server_type in {"http", "streamable-http"}:
+        if server_type and server_type not in {"http", "streamable-http"}:
             logger.warning(
-                "MCP server '%s': SSE transport is not supported by the MAF runtime; use 'http' (streamable-HTTP) or a stdio bridge.",
+                "MCP server '%s': unknown server type '%s'; supported types are 'http' and 'streamable-http'",
                 name,
+                server_type,
             )
             return None
         url = str(server.get("url", "")).strip()
@@ -70,10 +62,17 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
             header_provider=header_provider,
         )
 
-    logger.warning(
-        "MCP server '%s': unrecognized config (no 'command' or 'url'), skipping",
-        name,
-    )
+    if server_type:
+        logger.warning(
+            "MCP server '%s': unknown server type '%s'; supported types are 'http' and 'streamable-http'",
+            name,
+            server_type,
+        )
+    else:
+        logger.warning(
+            "MCP server '%s': unrecognized config (expected 'url' plus type 'http' or 'streamable-http'), skipping",
+            name,
+        )
     return None
 
 

@@ -107,15 +107,14 @@ def test_apply_skills_filter() -> None:
 
 
 def test_apply_tools_filter() -> None:
-    global_filter = ToolsFilter(exclude=["a"], custom_only=False)
+    global_filter = ToolsFilter(exclude=["a"])
     assert apply_tools_filter(False, global_filter) == (ToolsFilter(), True)
     effective, disabled = apply_tools_filter(
-        ToolsFilter(exclude=["b"], custom_only=True),
+        ToolsFilter(exclude=["b"]),
         global_filter,
     )
     assert disabled is False
     assert effective.exclude == ["a", "b"]
-    assert effective.custom_only is True
 
 
 def test_compose_end_to_end() -> None:
@@ -138,7 +137,7 @@ def test_compose_end_to_end() -> None:
         trigger=TriggerSpec(type="timer_trigger", args={"schedule": "0 0 * * * *"}),
         mcp=McpFilter(exclude=["ado"]),
         skills=SkillsFilter(exclude=["secret"]),
-        tools=ToolsFilter(exclude=["foo"], custom_only=True),
+        tools=ToolsFilter(exclude=["foo"]),
         metadata={"team": "x"},
         instructions="Do work",
         source_file=str(Path(r"Q:\agent.agent.md")),
@@ -157,7 +156,6 @@ def test_compose_end_to_end() -> None:
     assert resolved.enabled_mcp_names == ["learn"]
     assert resolved.enabled_skills_names == ["public"]
     assert resolved.tool_filter.exclude == ["danger", "foo"]
-    assert resolved.tool_filter.custom_only is True
     assert resolved.sandbox_config == global_config.system_tools.execute_in_sessions
     assert resolved.connector_specs == global_config.system_tools.tools_from_connections
     assert resolved.metadata == {"team": "x"}
@@ -292,11 +290,10 @@ def test_resolve_connectors_no_global_returns_empty() -> None:
 
 def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:
     """Defensive: when an agent doesn't specify tools, it inherits the global filter as-is."""
-    global_filter = ToolsFilter(exclude=["bash"], custom_only=False)
+    global_filter = ToolsFilter(exclude=["bash"])
     effective, disabled = apply_tools_filter(None, global_filter)
     assert disabled is False
     assert effective.exclude == ["bash"]
-    assert effective.custom_only is False
     # Returned object is a deep copy — mutating it must not affect the caller's filter
     effective.exclude.append("new")
     assert global_filter.exclude == ["bash"]
@@ -316,4 +313,3 @@ def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
     effective, disabled = apply_tools_filter(None, None)
     assert disabled is False
     assert effective.exclude == []
-    assert effective.custom_only is False

@@ -25,7 +25,10 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from azure.identity.aio import DefaultAzureCredential
 
 from ._logger import logger
 
@@ -71,6 +74,16 @@ _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_FOUNDRY_MODEL = "gpt-4o-mini"
 
 
+def _build_managed_identity_credential() -> DefaultAzureCredential:
+    """Build a DefaultAzureCredential honoring AZURE_CLIENT_ID for multi-identity Function Apps."""
+    from azure.identity.aio import DefaultAzureCredential
+
+    client_id = os.environ.get("AZURE_CLIENT_ID")
+    if client_id:
+        return DefaultAzureCredential(managed_identity_client_id=client_id)
+    return DefaultAzureCredential()
+
+
 class MAFClientManager(ClientManager):
     """Build Microsoft Agent Framework chat clients.
 
@@ -85,17 +98,19 @@ class MAFClientManager(ClientManager):
     name = "maf"
 
     def resolve_model(self, requested: str | None) -> str:
+        """Resolve model as requested > provider-specific env > MAF_MODEL > default."""
         if requested:
             return requested
-        env_override = os.environ.get("MAF_MODEL")
-        if env_override:
-            return env_override
         provider = self._provider()
         if provider == "azure_openai":
-            return os.environ.get("AZURE_OPENAI_DEPLOYMENT") or _DEFAULT_OPENAI_MODEL
+            return (
+                os.environ.get("AZURE_OPENAI_DEPLOYMENT")
+                or os.environ.get("MAF_MODEL")
+                or _DEFAULT_OPENAI_MODEL
+            )
         if provider == "foundry":
-            return os.environ.get("FOUNDRY_MODEL") or _DEFAULT_FOUNDRY_MODEL
-        return _DEFAULT_OPENAI_MODEL
+            return os.environ.get("FOUNDRY_MODEL") or os.environ.get("MAF_MODEL") or _DEFAULT_FOUNDRY_MODEL
+        return os.environ.get("MAF_MODEL") or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
         provider = self._provider()
@@ -176,15 +191,12 @@ class MAFClientManager(ClientManager):
         if api_key:
             kwargs["api_key"] = api_key
         else:
-            from azure.identity.aio import DefaultAzureCredential
-
-            kwargs["credential"] = DefaultAzureCredential()
+            kwargs["credential"] = _build_managed_identity_credential()
         return OpenAIChatClient(**kwargs)
 
     @classmethod
     def _build_foundry(cls, model: str) -> Any:
         from agent_framework.foundry import FoundryChatClient
-        from azure.identity.aio import DefaultAzureCredential
 
         endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
         if not endpoint:
@@ -192,7 +204,7 @@ class MAFClientManager(ClientManager):
         return FoundryChatClient(
             project_endpoint=endpoint,
             model=model,
-            credential=DefaultAzureCredential(),
+            credential=_build_managed_identity_credential(),
         )
 
 

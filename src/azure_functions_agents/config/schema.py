@@ -29,7 +29,6 @@ class ToolsFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     exclude: list[str] = Field(default_factory=list)
-    custom_only: bool = False
 
 
 class DebugConfig(BaseModel):

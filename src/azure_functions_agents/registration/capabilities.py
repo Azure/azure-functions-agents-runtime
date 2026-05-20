@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from ..config import ResolvedAgent
@@ -15,7 +16,7 @@ class AgentCapabilities:
 
     filtered_user_tools: list[Any] | None = None
     filtered_mcp_tools: list[MCPTool] | None = None
-    skills_text: str = ""
+    enabled_skill_paths: list[Path] = field(default_factory=list)
     use_connector_tools: bool = False
 
 
@@ -34,22 +35,16 @@ def build_capabilities(
     resolved: ResolvedAgent,
     *,
     discovered_user_tools: list[Any],
-    builtin_tools: list[Any],
     discovered_mcp_tools: dict[str, MCPTool],
-    discovered_skills: dict[str, str],
+    discovered_skills: dict[str, Path],
 ) -> AgentCapabilities:
     """Apply resolved capability filters and return the final runner inputs."""
     exclude_names = set(resolved.tool_filter.exclude or [])
 
     if resolved.tools_disabled:
         filtered_user_tools: list[Any] = []
-    elif resolved.tool_filter.custom_only:
-        filtered_user_tools = _filter_tools_by_name(list(discovered_user_tools), exclude_names)
     else:
-        filtered_user_tools = _filter_tools_by_name(
-            list(discovered_user_tools) + list(builtin_tools),
-            exclude_names,
-        )
+        filtered_user_tools = _filter_tools_by_name(list(discovered_user_tools), exclude_names)
 
     if resolved.mcp_disabled:
         filtered_mcp_tools: list[MCPTool] = []
@@ -61,18 +56,17 @@ def build_capabilities(
         ]
 
     if resolved.skills_disabled:
-        skills_text = ""
+        enabled_skill_paths: list[Path] = []
     else:
-        skills_parts = [
-            f"## skill: {name}\n\n{discovered_skills[name].rstrip()}"
+        enabled_skill_paths = [
+            discovered_skills[name]
             for name in resolved.enabled_skills_names
             if name in discovered_skills
         ]
-        skills_text = "\n\n".join(skills_parts)
 
     return AgentCapabilities(
         filtered_user_tools=filtered_user_tools,
         filtered_mcp_tools=filtered_mcp_tools,
-        skills_text=skills_text,
+        enabled_skill_paths=enabled_skill_paths,
         use_connector_tools=bool(resolved.connector_specs) and not resolved.tools_disabled,
     )

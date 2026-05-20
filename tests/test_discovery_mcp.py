@@ -5,6 +5,7 @@ import logging
 from pathlib import Path
 
 import pytest
+from agent_framework import MCPStreamableHTTPTool
 
 from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
 
@@ -16,15 +17,18 @@ def clear_discovery_cache() -> None:
     clear_mcp_cache()
 
 
-def _write_mcp_config(app_root: Path) -> None:
+def _write_mcp_config(
+    app_root: Path, server_config: dict[str, object] | None = None
+) -> None:
     (app_root / ".vscode").mkdir()
     (app_root / ".vscode" / "mcp.json").write_text(
         json.dumps(
             {
                 "servers": {
-                    "demo": {
-                        "command": "python",
-                        "args": ["-m", "demo_server"],
+                    "demo": server_config
+                    or {
+                        "type": "http",
+                        "url": "https://example.com/mcp",
                     }
                 }
             }
@@ -129,3 +133,64 @@ def test_discover_mcp_servers_handles_top_level_string(
         == f"Ignoring {config_path}: expected a JSON object at the top level, got str."
         for record in caplog.records
     )
+
+
+def test_discover_mcp_servers_skips_stdio_command_config(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_mcp_config(
+        tmp_path,
+        {
+            "command": "python",
+            "args": ["-m", "demo_server"],
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+    assert any(
+        record.levelno == logging.WARNING
+        and record.getMessage()
+        == "MCP stdio transport is not supported; skipping server 'demo'"
+        for record in caplog.records
+    )
+
+
+def test_discover_mcp_servers_skips_sse_config(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_mcp_config(
+        tmp_path,
+        {
+            "type": "sse",
+            "url": "https://example.com/mcp",
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+    assert any(
+        record.levelno == logging.WARNING
+        and record.getMessage()
+        == "MCP server 'demo': unknown server type 'sse'; supported types are 'http' and 'streamable-http'"
+        for record in caplog.records
+    )
+
+
+def test_discover_mcp_servers_supports_streamable_http(tmp_path: Path) -> None:
+    _write_mcp_config(
+        tmp_path,
+        {
+            "type": "streamable-http",
+            "url": "https://example.com/mcp",
+        },
+    )
+
+    discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert list(discovered_servers) == ["demo"]
+    assert isinstance(discovered_servers["demo"], MCPStreamableHTTPTool)

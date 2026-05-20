@@ -100,11 +100,9 @@ def apply_tools_filter(
         return ToolsFilter(), False
 
     merged_excludes = set(spec_tools.exclude)
-    custom_only = spec_tools.custom_only
     if global_tools_filter is not None:
         merged_excludes.update(global_tools_filter.exclude)
-        custom_only = custom_only or global_tools_filter.custom_only
-    return ToolsFilter(exclude=sorted(merged_excludes), custom_only=custom_only), False
+    return ToolsFilter(exclude=sorted(merged_excludes)), False
 
 
 def compose(

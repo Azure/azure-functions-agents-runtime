@@ -318,8 +318,8 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 - **Type:** `string`
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
-- **Description:** Specifies which LLM to use for the agent. Valid model identifiers include `claude-sonnet-4`, `gpt-4o`, `gpt-4o-mini`, `o1`, `o1-mini`.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `COPILOT_MODEL` env var → `"claude-sonnet-4"` (default)
+- **Description:** Specifies which LLM to use for the agent. Valid model identifiers depend on the active provider.
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry) → `MAF_MODEL` → provider default
 
 **Global default:**
 ```yaml
@@ -392,6 +392,8 @@ system_tools:
 ---
 ```
 
+**Note:** When the runtime has no explicit session id to bind to the ACA sandbox, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for the ACA sandbox honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
+
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
 
 ---
@@ -409,6 +411,8 @@ system_tools:
     - connection_id: $OUTLOOK_CONNECTION_ID
 ```
 
+**Note:** Connector auth uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps to select the intended managed identity.
+
 **Note:** This field enables dynamic tool generation from connector APIs. An alternative approach is to use connectors via their MCP (Model Context Protocol) servers through the `mcp` field, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
 
 **MCP alternative:**
@@ -422,7 +426,7 @@ mcp:
 #### `tools`
 - **Type:** `object`
 - **Location:** Global (`agents.config.yaml`) for configuration, Agent (front matter) for filtering
-- **Description:** Controls which tools are available. All tools from `tools/` directory and built-in tools are auto-discovered. Use global config to set defaults, agent config to apply allow/deny lists.
+- **Description:** Controls which custom tools (auto-discovered from the `tools/` directory) are available to agents. Use global config to set defaults, agent config to apply exclude lists.
 
 **Global configuration (optional) - Set defaults:**
 ```yaml
@@ -435,10 +439,6 @@ tools:
 # Exclude specific tools (in addition to global excludes)
 tools:
   exclude: ["web_fetch", "http_request"]
-
-# Only custom tools (no built-ins)
-tools:
-  custom_only: true
 ```
 
 **Disable all tools for an agent:**
@@ -446,7 +446,7 @@ tools:
 tools: false
 ```
 
-**Note:** Agents inherit all globally available tools by default. Use `exclude` to filter out unwanted tools.
+**Note:** Agents inherit all globally available custom tools by default. Use `exclude` to filter out unwanted tools.
 
 ---
 
@@ -481,13 +481,25 @@ mcp: false
 ---
 
 #### `skills`
-- **Type:** `array`, `object`, or `boolean`
+- **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skills configuration. All skills in `skills/` directory are automatically discovered and available to all agents by default. Use exclude lists in agent front matter to filter out unwanted skills.
+- **Description:** Skill filtering configuration. Each skill lives in its own subdirectory under `skills/` with a `SKILL.md` file declaring `name:` and `description:` in YAML frontmatter. Skill names must match `^[a-z0-9]([a-z0-9]*-[a-z0-9])*[a-z0-9]*$` (lowercase letters, digits, and single hyphens). At runtime the discovered skills are exposed through MAF's `SkillsProvider`, which gives the agent `load_skill` / `read_skill_resource` tools that operate scoped to the skill directory.
+
+**SKILL.md format (one per skill directory):**
+```markdown
+---
+name: my-skill
+description: One sentence the LLM uses to decide whether to load this skill.
+---
+
+# My Skill
+
+Skill body — instructions, examples, references to in-directory resources.
+```
 
 **Agent filtering - Use exclude lists:**
 ```yaml
-# Exclude specific skills
+# Exclude specific skills (matched against the SKILL.md `name` field)
 skills:
   exclude: ["security-review", "compliance-checker"]
 ```
@@ -497,7 +509,7 @@ skills:
 skills: false
 ```
 
-**Note:** All skills in the `skills/` directory are auto-discovered and available to all agents by default. Use `exclude` to filter out unwanted skills.
+**Note:** All skills under `skills/` are auto-discovered and available to all agents by default. Use `exclude` to filter out unwanted skills.
 
 ---
 
@@ -915,7 +927,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 8. **Schema validation:** `input_schema` and `response_schema` must be valid JSON Schema (draft-07 or later)
 9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
 10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
-11. **Tool references:** Tools in `tools.exclude` must exist in `tools/` directory or be built-in tools
+11. **Tool references:** Tools in `tools.exclude` must exist in the `tools/` directory
 12. **MCP server references:** Servers in `mcp.exclude` must be defined in the global `mcp` list in `agents.config.yaml`
 13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
 15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files

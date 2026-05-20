@@ -20,7 +20,6 @@ from azure_functions_agents.config.merge import (
     compose,
 )
 from azure_functions_agents.config.paths import (
-    _REMOTE_CONFIG_DIR,
     _app_root,
     get_app_root,
     resolve_config_dir,
@@ -56,7 +55,6 @@ __all__ = [
     "_INLINE_DOLLAR_PATTERN",
     "_INLINE_PERCENT_PATTERN",
     "_PERCENT_PATTERN",
-    "_REMOTE_CONFIG_DIR",
     "AgentSpec",
     "DebugConfig",
     "ExecuteInSessionsConfig",
