@@ -4,46 +4,136 @@ import pytest
 
 from azure_functions_agents.config.env import (
     _to_bool,
-    resolve_env_var,
+    resolve_env_vars_in_data,
     substitute_env_vars_in_text,
+    substitute_env_vars_in_value,
 )
 
 
-def test_resolve_env_var_dollar(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_substitute_env_vars_in_value_dollar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOO", "value")
-    assert resolve_env_var("$FOO") == "value"
-    monkeypatch.delenv("FOO", raising=False)
-    assert resolve_env_var("$FOO") == "$FOO"
+    assert substitute_env_vars_in_value("$FOO") == "value"
+    monkeypatch.setenv("FOO", "$FOO")
+    assert substitute_env_vars_in_value("$FOO") == "$FOO"
 
 
-def test_resolve_env_var_percent(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_substitute_env_vars_in_value_percent(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOO", "value")
-    assert resolve_env_var("%FOO%") == "value"
-    monkeypatch.delenv("FOO", raising=False)
-    assert resolve_env_var("%FOO%") == "%FOO%"
+    assert substitute_env_vars_in_value("%FOO%") == "value"
+    monkeypatch.setenv("FOO", "%FOO%")
+    assert substitute_env_vars_in_value("%FOO%") == "%FOO%"
 
 
-def test_full_string_percent_rejects_invalid_var_name(
+def test_substitute_env_vars_in_value_rejects_invalid_var_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("1 BAD-NAME", "value")
-    assert resolve_env_var("%1 BAD-NAME%") == "%1 BAD-NAME%"
+    assert substitute_env_vars_in_value("%1 BAD-NAME%") == "%1 BAD-NAME%"
 
 
-def test_full_string_percent_accepts_valid_var_name(
+def test_substitute_env_vars_in_value_accepts_valid_var_name(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FOO", "bar")
-    assert resolve_env_var("%FOO%") == "bar"
+    assert substitute_env_vars_in_value("%FOO%") == "bar"
 
 
-def test_resolve_env_var_plain() -> None:
-    assert resolve_env_var("plain") == "plain"
+def test_substitute_env_vars_in_value_plain() -> None:
+    assert substitute_env_vars_in_value("plain") == "plain"
 
 
-def test_resolve_env_var_brace_syntax_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_substitute_env_vars_in_value_brace_syntax_not_supported(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.setenv("FOO", "value")
-    assert resolve_env_var("${FOO}") == "${FOO}"
+    assert substitute_env_vars_in_value("${FOO}") == "${FOO}"
+
+
+def test_substitute_env_vars_in_value_inline_dollar_with_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TOKEN", "secret")
+    assert substitute_env_vars_in_value("Bearer $TOKEN") == "Bearer secret"
+
+
+def test_substitute_env_vars_in_value_inline_percent_with_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOO", "value")
+    assert substitute_env_vars_in_value("%FOO%-suffix") == "value-suffix"
+
+
+def test_substitute_env_vars_in_value_url_with_inline_host(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOST", "example.com")
+    assert substitute_env_vars_in_value("https://$HOST/api") == "https://example.com/api"
+
+
+def test_substitute_env_vars_in_value_same_var_multiple_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("HOST", "example.com")
+    assert (
+        substitute_env_vars_in_value("$HOST and $HOST")
+        == "example.com and example.com"
+    )
+
+
+def test_substitute_env_vars_in_value_mixed_dollar_and_percent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("A", "x")
+    monkeypatch.setenv("B", "y")
+    assert substitute_env_vars_in_value("$A and %B%") == "x and y"
+
+
+def test_substitute_env_vars_in_value_trailing_literal_dollar_stays_literal() -> None:
+    assert substitute_env_vars_in_value("trailing $") == "trailing $"
+
+
+def test_substitute_env_vars_in_value_inline_digit_start_identifier_stays_literal() -> None:
+    assert substitute_env_vars_in_value("port $1FOO") == "port $1FOO"
+
+
+def test_substitute_env_vars_in_value_empty_env_var_resolves_to_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("EMPTY", "")
+    assert substitute_env_vars_in_value("$EMPTY") == ""
+
+
+def test_substitute_env_vars_in_value_undefined_inline_stays_literal() -> None:
+    assert substitute_env_vars_in_value("Bearer $MISSING") == "Bearer $MISSING"
+
+
+def test_resolve_env_vars_in_data_nested_dict_and_list(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOO", "resolved")
+    value = {"a": "$FOO", "b": ["literal", "%FOO%-x"], "c": {"d": "$FOO/path"}}
+    assert resolve_env_vars_in_data(value) == {
+        "a": "resolved",
+        "b": ["literal", "resolved-x"],
+        "c": {"d": "resolved/path"},
+    }
+
+
+def test_resolve_env_vars_in_data_does_not_substitute_keys(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("KEYNAME", "substituted")
+    assert resolve_env_vars_in_data({"$KEYNAME": "value"}) == {"$KEYNAME": "value"}
+
+
+def test_resolve_env_vars_in_data_passes_through_non_string_scalars() -> None:
+    value = {"int": 42, "bool": True, "none": None, "float": 3.14}
+    assert resolve_env_vars_in_data(value) == value
+
+
+def test_resolve_env_vars_in_data_string_input(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("FOO", "value")
+    assert resolve_env_vars_in_data("$FOO") == "value"
 
 
 def test_substitute_env_vars_in_text(monkeypatch: pytest.MonkeyPatch) -> None:

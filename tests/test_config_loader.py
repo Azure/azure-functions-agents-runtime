@@ -286,7 +286,7 @@ def test_load_global_config_rejects_top_level_mcp_field(tmp_path: Path) -> None:
 def test_load_global_config_resolves_numeric_and_bool_values(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Defensive: _resolve_strings passes through non-string scalars (numbers, bools) untouched."""
+    """Defensive: resolve_env_vars_in_data passes through non-string scalars untouched."""
     monkeypatch.setenv("ENDPOINT", "https://example.test")
     (tmp_path / "agents.config.yaml").write_text(
         textwrap.dedent(
@@ -396,7 +396,7 @@ def test_load_agent_specs_strict_reraises_first_failure(tmp_path: Path) -> None:
 def test_load_agent_specs_resolves_strings_passes_through_non_string_scalars(
     tmp_path: Path,
 ) -> None:
-    """Defensive: _resolve_strings must passthrough numeric/bool values inside trigger.args
+    """Defensive: resolve_env_vars_in_data must passthrough numeric/bool values inside trigger.args
     without crashing (env-var resolution only applies to strings)."""
     (tmp_path / "report.agent.md").write_text(
         textwrap.dedent(

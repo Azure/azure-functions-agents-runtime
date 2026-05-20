@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 from azure_functions_agents.config.env import (
-    _DOLLAR_PATTERN,
     _INLINE_DOLLAR_PATTERN,
     _INLINE_PERCENT_PATTERN,
-    _PERCENT_PATTERN,
     _to_bool,
-    resolve_env_var,
+    resolve_env_vars_in_data,
     substitute_env_vars_in_text,
+    substitute_env_vars_in_value,
 )
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import (
@@ -46,10 +45,8 @@ from azure_functions_agents.config.validation import (
 
 __all__ = [
     "DEFAULT_TIMEOUT",
-    "_DOLLAR_PATTERN",
     "_INLINE_DOLLAR_PATTERN",
     "_INLINE_PERCENT_PATTERN",
-    "_PERCENT_PATTERN",
     "_REMOTE_CONFIG_DIR",
     "AgentSpec",
     "DebugConfig",
@@ -73,8 +70,9 @@ __all__ = [
     "load_agent_specs",
     "load_global_config",
     "resolve_config_dir",
-    "resolve_env_var",
+    "resolve_env_vars_in_data",
     "set_app_root",
     "substitute_env_vars_in_text",
+    "substitute_env_vars_in_value",
     "validate_resolved_agent",
 ]

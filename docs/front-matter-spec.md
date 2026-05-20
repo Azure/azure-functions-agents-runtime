@@ -580,24 +580,34 @@ metadata:
 
 Environment variable substitution is resolved against the Azure Functions process environment. On Azure, Application Settings are exposed to the function host as environment variables, so placeholders can refer to either local environment variables or deployed app settings.
 
+**Scope**
+
+Inline substitution applies to all string values in:
+1. `agents.config.yaml`
+2. `mcp.json`
+3. `.vscode/mcp.json`
+4. Agent `*.agent.md` frontmatter values
+5. Agent `*.agent.md` markdown body
+
+For the markdown body, text inside fenced code blocks (` ``` `) is preserved and is not substituted.
+
 **Supported syntaxes**
-- `$VAR`
-- `%VAR%`
+- `$IDENT` — for example, `Authorization: Bearer $TOKEN`
+- `%IDENT%` — for example, `base_url: "https://%HOST%/api"`
 
-Variable names must match `[A-Za-z_][A-Za-z0-9_]*`.
+Identifiers must match `[A-Za-z_][A-Za-z0-9_]*`. A full-string value such as `default_timeout: "$DEFAULT_TIMEOUT"` is also substituted.
 
-**Supported scope**
-1. Any string value in the global `agents.config.yaml` file (recursively)
-2. Any string value in agent frontmatter YAML metadata (recursively)
-3. Inline references in the agent markdown body, except inside fenced code blocks
+**Resolution**
 
-For YAML/JSON configuration fields, substitution only happens when the entire string value is exactly `$VAR` or `%VAR%`. For markdown bodies, substitution can occur inline anywhere outside fenced code blocks.
+Each placeholder is resolved with `os.environ.get(IDENT, original_placeholder)`. If a referenced environment variable is not set, the original placeholder text is left literal. String-typed fields keep that literal value; non-string fields still undergo normal schema validation, so entries such as `timeout: $TIMEOUT` raise a validation error.
 
-If a referenced environment variable is not set, the original placeholder text is left literal. String-typed fields keep that literal value; non-string fields still undergo normal schema validation, so entries such as `timeout: $TIMEOUT` raise a validation error.
+**What is not substituted**
+- Dictionary / object keys are never substituted; only values are substituted. For example, `"$KEY": "value"` keeps `"$KEY"` as the literal key.
+- `${FOO}` brace syntax is not supported because `{` immediately after `$` does not match the identifier regex.
+- Invalid identifier names such as `$1FOO` or `%bad-name%` do not match the supported syntax and remain literal.
+- Text inside markdown fenced code blocks remains literal. This code-block exception applies only to the markdown body, not to YAML or JSON string values.
 
-Text inside fenced code blocks (` ``` `) in the markdown body is not substituted, so documentation examples remain literal.
-
-Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent and defaults to `true`.
+Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent, defaults to `true`, and has no effect on the app-wide `agents.config.yaml`, `mcp.json`, or `.vscode/mcp.json` files.
 
 > **Note**: `substitute_variables` itself is read before env-var substitution. It must be a literal boolean (`true` or `false`). Setting `substitute_variables: $MY_FLAG` will not be resolved and defaults to `true`.
 
@@ -886,7 +896,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 1. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
 2. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
 3. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
-4. **Environment variables:** `$VAR` and `%VAR%` placeholders may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
+4. **Environment variables:** Inline `$VAR` and `%VAR%` placeholders in supported string values may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
 5. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
 6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
 7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`

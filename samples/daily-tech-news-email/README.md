@@ -11,7 +11,7 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
 - **Timer trigger** — runs daily at 15:00 UTC
 - **Code execution** — uses ACA Dynamic Sessions to fetch tech news from public RSS feeds and Hacker News
 - **Office 365 connector** — sends the email via an Azure API Connection
-- **Variable substitution** — recipient email address configured via `$TO_EMAIL` environment variable, resolved at load time in the agent instructions
+- **Variable substitution** — recipient email address configured via `$TO_EMAIL` environment variable. Substitution applies to all config string values (agent instructions, `agents.config.yaml`, `mcp.json`)
 
 ## Prerequisites
 
@@ -119,4 +119,4 @@ Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_tech_news" `
   1. Uses `execute_python` to fetch tech news from public RSS feeds and Hacker News
   2. Summarizes the top stories into an HTML email
   3. Calls the Office 365 send email tool to deliver the summary to the configured recipient
-- The `$TO_EMAIL` variable in the agent instructions is replaced with the actual email address at load time (via environment variable substitution)
+- The `$TO_EMAIL` variable in the agent instructions is replaced with the actual email address at load time. Inline `$VAR` and `%VAR%` substitution applies to all config string values

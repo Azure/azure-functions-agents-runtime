@@ -37,14 +37,14 @@ A few boundaries are worth calling out explicitly:
 | --- | --- | --- |
 | `azure_functions_agents/app.py` | Top-level orchestrator that runs the startup pipeline and returns the configured app. | `create_function_app()` |
 | `azure_functions_agents/config/paths.py` | Resolves the app root and the optional config/history directory. | `set_app_root()`, `get_app_root()`, `resolve_config_dir()` |
-| `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion during config loading. | `resolve_env_var()`, `substitute_env_vars_in_text()`, `_to_bool()` |
+| `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion across config string values in YAML, JSON, front matter, and markdown body content. | `substitute_env_vars_in_value()`, `resolve_env_vars_in_data()`, `substitute_env_vars_in_text()`, `_to_bool()` |
 | `azure_functions_agents/config/schema.py` | Defines the Pydantic models for raw, global, and merged config. | `AgentSpec`, `GlobalConfig`, `ResolvedAgent`, `TriggerSpec`, `DebugConfig` |
 | `azure_functions_agents/config/loader.py` | Loads YAML front matter and `agents.config.yaml` into typed models. | `load_agent_specs()`, `load_global_config()` |
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config. | `compose()` |
 | `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents. | `validate_resolved_agent()` |
 | `azure_functions_agents/discovery/skills.py` | Recursively discovers `skills/*.md`, caches them, and returns per-skill text or a combined block. | `discover_skill_texts()`, `discover_skill_names()`, `discover_skills()` |
 | `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds `FunctionTool` values or wraps plain functions, and caches the result. | `discover_user_tools()` |
-| `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json` / `.vscode/mcp.json` and translates server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
+| `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json` / `.vscode/mcp.json`, applies `resolve_env_vars_in_data()`, and translates server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
 | `azure_functions_agents/discovery/builtin_tools.py` | Provides built-in file-reading/search tools behind an allow-list and path-containment checks. | `BUILTIN_TOOLS`, `add_allowed_read_dir()` |
 | `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory. | `AgentCapabilities`, `build_capabilities()` |
 | `azure_functions_agents/registration/_naming.py` | Derives Azure-safe function names and debug slugs from `.agent.md` filenames; allocates unique function names via `allocate_unique_function_name()` when sanitized stems collide. | `_safe_function_name()`, `_function_name_from_source()` |
@@ -95,19 +95,19 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:load_global_config()`
    - **Input:** `app_root: Path`
    - **Output:** `GlobalConfig`
-   - **Notes:** missing config is valid and becomes `GlobalConfig()`. String values are normalized through `config/env.py`, so env-var references are resolved before the Pydantic model is materialized.
+   - **Notes:** missing config is valid and becomes `GlobalConfig()`. String values in `agents.config.yaml` are normalized through `config/env.py` via `resolve_env_vars_in_data()`, so env-var references are resolved before the Pydantic model is materialized.
 
 3. **Load all agent markdown files**
    - **Implemented by:** `src/azure_functions_agents/config/loader.py:_load_agent_spec()`, `src/azure_functions_agents/config/loader.py:load_agent_specs()`
    - **Input:** `app_root: Path`
    - **Output:** `list[AgentSpec]`
-   - **Notes:** each file is parsed as YAML front matter plus markdown body. The loader stamps `source_file`, sets `is_main` when the filename is `main.agent.md`, and stores the markdown body in `AgentSpec.instructions`.
+   - **Notes:** each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file`, sets `is_main` when the filename is `main.agent.md`, and stores the markdown body in `AgentSpec.instructions`.
 
 4. **Discover runtime inventories from disk**
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`, `src/azure_functions_agents/discovery/builtin_tools.py`
    - **Input:** `app_root: Path`
    - **Output:** user tools as `list[FunctionTool]`, MCP servers as `dict[str, MCPTool]`, skills as `dict[str, str]`, plus built-ins as `list[FunctionTool]`
-   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. MCP discovery is a translation step too: entries from `mcp.json` become ready-to-use MAF MCP tool objects.
+   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. MCP discovery applies the same env-var substitution helper (`resolve_env_vars_in_data()`) to parsed `mcp.json` / `.vscode/mcp.json` data that the global-config loader applies to `agents.config.yaml`. MCP discovery is a translation step too: entries from `mcp.json` become ready-to-use MAF MCP tool objects.
 
 5. **Compose a per-agent runtime view**
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`

@@ -12,30 +12,20 @@ from pydantic import ValidationError
 from azure_functions_agents._logger import logger
 from azure_functions_agents.config.env import (
     _to_bool,
-    resolve_env_var,
+    resolve_env_vars_in_data,
     substitute_env_vars_in_text,
 )
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
 
 
-def _resolve_strings(value: Any) -> Any:
-    if isinstance(value, str):
-        return resolve_env_var(value)
-    if isinstance(value, list):
-        return [_resolve_strings(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _resolve_strings(item) for key, item in value.items()}
-    return value
-
-
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
-    return cast(dict[str, Any], _resolve_strings(normalized))
+    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
 
 
 def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(metadata)
-    return cast(dict[str, Any], _resolve_strings(normalized))
+    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
