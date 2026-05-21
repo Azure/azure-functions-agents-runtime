@@ -10,7 +10,12 @@ from typing import Any
 import azure.functions as func
 import pytest
 
-from azure_functions_agents.config.schema import DebugConfig, ResolvedAgent, ToolsFilter
+from azure_functions_agents.config.schema import (
+    AgentConfiguration,
+    DebugConfig,
+    ResolvedAgent,
+    ToolsFilter,
+)
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _run_debug_agent,
@@ -66,8 +71,12 @@ def _resolved_agent(
         instructions="Assist the user.",
         is_main=is_main,
         debug=debug,
-        model=None,
-        timeout=1.0,
+        agent_configuration=AgentConfiguration.model_validate(
+            {
+                "provider": "openai",
+                "openai": {"model": "gpt-4o"},
+            }
+        ),
         enabled_mcp_names=[],
         enabled_skills_names=[],
         tool_filter=ToolsFilter(),
@@ -243,6 +252,7 @@ def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
     assert calls["sandbox"] == (resolved, "generated-session-id")
     assert calls["run_agent"]["session_id"] == "generated-session-id"
     assert calls["run_agent"]["sandbox_tools"] == ["sandbox-tool"]
+    assert calls["run_agent"]["agent_configuration"] == resolved.agent_configuration
     assert result.session_id == "generated-session-id"
 
 
@@ -285,6 +295,7 @@ def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_too
     assert calls["sandbox"] == (resolved, "generated-stream-session-id")
     assert calls["run_agent_stream"]["session_id"] == "generated-stream-session-id"
     assert calls["run_agent_stream"]["sandbox_tools"] == ["sandbox-tool"]
+    assert calls["run_agent_stream"]["agent_configuration"] == resolved.agent_configuration
     assert result == "stream"
 
 

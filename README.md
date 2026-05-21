@@ -11,7 +11,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations on Azure Files
-- **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Azure AI Foundry credentials and the runtime auto-detects the right client
+- **Pluggable model providers** — configure OpenAI, Azure OpenAI, or Azure AI Foundry with `agent_configuration`
 
 ## Installation
 
@@ -38,36 +38,50 @@ pip install "azurefunctions-agents-runtime[connectors]"
 
 ## Model Provider Configuration
 
-The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Azure AI Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
+The runtime reads model settings from `agent_configuration` in `agents.config.yaml` or agent front matter. This is the single source of truth for provider selection, universal knobs (`temperature`, `top_p`, `max_tokens`, `timeout`), and provider-specific typed fields. All keys use underscores to match Microsoft Agent Framework kwargs.
 
-1. `AZURE_OPENAI_ENDPOINT` → Azure OpenAI
-2. `FOUNDRY_PROJECT_ENDPOINT` → Azure AI Foundry
-3. `OPENAI_API_KEY` → OpenAI
+```yaml
+agent_configuration:
+  provider: openai
+  openai:
+    model: gpt-4o-mini
+    api_key: $OPENAI_API_KEY
+```
 
-You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|foundry`.
+| Provider | Required typed fields | Optional typed fields | Notes |
+| --- | --- | --- | --- |
+| `openai` | `openai.model` | `openai.base_url`, `openai.api_key` | Use `$OPENAI_API_KEY` for secrets |
+| `azure_openai` | `azure_openai.model`, `azure_openai.azure_endpoint`, `azure_openai.api_version` | `azure_openai.api_key`, `azure_openai.managed_identity_client_id` | Provider block name must also be `azure_openai` |
+| `foundry` | `foundry.model`, `foundry.project_endpoint` | `foundry.managed_identity_client_id` | Uses `DefaultAzureCredential`; no `api_key` |
 
-| Provider          | Required env vars                                                                            | Notes                                                                              |
-| ----------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| OpenAI            | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`)                               |                                                                                    |
-| Azure OpenAI      | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION`      | If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD).  |
-| Azure AI Foundry  | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | Always uses `DefaultAzureCredential`.                                              |
+- **Authentication** — `azure_openai` supports API-key auth and managed identity; `foundry` always uses `DefaultAzureCredential`.
 
-`MAF_MODEL` overrides the per-provider default when set.
+See the [Authentication section](docs/front-matter-spec.md#authentication) in the front-matter spec for the auth matrix, validation rules, and YAML examples. The canonical configuration examples live in `tests/fixtures/config_scenarios/13_agent_configuration_providers/` and `tests/fixtures/config_scenarios/14_managed_identity_auth/`.
+
+Provider sub-blocks also accept additional keys, which are forwarded to the Microsoft Agent Framework client constructor as `**kwargs`. See [`docs/front-matter-spec.md`](docs/front-matter-spec.md) for the full schema, examples for all providers, env-var substitution syntax, and naming conventions.
 
 ### Plugging in a custom client manager
 
-Provider auto-detection lives behind a small interface. To integrate a new chat client, implement `ClientManager` and register your instance once at startup:
+Provider selection lives behind a small interface. To integrate a new chat client, implement `ClientManager` and register your instance once at startup:
 
 ```python
+from typing import Any
+
 from azure_functions_agents import ClientManager, set_client_manager
+from azure_functions_agents.config.schema import AgentConfiguration
+
+
+class MyChatClient:
+    def __init__(self, model: str) -> None:
+        self.model = model
 
 class MyCustomClientManager(ClientManager):
-    def resolve_model(self, model_override=None):
-        return model_override or "my-model"
-    def build_chat_client(self, model_override=None):
-        return MyChatClient(model=self.resolve_model(model_override))
-    async def close(self):
-        ...
+    def get_chat_client(self, cfg: AgentConfiguration) -> Any:
+        model = cfg.provider_config.model_dump().get("model", "my-model")
+        return MyChatClient(model=model)
+
+    async def close(self) -> None:
+        return None
 
 set_client_manager(MyCustomClientManager())
 ```
@@ -84,6 +98,11 @@ Create `main.agent.md`:
 ---
 name: My Agent
 description: A helpful assistant
+agent_configuration:
+  provider: openai
+  openai:
+    model: gpt-4o-mini
+    api_key: $OPENAI_API_KEY
 ---
 
 You are a helpful assistant. Answer questions concisely.
@@ -126,9 +145,9 @@ azurefunctions-agents-runtime
 
 Or use `azurefunctions-agents-runtime[connectors]` to enable the optional connector tools extra.
 
-### 5. Set the model provider
+### 5. Set the referenced environment variables
 
-For local development with OpenAI:
+For the OpenAI example above:
 
 ```json
 {
@@ -136,8 +155,7 @@ For local development with OpenAI:
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "OPENAI_API_KEY": "sk-...",
-    "MAF_MODEL": "gpt-4o-mini"
+    "OPENAI_API_KEY": "sk-..."
   }
 }
 ```
@@ -441,7 +459,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ### Required Azure App Settings
 
-Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, or `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`).
+Set the environment variables referenced by your checked-in `agent_configuration` (for example `OPENAI_API_KEY` or `AZURE_OPENAI_API_KEY`). Required non-secret values such as `model`, `azure_endpoint`, `api_version`, and `project_endpoint` belong in `agent_configuration`, not standalone runtime fallbacks.
 
 When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup.
 
@@ -451,8 +469,6 @@ When the agent uses connector tools or `execution_sandbox`, the function app's *
 |---|---|
 | `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
 | `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage (legacy alias `CODE_ASSISTANT_CONFIG_PATH` still accepted) |
-| `AGENT_TIMEOUT` | Per-call timeout in seconds (default `900`) |
-| `MAF_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 
 ## Development
 

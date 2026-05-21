@@ -1,7 +1,6 @@
 ---
 name: Azure Reporter
 description: Reports on subscription %SUBSCRIPTION_ID% and emails $TO_EMAIL.
-model: $AGENT_MODEL_OVERRIDE
 trigger:
   type: timer_trigger
   args:

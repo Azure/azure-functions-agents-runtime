@@ -2,9 +2,17 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+from azure_functions_agents.client_manager.providers import (
+    PROVIDER_REGISTRY,
+    AzureOpenAIConfig,
+    FoundryConfig,
+    OpenAIConfig,
+    ProviderConfigBase,
+)
 
 
 class McpFilter(BaseModel):
@@ -96,13 +104,58 @@ class SystemToolsAgentOverride(BaseModel):
 class AgentConfiguration(BaseModel):
     """Provider-agnostic LLM runtime settings shared by global and agent config."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
-    provider: str | None = None
-    endpoint: str | None = None
-    model: str | None = None
+    provider: str
+    timeout: int | None = None
     temperature: float | None = None
-    timeout: float | None = None
+    top_p: float | None = None
+    max_tokens: int | None = None
+    openai: OpenAIConfig | None = None
+    azure_openai: AzureOpenAIConfig | None = None
+    foundry: FoundryConfig | None = None
+
+    @field_validator("provider")
+    @classmethod
+    def validate_provider(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized in PROVIDER_REGISTRY:
+            return normalized
+
+        known = ", ".join(sorted(PROVIDER_REGISTRY))
+        raise ValueError(
+            f"Unknown provider {value!r}; known providers are: {known}"
+        )
+
+    @model_validator(mode="after")
+    def validate_provider_sub_block(self) -> AgentConfiguration:
+        all_provider_keys = list(PROVIDER_REGISTRY)
+        populated = [key for key in all_provider_keys if getattr(self, key) is not None]
+
+        if self.provider not in populated:
+            raise ValueError(
+                f"agent_configuration.{self.provider} must be provided when provider is "
+                f"{self.provider!r}"
+            )
+
+        extras = [key for key in populated if key != self.provider]
+        if extras:
+            extras_str = ", ".join(repr(k) for k in sorted(extras))
+            raise ValueError(
+                f"agent_configuration declares provider {self.provider!r} but also has "
+                f"unrelated provider sub-block(s): {extras_str}. Only the sub-block "
+                f"matching the declared provider is permitted."
+            )
+        return self
+
+    @property
+    def provider_config(self) -> ProviderConfigBase:
+        provider_config = getattr(self, self.provider)
+        if provider_config is None:
+            raise RuntimeError(
+                f"Provider config for {self.provider!r} is unavailable after validation."
+            )
+        return cast(ProviderConfigBase, provider_config)
 
 
 class GlobalConfig(BaseModel):
@@ -112,10 +165,6 @@ class GlobalConfig(BaseModel):
 
     system_tools: SystemToolsConfig | None = None
     agent_configuration: AgentConfiguration | None = None
-    endpoint: str | None = None
-    model: str | None = None
-    temperature: float | None = None
-    timeout: float | None = None
     tools: ToolsFilter | None = None
 
 
@@ -129,10 +178,6 @@ class AgentSpec(BaseModel):
     trigger: TriggerSpec | None = None
     debug: bool | DebugConfig | None = None
     agent_configuration: AgentConfiguration | None = None
-    endpoint: str | None = None
-    model: str | None = None
-    temperature: float | None = None
-    timeout: float | None = None
     logger: bool | None = None
     substitute_variables: bool = True
     system_tools: SystemToolsAgentOverride | None = None
@@ -159,11 +204,7 @@ class ResolvedAgent(BaseModel):
     instructions: str
     is_main: bool
     debug: DebugConfig
-    provider: str | None = None
-    endpoint: str | None = None
-    model: str | None
-    temperature: float | None = None
-    timeout: float
+    agent_configuration: AgentConfiguration
     enabled_mcp_names: list[str]
     enabled_skills_names: list[str]
     mcp_exclude_names: list[str] = Field(default_factory=list)

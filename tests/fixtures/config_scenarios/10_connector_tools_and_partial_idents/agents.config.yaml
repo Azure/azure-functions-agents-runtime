@@ -1,5 +1,8 @@
-model: $AZURE_OPENAI_DEPLOYMENT
-timeout: 1200
+agent_configuration:
+  provider: openai
+  timeout: 1200
+  openai:
+    model: $OPENAI_MODEL
 
 system_tools:
   execute_in_sessions:

@@ -13,6 +13,7 @@ import pytest
 from azure_functions_agents.config.loader import load_agent_specs
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     DebugConfig,
     GlobalConfig,
     ResolvedAgent,
@@ -68,6 +69,10 @@ def _write_timer_agent(tmp_path: Path, filename: str, display_name: str) -> None
             ---
             name: "{display_name}"
             description: Test agent
+            agent_configuration:
+              provider: openai
+              openai:
+                model: gpt-4o
             trigger:
               type: timer_trigger
               args:
@@ -99,8 +104,12 @@ def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedA
         instructions="Run the timer workflow.",
         is_main=is_main,
         debug=DebugConfig(),
-        model=None,
-        timeout=1.0,
+        agent_configuration=AgentConfiguration.model_validate(
+            {
+                "provider": "openai",
+                "openai": {"model": "gpt-4o"},
+            }
+        ),
         enabled_mcp_names=[],
         enabled_skills_names=[],
         tool_filter=ToolsFilter(),
@@ -286,6 +295,10 @@ def test_register_agent_keeps_literal_trigger_args_when_substitution_disabled(
             ---
             name: Literal Route
             description: Test agent
+            agent_configuration:
+              provider: openai
+              openai:
+                model: gpt-4o
             substitute_variables: false
             trigger:
               type: http_trigger
@@ -657,6 +670,10 @@ def test_register_agent_does_not_double_substitute_trigger_args(
             ---
             name: Nested Route
             description: Test agent
+            agent_configuration:
+              provider: openai
+              openai:
+                model: gpt-4o
             trigger:
               type: http_trigger
               args:

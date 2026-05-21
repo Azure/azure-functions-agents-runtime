@@ -39,23 +39,17 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, TypedDict, cast
 
 from ._logger import logger
 from .client_manager import get_client_manager
 from .config.paths import get_app_root, resolve_config_dir
+from .config.schema import AgentConfiguration
 from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_user_tools
 from .system_tools.connectors.cache import get_connector_tools
-
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
-DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "900"))
-DEFAULT_MODEL: str | None = os.environ.get("MAF_MODEL")
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
@@ -69,6 +63,12 @@ _TOOL_RESTRICTION_PREFIX = (
     " tools from your function schema. Ignore any other tool references in"
     " your instructions.\n\n"
 )
+
+
+class _ChatOptionsKwargs(TypedDict, total=False):
+    temperature: float
+    top_p: float
+    max_tokens: int
 
 
 # ---------------------------------------------------------------------------
@@ -158,6 +158,20 @@ def _compose_instructions(
     return composed or None
 
 
+def _build_chat_options(agent_configuration: AgentConfiguration) -> Any:
+    """Build MAF ChatOptions from the universal agent-configuration knobs."""
+    from agent_framework import ChatOptions
+
+    kwargs: _ChatOptionsKwargs = {}
+    if agent_configuration.temperature is not None:
+        kwargs["temperature"] = agent_configuration.temperature
+    if agent_configuration.top_p is not None:
+        kwargs["top_p"] = agent_configuration.top_p
+    if agent_configuration.max_tokens is not None:
+        kwargs["max_tokens"] = agent_configuration.max_tokens
+    return cast(Any, ChatOptions)(**kwargs)
+
+
 # ---------------------------------------------------------------------------
 # Agent + session construction
 # ---------------------------------------------------------------------------
@@ -166,15 +180,12 @@ def _compose_instructions(
 async def _build_agent_session_history(
     *,
     instructions: str | None,
+    agent_configuration: AgentConfiguration,
     session_id: str | None,
     tools: list[Any] | None,
     mcp_tools: list[Any] | None,
     skills_text: str | None,
     use_connector_tools: bool,
-    model: str | None,
-    endpoint: str | None,
-    provider: str | None,
-    temperature: float | None,
     sandbox_tools: list[Any] | None,
 ) -> tuple[Any, Any, str]:
     """Construct the chat client, agent, AgentSession, and history provider.
@@ -192,7 +203,7 @@ async def _build_agent_session_history(
     # Build the chat client first so configuration errors surface BEFORE any
     # filesystem state is created.
     client_manager = get_client_manager()
-    chat_client = client_manager.build_chat_client(model, endpoint=endpoint, provider=provider)
+    chat_client = client_manager.get_chat_client(agent_configuration)
 
     # Validate / generate session id.
     validated_id = _validate_session_id(session_id)
@@ -237,7 +248,7 @@ async def _build_agent_session_history(
         chat_client,
         instructions=_compose_instructions(instructions, skills_text=skills_text),
         tools=resolved_tools,
-        default_options={"temperature": temperature} if temperature is not None else None,
+        default_options=_build_chat_options(agent_configuration),
         context_providers=[history_provider],
     )
 
@@ -285,15 +296,11 @@ async def run_agent(
     prompt: str,
     *,
     instructions: str | None = None,
-    timeout: float | None = None,
+    agent_configuration: AgentConfiguration,
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
     skills_text: str | None = None,
     use_connector_tools: bool = True,
-    model: str | None = None,
-    endpoint: str | None = None,
-    provider: str | None = None,
-    temperature: float | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
 ) -> AgentResult:
@@ -306,9 +313,10 @@ async def run_agent(
     instructions:
         Per-call agent instructions (typically the body of an ``*.agent.md``
         file). Combined with the tool-restriction prefix and any skills text.
-    timeout:
-        Maximum time to wait for the agent response, in seconds. Defaults to
-        :data:`DEFAULT_TIMEOUT`.
+    agent_configuration:
+        Resolved provider selection and universal generation knobs. The runner
+        forwards this object to ``ClientManager.get_chat_client(...)`` and uses
+        ``timeout`` / ``temperature`` / ``top_p`` / ``max_tokens`` from it.
     tools:
         Optional user/built-in tool override. ``None`` auto-discovers user
         tools and includes built-ins. When a list is provided (including
@@ -327,16 +335,6 @@ async def run_agent(
         This is separate from ``tools``. ``run_agent()`` defaults to ``True``;
         higher-level config-driven callers can treat ``None`` as "use the
         configured default" before calling this function.
-    model:
-        Optional model/deployment override. When omitted the
-        :class:`ClientManager` resolves the value from environment variables.
-    endpoint:
-        Optional provider endpoint override.
-    provider:
-        Optional backend provider override (for example ``openai``,
-        ``azure_openai``, or ``foundry``).
-    temperature:
-        Optional model temperature forwarded as the agent's default option.
     session_id:
         Optional session id for resuming a prior conversation. Must match
         ``[A-Za-z0-9._-]{1,128}``. When omitted, a fresh session is created
@@ -352,26 +350,26 @@ async def run_agent(
     To fully disable all tools from a direct API call, pass
     ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
     """
-    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    timeout = float(agent_configuration.timeout) if agent_configuration.timeout is not None else None
 
     agent, session, resolved_id = await _build_agent_session_history(
         instructions=instructions,
+        agent_configuration=agent_configuration,
         session_id=session_id,
         tools=tools,
         mcp_tools=mcp_tools,
         skills_text=skills_text,
         use_connector_tools=use_connector_tools,
-        model=model,
-        endpoint=endpoint,
-        provider=provider,
-        temperature=temperature,
         sandbox_tools=sandbox_tools,
     )
 
     lock = await _get_session_lock(resolved_id)
     async with lock:
         try:
-            response = await asyncio.wait_for(agent.run(prompt, session=session), timeout=timeout)
+            if timeout is None:
+                response = await agent.run(prompt, session=session)
+            else:
+                response = await asyncio.wait_for(agent.run(prompt, session=session), timeout=timeout)
         except TimeoutError:
             raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -427,15 +425,11 @@ async def run_agent_stream(
     prompt: str,
     *,
     instructions: str | None = None,
-    timeout: float | None = None,
+    agent_configuration: AgentConfiguration,
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
     skills_text: str | None = None,
     use_connector_tools: bool = True,
-    model: str | None = None,
-    endpoint: str | None = None,
-    provider: str | None = None,
-    temperature: float | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
 ) -> AsyncIterator[str]:
@@ -468,20 +462,17 @@ async def run_agent_stream(
     * ``done``         — stream completed normally
     * ``error``        — terminal error message
     """
-    timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
+    timeout = float(agent_configuration.timeout) if agent_configuration.timeout is not None else None
 
     try:
         agent, session, resolved_id = await _build_agent_session_history(
             instructions=instructions,
+            agent_configuration=agent_configuration,
             session_id=session_id,
             tools=tools,
             mcp_tools=mcp_tools,
             skills_text=skills_text,
             use_connector_tools=use_connector_tools,
-            model=model,
-            endpoint=endpoint,
-            provider=provider,
-            temperature=temperature,
             sandbox_tools=sandbox_tools,
         )
     except Exception as exc:
@@ -494,11 +485,11 @@ async def run_agent_stream(
     lock = await _get_session_lock(resolved_id)
     async with lock:
         loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
+        deadline = loop.time() + timeout if timeout is not None else None
         try:
             stream = agent.run(prompt, stream=True, session=session)
             async for update in stream:
-                if loop.time() > deadline:
+                if deadline is not None and loop.time() > deadline:
                     yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
                     return
                 for item in getattr(update, "contents", None) or []:

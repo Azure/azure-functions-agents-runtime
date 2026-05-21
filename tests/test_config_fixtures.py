@@ -8,13 +8,25 @@ assert the parsed configuration matches what the fixtures advertise.
 
 from __future__ import annotations
 
+import logging
+import traceback
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agent_framework import MCPStdioTool
 
 import azure_functions_agents.discovery.mcp as mcp_discovery
-from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.client_manager.providers import (
+    AzureOpenAIConfig,
+    FoundryConfig,
+    OpenAIConfig,
+)
+from azure_functions_agents.config.loader import (
+    _load_agent_spec,
+    load_agent_specs,
+    load_global_config,
+)
 from azure_functions_agents.config.schema import (
     DebugConfig,
     McpFilter,
@@ -57,8 +69,7 @@ def test_minimal_main_only_agent() -> None:
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
 
-    assert global_config.model is None
-    assert global_config.timeout is None
+    assert global_config.agent_configuration is None
     assert global_config.system_tools is None
     assert global_config.tools is None
 
@@ -68,7 +79,7 @@ def test_minimal_main_only_agent() -> None:
     assert spec.is_main is True
     assert spec.trigger is None
     assert spec.debug is None
-    assert spec.model is None
+    assert spec.agent_configuration is None
     assert "helpful assistant" in spec.instructions
     assert spec.substitute_variables is True
 
@@ -84,8 +95,11 @@ def test_global_defaults_inherited() -> None:
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
 
-    assert global_config.model == "gpt-4o"
-    assert global_config.timeout == 900
+    assert global_config.agent_configuration is not None
+    assert global_config.agent_configuration.provider == "openai"
+    assert global_config.agent_configuration.timeout == 900
+    assert global_config.agent_configuration.openai is not None
+    assert global_config.agent_configuration.openai.model == "gpt-4o"
     assert global_config.system_tools is not None
     assert global_config.system_tools.execute_in_sessions is not None
     assert (
@@ -97,8 +111,7 @@ def test_global_defaults_inherited() -> None:
     spec = specs[0]
     assert spec.name == "Default Assistant"
     assert spec.is_main is True
-    assert spec.model is None  # inherits global model at resolve time
-    assert spec.timeout is None
+    assert spec.agent_configuration is None  # inherits global config at resolve time
 
 
 # ---------------------------------------------------------------------------
@@ -109,17 +122,21 @@ def test_global_defaults_inherited() -> None:
 def test_env_substitution_resolves_known_vars(monkeypatch: pytest.MonkeyPatch) -> None:
     fixture = FIXTURES_ROOT / "03_env_substitution"
 
-    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o-mini")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret-key")
     monkeypatch.setenv("ACA_SESSION_POOL_ENDPOINT", "https://pool.contoso.test")
     monkeypatch.setenv("SUBSCRIPTION_ID", "sub-123")
     monkeypatch.setenv("TO_EMAIL", "alerts@contoso.test")
-    # Intentionally NOT setting AGENT_MODEL_OVERRIDE so it stays literal.
 
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
 
-    assert global_config.model == "gpt-4o-mini"
-    assert global_config.timeout == 600
+    assert global_config.agent_configuration is not None
+    assert global_config.agent_configuration.provider == "openai"
+    assert global_config.agent_configuration.timeout == 600
+    assert global_config.agent_configuration.openai is not None
+    assert global_config.agent_configuration.openai.model == "gpt-4o-mini"
+    assert global_config.agent_configuration.openai.api_key == "secret-key"
     assert global_config.system_tools is not None
     assert global_config.system_tools.execute_in_sessions is not None
     assert (
@@ -134,8 +151,7 @@ def test_env_substitution_resolves_known_vars(monkeypatch: pytest.MonkeyPatch) -
     assert spec.description == (
         "Reports on subscription sub-123 and emails alerts@contoso.test."
     )
-    # Unset env var should remain literal.
-    assert spec.model == "$AGENT_MODEL_OVERRIDE"
+    assert spec.agent_configuration is None
     assert spec.trigger is not None
     assert spec.trigger.type == "timer_trigger"
     assert spec.trigger.args["schedule"] == "0 0 7 * * *"
@@ -168,7 +184,9 @@ def test_substitute_variables_false_preserves_placeholders(
     assert spec.name == "Literal Agent"
     assert spec.substitute_variables is False
     # Model retained the literal placeholder.
-    assert spec.model == "$AGENT_MODEL"
+    assert spec.agent_configuration is not None
+    assert spec.agent_configuration.openai is not None
+    assert spec.agent_configuration.openai.model == "$AGENT_MODEL"
     assert spec.response_example == "$RESPONSE_TEMPLATE"
     assert spec.trigger is not None
     assert spec.trigger.args["route"] == "literal"
@@ -191,8 +209,10 @@ def test_multi_trigger_fixture() -> None:
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
 
-    assert global_config.model == "gpt-4o"
-    assert global_config.timeout == 300
+    assert global_config.agent_configuration is not None
+    assert global_config.agent_configuration.openai is not None
+    assert global_config.agent_configuration.openai.model == "gpt-4o"
+    assert global_config.agent_configuration.timeout == 300
 
     by_name = _specs_by_name(specs)
     assert set(by_name) == {
@@ -245,8 +265,10 @@ def test_capability_filtering_fixture() -> None:
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
 
-    assert global_config.model == "gpt-4o"
-    assert global_config.timeout == 900
+    assert global_config.agent_configuration is not None
+    assert global_config.agent_configuration.openai is not None
+    assert global_config.agent_configuration.openai.model == "gpt-4o"
+    assert global_config.agent_configuration.timeout == 900
     assert global_config.tools is not None
     assert isinstance(global_config.tools, ToolsFilter)
     assert global_config.tools.exclude == ["bash", "execute_shell"]
@@ -401,7 +423,7 @@ def test_connector_tools_and_partial_identifiers(
 ) -> None:
     fixture = FIXTURES_ROOT / "10_connector_tools_and_partial_idents"
 
-    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
+    monkeypatch.setenv("OPENAI_MODEL", "gpt-4o")
     monkeypatch.setenv("ACA_SESSION_POOL_ENDPOINT", "https://pool.example.test")
     monkeypatch.setenv("GITHUB_CONNECTION_ID", "conn-gh")
     monkeypatch.setenv("SERVICENOW_CONNECTION_ID", "conn-sn")
@@ -411,8 +433,10 @@ def test_connector_tools_and_partial_identifiers(
     global_config = load_global_config(fixture)
     specs = load_agent_specs(fixture, strict=True)
 
-    assert global_config.model == "gpt-4o"
-    assert global_config.timeout == 1200
+    assert global_config.agent_configuration is not None
+    assert global_config.agent_configuration.openai is not None
+    assert global_config.agent_configuration.openai.model == "gpt-4o"
+    assert global_config.agent_configuration.timeout == 1200
     assert global_config.system_tools is not None
     assert global_config.system_tools.execute_in_sessions is not None
     assert (
@@ -525,7 +549,9 @@ def test_escaped_placeholders_preserve_literal_sigils(
     spec = specs[0]
     assert spec.name == "Escaped Literals"
     assert spec.description == "Keep $API_TOKEN and %TENANT_ID% literal for platform."
-    assert spec.model == "gpt-4o-mini"
+    assert spec.agent_configuration is not None
+    assert spec.agent_configuration.openai is not None
+    assert spec.agent_configuration.openai.model == "gpt-4o-mini"
     assert spec.metadata is not None
     assert spec.metadata["literal_dollar"] == "$API_TOKEN"
     assert spec.metadata["literal_percent"] == "%TENANT_ID%"
@@ -536,3 +562,205 @@ def test_escaped_placeholders_preserve_literal_sigils(
     assert "Still resolve normal placeholders: model gpt-4o-mini, contact ops@contoso.test." in body
     assert "leaked-token" not in body
     assert "tenant-live" not in body
+
+
+# ---------------------------------------------------------------------------
+# 13 — agent_configuration supports all provider-specific sub-blocks
+# ---------------------------------------------------------------------------
+
+
+def test_agent_configuration_providers_fixture() -> None:
+    fixture = FIXTURES_ROOT / "13_agent_configuration_providers"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+
+    assert global_config.agent_configuration is None
+
+    by_name = _specs_by_name(specs)
+    assert set(by_name) == {
+        "Azure OpenAI Provider Agent",
+        "Foundry Provider Agent",
+        "OpenAI Provider Agent",
+    }
+
+    openai = by_name["OpenAI Provider Agent"]
+    assert openai.agent_configuration is not None
+    assert openai.agent_configuration.provider == "openai"
+    assert openai.agent_configuration.temperature == 0.2
+    assert openai.agent_configuration.top_p == 0.9
+    assert openai.agent_configuration.max_tokens == 256
+    assert isinstance(openai.agent_configuration.openai, OpenAIConfig)
+    assert openai.agent_configuration.openai.model == "gpt-4.1-mini"
+    assert openai.agent_configuration.openai.base_url == "https://api.openai.example.test/v1"
+
+    azure_openai = by_name["Azure OpenAI Provider Agent"]
+    assert azure_openai.agent_configuration is not None
+    assert azure_openai.agent_configuration.provider == "azure_openai"
+    assert azure_openai.agent_configuration.temperature == 0.4
+    assert azure_openai.agent_configuration.top_p == 0.85
+    assert azure_openai.agent_configuration.max_tokens == 512
+    assert isinstance(azure_openai.agent_configuration.azure_openai, AzureOpenAIConfig)
+    assert azure_openai.agent_configuration.azure_openai.model == "gpt-4.1"
+    assert (
+        azure_openai.agent_configuration.azure_openai.azure_endpoint
+        == "https://azure-openai.example.test"
+    )
+    assert azure_openai.agent_configuration.azure_openai.api_version == "2024-10-21"
+    assert azure_openai.agent_configuration.azure_openai.api_key == "azure-openai-key"
+
+    foundry = by_name["Foundry Provider Agent"]
+    assert foundry.agent_configuration is not None
+    assert foundry.agent_configuration.provider == "foundry"
+    assert isinstance(foundry.agent_configuration.foundry, FoundryConfig)
+    assert foundry.agent_configuration.foundry.model == "gpt-4.1-nano"
+    assert (
+        foundry.agent_configuration.foundry.project_endpoint
+        == "https://foundry.example.test/api/projects/demo"
+    )
+
+
+# ---------------------------------------------------------------------------
+# 14 — managed identity fields parse cleanly for Azure OpenAI and Foundry
+# ---------------------------------------------------------------------------
+
+
+def test_managed_identity_auth_fixture() -> None:
+    fixture = FIXTURES_ROOT / "14_managed_identity_auth"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+
+    assert global_config.agent_configuration is None
+
+    by_name = _specs_by_name(specs)
+    assert set(by_name) == {
+        "Azure OpenAI API Key Agent",
+        "Azure OpenAI System MI Agent",
+        "Azure OpenAI User Assigned MI Agent",
+        "Foundry System MI Agent",
+        "Foundry User Assigned MI Agent",
+    }
+
+    azure_api_key = by_name["Azure OpenAI API Key Agent"]
+    assert azure_api_key.agent_configuration is not None
+    assert isinstance(azure_api_key.agent_configuration.azure_openai, AzureOpenAIConfig)
+    assert azure_api_key.agent_configuration.azure_openai.api_key == "live-api-key"
+    assert azure_api_key.agent_configuration.azure_openai.managed_identity_client_id is None
+
+    azure_user_assigned = by_name["Azure OpenAI User Assigned MI Agent"]
+    assert azure_user_assigned.agent_configuration is not None
+    assert isinstance(
+        azure_user_assigned.agent_configuration.azure_openai, AzureOpenAIConfig
+    )
+    assert azure_user_assigned.agent_configuration.azure_openai.api_key is None
+    assert (
+        azure_user_assigned.agent_configuration.azure_openai.managed_identity_client_id
+        == "11111111-1111-1111-1111-111111111111"
+    )
+
+    azure_system_default = by_name["Azure OpenAI System MI Agent"]
+    assert azure_system_default.agent_configuration is not None
+    assert isinstance(
+        azure_system_default.agent_configuration.azure_openai, AzureOpenAIConfig
+    )
+    assert azure_system_default.agent_configuration.azure_openai.api_key is None
+    assert (
+        azure_system_default.agent_configuration.azure_openai.managed_identity_client_id
+        is None
+    )
+
+    foundry_user_assigned = by_name["Foundry User Assigned MI Agent"]
+    assert foundry_user_assigned.agent_configuration is not None
+    assert isinstance(foundry_user_assigned.agent_configuration.foundry, FoundryConfig)
+    assert (
+        foundry_user_assigned.agent_configuration.foundry.managed_identity_client_id
+        == "22222222-2222-2222-2222-222222222222"
+    )
+
+    foundry_system_default = by_name["Foundry System MI Agent"]
+    assert foundry_system_default.agent_configuration is not None
+    assert isinstance(foundry_system_default.agent_configuration.foundry, FoundryConfig)
+    assert foundry_system_default.agent_configuration.foundry.managed_identity_client_id is None
+
+
+# ---------------------------------------------------------------------------
+# 15 — invalid provider declarations produce targeted loader errors
+# ---------------------------------------------------------------------------
+
+
+def test_invalid_agent_configurations_fixture() -> None:
+    fixture = FIXTURES_ROOT / "15_agent_configuration_invalid"
+
+    expected_substrings = {
+        "multiple_provider_sub_blocks.agent.md": [
+            "unrelated provider sub-block",
+            "azure_openai",
+        ],
+        "azure_openai_mutual_exclusivity.agent.md": [
+            "managed_identity_client_id",
+            "api_key",
+        ],
+        "credential_extra_passthrough.agent.md": ["credential"],
+        "unknown_provider.agent.md": ["Unknown provider", "cohere"],
+    }
+
+    load_global_config(fixture)
+
+    for filename, substrings in expected_substrings.items():
+        with pytest.raises(ValueError) as exc_info:
+            _load_agent_spec(fixture / filename)
+
+        message = str(exc_info.value)
+        assert filename in message
+        for substring in substrings:
+            assert substring in message
+
+
+def test_loader_validation_errors_do_not_chain_or_log_secrets(
+    caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    secret = "VERY_SECRET_KEY_VALUE_DO_NOT_LEAK"
+    fixture = FIXTURES_ROOT / "15_agent_configuration_invalid"
+    source_file = fixture / "azure_openai_mutual_exclusivity.agent.md"
+    secret_post = SimpleNamespace(
+        metadata={
+            "name": "Azure OpenAI Mutual Exclusivity",
+            "description": "Invalid because api_key and managed_identity_client_id are both set.",
+            "agent_configuration": {
+                "provider": "azure_openai",
+                "azure_openai": {
+                    "model": "gpt-4.1",
+                    "azure_endpoint": "https://azure-openai.example.test",
+                    "api_version": "2024-10-21",
+                    "api_key": secret,
+                    "managed_identity_client_id": "33333333-3333-3333-3333-333333333333",
+                },
+            },
+        },
+        content="This fixture should fail validation because Azure OpenAI auth modes are mutually exclusive.\n",
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.config.loader.frontmatter.load",
+        lambda _: secret_post,
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        _load_agent_spec(source_file)
+
+    exc = exc_info.value
+    assert exc.__cause__ is None
+    assert secret not in repr(exc)
+    assert secret not in str(exc)
+    if exc.__context__ is not None:
+        assert secret not in repr(exc.__context__)
+        assert secret not in str(exc.__context__)
+    assert secret not in "".join(traceback.format_exception(exc))
+
+    caplog.set_level(logging.ERROR)
+    try:
+        _load_agent_spec(source_file)
+    except ValueError:
+        logging.getLogger(__name__).exception("loader failed")
+    assert secret not in caplog.text

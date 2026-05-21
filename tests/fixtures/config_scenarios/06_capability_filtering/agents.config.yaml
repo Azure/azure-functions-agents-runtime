@@ -1,5 +1,8 @@
-model: gpt-4o
-timeout: 900
+agent_configuration:
+  provider: openai
+  timeout: 900
+  openai:
+    model: gpt-4o
 
 tools:
   exclude:

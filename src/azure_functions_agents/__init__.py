@@ -24,8 +24,6 @@ from .client_manager import (
 )
 from .config.paths import resolve_config_dir, set_app_root
 from .runner import (
-    DEFAULT_MODEL,
-    DEFAULT_TIMEOUT,
     AgentResult,
     run_agent,
     run_agent_stream,
@@ -36,8 +34,6 @@ from .system_tools.connectors.cache import configure_connector_tools, get_connec
 from .system_tools.sandbox import create_sandbox_tools
 
 __all__ = [
-    "DEFAULT_MODEL",
-    "DEFAULT_TIMEOUT",
     "AgentResult",
     "ClientManager",
     "MAFClientManager",

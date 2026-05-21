@@ -63,17 +63,9 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-The Microsoft Agent Framework supports Azure OpenAI, OpenAI, and Azure AI Foundry. The samples default to Azure OpenAI.
+Samples select their model provider through the checked-in `agent_configuration` block in their agent config. For local runs, set the environment variables referenced by that config (for example `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, or provider-specific endpoint values).
 
-| Provider       | `MAF_PROVIDER`  | Required env vars                                                                  |
-| -------------- | --------------- | ---------------------------------------------------------------------------------- |
-| Azure OpenAI   | `azure_openai`  | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential`) |
-| OpenAI         | `openai`        | `OPENAI_API_KEY`                                                                   |
-| Azure Foundry  | `foundry`       | `FOUNDRY_PROJECT_ENDPOINT` (uses `DefaultAzureCredential`)                          |
-
-If `MAF_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
-
-For Azure OpenAI, set `AZURE_OPENAI_ENDPOINT` to your resource endpoint (e.g. `https://<name>.openai.azure.com/`) and `AZURE_OPENAI_DEPLOYMENT` to your model deployment name (e.g. `gpt-5.2`). Authentication uses `DefaultAzureCredential` — run `az login` locally.
+For Azure OpenAI, that usually means setting your resource endpoint (for example `https://<name>.openai.azure.com/`) plus whatever deployment and API-version values the sample config references. If the sample omits `api_key`, authentication uses `DefaultAzureCredential`, so run `az login` locally first.
 
 **Sample-specific variables:**
 

@@ -113,7 +113,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
    - **Input:** `AgentSpec`, `GlobalConfig`, `discovered_mcp_names: list[str]`, `discovered_skill_names: list[str]`
    - **Output:** `ResolvedAgent`
-   - **Notes:** this is where precedence rules are applied. Model and timeout fall through agent config, global config, environment, and defaults; capability filters turn the global/shared inventories into per-agent allow/deny decisions.
+   - **Notes:** this is where precedence rules are applied. `agent_configuration` is merged agent-over-global, and capability filters turn the global/shared inventories into per-agent allow/deny decisions.
 
 6. **Validate the merged configuration**
    - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
@@ -161,7 +161,7 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`, the registration layer has already done most of the policy work:
 
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
-- `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
+- `ResolvedAgent.agent_configuration` becomes the execution settings hand-off.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.skills_text` becomes the concatenated skills block.
@@ -177,7 +177,7 @@ These are the main "passport" objects that move through the pipeline:
 - `AgentSpec` — raw parsed front matter plus markdown body for one `.agent.md` file. Defined in `src/azure_functions_agents/config/schema.py` as `AgentSpec`.
   - **Created by:** `config/loader.py:_load_agent_spec()`
   - **Consumed by:** `config/merge.py:compose()`
-- `GlobalConfig` — parsed `agents.config.yaml`, including system-tool, model, timeout, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
+- `GlobalConfig` — parsed `agents.config.yaml`, including system-tool, `agent_configuration`, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
   - **Created by:** `config/loader.py:load_global_config()`
   - **Consumed by:** `config/merge.py:compose()`
 - `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
@@ -216,7 +216,7 @@ This split keeps parsing, policy, Azure binding registration, and runtime execut
 
 To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and the README section [Plugging in a custom client manager](../README.md#plugging-in-a-custom-client-manager).
 
-This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it.
+This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. `ResolvedAgent.agent_configuration` is the hand-off contract, and your manager decides how to interpret it.
 
 ### Custom tools
 

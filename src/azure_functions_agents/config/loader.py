@@ -19,17 +19,11 @@ from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
 
 
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(data)
-    if "agent-configuration" in normalized:
-        normalized["agent_configuration"] = normalized.pop("agent-configuration")
-    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
+    return cast(dict[str, Any], resolve_env_vars_in_data(dict(data)))
 
 
 def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    normalized = dict(metadata)
-    if "agent-configuration" in normalized:
-        normalized["agent_configuration"] = normalized.pop("agent-configuration")
-    return cast(dict[str, Any], resolve_env_vars_in_data(normalized))
+    return cast(dict[str, Any], resolve_env_vars_in_data(dict(metadata)))
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
@@ -67,7 +61,8 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     try:
         return AgentSpec.model_validate(normalized)
     except ValidationError as exc:
-        raise _format_validation_error(source_file, exc) from exc
+        # AUDIT: raise `from None` to drop pydantic ValidationError.__cause__ — its `input_value` echoes plaintext config including api_key / managed_identity_client_id values. Never re-chain.
+        raise _format_validation_error(source_file, exc) from None
 
 
 def load_global_config(app_root: Path) -> GlobalConfig:
@@ -93,7 +88,8 @@ def load_global_config(app_root: Path) -> GlobalConfig:
     try:
         return GlobalConfig.model_validate(normalized)
     except ValidationError as exc:
-        raise _format_validation_error(source_file, exc) from exc
+        # AUDIT: raise `from None` to drop pydantic ValidationError.__cause__ — its `input_value` echoes plaintext config including api_key / managed_identity_client_id values. Never re-chain.
+        raise _format_validation_error(source_file, exc) from None
 
 
 def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:

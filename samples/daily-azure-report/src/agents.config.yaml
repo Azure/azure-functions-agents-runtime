@@ -6,5 +6,10 @@ system_tools:
     - connection_id: $O365_CONNECTION_ID
 
 # Default runtime configuration
-model: $AZURE_OPENAI_DEPLOYMENT
-timeout: 900
+agent_configuration:
+  provider: azure_openai
+  timeout: 900
+  azure_openai:
+    model: $AZURE_OPENAI_DEPLOYMENT
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "2024-10-21"

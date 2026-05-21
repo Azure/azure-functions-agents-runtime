@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-import os
+import logging
+from typing import Any
 
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
@@ -17,6 +18,7 @@ from azure_functions_agents.config.schema import (
     ToolsFromConnectionEntry,
 )
 
+logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 900.0
 
 
@@ -32,16 +34,6 @@ def _resolve_debug(spec: AgentSpec) -> DebugConfig:
     return DebugConfig(chat=False, http=False, mcp=False)
 
 
-def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    return (
-        (spec.agent_configuration.model if spec.agent_configuration else None)
-        or spec.model
-        or (global_config.agent_configuration.model if global_config.agent_configuration else None)
-        or global_config.model
-        or os.environ.get("MAF_MODEL")
-    )
-
-
 def _resolve_provider(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
     return (
         (spec.agent_configuration.provider if spec.agent_configuration else None)
@@ -50,54 +42,67 @@ def _resolve_provider(spec: AgentSpec, global_config: GlobalConfig) -> str | Non
     )
 
 
-def _resolve_endpoint(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    return (
-        (spec.agent_configuration.endpoint if spec.agent_configuration else None)
-        or spec.endpoint
-        or (global_config.agent_configuration.endpoint if global_config.agent_configuration else None)
-        or global_config.endpoint
-        or None
-    )
+def _provider_block_payload(
+    configuration: AgentConfiguration | None, provider: str
+) -> dict[str, Any]:
+    if configuration is None or configuration.provider != provider:
+        return {}
+    return configuration.provider_config.model_dump(exclude_none=True)
 
 
-def _resolve_temperature(spec: AgentSpec, global_config: GlobalConfig) -> float | None:
-    if spec.agent_configuration and spec.agent_configuration.temperature is not None:
-        return spec.agent_configuration.temperature
-    if spec.temperature is not None:
-        return spec.temperature
-    if global_config.agent_configuration and global_config.agent_configuration.temperature is not None:
-        return global_config.agent_configuration.temperature
-    return global_config.temperature
-
-
-def _resolved_agent_configuration(
+def _compose_agent_configuration(
     spec: AgentSpec,
     global_config: GlobalConfig,
 ) -> AgentConfiguration:
-    return AgentConfiguration(
-        provider=_resolve_provider(spec, global_config),
-        endpoint=_resolve_endpoint(spec, global_config),
-        model=_resolve_model(spec, global_config),
-        temperature=_resolve_temperature(spec, global_config),
-    )
+    agent_config = spec.agent_configuration
+    global_agent_config = global_config.agent_configuration
 
+    if agent_config is None and global_agent_config is None:
+        raise ValueError(
+            f"Agent {spec.name!r} must declare agent_configuration either at the global "
+            "level or per-agent level."
+        )
 
-def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
-    if spec.agent_configuration and spec.agent_configuration.timeout is not None:
-        return spec.agent_configuration.timeout
-    if spec.timeout is not None:
-        return spec.timeout
-    if global_config.agent_configuration and global_config.agent_configuration.timeout is not None:
-        return global_config.agent_configuration.timeout
-    if global_config.timeout is not None:
-        return global_config.timeout
-    env_timeout = os.environ.get("AGENT_TIMEOUT")
-    if env_timeout is not None:
-        try:
-            return float(env_timeout)
-        except ValueError:
-            pass
-    return DEFAULT_TIMEOUT
+    provider = _resolve_provider(spec, global_config)
+    if provider is None:
+        raise ValueError(
+            f"Agent {spec.name!r} could not resolve agent_configuration.provider."
+        )
+
+    if (
+        agent_config is not None
+        and global_agent_config is not None
+        and agent_config.provider != global_agent_config.provider
+    ):
+        logger.debug(
+            "Agent %s overrides global provider %r with %r; dropping the global "
+            "provider sub-block during merge.",
+            spec.name,
+            global_agent_config.provider,
+            agent_config.provider,
+        )
+
+    payload: dict[str, Any] = {"provider": provider}
+
+    for field_name in ("timeout", "temperature", "top_p", "max_tokens"):
+        agent_value = (
+            getattr(agent_config, field_name) if agent_config is not None else None
+        )
+        global_value = (
+            getattr(global_agent_config, field_name)
+            if global_agent_config is not None
+            else None
+        )
+        if agent_value is not None:
+            payload[field_name] = agent_value
+        elif global_value is not None:
+            payload[field_name] = global_value
+
+    merged_provider_payload = _provider_block_payload(global_agent_config, provider)
+    merged_provider_payload.update(_provider_block_payload(agent_config, provider))
+    payload[provider] = merged_provider_payload
+
+    return AgentConfiguration.model_validate(payload)
 
 
 def _resolve_sandbox(
@@ -177,7 +182,7 @@ def compose(
     if spec.logger is not None:
         metadata["logger"] = spec.logger
 
-    agent_configuration = _resolved_agent_configuration(spec, global_config)
+    agent_configuration = _compose_agent_configuration(spec, global_config)
 
     resolved = ResolvedAgent(
         name=spec.name,
@@ -186,11 +191,7 @@ def compose(
         instructions=spec.instructions,
         is_main=spec.is_main,
         debug=_resolve_debug(spec),
-        provider=agent_configuration.provider,
-        endpoint=agent_configuration.endpoint,
-        model=agent_configuration.model,
-        temperature=agent_configuration.temperature,
-        timeout=_resolve_timeout(spec, global_config),
+        agent_configuration=agent_configuration,
         enabled_mcp_names=enabled_mcp,
         enabled_skills_names=enabled_skills,
         mcp_exclude_names=list(spec.mcp.exclude) if isinstance(spec.mcp, McpFilter) else [],
