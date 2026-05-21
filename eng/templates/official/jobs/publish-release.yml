@@ -15,6 +15,7 @@ jobs:
       os: linux
     steps:
     - powershell: |
+        $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
 
@@ -36,7 +37,8 @@ jobs:
 
             # Create release branch release/X.Y.Z
             Write-Host "Creating release branch release/$newLibraryVersion"
-            git push --repo="https://$githubToken@github.com/Azure/azure-functions-agent-runtime.git"
+            git remote set-url origin "https://$githubUser:$githubToken@github.com/Azure/azure-functions-agent-runtime.git"
+            git push --set-upstream origin "release/$newLibraryVersion"
 
         } else {
             Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
@@ -63,6 +65,7 @@ jobs:
     displayName: 'Create Release Tag'
     steps:
     - powershell: |
+        $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
 
@@ -72,7 +75,7 @@ jobs:
             git config --global user.email "azfunc@microsoft.com"
 
             # Clone Repository
-            git clone https://$githubToken@github.com/Azure/azure-functions-agent-runtime
+            git clone "https://$githubUser:$githubToken@github.com/Azure/azure-functions-agent-runtime"
             Write-Host "Cloned azure-functions-agent-runtime into local"
             Set-Location "azure-functions-agent-runtime"
             git checkout "origin/release/$newLibraryVersion"
