@@ -7,32 +7,6 @@ from typing import Any
 
 from azure_functions_agents._logger import logger as _logger
 
-LEGACY_FIELDS_AGENT = {
-    "runtime": (
-        "Removed in 1.0.0. Only the Microsoft Agent Framework is supported. Remove this field.",
-        "",
-    ),
-    "execution_sandbox": (
-        "Moved to the global agents.config.yaml under `system_tools.execute_in_sessions`.",
-        "#system_tools",
-    ),
-    "tools_from_connections": (
-        "Moved to the global agents.config.yaml under `system_tools.tools_from_connections`.",
-        "#system_tools",
-    ),
-}
-
-LEGACY_FIELDS_GLOBAL = {
-    "execution_sandbox": (
-        "Renamed to `system_tools.execute_in_sessions`.",
-        "#system_tools",
-    ),
-    "tools_from_connections": (
-        "Moved under `system_tools.tools_from_connections`.",
-        "#system_tools",
-    ),
-}
-
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
 
@@ -47,44 +21,10 @@ def _format_error(
     suffix = "" if "See " in normalized_message else f" See {spec_link}."
     return f"{Path(source_file)}: field `{field}`: {normalized_message}{suffix}"
 
-
-def validate_agent_frontmatter(metadata: dict[str, Any], source_file: str | Path) -> None:
-    """Raise ValueError with a clear message if metadata contains a legacy field."""
-    for field, (message, spec_anchor) in LEGACY_FIELDS_AGENT.items():
-        if field in metadata:
-            raise ValueError(_format_error(source_file, field, message, spec_anchor))
-
-
-def validate_global_config_dict(data: dict[str, Any], source_file: str | Path) -> None:
-    """Raise ValueError if agents.config.yaml uses legacy field names."""
-    for field, (message, spec_anchor) in LEGACY_FIELDS_GLOBAL.items():
-        if field in data:
-            raise ValueError(_format_error(source_file, field, message, spec_anchor))
-
-
-def validate_global_mcp_references(
-    global_mcp: list[str],
-    discovered_mcp_names: list[str],
-    *,
-    source_file: str | Path | None = None,
-) -> None:
-    """Raise ValueError if global MCP names are not defined in mcp.json."""
-    missing = sorted(set(global_mcp) - set(discovered_mcp_names))
-    if not missing:
-        return
-
-    source = Path(source_file) if source_file is not None else "<unknown>"
-    names = ", ".join(missing)
-    raise ValueError(
-        f"{source}: agents.config.yaml#mcp references undefined server(s): {names}. "
-        "Define them in mcp.json or .vscode/mcp.json. See docs/front-matter-spec.md#mcp."
-    )
-
-
 def validate_resolved_agent(
     resolved: Any,
     *,
-    all_global_mcp: list[str],
+    discovered_mcp_names: list[str],
     discovered_skills: list[str],
 ) -> None:
     """Run post-merge sanity checks for a resolved agent."""
@@ -100,20 +40,13 @@ def validate_resolved_agent(
             )
         )
 
-    requested_mcp = set(all_global_mcp)
-    exclude_names = list(getattr(resolved, "mcp_exclude_names", []) or [])
-    enabled_names = list(getattr(resolved, "enabled_mcp_names", []) or [])
-    mcp_references = (
-        [(name, "mcp.exclude") for name in exclude_names]
-        if exclude_names
-        else [(name, "mcp") for name in enabled_names]
-    )
-    for name, field in mcp_references:
-        if name not in requested_mcp:
+    known_mcp = set(discovered_mcp_names)
+    for name in getattr(resolved, "mcp_exclude_names", []) or []:
+        if name not in known_mcp:
             raise ValueError(
                 _format_error(
                     source_file,
-                    field,
+                    "mcp.exclude",
                     f"Unknown MCP server reference `{name}`.",
                     "#mcp",
                 )

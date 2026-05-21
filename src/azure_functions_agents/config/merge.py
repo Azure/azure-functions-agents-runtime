@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 
-from azure_functions_agents._logger import logger
 from azure_functions_agents.config.schema import (
     AgentSpec,
     DebugConfig,
@@ -115,18 +114,8 @@ def compose(
     discovered_skill_names: list[str] | None = None,
 ) -> ResolvedAgent:
     """Top-level merge function called by the app orchestrator."""
-    global_mcp = list(global_config.mcp)
-    if discovered_mcp_names is not None:
-        discovered_set = set(discovered_mcp_names)
-        filtered_out = [name for name in global_mcp if name not in discovered_set]
-        if filtered_out:
-            logger.warning(
-                "Filtering out MCP server reference(s) not defined in mcp.json: %s",
-                ", ".join(filtered_out),
-            )
-        global_mcp = [name for name in global_mcp if name in discovered_set]
-
-    enabled_mcp, mcp_disabled = apply_mcp_filter(global_mcp, spec.mcp)
+    available_mcp = list(discovered_mcp_names or [])
+    enabled_mcp, mcp_disabled = apply_mcp_filter(available_mcp, spec.mcp)
 
     skill_pool = list(discovered_skill_names or [])
     enabled_skills, skills_disabled = apply_skills_filter(skill_pool, spec.skills)
