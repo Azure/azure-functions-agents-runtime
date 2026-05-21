@@ -9,15 +9,13 @@
       },
       "tools": ["search_issues", "list_pull_requests"]
     },
-    "filesystem": {
-      "type": "stdio",
-      "command": "$NODE_BIN",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "$WORKSPACE_ROOT"],
-      "env": {
-        "LOG_LEVEL": "%MCP_LOG_LEVEL%",
-        "API_KEY": "$UNSET_API_KEY"
-      },
-      "tools": ["*"]
+    "internal": {
+      "type": "http",
+      "url": "https://%MCP_LOG_LEVEL%.internal.example.test/$WORKSPACE_ROOT",
+      "headers": {
+        "X-Node": "$NODE_BIN",
+        "X-API-Key": "$UNSET_API_KEY"
+      }
     }
   }
 }

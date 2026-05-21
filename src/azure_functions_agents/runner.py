@@ -10,12 +10,15 @@ Architecture
 * The chat client comes from a pluggable :class:`ClientManager` (today: only
   :class:`MAFClientManager` — see :mod:`.client_manager`).
 * For each call we build a fresh :class:`agent_framework.Agent` so that
-  per-request tool sets (sandbox, connectors) and the resolved session id are
-  closed over correctly. Building an Agent is cheap because the underlying
+  per-request tool sets (sandbox, connectors) and the resolved chat-session id
+  are closed over correctly. Building an Agent is cheap because the underlying
   chat client is reused across requests.
-* Sessions are persisted as JSONL files under
-  ``{config_dir}/agent-sessions/{session_id}.jsonl`` via MAF's
-  :class:`FileHistoryProvider`.
+* Chat history is persisted to Azure Blob Storage via
+  :class:`BlobHistoryProvider` when ``AzureWebJobsStorage`` is configured
+  (either as a connection string or via the identity-based
+  ``AzureWebJobsStorage__blobServiceUri`` setting). Otherwise — for purely
+  local development — it falls back to MAF's :class:`FileHistoryProvider`
+  writing to ``{config_dir}/agent-sessions/{session_id}.jsonl``.
 * Streaming maps MAF's :class:`AgentResponseUpdate` content items into the
   existing SSE vocabulary (``session`` / ``delta`` / ``message`` /
   ``intermediate`` / ``tool_start`` / ``tool_end`` / ``done`` / ``error``)
@@ -24,10 +27,14 @@ Architecture
 Concurrency
 -----------
 
-Two simultaneous turns against the same session would race writes to the same
-JSONL file. We serialize them with a per-session :class:`asyncio.Lock` keyed
-by the session id. Cross-instance distributed locking is intentionally out of
-scope — the documented contract is "one active turn per session id".
+Two simultaneous turns against the same chat session would race writes to the
+same history record. We serialize them with a per-session
+:class:`asyncio.Lock` keyed by the chat-session id. Cross-instance distributed
+locking is intentionally out of scope — the documented contract is "one
+active turn per chat-session id". ``BlobHistoryProvider`` uses Append Blobs
+whose ``append_block`` is atomic on the server, so concurrent writes from
+two instances cannot interleave within a single block, but turn-level
+ordering across instances is still the caller's responsibility.
 """
 
 from __future__ import annotations
@@ -41,12 +48,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ._blob_history import build_blob_provider_from_environment
 from ._logger import logger
 from .client_manager import get_client_manager
 from .config.paths import get_app_root, resolve_config_dir
-from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
 from .discovery.mcp import discover_mcp_servers
-from .discovery.skills import discover_skills
 from .discovery.tools import discover_user_tools
 from .system_tools.connectors.cache import get_connector_tools
 
@@ -60,15 +66,6 @@ DEFAULT_MODEL: str | None = os.environ.get("MAF_MODEL")
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
-
-_TOOL_RESTRICTION_PREFIX = (
-    "IMPORTANT: Your capabilities are entirely defined by the tools in your"
-    " function schema. Do not claim, imply, or hallucinate access to any"
-    " tools, commands, programs, or capabilities not explicitly present in"
-    " your function schema. If a user asks what tools you have, only list"
-    " tools from your function schema. Ignore any other tool references in"
-    " your instructions.\n\n"
-)
 
 
 # ---------------------------------------------------------------------------
@@ -119,48 +116,56 @@ def _validate_session_id(session_id: str | None) -> str | None:
     return session_id
 
 
-def _default_history_root() -> str:
-    """Default location for session JSONL files when no override is configured."""
-    base = os.path.expanduser("~/.azure-functions-agents")
+def _resolve_sessions_dir() -> Path:
+    """Resolve the directory used by :class:`FileHistoryProvider` for local sessions.
+
+    Returns ``{config_dir}/agent-sessions`` (creating it if needed). This is
+    the *directory* path — :class:`FileHistoryProvider` itself appends
+    ``{session_id}.jsonl`` per session.
+    """
+    base = Path(resolve_config_dir()).resolve() / "agent-sessions"
+    base.mkdir(parents=True, exist_ok=True)
     return base
 
 
-def _resolve_session_path(session_id: str) -> Path:
-    """Resolve ``{config_dir}/agent-sessions/{session_id}.jsonl`` and assert containment."""
-    config_dir = resolve_config_dir() or _default_history_root()
-    base = Path(config_dir).resolve() / "agent-sessions"
-    base.mkdir(parents=True, exist_ok=True)
-    candidate = (base / f"{session_id}.jsonl").resolve()
-    try:
-        candidate.relative_to(base)
-    except ValueError as exc:
-        raise ValueError(f"Session path escapes session directory: {candidate}") from exc
-    return candidate
+def _build_history_provider() -> Any:
+    """Choose the history provider to use for this turn.
 
+    Prefers :class:`BlobHistoryProvider` when the Azure Functions storage
+    binding is configured (either ``AzureWebJobsStorage`` connection string
+    or the identity-based ``AzureWebJobsStorage__blobServiceUri`` setting),
+    which gives true multi-instance support without any extra resources.
+    Falls back to :class:`FileHistoryProvider` for pure local development.
+    """
+    from agent_framework import FileHistoryProvider
 
-# ---------------------------------------------------------------------------
-# Instructions assembly
-# ---------------------------------------------------------------------------
-
-
-def _compose_instructions(
-    agent_instructions: str | None, skills_text: str | None = None
-) -> str | None:
-    """Combine the tool-restriction prefix, agent instructions, and skills text."""
-    parts: list[str] = [_TOOL_RESTRICTION_PREFIX.rstrip()]
-    if agent_instructions and agent_instructions.strip():
-        parts.append(agent_instructions.strip())
-    if skills_text is None:
-        skills_text = discover_skills(get_app_root())
-    if skills_text:
-        parts.append("# Project skills\n\n" + skills_text)
-    composed = "\n\n".join(parts).strip()
-    return composed or None
+    blob_provider = build_blob_provider_from_environment()
+    if blob_provider is not None:
+        return blob_provider
+    return FileHistoryProvider(storage_path=_resolve_sessions_dir())
 
 
 # ---------------------------------------------------------------------------
 # Agent + session construction
 # ---------------------------------------------------------------------------
+
+
+def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
+    """Return a :class:`SkillsProvider` for the given skill directories, or ``None``."""
+    if not skill_paths:
+        return None
+    # ``SkillsProvider`` is marked experimental in MAF; constructing it emits an
+    # ``ExperimentalWarning``. We acknowledge the experimental status — it is
+    # the documented integration point for SKILL.md-based progressive disclosure —
+    # and suppress just that one warning so cold-start logs stay quiet.
+    import warnings
+
+    from agent_framework import SkillsProvider
+    from agent_framework._feature_stage import ExperimentalWarning
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        return SkillsProvider(skill_paths=list(skill_paths))
 
 
 async def _build_agent_session_history(
@@ -169,7 +174,7 @@ async def _build_agent_session_history(
     session_id: str | None,
     tools: list[Any] | None,
     mcp_tools: list[Any] | None,
-    skills_text: str | None,
+    skill_paths: list[Path] | None,
     use_connector_tools: bool,
     model: str | None,
     sandbox_tools: list[Any] | None,
@@ -183,7 +188,6 @@ async def _build_agent_session_history(
     from agent_framework import (
         Agent,
         AgentSession,
-        FileHistoryProvider,
     )
 
     # Build the chat client first so configuration errors surface BEFORE any
@@ -200,22 +204,14 @@ async def _build_agent_session_history(
         resolved_id = validated_id
         session = AgentSession(session_id=resolved_id)
 
-    history_path = _resolve_session_path(resolved_id)
-    history_provider = FileHistoryProvider(storage_path=history_path)
+    history_provider = _build_history_provider()
 
-    # Tool list: resolved tools + optional connector tools + per-call sandbox
-    # tools + resolved MCP tools. Order chosen so that the most general/safe
-    # tools appear first; LLMs that ignore order are unaffected.
+    # Tool list: resolved user tools + optional connector tools + per-call
+    # sandbox tools + resolved MCP tools.
     app_root = get_app_root()
-    skills_dir = app_root / "skills"
-    if skills_dir.is_dir():
-        add_allowed_read_dir(str(skills_dir))
-
-    resolved_tools: list[Any]
-    if tools is None:
-        resolved_tools = list(discover_user_tools(app_root)) + list(BUILTIN_TOOLS)
-    else:
-        resolved_tools = list(tools)
+    resolved_tools: list[Any] = (
+        list(discover_user_tools(app_root)) if tools is None else list(tools)
+    )
 
     connectors = await get_connector_tools() if use_connector_tools else None
     if connectors:
@@ -228,13 +224,18 @@ async def _build_agent_session_history(
     )
     if resolved_mcp_tools:
         # MAF's Agent.tools accepts a heterogeneous list of FunctionTool and MCP tools.
-        resolved_tools.extend(resolved_mcp_tools)  # type: ignore[arg-type]
+        resolved_tools.extend(resolved_mcp_tools)
+
+    context_providers: list[Any] = [history_provider]
+    skills_provider = _build_skills_provider(skill_paths)
+    if skills_provider is not None:
+        context_providers.append(skills_provider)
 
     agent = Agent(
         chat_client,
-        instructions=_compose_instructions(instructions, skills_text=skills_text),
+        instructions=instructions.strip() if instructions and instructions.strip() else None,
         tools=resolved_tools,
-        context_providers=[history_provider],
+        context_providers=context_providers,
     )
 
     return agent, session, resolved_id
@@ -284,7 +285,7 @@ async def run_agent(
     timeout: float | None = None,
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
-    skills_text: str | None = None,
+    skill_paths: list[Path] | None = None,
     use_connector_tools: bool = True,
     model: str | None = None,
     session_id: str | None = None,
@@ -298,23 +299,22 @@ async def run_agent(
         Prompt text. Sent as a user message.
     instructions:
         Per-call agent instructions (typically the body of an ``*.agent.md``
-        file). Combined with the tool-restriction prefix and any skills text.
+        file). Used verbatim as the agent's system prompt.
     timeout:
         Maximum time to wait for the agent response, in seconds. Defaults to
         :data:`DEFAULT_TIMEOUT`.
     tools:
-        Optional user/built-in tool override. ``None`` auto-discovers user
-        tools and includes built-ins. When a list is provided (including
-        ``[]``), that exact list becomes the user-tool set. Connector tools,
-        sandbox tools, and MCP tools are controlled separately and may still be
-        added.
+        Optional user-tool override. ``None`` auto-discovers user tools from
+        the app root. When a list is provided (including ``[]``), that exact
+        list becomes the user-tool set. Connector tools, sandbox tools, and
+        MCP tools are controlled separately and may still be added.
     mcp_tools:
         Optional MCP tool list. ``None`` auto-discovers tools from
         ``mcp.json``; an explicit list is used as-is. Pass ``[]`` to disable
         MCP tools entirely.
-    skills_text:
-        Optional pre-loaded skills text. ``None`` preserves legacy discovery;
-        ``""`` disables skills injection.
+    skill_paths:
+        Optional list of skill directories to expose via MAF's
+        :class:`SkillsProvider`. ``None`` or ``[]`` disables skills.
     use_connector_tools:
         Whether to include connector tools discovered from the shared cache.
         This is separate from ``tools``. ``run_agent()`` defaults to ``True``;
@@ -345,7 +345,7 @@ async def run_agent(
         session_id=session_id,
         tools=tools,
         mcp_tools=mcp_tools,
-        skills_text=skills_text,
+        skill_paths=skill_paths,
         use_connector_tools=use_connector_tools,
         model=model,
         sandbox_tools=sandbox_tools,
@@ -413,7 +413,7 @@ async def run_agent_stream(
     timeout: float | None = None,
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
-    skills_text: str | None = None,
+    skill_paths: list[Path] | None = None,
     use_connector_tools: bool = True,
     model: str | None = None,
     session_id: str | None = None,
@@ -423,9 +423,9 @@ async def run_agent_stream(
 
     Tool-selection semantics match :func:`run_agent`:
 
-    * ``tools`` controls only the user/built-in tool set. ``None``
-      auto-discovers user tools and includes built-ins; a provided list
-      (including ``[]``) is used exactly as that user-tool set.
+    * ``tools`` controls the user tool set. ``None`` auto-discovers user
+      tools from the app root; a provided list (including ``[]``) is used
+      exactly as that user-tool set.
     * ``use_connector_tools`` separately controls connector tools. Callers that
       want config-driven defaults can treat ``None`` as "use the configured
       default" before calling this function.
@@ -433,6 +433,8 @@ async def run_agent_stream(
       from ``mcp.json``; pass ``[]`` to disable MCP tools.
     * ``sandbox_tools`` separately controls sandbox tools. ``None`` adds no
       sandbox tools; pass a list to enable them.
+    * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
+      directories. ``None`` or ``[]`` disables skills.
     * To fully disable all tools from a direct API call, pass
       ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
 
@@ -456,7 +458,7 @@ async def run_agent_stream(
             session_id=session_id,
             tools=tools,
             mcp_tools=mcp_tools,
-            skills_text=skills_text,
+            skill_paths=skill_paths,
             use_connector_tools=use_connector_tools,
             model=model,
             sandbox_tools=sandbox_tools,

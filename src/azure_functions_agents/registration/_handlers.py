@@ -69,7 +69,7 @@ def build_sandbox_tools_for_session(
         return None
     if resolved.sandbox_config is None:
         return None
-    fallback = session_id or "default"
+    fallback = session_id or uuid.uuid4().hex
     sandbox_module = import_module("azure_functions_agents.system_tools.sandbox")
     create_sandbox_tools = sandbox_module.create_sandbox_tools
     return cast(
@@ -195,7 +195,7 @@ def make_agent_handler(
                 sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
-                skills_text=capabilities.skills_text,
+                skill_paths=capabilities.enabled_skill_paths,
                 use_connector_tools=capabilities.use_connector_tools,
             )
 
@@ -265,7 +265,7 @@ def make_http_agent_handler(
                 sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
-                skills_text=capabilities.skills_text,
+                skill_paths=capabilities.enabled_skill_paths,
                 use_connector_tools=capabilities.use_connector_tools,
             )
 

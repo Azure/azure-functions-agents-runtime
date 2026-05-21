@@ -26,7 +26,6 @@ var resourceToken = toLower(uniqueString(subscription().id, environmentName, loc
 var tags = { 'azd-env-name': environmentName }
 var functionAppName = '${abbrs.webSitesFunctions}agent-func-${resourceToken}'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
-var sessionShareName = 'code-assistant-session'
 var deployerPrincipalId = deployer().objectId
 
 // Resource Group
@@ -77,7 +76,6 @@ module api './app/api.bicep' = {
     runtimeVersion: '3.12'
     storageAccountName: storage.outputs.name
     deploymentStorageContainerName: deploymentStorageContainerName
-    sessionShareName: sessionShareName
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
@@ -107,9 +105,6 @@ module storage 'br/public:avm/res/storage/storage-account:0.8.3' = {
     }
     blobServices: {
       containers: [{ name: deploymentStorageContainerName }]
-    }
-    fileServices: {
-      shares: [{ name: sessionShareName, shareQuota: 1 }]
     }
     minimumTlsVersion: 'TLS1_2'
     location: location

@@ -11,7 +11,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from agent_framework import MCPStdioTool
 
 import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
@@ -250,7 +249,6 @@ def test_capability_filtering_fixture() -> None:
     assert global_config.tools is not None
     assert isinstance(global_config.tools, ToolsFilter)
     assert global_config.tools.exclude == ["bash", "execute_shell"]
-    assert global_config.tools.custom_only is False
 
     by_name = _specs_by_name(specs)
     assert set(by_name) == {"Locked Down", "Selective Filters"}
@@ -271,7 +269,6 @@ def test_capability_filtering_fixture() -> None:
     assert selective.skills.exclude == ["compliance-checker", "security-review"]
     assert isinstance(selective.tools, ToolsFilter)
     assert selective.tools.exclude == ["web_fetch"]
-    assert selective.tools.custom_only is True
 
 
 # ---------------------------------------------------------------------------
@@ -443,7 +440,7 @@ def test_connector_tools_and_partial_identifiers(
 
 
 # ---------------------------------------------------------------------------
-# 11 — .vscode/mcp.json env-var substitution
+# 11 — mcp.json env-var substitution
 # ---------------------------------------------------------------------------
 
 
@@ -472,7 +469,7 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     finally:
         clear_mcp_cache()
 
-    assert set(servers) == {"github", "filesystem"}
+    assert set(servers) == {"github", "internal"}
 
     github = servers["github"]
     assert isinstance(github, _CapturedMCPStreamableHTTPTool)
@@ -486,20 +483,17 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
         "X-Tenant": "contoso",
     }
 
-    filesystem = servers["filesystem"]
-    assert isinstance(filesystem, MCPStdioTool)
-    assert filesystem.command == "/usr/local/bin/node"
-    assert filesystem.args == [
-        "-y",
-        "@modelcontextprotocol/server-filesystem",
-        "/srv/workspace",
-    ]
-    # allowed_tools is None when the original config used the "*" wildcard.
-    assert filesystem.allowed_tools is None
+    internal = servers["internal"]
+    assert isinstance(internal, _CapturedMCPStreamableHTTPTool)
+    # Both $VAR and %VAR% styles are substituted in the URL.
+    assert internal.url == "https://debug.internal.example.test//srv/workspace"
+    # allowed_tools is None when the original config omits a "tools" entry.
+    assert internal.allowed_tools is None
+    internal_headers = internal.header_provider(None)
     # Resolved values flow through, unresolved placeholders stay literal.
-    assert filesystem.env == {
-        "LOG_LEVEL": "debug",
-        "API_KEY": "$UNSET_API_KEY",
+    assert internal_headers == {
+        "X-Node": "/usr/local/bin/node",
+        "X-API-Key": "$UNSET_API_KEY",
     }
 
 

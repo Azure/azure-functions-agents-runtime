@@ -6,7 +6,6 @@ import pytest
 
 from azure_functions_agents.discovery.skills import (
     clear_skills_cache,
-    discover_skill_texts,
     discover_skills,
 )
 
@@ -18,67 +17,132 @@ def clear_discovery_cache() -> None:
     clear_skills_cache()
 
 
-def _write_skill(app_root: Path, name: str, content: str) -> None:
-    skills_dir = app_root / "skills"
-    skills_dir.mkdir()
-    (skills_dir / name).write_text(content, encoding="utf-8")
+def _write_skill(app_root: Path, dir_name: str, name: str, description: str = "Test skill") -> Path:
+    skill_dir = app_root / "skills" / dir_name
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: {name}\ndescription: {description}\n---\n\n# {name}\n",
+        encoding="utf-8",
+    )
+    return skill_dir
 
 
-def test_discover_skills_caches_by_resolved_app_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _write_skill(tmp_path, "alpha.md", "# Alpha\n")
+def test_discover_skills_returns_name_to_directory_map(tmp_path: Path) -> None:
+    skill_dir = _write_skill(tmp_path, "alpha", "alpha")
 
-    target_path = (tmp_path / "skills" / "alpha.md").resolve()
-    read_count = 0
-    original_read_text = Path.read_text
+    discovered = discover_skills(tmp_path)
 
-    def counting_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        nonlocal read_count
-        if self.resolve() == target_path:
-            read_count += 1
-        return original_read_text(self, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", counting_read_text)
-
-    first = discover_skills(tmp_path)
-    second = discover_skills(tmp_path / ".")
-
-    assert first == second
-    assert "## skill: alpha.md" in first
-    assert read_count == 1
+    assert discovered == {"alpha": skill_dir.resolve()} or discovered == {"alpha": skill_dir}
 
 
-def test_discover_skill_texts_returns_independent_dicts(tmp_path: Path) -> None:
-    _write_skill(tmp_path, "alpha.md", "# Alpha\n")
+def test_discover_skills_returns_empty_when_no_skills_dir(tmp_path: Path) -> None:
+    assert discover_skills(tmp_path) == {}
 
-    discovered_skills = discover_skill_texts(tmp_path)
-    discovered_skills["extra.md"] = "ignored"
 
-    subsequent_skills = discover_skill_texts(tmp_path)
+def test_discover_skills_returns_empty_when_no_skill_files(tmp_path: Path) -> None:
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills" / "README.md").write_text("not a skill", encoding="utf-8")
 
-    assert subsequent_skills == {"alpha.md": "# Alpha\n"}
+    assert discover_skills(tmp_path) == {}
+
+
+def test_discover_skills_caches_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_skill(tmp_path, "alpha", "alpha")
+
+    import frontmatter
+
+    parse_count = 0
+    original_load = frontmatter.load
+
+    def counting_load(*args: object, **kwargs: object) -> object:
+        nonlocal parse_count
+        parse_count += 1
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(frontmatter, "load", counting_load)
+
+    discover_skills(tmp_path)
+    discover_skills(tmp_path / ".")
+
+    assert parse_count == 1
 
 
 def test_clear_skills_cache_reruns_discovery(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _write_skill(tmp_path, "alpha.md", "# Alpha\n")
+    _write_skill(tmp_path, "alpha", "alpha")
 
-    target_path = (tmp_path / "skills" / "alpha.md").resolve()
-    read_count = 0
-    original_read_text = Path.read_text
+    import frontmatter
 
-    def counting_read_text(self: Path, *args: object, **kwargs: object) -> str:
-        nonlocal read_count
-        if self.resolve() == target_path:
-            read_count += 1
-        return original_read_text(self, *args, **kwargs)
+    parse_count = 0
+    original_load = frontmatter.load
 
-    monkeypatch.setattr(Path, "read_text", counting_read_text)
+    def counting_load(*args: object, **kwargs: object) -> object:
+        nonlocal parse_count
+        parse_count += 1
+        return original_load(*args, **kwargs)
+
+    monkeypatch.setattr(frontmatter, "load", counting_load)
 
     discover_skills(tmp_path)
     clear_skills_cache()
     discover_skills(tmp_path)
 
-    assert read_count == 2
+    assert parse_count == 2
+
+
+def test_discover_skills_rejects_missing_name(tmp_path: Path) -> None:
+    skills_dir = tmp_path / "skills" / "broken"
+    skills_dir.mkdir(parents=True)
+    (skills_dir / "SKILL.md").write_text(
+        "---\ndescription: missing name\n---\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="missing a 'name' field"):
+        discover_skills(tmp_path)
+
+
+def test_discover_skills_rejects_invalid_name(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "bad", "Bad_Name")
+
+    with pytest.raises(ValueError, match="is invalid"):
+        discover_skills(tmp_path)
+
+
+def test_discover_skills_rejects_name_over_max_length(tmp_path: Path) -> None:
+    # 65 lowercase letters — over MAF's 64-char cap. The regex alone would
+    # accept this, so this test locks in the length check that mirrors
+    # agent_framework._skills.MAX_NAME_LENGTH (and prevents MAF from silently
+    # dropping the skill at runtime).
+    long_name = "a" * 65
+    _write_skill(tmp_path, "too-long", long_name)
+
+    with pytest.raises(ValueError, match="at most 64 characters"):
+        discover_skills(tmp_path)
+
+
+def test_discover_skills_rejects_duplicate_names(tmp_path: Path) -> None:
+    _write_skill(tmp_path, "first", "shared")
+    _write_skill(tmp_path, "second", "shared")
+
+    with pytest.raises(ValueError, match="Duplicate skill name"):
+        discover_skills(tmp_path)
+
+
+def test_discover_skills_skips_unparseable_frontmatter(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    bad_dir = tmp_path / "skills" / "broken"
+    bad_dir.mkdir(parents=True)
+    # Intentionally malformed YAML in the frontmatter block.
+    (bad_dir / "SKILL.md").write_text(
+        "---\nname: [unclosed\n---\nbody\n",
+        encoding="utf-8",
+    )
+    _write_skill(tmp_path, "good", "good")
+
+    discovered = discover_skills(tmp_path)
+
+    assert "good" in discovered
+    assert "broken" not in discovered

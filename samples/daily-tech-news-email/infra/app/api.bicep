@@ -13,7 +13,6 @@ param instanceMemoryMB int = 2048
 param maximumInstanceCount int = 100
 param identityId string = ''
 param identityClientId string = ''
-param sessionShareName string = ''
 
 var applicationInsightsIdentity = 'ClientId=${identityClientId};Authorization=AAD'
 
@@ -79,23 +78,3 @@ module api 'br/public:avm/res/web/site:0.15.1' = {
 }
 
 output SERVICE_API_NAME string = api.outputs.name
-
-// Mount Azure Files share for session state persistence
-resource functionApp 'Microsoft.Web/sites@2024-04-01' existing = {
-  name: name
-}
-
-resource storageMount 'Microsoft.Web/sites/config@2024-04-01' = if (!empty(sessionShareName)) {
-  parent: functionApp
-  name: 'azurestorageaccounts'
-  dependsOn: [api]
-  properties: {
-    sessionstore: {
-      type: 'AzureFiles'
-      accountName: storageAccountName
-      shareName: sessionShareName
-      mountPath: '/code-assistant-session'
-      accessKey: stg.listKeys().keys[0].value
-    }
-  }
-}

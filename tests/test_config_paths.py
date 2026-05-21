@@ -43,17 +43,10 @@ def test_get_app_root_cwd_fallback(monkeypatch: pytest.MonkeyPatch, tmp_path: Pa
     assert paths.get_app_root() == tmp_path.resolve()
 
 
-def test_resolve_config_dir_priority(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_resolve_config_dir_priority(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(paths.os.path, "expanduser", lambda p: str(tmp_path / p.lstrip("~/")))
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR", r"C:\config\preferred")
-    monkeypatch.setenv("CODE_ASSISTANT_CONFIG_PATH", r"C:\config\legacy")
-    monkeypatch.setenv("CONTAINER_NAME", "container")
     assert paths.resolve_config_dir() == r"C:\config\preferred"
 
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR", raising=False)
-    assert paths.resolve_config_dir() == r"C:\config\legacy"
-
-    monkeypatch.delenv("CODE_ASSISTANT_CONFIG_PATH", raising=False)
-    assert paths.resolve_config_dir() == paths._REMOTE_CONFIG_DIR
-
-    monkeypatch.delenv("CONTAINER_NAME", raising=False)
-    assert paths.resolve_config_dir() is None
+    assert Path(paths.resolve_config_dir()) == (tmp_path / ".azure-functions-agents").resolve()

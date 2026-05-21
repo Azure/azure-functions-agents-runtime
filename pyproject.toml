@@ -19,6 +19,7 @@ dependencies = [
     "azurefunctions-extensions-http-fastapi==1.0.*",
     "aiohttp==3.13.*",
     "azure-identity==1.25.*",
+    "azure-storage-blob==12.28.*",
     "jsonschema==4.26.*",
     "mcp==1.27.*",
 ]

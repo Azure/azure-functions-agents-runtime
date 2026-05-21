@@ -12,22 +12,14 @@ from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
 from .config.validation import validate_resolved_agent
-from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
 from .discovery.mcp import discover_mcp_servers
-from .discovery.skills import discover_skill_texts
+from .discovery.skills import discover_skills
 from .discovery.tools import discover_user_tools
 from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_debug_endpoints
 from .registration.triggers import register_agent
 from .system_tools.connectors.cache import configure_connector_tools
-
-
-def _allow_skill_reads(app_root: Path) -> None:
-    for name in ("skills", "Skills"):
-        skills_dir = app_root / name
-        if skills_dir.is_dir():
-            add_allowed_read_dir(str(skills_dir))
 
 
 def _debug_enabled(app_debug: Any) -> bool:
@@ -41,7 +33,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
       1. Resolve app root (explicit > AZURE_FUNCTIONS_AGENTS_APP_ROOT > AzureWebJobsScriptRoot > cwd).
       2. Load global agents.config.yaml (optional).
       3. Load all *.agent.md frontmatter into AgentSpec objects.
-      4. Discover tools (user tools + built-ins), skills, MCP servers from disk.
+      4. Discover user tools, skills, and MCP servers from disk.
       5. Compose a ResolvedAgent per spec (apply global defaults + agent overrides).
       6. Validate each ResolvedAgent (required fields, MCP exclude references, etc.).
       7. Build AgentCapabilities per agent (apply mcp/skills/tools filters).
@@ -51,14 +43,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if app_root is not None:
         set_app_root(app_root)
     resolved_root = get_app_root()
-    _allow_skill_reads(resolved_root)
 
     global_config = load_global_config(resolved_root)
     agent_specs = load_agent_specs(resolved_root)
     user_tools = discover_user_tools(resolved_root)
     mcp_tools = discover_mcp_servers(resolved_root)
-    skill_texts = discover_skill_texts(resolved_root)
-    skill_names = list(skill_texts)
+    skills = discover_skills(resolved_root)
+    skill_names = list(skills)
     mcp_names = list(mcp_tools)
     if global_config.system_tools and global_config.system_tools.tools_from_connections:
         configure_connector_tools(
@@ -83,9 +74,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         capabilities = build_capabilities(
             resolved,
             discovered_user_tools=user_tools,
-            builtin_tools=list(BUILTIN_TOOLS),
             discovered_mcp_tools=mcp_tools,
-            discovered_skills=skill_texts,
+            discovered_skills=skills,
         )
         allocated_name: str | None = None
         if not resolved.is_main and (resolved.trigger is not None or _debug_enabled(resolved.debug)):
