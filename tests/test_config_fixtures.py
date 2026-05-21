@@ -440,7 +440,7 @@ def test_connector_tools_and_partial_identifiers(
 
 
 # ---------------------------------------------------------------------------
-# 11 — .vscode/mcp.json env-var substitution
+# 11 — mcp.json env-var substitution
 # ---------------------------------------------------------------------------
 
 

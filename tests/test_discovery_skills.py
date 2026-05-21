@@ -110,6 +110,18 @@ def test_discover_skills_rejects_invalid_name(tmp_path: Path) -> None:
         discover_skills(tmp_path)
 
 
+def test_discover_skills_rejects_name_over_max_length(tmp_path: Path) -> None:
+    # 65 lowercase letters — over MAF's 64-char cap. The regex alone would
+    # accept this, so this test locks in the length check that mirrors
+    # agent_framework._skills.MAX_NAME_LENGTH (and prevents MAF from silently
+    # dropping the skill at runtime).
+    long_name = "a" * 65
+    _write_skill(tmp_path, "too-long", long_name)
+
+    with pytest.raises(ValueError, match="at most 64 characters"):
+        discover_skills(tmp_path)
+
+
 def test_discover_skills_rejects_duplicate_names(tmp_path: Path) -> None:
     _write_skill(tmp_path, "first", "shared")
     _write_skill(tmp_path, "second", "shared")

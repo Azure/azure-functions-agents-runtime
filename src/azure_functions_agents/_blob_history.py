@@ -312,18 +312,14 @@ def _build_service_client(
         return BlobServiceClient.from_connection_string(connection_string)
     assert blob_service_url is not None
     if credential is None:
-        from azure.identity.aio import DefaultAzureCredential
+        from ._credential import build_async_credential_with_client_id
 
         # Precedence: storage-specific identity (AzureWebJobsStorage__clientId) wins,
         # then app-wide AZURE_CLIENT_ID, then bare DefaultAzureCredential().
         client_id = (
             os.environ.get(_CLIENT_ID_ENV) or os.environ.get("AZURE_CLIENT_ID") or ""
         ).strip()
-        credential = (
-            DefaultAzureCredential(managed_identity_client_id=client_id)
-            if client_id
-            else DefaultAzureCredential()
-        )
+        credential = build_async_credential_with_client_id(client_id)
     return BlobServiceClient(account_url=blob_service_url, credential=credential)
 
 

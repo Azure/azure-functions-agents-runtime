@@ -16,20 +16,23 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 import urllib.parse
 import uuid
 from collections.abc import Awaitable, Callable
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
-from azure.identity.aio import DefaultAzureCredential, get_bearer_token_provider
+from azure.identity.aio import get_bearer_token_provider
 from pydantic import BaseModel, Field
 
+from .._credential import build_async_credential
 from .._function_tool import FunctionTool, tool
 from .._logger import logger
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
+
+if TYPE_CHECKING:
+    from azure.identity.aio import DefaultAzureCredential
 
 _API_VERSION = "2025-10-02-preview"
 
@@ -70,9 +73,6 @@ _EXECUTE_PYTHON_DESCRIPTION = (
     " Jupyter kernel. Returns JSON with result, stdout, and stderr.\n"
     "\n"
     "IMPORTANT: This runs in an ISOLATED SANDBOX with its own file system."
-    " DO NOT use it to read or process files from the local system,"
-    " such as agent runtime tool outputs. Use the view, head, tail, grep,"
-    " or jq tools instead.\n"
     "\n"
     "Only use this tool when you need to actually run code,"
     " when no other tool can accomplish the task (there's a small cost to using it) —"
@@ -154,13 +154,6 @@ def _build_url(endpoint: str, session_id: str) -> str:
     return f"{base}/executions?api-version={_API_VERSION}&identifier={encoded_id}"
 
 
-def _build_managed_identity_credential() -> DefaultAzureCredential:
-    client_id = os.environ.get("AZURE_CLIENT_ID")
-    if client_id:
-        return DefaultAzureCredential(managed_identity_client_id=client_id)
-    return DefaultAzureCredential()
-
-
 async def _execute_code(
     endpoint: str,
     code: str,
@@ -228,7 +221,7 @@ async def _ensure_shared_resources() -> None:
     async with _init_lock:
         if _token_provider is not None:
             return
-        _credential = _build_managed_identity_credential()
+        _credential = build_async_credential()
         _token_provider = get_bearer_token_provider(
             _credential, "https://dynamicsessions.io/.default"
         )

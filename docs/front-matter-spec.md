@@ -20,7 +20,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Default runtime settings (model, timeout)
 
 **MCP server discovery:**
-- MCP servers (defined in `mcp.json` or `.vscode/mcp.json`)
+- MCP servers (defined in `mcp.json`)
 
 **Agent front matter:**
 - **Inherits all discovered capabilities by default**
@@ -38,7 +38,7 @@ For runtime settings (model, timeout):
 4. **Framework defaults** — Built-in default values
 
 For capabilities (MCP, skills, tools):
-1. **Auto-discovered** — MCP servers from `mcp.json` or `.vscode/mcp.json`, plus skills and tools from their directories
+1. **Auto-discovered** — MCP servers from `mcp.json`, plus skills and tools from their directories
 2. **Filtered per-agent** using exclude lists in agent front matter
 
 ### Quick Reference: Required vs Optional
@@ -66,7 +66,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
 
-**Note:** MCP servers (from `mcp.json` or `.vscode/mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
+**Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
 **Key principle:** `agents.config.yaml` defines shared runtime configuration. Agents filter discovered capabilities and choose what they use.
 
@@ -109,7 +109,7 @@ Fields are organized into categories based on how they can be used:
 ### Field Categories
 
 **Infrastructure (Discovered capabilities, filtered in agents):**
-- `mcp` — MCP servers discovered from `mcp.json` or `.vscode/mcp.json`, filtered in agents
+- `mcp` — MCP servers discovered from `mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
@@ -393,7 +393,7 @@ system_tools:
 ---
 ```
 
-**Note:** When the runtime has no explicit session id to bind to the ACA sandbox, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for the ACA sandbox honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
+**Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
 
@@ -414,7 +414,7 @@ system_tools:
 
 **Note:** Connector auth uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps to select the intended managed identity.
 
-**Note:** This field enables dynamic tool generation from connector APIs. Connector-backed MCP servers are defined in `mcp.json` or `.vscode/mcp.json` and participate in the standard MCP discovery flow, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
+**Note:** This field enables dynamic tool generation from connector APIs. Connector-backed MCP servers are defined in `mcp.json` and participate in the standard MCP discovery flow, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
 
 ---
 
@@ -448,7 +448,7 @@ tools: false
 #### `mcp`
 - **Type:** `boolean` or `object`
 - **Location:** Agent (front matter) for filtering
-- **Description:** MCP server filtering. MCP servers are discovered from `mcp.json` or `.vscode/mcp.json`. Agents inherit all discovered servers by default. Use `false` to disable MCP for an agent, or use `exclude` to hide specific servers.
+- **Description:** MCP server filtering. MCP servers are discovered from `mcp.json`. Agents inherit all discovered servers by default. Use `false` to disable MCP for an agent, or use `exclude` to hide specific servers.
 
 **Default behavior - Inherit all discovered servers:**
 ```yaml
@@ -468,16 +468,16 @@ mcp:
 mcp: false
 ```
 
-**Note:** `mcp.exclude` entries must match MCP servers discovered from `mcp.json` or `.vscode/mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.
+**Note:** `mcp.exclude` entries must match MCP servers discovered from `mcp.json`. See [MCP documentation](https://modelcontextprotocol.io/) for server definitions.
 
 ---
 
 #### `skills`
 - **Type:** `object` or `boolean`
 - **Location:** Agent (front matter) for filtering only
-- **Description:** Skill filtering configuration. Each skill lives in its own subdirectory under `skills/` with a `SKILL.md` file declaring `name:` and `description:` in YAML frontmatter. Skill names must match `^[a-z0-9]([a-z0-9]*-[a-z0-9])*[a-z0-9]*$` (lowercase letters, digits, and single hyphens). At runtime the discovered skills are exposed through MAF's `SkillsProvider`, which gives the agent `load_skill` / `read_skill_resource` tools that operate scoped to the skill directory.
+- **Description:** Skill filtering configuration. Skills follow MAF's file-based skill format: each skill lives in its own subdirectory under `skills/` with a `SKILL.md` file. At runtime the discovered skills are exposed through MAF's `SkillsProvider`, which gives the agent `load_skill` / `read_skill_resource` tools that operate scoped to the skill directory. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for the authoritative `SKILL.md` format, naming rules, and resource conventions.
 
-**SKILL.md format (one per skill directory):**
+**Minimal `SKILL.md` example (refer to MAF docs for the full specification):**
 ```markdown
 ---
 name: my-skill
@@ -597,9 +597,8 @@ Environment variable substitution is resolved against the Azure Functions proces
 Inline substitution applies to all string values in:
 1. `agents.config.yaml`
 2. `mcp.json`
-3. `.vscode/mcp.json`
-4. Agent `*.agent.md` frontmatter values
-5. Agent `*.agent.md` markdown body
+3. Agent `*.agent.md` frontmatter values
+4. Agent `*.agent.md` markdown body
 
 For the markdown body, text inside fenced code blocks (` ``` `) is preserved and is not substituted.
 
@@ -626,7 +625,7 @@ Each placeholder is resolved with `os.environ.get(IDENT, original_placeholder)`.
 - For `%IDENT%`, the closing `%` must immediately follow the identifier, so tokens like `%VAR-NAME%` remain fully literal regardless of whether `VAR` is set.
 - Text inside markdown fenced code blocks remains literal. This code-block exception applies only to the markdown body, not to YAML or JSON string values.
 
-Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent, defaults to `true`, and has no effect on the app-wide `agents.config.yaml`, `mcp.json`, or `.vscode/mcp.json` files.
+Set `substitute_variables: false` in an agent's frontmatter to disable both frontmatter substitution and markdown body substitution for that agent. The flag is per-agent, defaults to `true`, and has no effect on the app-wide `agents.config.yaml` or `mcp.json` files.
 
 > **Note**: `substitute_variables` itself is read before env-var substitution. It must be a literal boolean (`true` or `false`). Setting `substitute_variables: $MY_FLAG` will not be resolved and defaults to `true`.
 
@@ -792,7 +791,7 @@ You are a helpful assistant. If you need to run Python code or perform calculati
 
 ### Example 3: Agent with Runtime Overrides and Capability Filtering
 
-This example shows how to override runtime settings and filter capabilities per-agent. Assume `mcp.json` or `.vscode/mcp.json` includes an `experimental-server` entry.
+This example shows how to override runtime settings and filter capabilities per-agent. Assume `mcp.json` includes an `experimental-server` entry.
 
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
@@ -923,7 +922,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
 10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
 11. **Tool references:** Tools in `tools.exclude` must exist in the `tools/` directory
-12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json` or `.vscode/mcp.json`
+12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
 13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
 15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 

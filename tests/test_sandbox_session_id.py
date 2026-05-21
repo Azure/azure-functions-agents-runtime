@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
+from azure_functions_agents._credential import build_async_credential
 from azure_functions_agents.system_tools import sandbox
 
 
@@ -95,11 +96,11 @@ def test_build_managed_identity_credential_uses_azure_client_id(
 ) -> None:
     monkeypatch.setenv("AZURE_CLIENT_ID", "client-id-123")
 
-    with patch.object(sandbox, "DefaultAzureCredential") as credential_ctor:
+    with patch("azure.identity.aio.DefaultAzureCredential") as credential_ctor:
         credential = object()
         credential_ctor.return_value = credential
 
-        assert sandbox._build_managed_identity_credential() is credential
+        assert build_async_credential() is credential
 
     credential_ctor.assert_called_once_with(managed_identity_client_id="client-id-123")
 
@@ -109,10 +110,10 @@ def test_build_managed_identity_credential_omits_kwargs_without_azure_client_id(
 ) -> None:
     monkeypatch.delenv("AZURE_CLIENT_ID", raising=False)
 
-    with patch.object(sandbox, "DefaultAzureCredential") as credential_ctor:
+    with patch("azure.identity.aio.DefaultAzureCredential") as credential_ctor:
         credential = object()
         credential_ctor.return_value = credential
 
-        assert sandbox._build_managed_identity_credential() is credential
+        assert build_async_credential() is credential
 
     credential_ctor.assert_called_once_with()

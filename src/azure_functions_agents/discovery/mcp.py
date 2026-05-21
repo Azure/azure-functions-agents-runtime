@@ -83,52 +83,46 @@ def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
     if cached_servers is not None:
         return dict(cached_servers)
 
-    candidates = [
-        resolved_root / ".vscode" / "mcp.json",
-        resolved_root / "mcp.json",
-    ]
+    path = resolved_root / "mcp.json"
+    if not path.exists():
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
+        return {}
 
-    for path in candidates:
-        if not path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.warning("Failed to read MCP config from %s: %s", path, exc)
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
+        return {}
+
+    if not isinstance(data, dict):
+        logger.warning(
+            "Ignoring %s: expected a JSON object at the top level, got %s.",
+            path,
+            type(data).__name__,
+        )
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
+        return {}
+
+    data = cast(dict[str, Any], resolve_env_vars_in_data(data))
+    servers = data.get("servers", {})
+    if not isinstance(servers, dict):
+        logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
+        return {}
+
+    tools: dict[str, MCPTool] = {}
+    for name in sorted(servers.keys()):
+        config = servers[name]
+        if not isinstance(name, str) or not isinstance(config, dict):
             continue
+        built = _build_mcp_tool(name, config)
+        if built is not None:
+            tools[name] = built
 
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Failed to read MCP config from %s: %s", path, exc)
-            continue
-
-        if not isinstance(data, dict):
-            logger.warning(
-                "Ignoring %s: expected a JSON object at the top level, got %s.",
-                path,
-                type(data).__name__,
-            )
-            _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-            return {}
-
-        data = cast(dict[str, Any], resolve_env_vars_in_data(data))
-        servers = data.get("servers", {})
-        if not isinstance(servers, dict):
-            logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
-            _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-            return {}
-
-        tools: dict[str, MCPTool] = {}
-        for name in sorted(servers.keys()):
-            config = servers[name]
-            if not isinstance(name, str) or not isinstance(config, dict):
-                continue
-            built = _build_mcp_tool(name, config)
-            if built is not None:
-                tools[name] = built
-
-        if tools:
-            logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
-        else:
-            logger.info("No valid MCP servers found in %s", path)
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
-        return dict(tools)
-
-    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-    return {}
+    if tools:
+        logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
+    else:
+        logger.info("No valid MCP servers found in %s", path)
+    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
+    return dict(tools)

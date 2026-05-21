@@ -288,7 +288,7 @@ The agent receives the HTTP request body as input and is instructed to return JS
 
 ### Environment variable substitution
 
-`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders inline in every string value in `agents.config.yaml`, `mcp.json`, `.vscode/mcp.json`, agent frontmatter values, and the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
+`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders inline in every string value in `agents.config.yaml`, `mcp.json`, agent frontmatter values, and the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
 
 #### Agent instructions (markdown body)
 
@@ -385,9 +385,9 @@ If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and
 
 ## MCP Server Configuration
 
-You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported (`type: "http"` or `"streamable-http"`).
+You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported. The `type` field is optional — when omitted, an entry with a `url` is treated as HTTP. When `type` is specified it must be `"http"` or `"streamable-http"`; any other transport (e.g. `stdio`, `sse`) is rejected with a warning.
 
-String values in `mcp.json` and `.vscode/mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields are `command`, `args`, `env` values, `url`, `headers` values, `type`, and `tools` entries. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
+String values in `mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields are `command`, `args`, `env` values, `url`, `headers` values, `type`, and `tools` entries. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
 
 ```json
 {
@@ -412,12 +412,12 @@ String values in `mcp.json` and `.vscode/mcp.json` support inline environment-va
 
 Tools from configured MCP servers are automatically available to the agent at runtime. Each server entry supports:
 
-- **`type`** — `"http"` or `"streamable-http"`
+- **`type`** — optional. When set, must be `"http"` or `"streamable-http"`. When omitted, an entry with a `url` is treated as HTTP.
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 
-> **Note**: Entries that do not provide `type: "http"` or `type: "streamable-http"` with a `url` are ignored with a warning. Use the remote HTTP transport instead.
+> **Note**: Entries without a `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 
 ## Session storage
 

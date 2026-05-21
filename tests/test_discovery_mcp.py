@@ -21,8 +21,7 @@ def clear_discovery_cache() -> None:
 def _write_mcp_config(
     app_root: Path, server_config: dict[str, object] | None = None
 ) -> None:
-    (app_root / ".vscode").mkdir(exist_ok=True)
-    (app_root / ".vscode" / "mcp.json").write_text(
+    (app_root / "mcp.json").write_text(
         json.dumps(
             {
                 "servers": {
@@ -38,14 +37,8 @@ def _write_mcp_config(
     )
 
 
-def _write_mcp_json(
-    app_root: Path, data: dict[str, object], *, vscode: bool = True
-) -> None:
-    if vscode:
-        (app_root / ".vscode").mkdir(exist_ok=True)
-        config_path = app_root / ".vscode" / "mcp.json"
-    else:
-        config_path = app_root / "mcp.json"
+def _write_mcp_json(app_root: Path, data: dict[str, object]) -> None:
+    config_path = app_root / "mcp.json"
     config_path.write_text(json.dumps(data), encoding="utf-8")
 
 
@@ -70,7 +63,7 @@ def test_discover_mcp_servers_caches_by_resolved_app_root(
 ) -> None:
     _write_mcp_config(tmp_path)
 
-    target_path = (tmp_path / ".vscode" / "mcp.json").resolve()
+    target_path = (tmp_path / "mcp.json").resolve()
     read_count = 0
     original_read_text = Path.read_text
 
@@ -106,7 +99,7 @@ def test_clear_mcp_cache_reruns_discovery(
 ) -> None:
     _write_mcp_config(tmp_path)
 
-    target_path = (tmp_path / ".vscode" / "mcp.json").resolve()
+    target_path = (tmp_path / "mcp.json").resolve()
     read_count = 0
     original_read_text = Path.read_text
 
@@ -128,8 +121,7 @@ def test_clear_mcp_cache_reruns_discovery(
 def test_discover_mcp_servers_handles_top_level_list(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    (tmp_path / ".vscode").mkdir()
-    config_path = tmp_path / ".vscode" / "mcp.json"
+    config_path = tmp_path / "mcp.json"
     config_path.write_text("[1, 2, 3]", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
@@ -147,8 +139,7 @@ def test_discover_mcp_servers_handles_top_level_list(
 def test_discover_mcp_servers_handles_top_level_string(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
-    (tmp_path / ".vscode").mkdir()
-    config_path = tmp_path / ".vscode" / "mcp.json"
+    config_path = tmp_path / "mcp.json"
     config_path.write_text(json.dumps("hello"), encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
@@ -224,6 +215,52 @@ def test_discover_mcp_servers_supports_streamable_http(tmp_path: Path) -> None:
     assert isinstance(discovered_servers["demo"], MCPStreamableHTTPTool)
 
 
+def test_discover_mcp_servers_accepts_url_without_type(tmp_path: Path) -> None:
+    _write_mcp_config(
+        tmp_path,
+        {"url": "https://example.com/mcp"},
+    )
+
+    discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert list(discovered_servers) == ["demo"]
+    assert isinstance(discovered_servers["demo"], MCPStreamableHTTPTool)
+
+
+def test_discover_mcp_servers_skips_http_type_missing_url(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    _write_mcp_config(tmp_path, {"type": "http"})
+
+    with caplog.at_level(logging.WARNING):
+        discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+    assert any(
+        record.levelno == logging.WARNING
+        and record.getMessage() == "MCP server 'demo': missing 'url', skipping"
+        for record in caplog.records
+    )
+
+
+def test_discover_mcp_servers_ignores_vscode_mcp_json(tmp_path: Path) -> None:
+    (tmp_path / ".vscode").mkdir()
+    (tmp_path / ".vscode" / "mcp.json").write_text(
+        json.dumps(
+            {
+                "servers": {
+                    "demo": {"type": "http", "url": "https://example.com/mcp"}
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+
+
 def test_discover_substitutes_dollar_in_http_url(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -238,7 +275,6 @@ def test_discover_substitutes_dollar_in_http_url(
                 }
             }
         },
-        vscode=False,
     )
 
     tool = discover_mcp_servers(tmp_path)["demo"]
@@ -265,7 +301,6 @@ def test_discover_substitutes_inline_in_headers(
                 }
             }
         },
-        vscode=False,
     )
 
     tool = discover_mcp_servers(tmp_path)["demo"]
@@ -275,26 +310,10 @@ def test_discover_substitutes_inline_in_headers(
     assert tool.header_provider(None) == {"Authorization": "Bearer abc123"}
 
 
-def test_discover_substitution_works_in_vscode_mcp_json(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("URL", "https://vscode.example.com")
-    _write_mcp_json(
-        tmp_path,
-        {"servers": {"demo": {"type": "http", "url": "$URL"}}},
-    )
-
-    tool = discover_mcp_servers(tmp_path)["demo"]
-
-    assert isinstance(tool, MCPStreamableHTTPTool)
-    assert tool.url == "https://vscode.example.com"
-
-
 def test_discover_undefined_variable_stays_literal(tmp_path: Path) -> None:
     _write_mcp_json(
         tmp_path,
         {"servers": {"demo": {"type": "http", "url": "https://$MISSING_VAR/api"}}},
-        vscode=False,
     )
 
     tool = discover_mcp_servers(tmp_path)["demo"]
@@ -310,7 +329,6 @@ def test_discover_does_not_substitute_server_name_keys(
     _write_mcp_json(
         tmp_path,
         {"servers": {"$KEYNAME": {"type": "http", "url": "https://example.com/api"}}},
-        vscode=False,
     )
 
     discovered_servers = discover_mcp_servers(tmp_path)
@@ -337,7 +355,6 @@ def test_discover_does_not_substitute_header_keys(
                 }
             }
         },
-        vscode=False,
     )
 
     tool = discover_mcp_servers(tmp_path)["demo"]
@@ -362,7 +379,6 @@ def test_discover_inline_mix_in_url(
                 }
             }
         },
-        vscode=False,
     )
 
     tool = discover_mcp_servers(tmp_path)["demo"]

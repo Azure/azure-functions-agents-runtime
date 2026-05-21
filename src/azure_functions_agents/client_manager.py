@@ -25,11 +25,9 @@ from __future__ import annotations
 
 import os
 from abc import ABC, abstractmethod
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from azure.identity.aio import DefaultAzureCredential
-
+from ._credential import build_async_credential
 from ._logger import logger
 
 # ---------------------------------------------------------------------------
@@ -72,16 +70,6 @@ class ClientManager(ABC):
 
 _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_FOUNDRY_MODEL = "gpt-4o-mini"
-
-
-def _build_managed_identity_credential() -> DefaultAzureCredential:
-    """Build a DefaultAzureCredential honoring AZURE_CLIENT_ID for multi-identity Function Apps."""
-    from azure.identity.aio import DefaultAzureCredential
-
-    client_id = os.environ.get("AZURE_CLIENT_ID")
-    if client_id:
-        return DefaultAzureCredential(managed_identity_client_id=client_id)
-    return DefaultAzureCredential()
 
 
 class MAFClientManager(ClientManager):
@@ -191,7 +179,7 @@ class MAFClientManager(ClientManager):
         if api_key:
             kwargs["api_key"] = api_key
         else:
-            kwargs["credential"] = _build_managed_identity_credential()
+            kwargs["credential"] = build_async_credential()
         return OpenAIChatClient(**kwargs)
 
     @classmethod
@@ -204,7 +192,7 @@ class MAFClientManager(ClientManager):
         return FoundryChatClient(
             project_endpoint=endpoint,
             model=model,
-            credential=_build_managed_identity_credential(),
+            credential=build_async_credential(),
         )
 
 

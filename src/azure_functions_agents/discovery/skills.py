@@ -16,10 +16,15 @@ import frontmatter
 
 from .._logger import logger
 
-# Mirrors :data:`agent_framework._skills.VALID_NAME_RE`. Names that fail this
-# pattern are rejected at startup with a clear error rather than being
-# discovered and then crashing inside :class:`SkillsProvider`.
+# Mirrors :data:`agent_framework._skills.VALID_NAME_RE` and ``MAX_NAME_LENGTH``.
+# We pre-validate here because :class:`SkillsProvider` does *not* raise on
+# invalid names — it logs a warning and silently drops the skill, which gives
+# users an agent that mysteriously lacks the skill with no startup error.
+# By failing loud here we turn that into a clear configuration error.
+# If MAF tightens or loosens these rules, update both constants below to
+# match ``agent_framework._skills``.
 _VALID_SKILL_NAME = re.compile(r"^[a-z0-9]([a-z0-9]*-[a-z0-9])*[a-z0-9]*$")
+_MAX_SKILL_NAME_LENGTH = 64
 _SKILL_FILE_NAME = "SKILL.md"
 _DISCOVERED_SKILLS_CACHE: dict[Path, dict[str, Path]] = {}
 
@@ -79,10 +84,11 @@ def discover_skills(app_root: Path) -> dict[str, Path]:
             raise ValueError(
                 f"Skill at {skill_file} is missing a 'name' field in its frontmatter."
             )
-        if not _VALID_SKILL_NAME.match(name):
+        if not _VALID_SKILL_NAME.match(name) or len(name) > _MAX_SKILL_NAME_LENGTH:
             raise ValueError(
                 f"Skill name {name!r} at {skill_file} is invalid. Names must match "
-                f"{_VALID_SKILL_NAME.pattern} (lowercase letters, digits, and single hyphens)."
+                f"{_VALID_SKILL_NAME.pattern} (lowercase letters, digits, and single "
+                f"hyphens) and be at most {_MAX_SKILL_NAME_LENGTH} characters."
             )
         if name in discovered:
             raise ValueError(

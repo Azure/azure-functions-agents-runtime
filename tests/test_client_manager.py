@@ -4,11 +4,11 @@ from unittest.mock import patch
 
 import pytest
 
+from azure_functions_agents._credential import build_async_credential
 from azure_functions_agents.client_manager import (
     _DEFAULT_FOUNDRY_MODEL,
     _DEFAULT_OPENAI_MODEL,
     MAFClientManager,
-    _build_managed_identity_credential,
 )
 
 
@@ -103,7 +103,7 @@ def test_build_managed_identity_credential_passes_client_id(
         credential = object()
         credential_ctor.return_value = credential
 
-        assert _build_managed_identity_credential() is credential
+        assert build_async_credential() is credential
 
     credential_ctor.assert_called_once_with(managed_identity_client_id="client-id-123")
 
@@ -117,6 +117,6 @@ def test_build_managed_identity_credential_without_client_id(
         credential = object()
         credential_ctor.return_value = credential
 
-        assert _build_managed_identity_credential() is credential
+        assert build_async_credential() is credential
 
     credential_ctor.assert_called_once_with()

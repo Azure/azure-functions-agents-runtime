@@ -10,14 +10,14 @@ Architecture
 * The chat client comes from a pluggable :class:`ClientManager` (today: only
   :class:`MAFClientManager` — see :mod:`.client_manager`).
 * For each call we build a fresh :class:`agent_framework.Agent` so that
-  per-request tool sets (sandbox, connectors) and the resolved session id are
-  closed over correctly. Building an Agent is cheap because the underlying
+  per-request tool sets (sandbox, connectors) and the resolved chat-session id
+  are closed over correctly. Building an Agent is cheap because the underlying
   chat client is reused across requests.
-* Sessions are persisted to Azure Blob Storage via
+* Chat history is persisted to Azure Blob Storage via
   :class:`BlobHistoryProvider` when ``AzureWebJobsStorage`` is configured
   (either as a connection string or via the identity-based
   ``AzureWebJobsStorage__blobServiceUri`` setting). Otherwise — for purely
-  local development — they fall back to MAF's :class:`FileHistoryProvider`
+  local development — it falls back to MAF's :class:`FileHistoryProvider`
   writing to ``{config_dir}/agent-sessions/{session_id}.jsonl``.
 * Streaming maps MAF's :class:`AgentResponseUpdate` content items into the
   existing SSE vocabulary (``session`` / ``delta`` / ``message`` /
@@ -27,11 +27,11 @@ Architecture
 Concurrency
 -----------
 
-Two simultaneous turns against the same session would race writes to the
+Two simultaneous turns against the same chat session would race writes to the
 same history record. We serialize them with a per-session
-:class:`asyncio.Lock` keyed by the session id. Cross-instance distributed
+:class:`asyncio.Lock` keyed by the chat-session id. Cross-instance distributed
 locking is intentionally out of scope — the documented contract is "one
-active turn per session id". ``BlobHistoryProvider`` uses Append Blobs
+active turn per chat-session id". ``BlobHistoryProvider`` uses Append Blobs
 whose ``append_block`` is atomic on the server, so concurrent writes from
 two instances cannot interleave within a single block, but turn-level
 ordering across instances is still the caller's responsibility.
