@@ -9,7 +9,7 @@ import pytest
 from agent_framework.openai import OpenAIChatClient
 from pydantic import ValidationError
 
-from azure_functions_agents.client_manager import ClientFactoryError, MAFClientManager
+from azure_functions_agents.client_manager import ClientFactoryError, build_chat_client
 from azure_functions_agents.client_manager.providers import (
     AzureOpenAIConfig,
     FoundryConfig,
@@ -60,7 +60,7 @@ def test_get_chat_client_dispatches_to_provider_factory_and_forwards_extras(
         }
     )
 
-    client = MAFClientManager().get_chat_client(cfg)
+    client = build_chat_client(cfg)
 
     assert client == "client"
     assert captured == {
@@ -95,7 +95,7 @@ def test_get_chat_client_filters_none_api_key_to_allow_maf_env_fallback(
         }
     )
 
-    MAFClientManager().get_chat_client(cfg)
+    build_chat_client(cfg)
 
     assert captured == {"model": "gpt-4.1-mini"}
     assert "api_key" not in captured
@@ -109,7 +109,7 @@ def test_get_chat_client_unknown_provider_raises() -> None:
     )
 
     with pytest.raises(UnknownProviderError, match="Unknown provider 'bogus'"):
-        MAFClientManager().get_chat_client(cfg)  # type: ignore[arg-type]
+        build_chat_client(cfg)  # type: ignore[arg-type]
 
 
 def test_get_chat_client_wraps_type_error_with_diagnostic_message(
@@ -135,7 +135,7 @@ def test_get_chat_client_wraps_type_error_with_diagnostic_message(
     )
 
     with pytest.raises(ClientFactoryError) as exc_info:
-        MAFClientManager().get_chat_client(cfg)
+        build_chat_client(cfg)
 
     message = str(exc_info.value)
     assert (
@@ -165,7 +165,7 @@ def test_get_chat_client_azure_openai_api_key_only_uses_api_key_auth(
         patch("azure.identity.DefaultAzureCredential", sync_credential),
         patch("agent_framework.openai.OpenAIChatClient", return_value=openai_client) as openai_ctor,
     ):
-        client = MAFClientManager().get_chat_client(
+        client = build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
@@ -214,7 +214,7 @@ def test_get_chat_client_azure_openai_managed_identity_only_uses_yaml_client_id(
         patch("azure.identity.DefaultAzureCredential", sync_credential),
         patch("agent_framework.openai.OpenAIChatClient", return_value=openai_client) as openai_ctor,
     ):
-        client = MAFClientManager().get_chat_client(
+        client = build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
@@ -274,7 +274,7 @@ def test_get_chat_client_azure_openai_env_api_key_fallback_skips_credential(
         patch("azure.identity.DefaultAzureCredential", sync_credential),
         patch("agent_framework.openai.OpenAIChatClient", return_value=openai_client) as openai_ctor,
     ):
-        client = MAFClientManager().get_chat_client(
+        client = build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
@@ -320,7 +320,7 @@ def test_get_chat_client_azure_openai_system_assigned_managed_identity(
         patch("azure.identity.DefaultAzureCredential", sync_credential),
         patch("agent_framework.openai.OpenAIChatClient", return_value=openai_client) as openai_ctor,
     ):
-        client = MAFClientManager().get_chat_client(
+        client = build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
@@ -365,7 +365,7 @@ def test_get_chat_client_foundry_managed_identity_client_id_uses_async_credentia
         patch("azure.identity.DefaultAzureCredential", sync_credential),
         patch("agent_framework.foundry.FoundryChatClient", return_value=foundry_client) as foundry_ctor,
     ):
-        client = MAFClientManager().get_chat_client(
+        client = build_chat_client(
             _agent_configuration(
                 "foundry",
                 {
@@ -410,7 +410,7 @@ def test_get_chat_client_foundry_system_assigned_managed_identity(
         patch("azure.identity.DefaultAzureCredential", sync_credential),
         patch("agent_framework.foundry.FoundryChatClient", return_value=foundry_client) as foundry_ctor,
     ):
-        client = MAFClientManager().get_chat_client(
+        client = build_chat_client(
             _agent_configuration(
                 "foundry",
                 {
@@ -474,8 +474,7 @@ def test_get_chat_client_never_logs_secrets_for_azure_openai_auth_paths(
         ),
         patch("agent_framework.openai.OpenAIChatClient", side_effect=[object(), object()]),
     ):
-        manager = MAFClientManager()
-        manager.get_chat_client(
+        build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
@@ -486,7 +485,7 @@ def test_get_chat_client_never_logs_secrets_for_azure_openai_auth_paths(
                 },
             )
         )
-        manager.get_chat_client(
+        build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
@@ -570,7 +569,7 @@ def test_get_chat_client_uses_foundry_provider_payload(
         }
     )
 
-    client = MAFClientManager().get_chat_client(cfg)
+    client = build_chat_client(cfg)
 
     assert client == "foundry-client"
     assert captured == {
@@ -607,7 +606,7 @@ def test_get_chat_client_constructs_real_openai_chat_client_without_network(
 ) -> None:
     cfg = AgentConfiguration.model_validate(payload)
 
-    client = MAFClientManager().get_chat_client(cfg)
+    client = build_chat_client(cfg)
 
     assert isinstance(client, OpenAIChatClient)
 
@@ -641,7 +640,7 @@ def test_get_chat_client_constructs_foundry_client_with_renamed_kwargs(
         }
     )
 
-    client = MAFClientManager().get_chat_client(cfg)
+    client = build_chat_client(cfg)
 
     assert isinstance(client, RecordingFoundryChatClient)
     assert captured == {

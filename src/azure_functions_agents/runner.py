@@ -7,8 +7,8 @@ Both the HTTP chat endpoints and triggered-agent handlers go through
 Architecture
 ------------
 
-* The chat client comes from a pluggable :class:`ClientManager` (today: only
-  :class:`MAFClientManager` — see :mod:`.client_manager`).
+* The chat client is constructed from the configured built-in provider via
+  :func:`build_chat_client` in :mod:`.client_manager`.
 * For each call we build a fresh :class:`agent_framework.Agent` so that
   per-request tool sets (sandbox, connectors) and the resolved session id are
   closed over correctly. Building an Agent is cheap because the underlying
@@ -42,7 +42,7 @@ from pathlib import Path
 from typing import Any, TypedDict, cast
 
 from ._logger import logger
-from .client_manager import get_client_manager
+from .client_manager import build_chat_client
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import AgentConfiguration
 from .discovery.builtin_tools import BUILTIN_TOOLS, add_allowed_read_dir
@@ -202,8 +202,7 @@ async def _build_agent_session_history(
 
     # Build the chat client first so configuration errors surface BEFORE any
     # filesystem state is created.
-    client_manager = get_client_manager()
-    chat_client = client_manager.get_chat_client(agent_configuration)
+    chat_client = build_chat_client(agent_configuration)
 
     # Validate / generate session id.
     validated_id = _validate_session_id(session_id)
@@ -315,7 +314,7 @@ async def run_agent(
         file). Combined with the tool-restriction prefix and any skills text.
     agent_configuration:
         Resolved provider selection and universal generation knobs. The runner
-        forwards this object to ``ClientManager.get_chat_client(...)`` and uses
+        forwards this object to ``build_chat_client(...)`` and uses
         ``timeout`` / ``temperature`` / ``top_p`` / ``max_tokens`` from it.
     tools:
         Optional user/built-in tool override. ``None`` auto-discovers user

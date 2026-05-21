@@ -50,12 +50,12 @@ def test_build_agent_session_history_builds_chat_options_from_universal_knobs(
     fake_agent_framework.ChatOptions = FakeChatOptions
     fake_agent_framework.FileHistoryProvider = FakeFileHistoryProvider
 
-    fake_manager = SimpleNamespace(
-        get_chat_client=lambda cfg: captured.setdefault("client_cfg", cfg) or "chat-client"
-    )
-
     monkeypatch.setitem(__import__("sys").modules, "agent_framework", fake_agent_framework)
-    monkeypatch.setattr(runner, "get_client_manager", lambda: fake_manager)
+    monkeypatch.setattr(
+        runner,
+        "build_chat_client",
+        lambda cfg: captured.setdefault("client_cfg", cfg) or "chat-client",
+    )
     monkeypatch.setattr(runner, "resolve_config_dir", lambda: str(tmp_path))
     monkeypatch.setattr(runner, "get_app_root", lambda: tmp_path)
     monkeypatch.setattr(runner, "add_allowed_read_dir", lambda _: None)

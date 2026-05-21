@@ -35,7 +35,7 @@ For runtime settings, the single source of truth is `agent_configuration`:
 2. **Global configuration** — shared `agent_configuration`
 3. **Framework defaults** — only for omitted optional values
 
-Inline env-var substitution (`$VAR` / `%VAR%`) happens **before** schema validation, so environment variables are just one way to supply field values inside `agent_configuration`; they are not a separate runtime fallback tier for required non-secret settings.
+Inline env-var substitution (`$VAR` / `%VAR%`) happens **before** schema validation, so environment variables are just one way to supply field values inside `agent_configuration`; they are not a separate runtime fallback tier for required non-secret settings. Provider selection is internal to the runtime: `agent_configuration.provider` must name one of the built-in providers, and extending that list means adding a new provider spec in the repository rather than plugging in a custom client manager at app startup.
 
 For capabilities (MCP, skills, tools):
 1. **Auto-discovered** — MCP servers from `mcp.json` / `.vscode/mcp.json`, plus skills and tools from their directories

@@ -60,33 +60,7 @@ See the [Authentication section](docs/front-matter-spec.md#authentication) in th
 
 Provider sub-blocks also accept additional keys, which are forwarded to the Microsoft Agent Framework client constructor as `**kwargs`. See [`docs/front-matter-spec.md`](docs/front-matter-spec.md) for the full schema, examples for all providers, env-var substitution syntax, and naming conventions.
 
-### Plugging in a custom client manager
-
-Provider selection lives behind a small interface. To integrate a new chat client, implement `ClientManager` and register your instance once at startup:
-
-```python
-from typing import Any
-
-from azure_functions_agents import ClientManager, set_client_manager
-from azure_functions_agents.config.schema import AgentConfiguration
-
-
-class MyChatClient:
-    def __init__(self, model: str) -> None:
-        self.model = model
-
-class MyCustomClientManager(ClientManager):
-    def get_chat_client(self, cfg: AgentConfiguration) -> Any:
-        model = cfg.provider_config.model_dump().get("model", "my-model")
-        return MyChatClient(model=model)
-
-    async def close(self) -> None:
-        return None
-
-set_client_manager(MyCustomClientManager())
-```
-
-Once set, every call to `run_agent` / `run_agent_stream` and every triggered agent uses your client.
+The supported built-in providers are `openai`, `azure_openai`, and `foundry`. For OpenAI-compatible endpoints such as vLLM, Ollama, or on-prem gateways, use the `openai` provider with `base_url`. To add support for a new provider, contribute a new `ProviderSpec` in [`src/azure_functions_agents/client_manager/providers.py`](src/azure_functions_agents/client_manager/providers.py).
 
 ## Quick Start
 
