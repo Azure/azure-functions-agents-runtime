@@ -127,7 +127,7 @@ async def _run_debug_agent(
         sandbox_tools=sandbox_tools,
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
-        skills_text=capabilities.skills_text,
+        skill_paths=capabilities.enabled_skill_paths,
         use_connector_tools=capabilities.use_connector_tools,
     )
 
@@ -149,7 +149,7 @@ def _run_debug_agent_stream(
         sandbox_tools=sandbox_tools,
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
-        skills_text=capabilities.skills_text,
+        skill_paths=capabilities.enabled_skill_paths,
         use_connector_tools=capabilities.use_connector_tools,
     )
 

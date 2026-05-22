@@ -46,7 +46,7 @@ def test_agent_spec_mcp_variants(value: bool | None | McpFilter) -> None:
 
 @pytest.mark.parametrize(
     "value",
-    [False, None, ToolsFilter(exclude=["x"], custom_only=True)],
+    [False, None, ToolsFilter(exclude=["x"])],
 )
 def test_agent_spec_tools_variants(value: bool | None | ToolsFilter) -> None:
     spec = AgentSpec(name="X", description="Y", tools=value)

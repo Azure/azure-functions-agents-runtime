@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -164,6 +165,37 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
             "session-456",
         )
     ]
+
+
+def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypatch: Any) -> None:
+    create_calls: list[str] = []
+
+    def fake_create_sandbox_tools(config: dict[str, Any], *, fallback_session_id: str) -> list[str]:
+        create_calls.append(fallback_session_id)
+        return [fallback_session_id]
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.import_module",
+        lambda name: SimpleNamespace(create_sandbox_tools=fake_create_sandbox_tools),
+    )
+
+    resolved = _resolved_agent(
+        response_schema=None,
+        sandbox_config=ExecuteInSessionsConfig(
+            session_pool_management_endpoint="https://sandbox.example"
+        ),
+    )
+
+    first = build_sandbox_tools_for_session(resolved, None)
+    second = build_sandbox_tools_for_session(resolved, None)
+
+    assert first == [create_calls[0]]
+    assert second == [create_calls[1]]
+    assert len(create_calls) == 2
+    assert re.fullmatch(r"[0-9a-f]{32}", create_calls[0])
+    assert re.fullmatch(r"[0-9a-f]{32}", create_calls[1])
+    assert create_calls[0] != create_calls[1]
+    assert "default" not in create_calls
 
 
 def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> None:

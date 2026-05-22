@@ -1,0 +1,32 @@
+jobs:
+  - job: "Build"
+    displayName: 'Build Azure Functions Agent Runtime'
+
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    templateContext:
+      outputParentDirectory: $(Build.ArtifactStagingDirectory)
+      outputs:
+        - output: pipelineArtifact
+          targetPath: $(Build.SourcesDirectory)
+          artifactName: "azurefunctions-agents-runtime"
+
+    steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: "3.13"
+      - bash: |
+          python --version
+        displayName: 'Check python version'
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: 'internal/PythonSDK_Internal_PublicPackages'
+      - bash: |
+          python -m pip install -U pip
+          python -m pip install build
+          python -m build
+        displayName: 'Build Azure Functions Agent Runtime'

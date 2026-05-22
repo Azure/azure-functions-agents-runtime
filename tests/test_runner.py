@@ -58,7 +58,6 @@ def test_build_agent_session_history_builds_chat_options_from_universal_knobs(
     )
     monkeypatch.setattr(runner, "resolve_config_dir", lambda: str(tmp_path))
     monkeypatch.setattr(runner, "get_app_root", lambda: tmp_path)
-    monkeypatch.setattr(runner, "add_allowed_read_dir", lambda _: None)
 
     cfg = _openai_agent_configuration(top_p=None)
 
@@ -69,7 +68,7 @@ def test_build_agent_session_history_builds_chat_options_from_universal_knobs(
             session_id="session-123",
             tools=[],
             mcp_tools=[],
-            skills_text="",
+            skill_paths=None,
             use_connector_tools=False,
             sandbox_tools=None,
         )

@@ -4,7 +4,8 @@ import asyncio
 from typing import Any
 
 import aiohttp
-from azure.identity import DefaultAzureCredential
+
+from ..._credential import build_credential
 
 ARM_BASE = "https://management.azure.com"
 DEFAULT_API_VERSION = "2016-06-01"
@@ -14,7 +15,7 @@ JsonObject = dict[str, Any]
 
 class ArmClient:
     def __init__(self) -> None:
-        self._credential = DefaultAzureCredential()
+        self._credential = build_credential()
         self._session: aiohttp.ClientSession | None = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
@@ -75,7 +76,7 @@ class DataPlaneClient:
     """
 
     def __init__(self) -> None:
-        self._credential = DefaultAzureCredential()
+        self._credential = build_credential()
         self._session: aiohttp.ClientSession | None = None
 
     async def _ensure_session(self) -> aiohttp.ClientSession:

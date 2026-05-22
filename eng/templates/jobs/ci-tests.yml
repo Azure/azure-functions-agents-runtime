@@ -1,0 +1,30 @@
+parameters:
+  - name: artifactFeed
+    type: string
+
+jobs:
+  - job: "TestPython"
+    displayName: "Run Azure Functions Agent Runtime Unit Tests"
+
+    strategy:
+      matrix:
+        python-313:
+          PYTHON_VERSION: '3.13'
+        python-314:
+          PYTHON_VERSION: '3.14'
+
+    steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: $(PYTHON_VERSION)
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - bash: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+        displayName: 'Install dependencies'
+      - bash: |
+          python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
+        displayName: 'Test with pytest'

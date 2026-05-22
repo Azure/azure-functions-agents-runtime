@@ -9,8 +9,6 @@ from azure_functions_agents._logger import logger
 
 _app_root: Path | None = None
 
-_REMOTE_CONFIG_DIR = "/code-assistant-session"
-
 
 def set_app_root(path: Path) -> None:
     """Explicitly set the application root directory."""
@@ -31,22 +29,13 @@ def get_app_root() -> Path:
     return Path.cwd().resolve()
 
 
-def resolve_config_dir() -> str | None:
+def resolve_config_dir() -> str:
     """Resolve the config directory used to persist agent-session history files."""
-    explicit_path = os.environ.get("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR") or os.environ.get(
-        "CODE_ASSISTANT_CONFIG_PATH"
-    )
+    explicit_path = os.environ.get("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR")
     if explicit_path:
         logger.info("Using config dir override: %s", explicit_path)
         return explicit_path
 
-    container_name = os.environ.get("CONTAINER_NAME")
-    if container_name:
-        logger.info(
-            "Remote mode detected (CONTAINER_NAME=%s), using %s",
-            container_name,
-            _REMOTE_CONFIG_DIR,
-        )
-        return _REMOTE_CONFIG_DIR
-
-    return None
+    fallback_path = str(Path(os.path.expanduser("~/.azure-functions-agents")).resolve())
+    logger.debug("Using local config dir fallback: %s", fallback_path)
+    return fallback_path

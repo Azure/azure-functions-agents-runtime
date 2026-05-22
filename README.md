@@ -7,10 +7,10 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Build agents with markdown** — write instructions, configure triggers, and bind tools in `.agent.md` files
 - **Run on any Azure Functions trigger** — trigger agents on timer, queue, blob, HTTP, Event Hub, Service Bus, Cosmos DB, and more
 - **Connect to 1,400+ services** — Azure API Connections let agents trigger on and perform actions across Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors — no custom code required
-- **Extend with MCP servers** — plug in remote HTTP MCP servers and stdio MCP servers for additional capabilities
+- **Extend with MCP servers** — plug in remote HTTP MCP servers for additional capabilities
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
-- **Serverless with built-in session management** — scales to zero, persists multi-turn conversations on Azure Files
+- **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — configure OpenAI, Azure OpenAI, or Azure AI Foundry with `agent_configuration`
 
 ## Installation
@@ -163,7 +163,7 @@ Define an agent with a markdown file. When `main.agent.md` is present, the runti
 - **Chat UI** — built-in single-page web interface at the app root
 - **HTTP APIs** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
 - **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
-- **Session persistence** — multi-turn conversations stored on Azure Files via MAF's `FileHistoryProvider`
+- **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
 Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug.chat: true` (or `debug: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
@@ -176,11 +176,11 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
-- **Skills** — reusable prompt modules from `*.md` files under `skills/`
+- **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
 - **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
 - **Connector tools** — dynamically generated tools from Azure API Connections
-- **MCP servers** — connect to external MCP servers (HTTP or stdio) for additional tools
-- **Sandbox** — Python code execution via Azure Container Apps dynamic sessions
+- **MCP servers** — connect to external remote HTTP MCP servers for additional tools
+- **Sandbox** — Python code execution via Azure Container Apps dynamic sessions; if no explicit sandbox session id is supplied, each invocation gets a fresh GUID-backed session
 
 ## Agent File Format (`.agent.md`)
 
@@ -280,7 +280,7 @@ The agent receives the HTTP request body as input and is instructed to return JS
 
 ### Environment variable substitution
 
-`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders inline in every string value in `agents.config.yaml`, `mcp.json`, `.vscode/mcp.json`, agent frontmatter values, and the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
+`docs/front-matter-spec.md#environment-variable-substitution` is the authoritative reference. In short, the runtime resolves `$VAR` and `%VAR%` placeholders inline in every string value in `agents.config.yaml`, `mcp.json`, agent frontmatter values, and the markdown body (outside fenced code blocks). Missing variables are left as literal placeholders.
 
 #### Agent instructions (markdown body)
 
@@ -377,9 +377,9 @@ If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and
 
 ## MCP Server Configuration
 
-You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Both **HTTP (Streamable)** remote servers and **stdio** servers are supported.
+You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported. The `type` field is optional — when omitted, an entry with a `url` is treated as HTTP. When `type` is specified it must be `"http"` or `"streamable-http"`; any other transport (e.g. `stdio`, `sse`) is rejected with a warning.
 
-String values in `mcp.json` and `.vscode/mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields are `command`, `args`, `env` values, `url`, `headers` values, `type`, and `tools` entries. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
+String values in `mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields are `command`, `args`, `env` values, `url`, `headers` values, `type`, and `tools` entries. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
 
 ```json
 {
@@ -391,10 +391,12 @@ String values in `mcp.json` and `.vscode/mcp.json` support inline environment-va
         "Authorization": "Bearer $LEARN_MCP_TOKEN"
       }
     },
-    "filesystem": {
-      "type": "stdio",
-      "command": "npx",
-      "args": ["-y", "@modelcontextprotocol/server-filesystem", "%MCP_ROOT%/data"]
+    "custom-api": {
+      "type": "streamable-http",
+      "url": "https://example.com/mcp",
+      "headers": {
+        "Authorization": "Bearer ${MCP_TOKEN}"
+      }
     }
   }
 }
@@ -402,20 +404,34 @@ String values in `mcp.json` and `.vscode/mcp.json` support inline environment-va
 
 Tools from configured MCP servers are automatically available to the agent at runtime. Each server entry supports:
 
-- **`type`** — `"http"` (Streamable HTTP transport) or `"stdio"`
-- **`url`** — the MCP server endpoint URL (HTTP only)
-- **`command`** + **`args`** + **`env`** — process spec (stdio only)
-- **`headers`** — optional HTTP headers (e.g. for authentication; HTTP only)
+- **`type`** — optional. When set, must be `"http"` or `"streamable-http"`. When omitted, an entry with a `url` is treated as HTTP.
+- **`url`** — the MCP server endpoint URL (required)
+- **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 
-> **Note**: SSE-transport MCP servers (`type: "sse"`) are no longer supported. Use the Streamable HTTP transport (`type: "http"`) instead.
+> **Note**: Entries without a `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 
 ## Session storage
 
-Multi-turn conversations are persisted as JSONL files using MAF's `FileHistoryProvider`. Storage path resolution:
+Multi-turn conversations are persisted as JSON Lines, one record per message:
 
-- When `CONTAINER_NAME` is set (Functions container) → `/code-assistant-session/agent-sessions/{session_id}.jsonl`
-- Otherwise: `{AZURE_FUNCTIONS_AGENTS_CONFIG_DIR}/agent-sessions/{session_id}.jsonl`, defaulting to `~/.azure-functions-agents/agent-sessions/`
+- **Deployed apps (recommended).** When `AzureWebJobsStorage` is configured —
+  as either a connection string or the identity-based
+  `AzureWebJobsStorage__blobServiceUri` setting that `azd` provisions —
+  history is written to **Azure Blob Storage** via the runtime's
+  `BlobHistoryProvider`. One Append Blob per session is stored under
+  `agent-sessions/{session_id}.jsonl` inside the
+  `azure-functions-agents` container (override with
+  `AZURE_FUNCTIONS_AGENTS_SESSION_CONTAINER`). No file share, no storage
+  account key, no mount path; the same identity that the function app
+  already uses for `AzureWebJobsStorage` reads and writes sessions. In
+  multi-identity Function Apps, set `AZURE_CLIENT_ID` so
+  `DefaultAzureCredential` selects the intended managed identity.
+- **Local dev fallback.** When neither `AzureWebJobsStorage` nor
+  `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
+  `FileHistoryProvider` writing to
+  `{AZURE_FUNCTIONS_AGENTS_CONFIG_DIR}/agent-sessions/{session_id}.jsonl`,
+  defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
 
@@ -435,7 +451,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 Set the environment variables referenced by your checked-in `agent_configuration` (for example `OPENAI_API_KEY` or `AZURE_OPENAI_API_KEY`). Required non-secret values such as `model`, `azure_endpoint`, `api_version`, and `project_endpoint` belong in `agent_configuration`, not standalone runtime fallbacks.
 
-When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup.
+When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls.
 
 ### Optional config overrides
 

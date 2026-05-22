@@ -1,0 +1,38 @@
+parameters:
+  - name: libraryVersion
+    type: string
+    displayName: 'Library version to release (e.g., 0.1.0)'
+  - name: blobPath
+    type: string
+    default: 'azure-functions/python/azurefunctions-agents-runtime'
+    displayName: 'Blob path prefix under drops container'
+
+resources:
+  repositories:
+    - repository: 1es
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1es
+  parameters:
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-windows-2022
+      os: windows
+
+    stages:
+      - stage: Build
+        displayName: 'Build Azure Functions Agent Runtime'
+        jobs:
+          - template: /eng/templates/official/jobs/build-artifacts.yml@self
+
+      - stage: Release
+        displayName: 'Release Azure Functions Agent Runtime'
+        dependsOn: Build
+        jobs:
+          - template: /eng/templates/official/jobs/publish-release.yml@self
+            parameters:
+              libraryVersion: ${{ parameters.libraryVersion }}
+              blobPath: ${{ parameters.blobPath }}
