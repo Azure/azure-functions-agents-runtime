@@ -165,7 +165,7 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
-        return SkillsProvider(skill_paths=list(skill_paths))
+        return SkillsProvider.from_paths(list(skill_paths))
 
 
 async def _build_agent_session_history(
