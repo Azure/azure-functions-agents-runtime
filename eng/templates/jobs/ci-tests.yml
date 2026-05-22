@@ -26,5 +26,11 @@ jobs:
           python -m pip install -U -e .[dev]
         displayName: 'Install dependencies'
       - bash: |
+          python -m ruff check src tests
+        displayName: 'Lint with ruff'
+      - bash: |
+          python -m mypy src
+        displayName: 'Type check with mypy'
+      - bash: |
           python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
         displayName: 'Test with pytest'
