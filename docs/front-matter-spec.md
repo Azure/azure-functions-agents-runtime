@@ -45,8 +45,10 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `agent_configuration`, `tools` |
+| **Global** (`agents.config.yaml`) | None (file is optional; see note below) | `system_tools`, `agent_configuration`, `tools` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `agent_configuration`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+
+> **Note:** Although `agents.config.yaml` is optional, every agent that issues LLM calls needs an effective `agent_configuration` (`provider`, `model`, and provider sub-block) — supplied either in `agents.config.yaml` or in the agent's own front matter. See [`agent_configuration`](#agent_configuration).
 
 ---
 
@@ -311,25 +313,42 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 - **Location:** Global (`agents.config.yaml`) for defaults, Agent (front matter) for overrides
 - **Can override:** Yes
 - **Description:** The single source of truth for model/provider configuration. The block contains universal generation knobs plus exactly one provider sub-block named the same as `provider`.
-- **Precedence:** Agent `agent_configuration` → Global `agent_configuration` → framework defaults for omitted optional values
+- **Precedence:** Agent `agent_configuration` JSON Merge Patch → Global `agent_configuration` → framework defaults for omitted optional values
 
-**Schema overview:**
+**Canonical schema overview (recommended style):**
 ```yaml
 agent_configuration:
   provider: azure_openai          # required: openai | azure_openai | foundry
+  model: $AZURE_OPENAI_DEPLOYMENT # recommended top-level placement
+  timeout: 900
 
   # Universal knobs (optional)
   temperature: 0.2
   top_p: 0.95
   max_tokens: 1000
-  timeout: 900
 
   # Exactly one provider block, named the same as `provider`
   azure_openai:
-    model: gpt-4o
-    azure_endpoint: https://my-aoai.openai.azure.com/
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
     api_version: "2024-10-21"
-    api_key: $AZURE_OPENAI_API_KEY
+```
+
+**Model placement rules**
+
+- `agent_configuration.model` and `agent_configuration.<active-provider>.model` are both valid.
+- Use the **top-level `model`** when the only thing you want to vary is the model name.
+- At least one of those two paths must be populated after merge.
+- If both are populated in the composed config, the **active provider sub-block wins** because it is more specific.
+
+**Sub-block model placement (equally valid alternative):**
+```yaml
+agent_configuration:
+  provider: azure_openai
+  timeout: 900
+  azure_openai:
+    model: $AZURE_OPENAI_DEPLOYMENT
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "2024-10-21"
 ```
 
 **Universal knobs**
@@ -343,18 +362,79 @@ agent_configuration:
 
 These are the only top-level chat knobs supported in this PR. A pass-through `ChatOptions` block for non-universal knobs such as `stop`, `seed`, and `data_sources` is intentionally out of scope and will come in a future PR.
 
+**Partial overrides use JSON Merge Patch (RFC 7396)**
+
+Agent front matter `agent_configuration` is parsed as a raw mapping, merged over the inherited global config with JSON Merge Patch semantics, then validated as a complete config. That means:
+
+- Sibling keys are preserved unless you explicitly replace or delete them.
+- You can override a single nested field without restating `provider`, `model`, or the rest of the provider block.
+- YAML `null` (or `~`) deletes the inherited key before validation.
+
+**Agent override: just change the model**
+```yaml
+agent_configuration:
+  model: gpt-4.1-mini
+```
+
+If the global config already supplies `provider`, endpoints, API version, and other settings, this one-line override keeps them.
+
+**Agent override: patch only one nested field**
+```yaml
+agent_configuration:
+  azure_openai:
+    azure_endpoint: https://secondary-aoai.openai.azure.com/
+```
+
+The inherited `provider`, `model`, `timeout`, and `azure_openai.api_version` remain in place.
+
+**`null` means "unset"**
+
+```yaml
+agent_configuration:
+  azure_openai:
+    api_key: null
+```
+
+That removes the inherited `api_key` from the composed config, which is useful when you want the runtime to fall back to managed identity selection instead of API-key auth.
+
+Required fields are still enforced **after merge**. For example, `model`, `azure_openai.azure_endpoint`, `azure_openai.api_version`, and `foundry.project_endpoint` cannot be removed if the final composed config would be incomplete.
+
+**Case-4 sharp edge: inherited sub-block model beats agent top-level model**
+
+If the global config sets `azure_openai.model: A` and an agent sets only `model: B`, the composed config contains both values and the provider sub-block wins. The effective model stays `A`.
+
+**Mitigation: pair the top-level override with a `null` unset**
+```yaml
+agent_configuration:
+  model: gpt-4.1-mini
+  azure_openai:
+    model: null
+```
+
+Recommendation: pick one placement style for `model` and stick with it across global config and agent overrides for more predictable behavior.
+
+**Validation timing**
+
+- Global `agents.config.yaml` is validated at parse time.
+- Agent front matter `agent_configuration` is merged with the inherited global block first, then the composed result is validated.
+- Env-var substitution runs **before** either validation pass.
+
+**Unresolved env vars are not unsets**
+
+If `$FOO` is not defined, substitution leaves the literal string `"$FOO"` in the YAML value. That is **not** the same as `null`, and it does not delete the field. Use YAML `null` / `~` when you need true JSON Merge Patch deletion semantics.
+
 **Minimal provider examples**
 
 OpenAI:
 ```yaml
 agent_configuration:
   provider: openai
+  model: gpt-4o-mini
   temperature: 0.2
   top_p: 0.95
   max_tokens: 1000
   timeout: 900
   openai:
-    model: gpt-4o-mini
     api_key: $OPENAI_API_KEY
 ```
 
@@ -362,12 +442,12 @@ Azure OpenAI:
 ```yaml
 agent_configuration:
   provider: azure_openai
+  model: gpt-4o
   temperature: 0.2
   top_p: 0.95
   max_tokens: 1000
   timeout: 900
   azure_openai:
-    model: gpt-4o
     azure_endpoint: https://my-aoai.openai.azure.com/
     api_version: "2024-10-21"
     api_key: $AZURE_OPENAI_API_KEY
@@ -377,24 +457,24 @@ Azure AI Foundry:
 ```yaml
 agent_configuration:
   provider: foundry
+  model: gpt-4o
   temperature: 0.2
   top_p: 0.95
   max_tokens: 1000
   timeout: 900
   foundry:
-    model: gpt-4o
     project_endpoint: https://my-project.cognitiveservices.azure.com/
 ```
 
 Foundry uses `DefaultAzureCredential`; there is no `api_key` field for this provider.
 
-**Per-provider field map**
+**Per-provider field map (required after merge)**
 
 | Provider | MAF client | Model arg name | Endpoint arg name | Secret arg name | Required typed fields | Optional typed fields |
 |---|---|---|---|---|---|---|
-| `openai` | [`agent_framework.openai.OpenAIChatClient`](https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.openai.openaichatclient?view=agent-framework-python-latest) | `model` | `base_url` | `api_key` | `model` | `base_url`, `api_key` |
-| `azure_openai` | [`agent_framework.openai.OpenAIChatClient`](https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.openai.openaichatclient?view=agent-framework-python-latest) | `model` | `azure_endpoint` | `api_key` | `model`, `azure_endpoint`, `api_version` | `api_key`, `managed_identity_client_id` |
-| `foundry` | `agent_framework.foundry.FoundryChatClient` | `model` | `project_endpoint` | — | `model`, `project_endpoint` | `managed_identity_client_id` |
+| `openai` | [`agent_framework.openai.OpenAIChatClient`](https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.openai.openaichatclient?view=agent-framework-python-latest) | `model` | `base_url` | `api_key` | `model` (via `agent_configuration.model` or `agent_configuration.openai.model`) | `base_url`, `api_key` |
+| `azure_openai` | [`agent_framework.openai.OpenAIChatClient`](https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.openai.openaichatclient?view=agent-framework-python-latest) | `model` | `azure_endpoint` | `api_key` | `model` (top-level or sub-block), `azure_endpoint`, `api_version` | `api_key`, `managed_identity_client_id` |
+| `foundry` | `agent_framework.foundry.FoundryChatClient` | `model` | `project_endpoint` | — | `model` (top-level or sub-block), `project_endpoint` | `managed_identity_client_id` |
 
 Provider sub-blocks accept arbitrary additional keys. After typed validation, any extra keys are forwarded directly as `**kwargs` to the MAF client constructor for the active provider.
 
@@ -410,7 +490,7 @@ Provider sub-blocks accept arbitrary additional keys. After typed validation, an
 | `azure_openai.managed_identity_client_id` | `str | None` | Optional user-assigned managed identity client ID; mutually exclusive with `api_key` |
 | `foundry.managed_identity_client_id` | `str | None` | Optional user-assigned managed identity client ID |
 
-Validation happens at parse time. Setting both `azure_openai.api_key` and `azure_openai.managed_identity_client_id` is invalid, and a `credential:` YAML key is rejected for both `azure_openai` and `foundry` because `TokenCredential` objects cannot be materialized from YAML.
+Global config validation happens at parse time. Agent overrides are validated after merge. In both cases, setting both `azure_openai.api_key` and `azure_openai.managed_identity_client_id` is invalid, and a `credential:` YAML key is rejected for both `azure_openai` and `foundry` because `TokenCredential` objects cannot be materialized from YAML.
 
 **Azure OpenAI auth decision matrix**
 
@@ -435,8 +515,8 @@ API-key auth:
 ```yaml
 agent_configuration:
   provider: azure_openai
+  model: gpt-4o
   azure_openai:
-    model: gpt-4o
     azure_endpoint: https://my-aoai.openai.azure.com/
     api_version: "2024-10-21"
     api_key: $AZURE_OPENAI_API_KEY
@@ -447,8 +527,8 @@ System-assigned managed identity:
 ```yaml
 agent_configuration:
   provider: azure_openai
+  model: gpt-4o
   azure_openai:
-    model: gpt-4o
     azure_endpoint: https://my-aoai.openai.azure.com/
     api_version: "2024-10-21"
 ```
@@ -458,8 +538,8 @@ User-assigned managed identity:
 ```yaml
 agent_configuration:
   provider: foundry
+  model: gpt-4o
   foundry:
-    model: gpt-4o
     project_endpoint: https://my-project.cognitiveservices.azure.com/
     managed_identity_client_id: 11111111-2222-3333-4444-555555555555
 ```
@@ -469,8 +549,8 @@ Local development:
 ```yaml
 agent_configuration:
   provider: azure_openai
+  model: gpt-4o
   azure_openai:
-    model: gpt-4o
     azure_endpoint: https://my-aoai.openai.azure.com/
     api_version: "2024-10-21"
 ```
@@ -505,6 +585,8 @@ The runtime supports the syntax implemented in `src/azure_functions_agents/confi
 - literal escapes `$$VAR` and `%%VAR%%`
 
 This is the recommended pattern for secrets. Required non-secret values such as `model`, `base_url`, `azure_endpoint`, `api_version`, and `project_endpoint` must come from `agent_configuration`, not from runtime env-var fallbacks. Removed fallbacks include `MAF_MODEL`, `AGENT_TIMEOUT`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME`, `AZURE_AI_PROJECT_ENDPOINT`, `AZURE_AI_MODEL_DEPLOYMENT_NAME`, and `FOUNDRY_*`.
+
+If a referenced env var is missing, the unresolved placeholder stays as a literal string (for example `"$AZURE_OPENAI_DEPLOYMENT"`). That is not treated as an unset value; only YAML `null` / `~` removes a field during merge.
 
 **Naming convention**
 
@@ -1064,7 +1146,17 @@ You are a basic agent with most capabilities but some exclusions for security.
 
 ### Example 5: Minimal Configuration
 
-**No global configuration file** (`agents.config.yaml` omitted)
+**No per-agent `agent_configuration`** — relies entirely on the global default.
+
+**`agents.config.yaml`:**
+```yaml
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  azure_openai:
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "2024-10-21"
+```
 
 **Agent (`main.agent.md`):**
 ```yaml
@@ -1076,7 +1168,7 @@ description: An interactive assistant for exploring Azure resources
 Help the user explore resources in subscription $SUBSCRIPTION_ID.
 ```
 
-All configuration uses framework defaults (HTTP trigger, default model, etc.)
+The agent inherits `agent_configuration` and the default HTTP trigger from the framework; no per-agent overrides are needed.
 
 ---
 
@@ -1090,7 +1182,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 3. **`trigger`** — Required for all agents except `main.agent.md` (object with `type` field)
 
 **Global Configuration (`agents.config.yaml`):**
-- **No required properties** — The entire file is optional
+- **No required properties** — The entire file is optional, but every agent that issues LLM calls still needs an effective `agent_configuration`. Either supply it here as a shared default, or in each agent's own front matter.
 
 ### Supported Properties
 

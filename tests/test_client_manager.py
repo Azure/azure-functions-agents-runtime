@@ -101,9 +101,123 @@ def test_get_chat_client_filters_none_api_key_to_allow_maf_env_fallback(
     assert "api_key" not in captured
 
 
+def test_build_chat_client_injects_top_level_model_into_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setattr(
+        "azure_functions_agents.client_manager.get_provider",
+        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
+    )
+
+    cfg = AgentConfiguration.model_validate(
+        {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "openai": {},
+        }
+    )
+
+    build_chat_client(cfg)
+
+    assert captured["model"] == "gpt-4o"
+
+
+def test_build_chat_client_lets_subblock_model_win(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setattr(
+        "azure_functions_agents.client_manager.get_provider",
+        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
+    )
+
+    cfg = AgentConfiguration.model_validate(
+        {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "openai": {"model": "gpt-4o-mini"},
+        }
+    )
+
+    build_chat_client(cfg)
+
+    assert captured["model"] == "gpt-4o-mini"
+
+
+def test_build_chat_client_omits_api_key_after_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setattr(
+        "azure_functions_agents.client_manager.get_provider",
+        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
+    )
+
+    cfg = AgentConfiguration.model_validate(
+        {
+            "provider": "azure_openai",
+            "model": "gpt-4o",
+            "azure_openai": {
+                "azure_endpoint": "https://example.invalid/",
+                "api_version": "2024-10-21",
+                "api_key": None,
+            },
+        }
+    )
+
+    build_chat_client(cfg)
+
+    assert captured["model"] == "gpt-4o"
+    assert "api_key" not in captured
+
+
+def test_build_chat_client_falls_back_to_top_level_when_subblock_model_is_empty_string(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setattr(
+        "azure_functions_agents.client_manager.get_provider",
+        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
+    )
+
+    cfg = AgentConfiguration.model_validate(
+        {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "openai": {"model": ""},
+        }
+    )
+
+    build_chat_client(cfg)
+
+    assert captured["model"] == "gpt-4o"
+
+
 def test_get_chat_client_unknown_provider_raises() -> None:
     cfg = SimpleNamespace(
         provider="bogus",
+        model=None,
         provider_config=SimpleNamespace(model_dump=lambda **_: {}),
         timeout=None,
     )

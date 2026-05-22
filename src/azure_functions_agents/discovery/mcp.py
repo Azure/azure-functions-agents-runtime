@@ -4,12 +4,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from agent_framework import MCPStreamableHTTPTool
 
 from .._logger import logger
-from ..config.env import resolve_env_vars_in_data
+from ..config.env import resolve_env_vars_in_mapping
 
 MCPTool = MCPStreamableHTTPTool
 
@@ -104,7 +104,7 @@ def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
         _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
         return {}
 
-    data = cast(dict[str, Any], resolve_env_vars_in_data(data))
+    data = resolve_env_vars_in_mapping(data)
     servers = data.get("servers", {})
     if not isinstance(servers, dict):
         logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)

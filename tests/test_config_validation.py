@@ -3,9 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
-from azure_functions_agents.client_manager.providers import AzureOpenAIConfig, OpenAIConfig
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     DebugConfig,
@@ -57,89 +55,43 @@ def _resolved_agent(
     return ResolvedAgent(**payload)
 
 
-def test_validate_agent_configuration_rejects_unknown_provider(tmp_path: Path) -> None:
-    agent_configuration = AgentConfiguration.model_construct(
-        provider="bogus",
-        timeout=None,
-        temperature=None,
-        top_p=None,
-        max_tokens=None,
-        openai=None,
-        azure_openai=None,
-        foundry=None,
+def test_validate_agent_configuration_requires_azure_openai_endpoint(tmp_path: Path) -> None:
+    agent_configuration = AgentConfiguration.model_validate(
+        {
+            "provider": "azure_openai",
+            "model": "gpt-4o",
+            "azure_openai": {
+                "api_version": "2024-10-21",
+            },
+        }
     )
 
-    with pytest.raises(ValueError, match="declares unknown provider 'bogus'"):
-        validate_agent_configuration(
-            agent_configuration,
-            source_file=tmp_path / "agent.agent.md",
-            agent_name="Report",
-        )
-
-
-def test_validate_agent_configuration_rejects_multiple_provider_sub_blocks(
-    tmp_path: Path,
-) -> None:
-    agent_configuration = AgentConfiguration.model_construct(
-        provider="openai",
-        timeout=None,
-        temperature=None,
-        top_p=None,
-        max_tokens=None,
-        openai=OpenAIConfig(model="gpt-4o"),
-        azure_openai=AzureOpenAIConfig(
-            model="gpt-4o",
-            azure_endpoint="https://azure-openai.example.test",
-            api_version="2024-10-21",
-        ),
-        foundry=None,
-    )
-
-    with pytest.raises(ValueError, match="declares multiple provider sub-blocks"):
-        validate_agent_configuration(
-            agent_configuration,
-            source_file=tmp_path / "agent.agent.md",
-            agent_name="Report",
-        )
-
-
-def test_agent_configuration_rejects_multiple_provider_sub_blocks_at_parse_time() -> None:
     with pytest.raises(
-        ValidationError,
-        match="Only the sub-block matching the declared provider is permitted",
+        ValueError,
+        match=r"agent_configuration\.azure_openai\.azure_endpoint must be set",
     ):
-        AgentConfiguration.model_validate(
-            {
-                "provider": "openai",
-                "openai": {"model": "gpt-4o"},
-                "azure_openai": {
-                    "model": "gpt-4o",
-                    "azure_endpoint": "https://azure-openai.example.test",
-                    "api_version": "2024-10-21",
-                },
-            }
+        validate_agent_configuration(
+            agent_configuration,
+            source_file=tmp_path / "agent.agent.md",
+            agent_name="Report",
         )
 
 
-def test_validate_agent_configuration_rejects_mismatched_provider_sub_block(
+def test_validate_agent_configuration_requires_foundry_project_endpoint(
     tmp_path: Path,
 ) -> None:
-    agent_configuration = AgentConfiguration.model_construct(
-        provider="openai",
-        timeout=None,
-        temperature=None,
-        top_p=None,
-        max_tokens=None,
-        openai=None,
-        azure_openai=AzureOpenAIConfig(
-            model="gpt-4o",
-            azure_endpoint="https://azure-openai.example.test",
-            api_version="2024-10-21",
-        ),
-        foundry=None,
+    agent_configuration = AgentConfiguration.model_validate(
+        {
+            "provider": "foundry",
+            "model": "gpt-4o",
+            "foundry": {},
+        }
     )
 
-    with pytest.raises(ValueError, match="requires the matching `openai` sub-block; got `azure_openai` instead"):
+    with pytest.raises(
+        ValueError,
+        match=r"agent_configuration\.foundry\.project_endpoint must be set",
+    ):
         validate_agent_configuration(
             agent_configuration,
             source_file=tmp_path / "agent.agent.md",

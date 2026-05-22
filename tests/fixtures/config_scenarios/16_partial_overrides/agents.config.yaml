@@ -1,0 +1,9 @@
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  timeout: 120
+  azure_openai:
+    model: gpt-4o-mini
+    azure_endpoint: https://global-azure.example.test
+    api_version: "2024-10-21"
+    api_key: global-key

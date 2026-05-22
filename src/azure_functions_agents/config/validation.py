@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from azure_functions_agents._logger import logger as _logger
 
 if TYPE_CHECKING:
-    from azure_functions_agents.config.schema import AgentConfiguration
+    from azure_functions_agents.config.schema import AgentConfiguration, ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -25,95 +25,52 @@ def _format_error(
     return f"{Path(source_file)}: field `{field}`: {normalized_message}{suffix}"
 
 
-def _agent_label(agent_name: str | None) -> str:
-    return f"Agent `{agent_name}`" if agent_name else "Agent"
-
-
-def _provider_sub_blocks() -> tuple[str, ...]:
-    from azure_functions_agents.client_manager.providers import PROVIDER_REGISTRY
-
-    return tuple(sorted(PROVIDER_REGISTRY))
-
-
-def _present_provider_sub_blocks(agent_configuration: AgentConfiguration) -> list[str]:
-    return [
-        name
-        for name in _provider_sub_blocks()
-        if getattr(agent_configuration, name, None) is not None
-    ]
-
-
 def validate_agent_configuration(
     agent_configuration: AgentConfiguration,
     *,
     source_file: str | Path,
     agent_name: str | None = None,
 ) -> None:
-    """Run structural validation for provider selection after config composition."""
-    from azure_functions_agents.client_manager.providers import (
-        PROVIDER_REGISTRY,
-        UnknownProviderError,
-        get_provider,
-    )
+    """Run post-merge required-field completeness checks for the active provider.
 
-    agent = _agent_label(agent_name)
+    Structural invariants (unknown provider, multiple sub-blocks, mismatched
+    sub-block, model presence) are enforced by ``AgentConfiguration``'s pydantic
+    validators on every ``model_validate`` call. This helper only enforces the
+    additional per-provider field requirements that are too provider-specific
+    to express on the shared base model (``azure_endpoint``/``api_version`` for
+    azure_openai; ``project_endpoint`` for foundry).
+    """
+    del agent_name  # reserved for future error enrichment
+
     provider = agent_configuration.provider
+    provider_config = getattr(agent_configuration, provider, None)
 
-    try:
-        get_provider(provider)
-    except UnknownProviderError as exc:
-        known = ", ".join(sorted(PROVIDER_REGISTRY))
+    required_fields: tuple[str, ...] = ()
+    if provider == "azure_openai":
+        required_fields = ("azure_endpoint", "api_version")
+    elif provider == "foundry":
+        required_fields = ("project_endpoint",)
+
+    for field_name in required_fields:
+        value = (
+            getattr(provider_config, field_name, None)
+            if provider_config is not None
+            else None
+        )
+        if value:
+            continue
         raise ValueError(
             _format_error(
                 source_file,
-                "agent_configuration.provider",
-                f"{agent} declares unknown provider {provider!r}. "
-                f"Expected one of: {known}. Update `agent_configuration.provider` "
-                "to a registered provider name and keep only the matching provider sub-block",
-                "#agent_configuration",
-            )
-        ) from exc
-
-    present_provider_blocks = _present_provider_sub_blocks(agent_configuration)
-    if len(present_provider_blocks) > 1:
-        blocks = ", ".join(f"`{name}`" for name in present_provider_blocks)
-        raise ValueError(
-            _format_error(
-                source_file,
-                "agent_configuration",
-                f"{agent} declares multiple provider sub-blocks ({blocks}). "
-                f"Expected exactly one sub-block matching provider {provider!r}. "
-                f"Remove the extra sub-blocks so only `agent_configuration.{provider}` remains",
+                f"agent_configuration.{provider}.{field_name}",
+                f"agent_configuration.{provider}.{field_name} must be set",
                 "#agent_configuration",
             )
         )
 
-    if getattr(agent_configuration, provider, None) is None:
-        if present_provider_blocks:
-            actual = present_provider_blocks[0]
-            message = (
-                f"{agent} declares provider {provider!r}, which requires the matching "
-                f"`{provider}` sub-block; got `{actual}` instead. Add "
-                f"`agent_configuration.{provider}` and remove the mismatched `{actual}` "
-                f"sub-block, or change `provider` to {actual!r}"
-            )
-        else:
-            message = (
-                f"{agent} declares provider {provider!r}, which requires the matching "
-                f"`{provider}` sub-block. Add `agent_configuration.{provider}` with the "
-                "provider-specific settings for this agent"
-            )
-        raise ValueError(
-            _format_error(
-                source_file,
-                "agent_configuration",
-                message,
-                "#agent_configuration",
-            )
-        )
 
 def validate_resolved_agent(
-    resolved: Any,
+    resolved: ResolvedAgent,
     *,
     discovered_mcp_names: list[str],
     discovered_skills: list[str],

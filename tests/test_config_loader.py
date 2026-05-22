@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
+from azure_functions_agents.config.validation import validate_resolved_agent
 
 
 def _write_agent(tmp_path: Path, frontmatter: str, body: str = "Hello") -> Path:
@@ -174,6 +176,53 @@ def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) ->
     assert config.agent_configuration.openai.model == "$MODEL_NAME"
 
 
+def test_load_global_config_rejects_missing_azure_endpoint_at_load_time(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "agents.config.yaml"
+    source.write_text(
+        textwrap.dedent(
+            """
+            agent_configuration:
+              provider: azure_openai
+              model: gpt-4o
+              azure_openai:
+                api_version: "2024-10-21"
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"agent_configuration\.azure_openai\.azure_endpoint must be set",
+    ):
+        load_global_config(tmp_path)
+
+
+def test_load_global_config_rejects_missing_project_endpoint_for_foundry_at_load_time(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "agents.config.yaml"
+    source.write_text(
+        textwrap.dedent(
+            """
+            agent_configuration:
+              provider: foundry
+              model: gpt-4o
+              foundry: {}
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"agent_configuration\.foundry\.project_endpoint must be set",
+    ):
+        load_global_config(tmp_path)
+
+
 def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
     assert load_global_config(tmp_path) == load_global_config(tmp_path)
     assert load_global_config(tmp_path).model_dump() == {
@@ -267,8 +316,7 @@ def test_load_agent_specs_resolves_frontmatter_strings_in_agent_configuration(
 
     [spec] = load_agent_specs(tmp_path)
     assert spec.agent_configuration is not None
-    assert spec.agent_configuration.openai is not None
-    assert spec.agent_configuration.openai.model == "gpt-4.1-mini"
+    assert spec.agent_configuration["openai"]["model"] == "gpt-4.1-mini"
     assert spec.response_example == '{"status":"ok"}'
 
 
@@ -292,12 +340,104 @@ def test_load_agent_specs_parses_provider_sub_block_and_extras(tmp_path: Path) -
     [spec] = load_agent_specs(tmp_path)
 
     assert spec.agent_configuration is not None
-    assert spec.agent_configuration.provider == "azure_openai"
-    assert spec.agent_configuration.timeout == 45
-    assert spec.agent_configuration.azure_openai is not None
-    assert spec.agent_configuration.azure_openai.model == "gpt-4.1"
-    assert spec.agent_configuration.azure_openai.azure_endpoint == "https://azure-openai.example.test"
-    assert spec.agent_configuration.azure_openai.model_dump()["audience"] == "agents"
+    assert spec.agent_configuration["provider"] == "azure_openai"
+    assert spec.agent_configuration["timeout"] == 45
+    assert spec.agent_configuration["azure_openai"]["model"] == "gpt-4.1"
+    assert (
+        spec.agent_configuration["azure_openai"]["azure_endpoint"]
+        == "https://azure-openai.example.test"
+    )
+    assert spec.agent_configuration["azure_openai"]["audience"] == "agents"
+
+
+def test_partial_agent_configuration_parses_successfully(tmp_path: Path) -> None:
+    _write_agent(
+        tmp_path,
+        """
+        name: Main
+        description: Main agent
+        agent_configuration:
+          azure_openai:
+            azure_endpoint: https://azure-openai.example.test
+        """,
+    )
+
+    [spec] = load_agent_specs(tmp_path, strict=True)
+
+    assert spec.agent_configuration == {
+        "azure_openai": {"azure_endpoint": "https://azure-openai.example.test"}
+    }
+
+
+def test_post_merge_validation_surfaces_clear_errors_for_provider_mismatch(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "agents.config.yaml").write_text(
+        textwrap.dedent(
+            """
+            agent_configuration:
+              provider: openai
+              model: gpt-4o
+              openai: {}
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    _write_agent(
+        tmp_path,
+        """
+        name: Main
+        description: Main agent
+        agent_configuration:
+          provider: openai
+          azure_openai:
+            model: gpt-4o-mini
+            azure_endpoint: https://azure-openai.example.test
+            api_version: "2024-10-21"
+        """,
+    )
+
+    global_config = load_global_config(tmp_path)
+    [spec] = load_agent_specs(tmp_path, strict=True)
+
+    with pytest.raises(ValueError, match="unrelated provider sub-block"):
+        compose(spec, global_config, discovered_mcp_names=[], discovered_skill_names=[])
+
+
+def test_post_merge_validation_surfaces_missing_required_fields(tmp_path: Path) -> None:
+    (tmp_path / "agents.config.yaml").write_text(
+        textwrap.dedent(
+            """
+            agent_configuration:
+              provider: azure_openai
+              model: gpt-4o
+              azure_openai:
+                azure_endpoint: https://azure-openai.example.test
+                api_version: "2024-10-21"
+            """
+        ).strip(),
+        encoding="utf-8",
+    )
+    _write_agent(
+        tmp_path,
+        """
+        name: Main
+        description: Main agent
+        agent_configuration:
+          azure_openai:
+            azure_endpoint:
+        """,
+    )
+
+    global_config = load_global_config(tmp_path)
+    [spec] = load_agent_specs(tmp_path, strict=True)
+    resolved = compose(spec, global_config, discovered_mcp_names=[], discovered_skill_names=[])
+
+    with pytest.raises(
+        ValueError,
+        match=r"agent_configuration\.azure_openai\.azure_endpoint must be set",
+    ):
+        validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
 
 
 def test_load_agent_specs_rejects_hyphenated_agent_configuration_key(tmp_path: Path) -> None:
@@ -391,9 +531,8 @@ def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
 
     [spec] = load_agent_specs(tmp_path)
     assert spec.agent_configuration is not None
-    assert spec.agent_configuration.openai is not None
-    assert spec.agent_configuration.openai.model == "$AGENT_MODEL"
-    assert spec.agent_configuration.openai.api_key == "$OPENAI_API_KEY"
+    assert spec.agent_configuration["openai"]["model"] == "$AGENT_MODEL"
+    assert spec.agent_configuration["openai"]["api_key"] == "$OPENAI_API_KEY"
     assert spec.substitute_variables is False
     assert spec.instructions.strip() == "Keep $FOO literal"
 

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, cast
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -12,6 +12,7 @@ from azure_functions_agents.client_manager.providers import (
     FoundryConfig,
     OpenAIConfig,
     ProviderConfigBase,
+    normalize_optional_model_value,
 )
 
 
@@ -106,6 +107,7 @@ class AgentConfiguration(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     provider: str
+    model: str | None = None
     timeout: int | None = None
     temperature: float | None = None
     top_p: float | None = None
@@ -125,6 +127,11 @@ class AgentConfiguration(BaseModel):
         raise ValueError(
             f"Unknown provider {value!r}; known providers are: {known}"
         )
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def normalize_model(cls, value: Any) -> Any:
+        return normalize_optional_model_value(value)
 
     @model_validator(mode="after")
     def validate_provider_sub_block(self) -> AgentConfiguration:
@@ -147,14 +154,29 @@ class AgentConfiguration(BaseModel):
             )
         return self
 
+    @model_validator(mode="after")
+    def validate_model_present(self) -> AgentConfiguration:
+        active_subblock = getattr(self, self.provider, None)
+        effective_model = (
+            (active_subblock.model if active_subblock is not None else None) or self.model
+        )
+        if effective_model:
+            return self
+
+        raise ValueError(
+            "agent_configuration.model must be set either at the top level "
+            f"(agent_configuration.model) or inside the provider sub-block "
+            f"(agent_configuration.{self.provider}.model)."
+        )
+
     @property
     def provider_config(self) -> ProviderConfigBase:
-        provider_config = getattr(self, self.provider)
-        if provider_config is None:
+        provider_config = getattr(self, self.provider, None)
+        if not isinstance(provider_config, ProviderConfigBase):
             raise RuntimeError(
                 f"Provider config for {self.provider!r} is unavailable after validation."
             )
-        return cast(ProviderConfigBase, provider_config)
+        return provider_config
 
 
 class GlobalConfig(BaseModel):
@@ -176,7 +198,13 @@ class AgentSpec(BaseModel):
     description: str
     trigger: TriggerSpec | None = None
     debug: bool | DebugConfig | None = None
-    agent_configuration: AgentConfiguration | None = None
+    agent_configuration: dict[str, Any] | None = Field(
+        default=None,
+        description=(
+            "Raw per-agent agent_configuration mapping. It is merged with global "
+            "settings and validated after composition."
+        ),
+    )
     logger: bool | None = None
     substitute_variables: bool = True
     system_tools: SystemToolsAgentOverride | None = None

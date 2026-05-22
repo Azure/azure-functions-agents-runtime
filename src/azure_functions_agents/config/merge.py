@@ -3,8 +3,12 @@
 from __future__ import annotations
 
 import logging
+from copy import deepcopy
 from typing import Any
 
+from pydantic import ValidationError
+
+from azure_functions_agents.client_manager.providers import PROVIDER_REGISTRY
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentSpec,
@@ -22,6 +26,22 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 900.0
 
 
+def _json_merge_patch(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    """Apply RFC 7396 JSON Merge Patch of ``override`` onto ``base`` and return a new dict."""
+    if override is None:
+        return deepcopy(base)
+
+    result = deepcopy(base)
+    for key, value in override.items():
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _json_merge_patch(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
+
+
 def _resolve_debug(spec: AgentSpec) -> DebugConfig:
     if isinstance(spec.debug, DebugConfig):
         return spec.debug
@@ -34,20 +54,15 @@ def _resolve_debug(spec: AgentSpec) -> DebugConfig:
     return DebugConfig(chat=False, http=False, mcp=False)
 
 
-def _resolve_provider(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    return (
-        (spec.agent_configuration.provider if spec.agent_configuration else None)
-        or (global_config.agent_configuration.provider if global_config.agent_configuration else None)
-        or None
-    )
+def _non_empty_provider_sub_blocks(configuration: dict[str, Any] | None) -> list[str]:
+    if configuration is None:
+        return []
 
-
-def _provider_block_payload(
-    configuration: AgentConfiguration | None, provider: str
-) -> dict[str, Any]:
-    if configuration is None or configuration.provider != provider:
-        return {}
-    return configuration.provider_config.model_dump(exclude_none=True)
+    return [
+        provider
+        for provider in PROVIDER_REGISTRY
+        if isinstance(configuration.get(provider), dict) and bool(configuration.get(provider))
+    ]
 
 
 def _compose_agent_configuration(
@@ -63,46 +78,56 @@ def _compose_agent_configuration(
             "level or per-agent level."
         )
 
-    provider = _resolve_provider(spec, global_config)
+    base_payload = (
+        global_agent_config.model_dump(exclude_unset=False, exclude_none=False)
+        if global_agent_config is not None
+        else {}
+    )
+    merged_payload = _json_merge_patch(base_payload, agent_config)
+
+    global_provider = global_agent_config.provider if global_agent_config is not None else None
+    explicit_provider = (
+        merged_payload.get("provider")
+        if agent_config is not None and "provider" in agent_config
+        else None
+    )
+    provider = explicit_provider if isinstance(explicit_provider, str) else None
+    agent_provider_blocks = _non_empty_provider_sub_blocks(agent_config)
+    if provider is None:
+        provider = (
+            agent_provider_blocks[0]
+            if len(agent_provider_blocks) == 1
+            else global_provider
+        )
+
     if provider is None:
         raise ValueError(
             f"Agent {spec.name!r} could not resolve agent_configuration.provider."
         )
 
-    if (
-        agent_config is not None
-        and global_agent_config is not None
-        and agent_config.provider != global_agent_config.provider
-    ):
+    agent_switches_provider = (
+        global_provider is not None
+        and provider != global_provider
+        and agent_config is not None
+        and ("provider" in agent_config or provider in agent_provider_blocks)
+    )
+    if agent_switches_provider:
+        assert global_provider is not None
         logger.debug(
             "Agent %s overrides global provider %r with %r; dropping the global "
             "provider sub-block during merge.",
             spec.name,
-            global_agent_config.provider,
-            agent_config.provider,
+            global_provider,
+            provider,
         )
+        merged_payload.pop(global_provider, None)
 
-    payload: dict[str, Any] = {"provider": provider}
+    merged_payload["provider"] = provider
 
-    for field_name in ("timeout", "temperature", "top_p", "max_tokens"):
-        agent_value = (
-            getattr(agent_config, field_name) if agent_config is not None else None
-        )
-        global_value = (
-            getattr(global_agent_config, field_name)
-            if global_agent_config is not None
-            else None
-        )
-        if agent_value is not None:
-            payload[field_name] = agent_value
-        elif global_value is not None:
-            payload[field_name] = global_value
-
-    merged_provider_payload = _provider_block_payload(global_agent_config, provider)
-    merged_provider_payload.update(_provider_block_payload(agent_config, provider))
-    payload[provider] = merged_provider_payload
-
-    return AgentConfiguration.model_validate(payload)
+    try:
+        return AgentConfiguration.model_validate(merged_payload)
+    except ValidationError as exc:
+        raise ValueError(str(exc.errors(include_input=False))) from None
 
 
 def _resolve_sandbox(

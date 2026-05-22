@@ -38,27 +38,65 @@ pip install "azurefunctions-agents-runtime[connectors]"
 
 ## Model Provider Configuration
 
-The runtime reads model settings from `agent_configuration` in `agents.config.yaml` or agent front matter. This is the single source of truth for provider selection, universal knobs (`temperature`, `top_p`, `max_tokens`, `timeout`), and provider-specific typed fields. All keys use underscores to match Microsoft Agent Framework kwargs.
+The runtime reads model settings from `agent_configuration` in `agents.config.yaml` or agent front matter. Agent overrides are JSON Merge Patch over the inherited global block. This is the single source of truth for provider selection, universal knobs (`temperature`, `top_p`, `max_tokens`, `timeout`), and provider-specific typed fields.
 
 ```yaml
 agent_configuration:
-  provider: openai
-  openai:
-    model: gpt-4o-mini
-    api_key: $OPENAI_API_KEY
+  provider: azure_openai
+  model: $AZURE_OPENAI_DEPLOYMENT
+  timeout: 900
+  azure_openai:
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "2024-10-21"
 ```
 
 | Provider | Required typed fields | Optional typed fields | Notes |
 | --- | --- | --- | --- |
-| `openai` | `openai.model` | `openai.base_url`, `openai.api_key` | Use `$OPENAI_API_KEY` for secrets |
-| `azure_openai` | `azure_openai.model`, `azure_openai.azure_endpoint`, `azure_openai.api_version` | `azure_openai.api_key`, `azure_openai.managed_identity_client_id` | Provider block name must also be `azure_openai` |
-| `foundry` | `foundry.model`, `foundry.project_endpoint` | `foundry.managed_identity_client_id` | Uses `DefaultAzureCredential`; no `api_key` |
+| `openai` | `model` or `openai.model` | `openai.base_url`, `openai.api_key` | Top-level `model` is recommended when only the model varies |
+| `azure_openai` | `model` or `azure_openai.model`, plus `azure_openai.azure_endpoint`, `azure_openai.api_version` | `azure_openai.api_key`, `azure_openai.managed_identity_client_id` | If both model paths are set, `azure_openai.model` wins |
+| `foundry` | `model` or `foundry.model`, plus `foundry.project_endpoint` | `foundry.managed_identity_client_id` | Uses `DefaultAzureCredential`; no `api_key` |
+
+Both model placements are valid, but at least one must be set. For agent overrides, top-level `model` is the shortest way to say "inherit everything else, just change the model":
+
+```yaml
+agent_configuration:
+  model: gpt-4.1-mini
+```
+
+You can also patch just one nested field:
+
+```yaml
+agent_configuration:
+  azure_openai:
+    azure_endpoint: https://secondary-aoai.openai.azure.com/
+```
+
+Sub-block model placement remains supported:
+
+```yaml
+agent_configuration:
+  provider: azure_openai
+  azure_openai:
+    model: $AZURE_OPENAI_DEPLOYMENT
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "2024-10-21"
+```
+
+Use YAML `null` to clear inherited values. This is the mitigation when a global provider sub-block model would otherwise override an agent's top-level model:
+
+```yaml
+agent_configuration:
+  model: gpt-4.1-mini
+  azure_openai:
+    model: null
+```
 
 - **Authentication** — `azure_openai` supports API-key auth and managed identity; `foundry` always uses `DefaultAzureCredential`.
+- **Unsets** — unresolved `$FOO` placeholders remain literal strings after substitution; only YAML `null` / `~` truly removes a key.
 
-See the [Authentication section](docs/front-matter-spec.md#authentication) in the front-matter spec for the auth matrix, validation rules, and YAML examples. The canonical configuration examples live in `tests/fixtures/config_scenarios/13_agent_configuration_providers/` and `tests/fixtures/config_scenarios/14_managed_identity_auth/`.
+See the [front-matter spec `agent_configuration` section](docs/front-matter-spec.md#agent_configuration) for merge, unset, validation-timing, and precedence details, and the [Authentication section](docs/front-matter-spec.md#authentication) for the auth matrix. The canonical configuration examples live in `tests/fixtures/config_scenarios/13_agent_configuration_providers/` and `tests/fixtures/config_scenarios/14_managed_identity_auth/`.
 
-Provider sub-blocks also accept additional keys, which are forwarded to the Microsoft Agent Framework client constructor as `**kwargs`. See [`docs/front-matter-spec.md`](docs/front-matter-spec.md) for the full schema, examples for all providers, env-var substitution syntax, and naming conventions.
+Provider sub-blocks also accept additional keys, which are forwarded to the Microsoft Agent Framework client constructor as `**kwargs`.
 
 The supported built-in providers are `openai`, `azure_openai`, and `foundry`. For OpenAI-compatible endpoints such as vLLM, Ollama, or on-prem gateways, use the `openai` provider with `base_url`. To add support for a new provider, contribute a new `ProviderSpec` in [`src/azure_functions_agents/client_manager/providers.py`](src/azure_functions_agents/client_manager/providers.py).
 
@@ -451,7 +489,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 Set the environment variables referenced by your checked-in `agent_configuration` (for example `OPENAI_API_KEY` or `AZURE_OPENAI_API_KEY`). Required non-secret values such as `model`, `azure_endpoint`, `api_version`, and `project_endpoint` belong in `agent_configuration`, not standalone runtime fallbacks.
 
-When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls.
+When the agent uses connector tools or `system_tools.execute_in_sessions`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls.
 
 ### Optional config overrides
 
@@ -464,8 +502,8 @@ When the agent uses connector tools or `execution_sandbox`, the function app's *
 
 ```bash
 # Clone the repo
-git clone https://github.com/anthonychu/azure-functions-agents.git
-cd azure-functions-agents
+git clone https://github.com/Azure/azure-functions-agent-runtime.git
+cd azure-functions-agent-runtime
 
 # Install in development mode
 pip install -e ".[connectors]"

@@ -8,6 +8,7 @@ from azure_functions_agents.config.env import (
     _to_bool,
     has_unresolved_placeholders,
     resolve_env_vars_in_data,
+    resolve_env_vars_in_mapping,
     substitute_env_vars_in_text,
     substitute_env_vars_in_value,
 )
@@ -71,6 +72,7 @@ __all__ = [
     "load_global_config",
     "resolve_config_dir",
     "resolve_env_vars_in_data",
+    "resolve_env_vars_in_mapping",
     "set_app_root",
     "substitute_env_vars_in_text",
     "substitute_env_vars_in_value",

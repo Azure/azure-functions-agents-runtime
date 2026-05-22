@@ -12,7 +12,7 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, a
 - **HTTP API** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
 - **MCP server** — `/runtime/webhooks/mcp` for connecting from VS Code, Claude Desktop, etc.
 - **Code execution** — sandboxed Python via ACA Dynamic Sessions with Playwright support
-- **Session persistence** — multi-turn conversations stored on Azure Files
+- **Session persistence** — multi-turn conversations stored on Azure Blob Storage
 
 ## Prerequisites
 
@@ -63,6 +63,6 @@ Once `func start` is running:
 
 ## How It Works
 
-- [`main.agent.md`](src/main.agent.md) defines the agent with code execution sandbox support
+- [`src/agents.config.yaml`](src/agents.config.yaml) enables the ACA Dynamic Sessions sandbox for the app, and [`main.agent.md`](src/main.agent.md) defines the chat agent
 - The framework registers HTTP chat endpoints, an MCP server, and a built-in chat UI
 - The agent can answer questions and run Python code in a secure sandbox when needed

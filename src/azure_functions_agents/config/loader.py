@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import frontmatter
 import yaml  # type: ignore[import-untyped]  # PyYAML does not ship inline typing here.
@@ -12,22 +12,25 @@ from pydantic import ValidationError
 from azure_functions_agents._logger import logger
 from azure_functions_agents.config.env import (
     _to_bool,
-    resolve_env_vars_in_data,
+    resolve_env_vars_in_mapping,
     substitute_env_vars_in_text,
 )
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
+from azure_functions_agents.config.validation import validate_agent_configuration
 
 
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
-    return cast(dict[str, Any], resolve_env_vars_in_data(dict(data)))
+    return resolve_env_vars_in_mapping(dict(data))
 
 
 def _normalize_agent_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
-    return cast(dict[str, Any], resolve_env_vars_in_data(dict(metadata)))
+    return resolve_env_vars_in_mapping(dict(metadata))
 
 
 def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueError:
-    error = exc.errors()[0]
+    # AUDIT: include_input=False drops the offending value from the error record so
+    # secrets (api_key, managed_identity_client_id, etc.) cannot leak into ValueError messages.
+    error = exc.errors(include_input=False)[0]
     location = (
         ".".join(str(part) for part in error.get("loc", ()) if part != "__root__") or "<root>"
     )
@@ -86,10 +89,14 @@ def load_global_config(app_root: Path) -> GlobalConfig:
 
     normalized = _normalize_global_config_dict(data)
     try:
-        return GlobalConfig.model_validate(normalized)
+        config = GlobalConfig.model_validate(normalized)
     except ValidationError as exc:
         # AUDIT: raise `from None` to drop pydantic ValidationError.__cause__ — its `input_value` echoes plaintext config including api_key / managed_identity_client_id values. Never re-chain.
         raise _format_validation_error(source_file, exc) from None
+
+    if config.agent_configuration is not None:
+        validate_agent_configuration(config.agent_configuration, source_file=source_file)
+    return config
 
 
 def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:

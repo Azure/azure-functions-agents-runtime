@@ -88,6 +88,11 @@ def resolve_env_vars_in_data(value: Any) -> Any:
     return value
 
 
+def resolve_env_vars_in_mapping(data: dict[str, Any]) -> dict[str, Any]:
+    """Recursively substitute env vars in a top-level mapping; preserves the dict type."""
+    return {key: resolve_env_vars_in_data(item) for key, item in data.items()}
+
+
 def _to_bool(value: Any, default: bool = True) -> bool:
     """Coerce a config value to bool."""
     if isinstance(value, bool):

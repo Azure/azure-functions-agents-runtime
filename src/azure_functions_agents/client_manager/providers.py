@@ -3,23 +3,26 @@ from __future__ import annotations
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import Any
 
 from azure.identity import aio as azure_identity_aio
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import BaseModel, ConfigDict, field_validator, model_validator
 
 from azure_functions_agents._logger import logger
 
-if TYPE_CHECKING:
-    class ChatClientProtocol(Protocol):
-        """Minimal protocol placeholder for provider factory typing."""
-
-else:
-    ChatClientProtocol = Any
+# MAF SDK does not expose a shared chat client base class or Protocol; this alias
+# documents that intent and gives the factory return type a meaningful name.
+type ChatClient = Any
 
 
 class UnknownProviderError(ValueError):
     """Raised when an unrecognized provider name is requested."""
+
+
+def normalize_optional_model_value(value: Any) -> Any:
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 
 class ProviderConfigBase(BaseModel):
@@ -27,17 +30,22 @@ class ProviderConfigBase(BaseModel):
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
+    model: str | None = None
+
+    @field_validator("model", mode="before")
+    @classmethod
+    def normalize_model(cls, value: Any) -> Any:
+        return normalize_optional_model_value(value)
+
 
 class OpenAIConfig(ProviderConfigBase):
-    model: str
     base_url: str | None = None
     api_key: str | None = None
 
 
 class AzureOpenAIConfig(ProviderConfigBase):
-    model: str
-    azure_endpoint: str
-    api_version: str
+    azure_endpoint: str | None = None
+    api_version: str | None = None
     api_key: str | None = None
     managed_identity_client_id: str | None = None
 
@@ -60,8 +68,7 @@ class AzureOpenAIConfig(ProviderConfigBase):
 
 
 class FoundryConfig(ProviderConfigBase):
-    model: str
-    project_endpoint: str
+    project_endpoint: str | None = None
     managed_identity_client_id: str | None = None
 
     @model_validator(mode="after")
@@ -80,16 +87,16 @@ class FoundryConfig(ProviderConfigBase):
 class ProviderSpec:
     name: str
     config_model: type[ProviderConfigBase]
-    client_factory: Callable[..., ChatClientProtocol]
+    client_factory: Callable[..., ChatClient]
 
 
-def _build_openai_client(**kwargs: Any) -> ChatClientProtocol:
+def _build_openai_client(**kwargs: Any) -> ChatClient:
     from agent_framework.openai import OpenAIChatClient
 
-    return cast(ChatClientProtocol, OpenAIChatClient(**kwargs))
+    return OpenAIChatClient(**kwargs)
 
 
-def _build_azure_openai_client(**kwargs: Any) -> ChatClientProtocol:
+def _build_azure_openai_client(**kwargs: Any) -> ChatClient:
     # Per design decision: azure_openai stays on OpenAIChatClient (MAF tolerates the extra kwargs)
     from agent_framework.openai import OpenAIChatClient
 
@@ -117,10 +124,10 @@ def _build_azure_openai_client(**kwargs: Any) -> ChatClientProtocol:
         auth_mode,
         bool(managed_identity_client_id),
     )
-    return cast(ChatClientProtocol, OpenAIChatClient(**kwargs))
+    return OpenAIChatClient(**kwargs)
 
 
-def _build_foundry_client(**kwargs: Any) -> ChatClientProtocol:
+def _build_foundry_client(**kwargs: Any) -> ChatClient:
     # This repo currently uses FoundryChatClient with the async DefaultAzureCredential.
     from agent_framework.foundry import FoundryChatClient
 
@@ -143,7 +150,7 @@ def _build_foundry_client(**kwargs: Any) -> ChatClientProtocol:
         auth_mode,
         bool(managed_identity_client_id),
     )
-    return cast(ChatClientProtocol, FoundryChatClient(**kwargs))
+    return FoundryChatClient(**kwargs)
 
 
 PROVIDER_REGISTRY: dict[str, ProviderSpec] = {

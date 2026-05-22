@@ -6,7 +6,7 @@ Each subdirectory is a standalone Azure Functions app deployable with [`azd up`]
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 | | | ✅ | |
-| [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 | ✅ MS Learn | ✅ azure-resources | | ✅ |
+| [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 | ✅ MS Learn | ✅ azure-resources | ✅ | ✅ |
 
 ## Run Locally (optional)
 
@@ -18,7 +18,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
 - Python 3.12+
-- an OpenAI API key (https://platform.openai.com/api-keys) 
+- credentials and settings for the model provider referenced by the sample's `agent_configuration` (for example Azure OpenAI endpoint/deployment, API keys, or `az login` for managed identity)
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
 ### 1. Install dependencies

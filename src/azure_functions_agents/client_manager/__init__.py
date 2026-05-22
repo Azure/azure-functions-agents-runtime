@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Any
 
 from .._logger import logger
-from .providers import get_provider
+from .providers import ChatClient, get_provider
 
 if TYPE_CHECKING:
     from ..config.schema import AgentConfiguration
@@ -30,10 +30,11 @@ def _normalize_provider(provider: str | None) -> str:
     return normalized
 
 
-def build_chat_client(cfg: AgentConfiguration) -> Any:
+def build_chat_client(cfg: AgentConfiguration) -> ChatClient:
     """Construct and return a chat client from resolved agent configuration."""
     provider = _normalize_provider(cfg.provider)
     kwargs: dict[str, Any] = cfg.provider_config.model_dump(exclude_none=True)
+    kwargs.setdefault("model", cfg.model)
     if cfg.timeout is not None:
         kwargs.setdefault("timeout", cfg.timeout)
 
