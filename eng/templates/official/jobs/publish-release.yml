@@ -1,0 +1,179 @@
+parameters:
+  - name: libraryVersion
+    type: string
+  - name: blobPath
+    type: string
+    default: 'azure-functions/python/azurefunctions-agents-runtime'
+    displayName: 'Blob path under drops container'
+
+jobs:
+  - job: "CreateReleaseBranch"
+    displayName: 'Create Release Branch'
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+    steps:
+    - powershell: |
+        $githubUser = "$(GithubUser)"
+        $githubToken = "$(GithubPat)"
+        $newLibraryVersion = "${{ parameters.libraryVersion }}"
+
+        if($newLibraryVersion -match '^\d+\.\d+\.\d+$') {
+            # Create GitHub credential
+            git config --global user.name "AzureFunctions"
+            git config --global user.email "azfunc@microsoft.com"
+
+            # Heading to Artifact Repository
+            Write-Host "Operating based on azure-functions-agent-runtime"
+            git checkout -b "release/$newLibraryVersion"
+
+            # Change pyproject.toml version
+            Write-Host "Change version number in pyproject.toml to $newLibraryVersion"
+            ((Get-Content pyproject.toml) -replace '^version = "(\d)+.(\d)+.*"', "version = `"$newLibraryVersion`"" -join "`n") + "`n" | Set-Content -NoNewline pyproject.toml
+            git add pyproject.toml
+
+            git commit -m "build: update Azure Functions Agent Runtime Version to $newLibraryVersion"
+
+            # Create release branch release/X.Y.Z
+            Write-Host "Creating release branch release/$newLibraryVersion"
+            git remote set-url origin "https://$githubUser:$githubToken@github.com/Azure/azure-functions-agent-runtime.git"
+            git push --set-upstream origin "release/$newLibraryVersion"
+
+        } else {
+            Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
+            exit -1
+        }
+      displayName: 'Push release/x.y.z'
+
+  - job: "CheckReleaseBranch"
+    dependsOn: ['CreateReleaseBranch']
+    displayName: '(Manual) Check Release Branch'
+    pool: server
+    steps:
+    - task: ManualValidation@1
+      displayName: '(Optional) Modify release/x.y.z branch'
+      inputs:
+        notifyUsers: ''  # No email notifications sent
+        instructions: |
+          1. Check if the https://github.com/Azure/azure-functions-agent-runtime/tree/release/${{ parameters.libraryVersion }} build succeeds and passes all unit tests.
+          2. If not, modify the release/${{ parameters.libraryVersion }} branch.
+          3. Ensure release/${{ parameters.libraryVersion }} branch contains all necessary changes.
+
+  - job: "CreateReleaseTag"
+    dependsOn: ['CheckReleaseBranch']
+    displayName: 'Create Release Tag'
+    steps:
+    - powershell: |
+        $githubUser = "$(GithubUser)"
+        $githubToken = "$(GithubPat)"
+        $newLibraryVersion = "${{ parameters.libraryVersion }}"
+
+        if($newLibraryVersion -match '^\d+\.\d+\.\d+$') {
+            # Create GitHub credential
+            git config --global user.name "AzureFunctions"
+            git config --global user.email "azfunc@microsoft.com"
+
+            # Clone Repository
+            git clone "https://$githubUser:$githubToken@github.com/Azure/azure-functions-agent-runtime"
+            Write-Host "Cloned azure-functions-agent-runtime into local"
+            Set-Location "azure-functions-agent-runtime"
+            git checkout "origin/release/$newLibraryVersion"
+
+            # Create release tag X.Y.Z
+            Write-Host "Creating release tag $newLibraryVersion"
+            git tag -a "$newLibraryVersion" -m "$newLibraryVersion"
+
+            # Push tag to remote
+            git push origin $newLibraryVersion
+        } else {
+            Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
+            exit -1
+        }
+      displayName: 'Tag and push x.y.z'
+    - pwsh: |
+        $githubUser = "$(GithubUser)"
+        $githubToken = "$(GithubPat)"
+        $newLibraryVersion = "${{ parameters.libraryVersion }}"
+
+        if($newLibraryVersion -match '^\d+\.\d+\.\d+$') {
+            # Create GitHub credential
+            $credential = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
+
+            # Create Release Note
+            Write-Host "Creating release note in GitHub"
+            $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
+            $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/Azure/azure-functions-agent-runtime/releases"
+
+            # Return Value
+            if ($response.StatusCode -ne 201) {
+                Write-Host "Failed to create release note in GitHub"
+                exit -1
+            }
+
+            $draftUrl = $response | ConvertFrom-Json | Select -expand url
+            Write-Host "Release draft created in $draftUrl"
+        } else {
+            Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.1.8)"
+            exit -1
+        }
+      displayName: 'Create GitHub release draft'
+
+  - job: "CheckGitHubRelease"
+    dependsOn: ['CreateReleaseTag']
+    displayName: '(Manual) Check GitHub release note'
+    pool: server
+    steps:
+    - task: ManualValidation@1
+      displayName: 'Write GitHub release note'
+      inputs:
+        notifyUsers: ''
+        instructions: 'Please head to https://github.com/Azure/azure-functions-agent-runtime/releases to finish the release note'
+
+  - job: PublishRelease
+    dependsOn: ['CheckGitHubRelease']
+    displayName: 'Upload artifacts to partner blob for release'
+
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    steps:
+      - checkout: none
+
+      - download: current
+        artifact: azurefunctions-agents-runtime
+        displayName: 'Download build artifacts'
+
+      - task: AzurePowerShell@5
+        displayName: 'Upload files to partner drop folder'
+        inputs:
+          azureSubscription: 'azure-sdk-partner-drops'
+          ScriptType: 'InlineScript'
+          azurePowerShellVersion: LatestVersion
+          pwsh: true
+          Inline: |
+            $version = '${{ parameters.libraryVersion }}'
+            $blobPath = '${{ parameters.blobPath }}'
+            $distFolder = '$(Pipeline.Workspace)/azurefunctions-agents-runtime/dist'
+
+            Write-Host "Uploading Python artifacts for version: $version"
+            Write-Host "Source folder: $distFolder"
+            Write-Host "Destination: https://azuresdkpartnerdrops.blob.core.windows.net/drops/$blobPath/$version/"
+
+            # List files to be uploaded
+            Get-ChildItem -Path $distFolder -Recurse | ForEach-Object {
+              Write-Host "  - $($_.Name)"
+            }
+
+            # Upload all distribution files (whl and tar.gz) to partner blob
+            azcopy copy "$distFolder/*" "https://azuresdkpartnerdrops.blob.core.windows.net/drops/$blobPath/$version/"
+
+            Write-Host ""
+            Write-Host "Upload complete. To publish to PyPI:"
+            Write-Host "  1. Go to Azure DevOps: python - partner-release pipeline"
+            Write-Host "  2. Click 'Run Pipeline'"
+            Write-Host "  3. Set BlobPath to: $blobPath/$version"
+        env:
+          AZCOPY_AUTO_LOGIN_TYPE: 'PSCRED'
