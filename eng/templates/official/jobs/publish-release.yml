@@ -18,32 +18,32 @@ jobs:
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
+        $versionPattern = '^\d+\.\d+\.\d+[0-9A-Za-z.+-]*$'
 
-        if($newLibraryVersion -match '^\d+\.\d+\.\d+$') {
-            # Create GitHub credential
-            git config --global user.name "AzureFunctions"
-            git config --global user.email "azfunc@microsoft.com"
-
-            # Heading to Artifact Repository
-            Write-Host "Operating based on azure-functions-agent-runtime"
-            git checkout -b "release/$newLibraryVersion"
-
-            # Change pyproject.toml version
-            Write-Host "Change version number in pyproject.toml to $newLibraryVersion"
-            ((Get-Content pyproject.toml) -replace '^version = "(\d)+.(\d)+.*"', "version = `"$newLibraryVersion`"" -join "`n") + "`n" | Set-Content -NoNewline pyproject.toml
-            git add pyproject.toml
-
-            git commit -m "build: update Azure Functions Agent Runtime Version to $newLibraryVersion"
-
-            # Create release branch release/X.Y.Z
-            Write-Host "Creating release branch release/$newLibraryVersion"
-            git remote set-url origin "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime.git"
-            git push --set-upstream origin "release/$newLibraryVersion"
-
-        } else {
-            Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
+        if ($newLibraryVersion -notmatch $versionPattern) {
+            Write-Host "NewLibraryVersion $newLibraryVersion is malformed. It must start with major.minor.patch, for example: 1.5.0, 1.5.0.dev4, 1.5.0rc1, 1.5.0-alpha.1"
             exit -1
         }
+
+        # Create GitHub credential
+        git config --global user.name "AzureFunctions"
+        git config --global user.email "azfunc@microsoft.com"
+
+        # Heading to Artifact Repository
+        Write-Host "Operating based on azure-functions-agent-runtime"
+        git checkout -b "release/$newLibraryVersion"
+
+        # Change pyproject.toml version
+        Write-Host "Change version number in pyproject.toml to $newLibraryVersion"
+        ((Get-Content pyproject.toml) -replace '^version = "(\d)+.(\d)+.*"', "version = `"$newLibraryVersion`"" -join "`n") + "`n" | Set-Content -NoNewline pyproject.toml
+        git add pyproject.toml
+
+        git commit -m "build: update Azure Functions Agent Runtime Version to $newLibraryVersion"
+
+        # Create release branch release/X.Y.Z
+        Write-Host "Creating release branch release/$newLibraryVersion"
+        git remote set-url origin "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime.git"
+        git push --set-upstream origin "release/$newLibraryVersion"
       displayName: 'Push release/x.y.z'
 
   - job: "CheckReleaseBranch"
@@ -69,54 +69,44 @@ jobs:
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
 
-        if($newLibraryVersion -match '^\d+\.\d+\.\d+$') {
-            # Create GitHub credential
-            git config --global user.name "AzureFunctions"
-            git config --global user.email "azfunc@microsoft.com"
+        # Create GitHub credential
+        git config --global user.name "AzureFunctions"
+        git config --global user.email "azfunc@microsoft.com"
 
-            # Clone Repository
-            git clone "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime"
-            Write-Host "Cloned azure-functions-agent-runtime into local"
-            Set-Location "azure-functions-agent-runtime"
-            git checkout "origin/release/$newLibraryVersion"
+        # Clone Repository
+        git clone "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime"
+        Write-Host "Cloned azure-functions-agent-runtime into local"
+        Set-Location "azure-functions-agent-runtime"
+        git checkout "origin/release/$newLibraryVersion"
 
-            # Create release tag X.Y.Z
-            Write-Host "Creating release tag $newLibraryVersion"
-            git tag -a "$newLibraryVersion" -m "$newLibraryVersion"
+        # Create release tag X.Y.Z
+        Write-Host "Creating release tag $newLibraryVersion"
+        git tag -a "$newLibraryVersion" -m "$newLibraryVersion"
 
-            # Push tag to remote
-            git push origin $newLibraryVersion
-        } else {
-            Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.5.0)"
-            exit -1
-        }
+        # Push tag to remote
+        git push origin $newLibraryVersion
       displayName: 'Tag and push x.y.z'
     - pwsh: |
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
 
-        if($newLibraryVersion -match '^\d+\.\d+\.\d+$') {
-            # Create GitHub credential
-            $credential = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
+        # Create GitHub credential
+        $credential = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
 
-            # Create Release Note
-            Write-Host "Creating release note in GitHub"
-            $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
-            $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/Azure/azure-functions-agent-runtime/releases"
+        # Create Release Note
+        Write-Host "Creating release note in GitHub"
+        $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
+        $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/Azure/azure-functions-agent-runtime/releases"
 
-            # Return Value
-            if ($response.StatusCode -ne 201) {
-                Write-Host "Failed to create release note in GitHub"
-                exit -1
-            }
-
-            $draftUrl = $response | ConvertFrom-Json | Select -expand url
-            Write-Host "Release draft created in $draftUrl"
-        } else {
-            Write-Host "NewLibraryVersion $newLibraryVersion is malformed (example: 1.1.8)"
+        # Return Value
+        if ($response.StatusCode -ne 201) {
+            Write-Host "Failed to create release note in GitHub"
             exit -1
         }
+
+        $draftUrl = $response | ConvertFrom-Json | Select -expand url
+        Write-Host "Release draft created in $draftUrl"
       displayName: 'Create GitHub release draft'
 
   - job: "CheckGitHubRelease"
