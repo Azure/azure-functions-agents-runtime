@@ -458,7 +458,7 @@ When the agent uses connector tools or `execution_sandbox`, the function app's *
 | Setting | Purpose |
 |---|---|
 | `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
-| `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage (legacy alias `CODE_ASSISTANT_CONFIG_PATH` still accepted) |
+| `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage |
 
 ## Development
 

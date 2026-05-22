@@ -45,7 +45,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `mcp`, `system_tools`, `agent_configuration`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `agent_configuration`, `tools` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `agent_configuration`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 ---
