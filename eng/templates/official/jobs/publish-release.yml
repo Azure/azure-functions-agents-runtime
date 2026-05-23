@@ -18,10 +18,23 @@ jobs:
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
-        $versionPattern = '^\d+\.\d+\.\d+[0-9A-Za-z.+-]*$'
+        # Strict version pattern: major.minor.patch with optional PEP 440 or SemVer pre-release suffix.
+        # PEP 440:  a/b/rc must be followed by a number (e.g., 1.5.0a1, 1.5.0rc2, 1.5.0.dev4, 1.5.0.post1)
+        # SemVer:   hyphen-separated identifiers (e.g., 1.5.0-alpha.1, 1.5.0-rc.1)
+        $versionPattern = '^\d+\.\d+\.\d+((a|b|rc)\d+|\.dev\d+|\.post\d+|-[0-9A-Za-z]+(\.[0-9A-Za-z]+)*)?$'
 
         if ($newLibraryVersion -notmatch $versionPattern) {
-            Write-Host "NewLibraryVersion $newLibraryVersion is malformed. It must start with major.minor.patch, for example: 1.5.0, 1.5.0.dev4, 1.5.0rc1, 1.5.0-alpha.1"
+            Write-Host "NewLibraryVersion '$newLibraryVersion' is malformed. Expected major.minor.patch with an optional pre-release suffix."
+            Write-Host "Valid examples: 1.5.0, 1.5.0-alpha.1, 1.5.0rc1, 1.5.0a2, 1.5.0b3, 1.5.0.dev4, 1.5.0.post1"
+            exit -1
+        }
+
+        # Validate that the resulting branch ref is a valid Git ref name
+        $refName = "release/$newLibraryVersion"
+        git check-ref-format --branch $refName 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host "The derived branch name '$refName' is not a valid Git ref name (see 'git check-ref-format' rules)."
+            Write-Host "Please use a version string that produces a valid branch name."
             exit -1
         }
 
