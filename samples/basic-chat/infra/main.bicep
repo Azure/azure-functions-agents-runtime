@@ -14,17 +14,24 @@ param environmentName string
 })
 param location string
 
-@description('Azure OpenAI endpoint (e.g. https://<name>.openai.azure.com/).')
-@minLength(1)
-param azureOpenAiEndpoint string
+@description('Microsoft Foundry model deployment name.')
+param foundryModel string = 'gpt-5.4'
 
-@description('Azure OpenAI model deployment name (e.g. gpt-4o, gpt-4o-mini).')
-param azureOpenAiDeployment string = 'gpt-5.2'
+@description('Microsoft Foundry model name.')
+param foundryModelName string = 'gpt-5.4'
+
+@description('Microsoft Foundry model version.')
+param foundryModelVersion string = '2026-03-05'
+
+@description('Microsoft Foundry deployment capacity.')
+param foundryDeploymentCapacity int = 50
 
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 var functionAppName = '${abbrs.webSitesFunctions}agent-func-${resourceToken}'
+var foundryAccountName = 'cog-${resourceToken}'
+var foundryProjectName = '${foundryAccountName}-proj'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
 var deployerPrincipalId = deployer().objectId
 
@@ -43,6 +50,23 @@ module apiUserAssignedIdentity 'br/public:avm/res/managed-identity/user-assigned
     location: location
     tags: tags
     name: '${abbrs.managedIdentityUserAssignedIdentities}agent-func-${resourceToken}'
+  }
+}
+
+// Microsoft Foundry
+module foundry './app/foundry.bicep' = {
+  name: 'foundry'
+  scope: rg
+  params: {
+    accountName: foundryAccountName
+    projectName: foundryProjectName
+    location: location
+    tags: tags
+    modelDeploymentName: foundryModel
+    modelName: foundryModelName
+    modelVersion: foundryModelVersion
+    deploymentCapacity: foundryDeploymentCapacity
+    managedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
   }
 }
 
@@ -73,14 +97,15 @@ module api './app/api.bicep' = {
     applicationInsightsName: monitoring.outputs.name
     appServicePlanId: appServicePlan.outputs.resourceId
     runtimeName: 'python'
-    runtimeVersion: '3.12'
+    runtimeVersion: '3.13'
     storageAccountName: storage.outputs.name
     deploymentStorageContainerName: deploymentStorageContainerName
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
-      AZURE_OPENAI_ENDPOINT: azureOpenAiEndpoint
-      AZURE_OPENAI_DEPLOYMENT: azureOpenAiDeployment
+      MAF_PROVIDER: 'foundry'
+      FOUNDRY_PROJECT_ENDPOINT: foundry.outputs.projectEndpoint
+      FOUNDRY_MODEL: foundry.outputs.modelDeploymentName
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       ACA_SESSION_POOL_ENDPOINT: sessionPool.outputs.poolManagementEndpoint
       ENABLE_MULTIPLATFORM_BUILD: 'true'
@@ -174,3 +199,5 @@ module monitoring 'br/public:avm/res/insights/component:0.4.1' = {
 // Outputs
 output AZURE_LOCATION string = location
 output AZURE_FUNCTION_NAME string = api.outputs.SERVICE_API_NAME
+output FOUNDRY_PROJECT_ENDPOINT string = foundry.outputs.projectEndpoint
+output FOUNDRY_MODEL string = foundry.outputs.modelDeploymentName
