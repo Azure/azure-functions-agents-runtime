@@ -4,14 +4,14 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|
-| Timer + HTTP | ✅ azure_rest | | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
+| Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 
 ## Features
 
 - **Timer trigger** — `daily_azure_report` runs daily at 15:00 UTC, emails a report of resources created or changed in the last 24 hours
 - **HTTP trigger** — `resource_summary` at `POST /resource-summary` returns a structured JSON summary of all resources by type and location
 - **Custom `azure_rest` tool** — makes authenticated ARM REST API calls using the function app's managed identity, with JMESPath query support
-- **Office 365 Outlook MCP server** — sends the report via email using managed identity auth
+- **Office 365 Outlook connector** — provisions a v2 connection under a Connector Gateway and exposes the send-email operation through an MCP server
 - **Microsoft Learn MCP server** — gives the agent access to Azure documentation for looking up correct API paths and versions
 - **`azure-resources` skill** — packages ARM REST API knowledge (paths, api-versions, tips) so the agent instructions can focus on the job, not the technical details
 - **Interactive chat UI** — `main.agent.md` enables the built-in chat interface for ad-hoc Azure queries
@@ -21,7 +21,6 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- a Microsoft Foundry project with a model deployment (e.g. `gpt-5.4`)
 - An Azure subscription
 
 ## Deploy
@@ -31,11 +30,11 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    ```bash
    cd samples/daily-azure-report
    azd init
-   azd env set FOUNDRY_PROJECT_ENDPOINT <your-foundry-project-endpoint>
-   azd env set FOUNDRY_MODEL gpt-5.4
-   azd env set O365_MCP_SERVER_URL <your-office365-outlook-mcp-url>
+  azd env set AZURE_LOCATION eastus2
    azd env set TO_EMAIL <recipient@example.com>
    ```
+
+  `AZURE_LOCATION` is restricted to regions that support Azure Functions Flex Consumption, Microsoft.Web Connector Gateways, and the sample's default Microsoft Foundry `gpt-5.4` Global Standard deployment: `centralus`, `eastus`, `eastus2`, `northcentralus`, `southcentralus`, and `westus`.
 
 2. **Deploy to Azure:**
 
@@ -43,9 +42,17 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    azd up
    ```
 
-    This provisions all resources (Function App and storage) and deploys the code. The subscription ID is automatically detected from the deployment. The managed identity is granted Reader access on the subscription for querying resources.
+    This provisions all resources (Function App, Microsoft Foundry, storage, Connector Gateway, Office 365 Outlook v2 connection, connection access policies for the Function App identity and deployer, and MCP server config) and deploys the code. The subscription ID is automatically detected from the deployment. The managed identity is granted Reader access on the subscription for querying resources.
 
-3. **Verify:**
+  3. **Authenticate the Office 365 Outlook connection:**
+
+    Open the deployed Office 365 Outlook connection in the Azure portal and complete authentication. The deployment output includes `O365_CONNECTION_ID`; after signing in, the connection status should be `Connected`:
+
+    ```bash
+    az resource show --ids "$(azd env get-value O365_CONNECTION_ID)" --query properties.overallStatus -o tsv
+    ```
+
+  4. **Verify:**
 
    The timer fires daily at 15:00 UTC. To test immediately, trigger the function with curl:
 
@@ -143,7 +150,7 @@ Invoke-WebRequest -Uri "http://localhost:7071/resource-summary" `
 ### Shared capabilities
 
 - [`tools/azure_rest.py`](src/tools/azure_rest.py) — custom tool for authenticated ARM REST API calls with JMESPath query filtering
-- [`mcp.json`](src/mcp.json) — Microsoft Learn MCP server for Azure documentation lookups and Office 365 Outlook MCP server for sending email
+- [`mcp.json`](src/mcp.json) — Microsoft Learn MCP server for Azure documentation lookups and the Office 365 Outlook MCP server provisioned by Bicep for sending email
 - [`skills/azure-resources/SKILL.md`](src/skills/azure-resources/SKILL.md) — ARM REST API knowledge (paths, api-versions, tips)
 - When the timer fires, the agent:
   1. Calls the `azure_rest` tool to list resources in the subscription
