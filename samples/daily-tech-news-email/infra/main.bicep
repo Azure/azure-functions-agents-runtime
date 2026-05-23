@@ -14,11 +14,11 @@ param environmentName string
 })
 param location string
 
-@description('Azure AI Foundry project endpoint (e.g. https://<name>.services.ai.azure.com/api/projects/<project>).')
+@description('Microsoft Foundry project endpoint (e.g. https://<name>.services.ai.azure.com/api/projects/<project>).')
 @minLength(1)
 param foundryProjectEndpoint string
 
-@description('Azure AI Foundry model name or deployment name.')
+@description('Microsoft Foundry model name or deployment name.')
 param foundryModel string = 'gpt-5.4'
 
 @description('Email address to send the daily news summary to.')

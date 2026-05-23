@@ -1,17 +1,17 @@
-# azure-functions-agents (Experimental)
+# azure-functions-agents (Preview)
 
-> **⚠️ This is an experimental package.** The APIs described here are under active development and subject to change.
+> **Public preview.** The features described here are available for preview use and may change before general availability.
 
 A markdown-first programming model for building AI agents on Azure Functions, powered by the [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework).
 
 - **Build agents with markdown** — write instructions, configure triggers, and bind tools in `.agent.md` files
 - **Run on any Azure Functions trigger** — trigger agents on timer, queue, blob, HTTP, Event Hub, Service Bus, Cosmos DB, and more
-- **Connect to 1,400+ services** — Azure API Connections let agents trigger on and perform actions across Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors — no custom code required
-- **Extend with MCP servers** — plug in remote HTTP MCP servers for additional capabilities
+- **Connect to 1,400+ services** — use connector-backed MCP servers to let agents act through Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors
+- **Extend with MCP servers** — plug in remote HTTP MCP servers, including MCP servers backed by connectors
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
-- **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Azure AI Foundry credentials and the runtime auto-detects the right client
+- **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
 
 ## Installation
 
@@ -27,9 +27,9 @@ Add it to your function app's `requirements.txt`:
 azurefunctions-agents-runtime
 ```
 
-### With connector tools support
+### With connector trigger support
 
-Connector tools (Teams, Office 365, SQL, Salesforce, etc.) require an optional extra:
+Connector triggers (Teams, Office 365, SQL, Salesforce, etc.) require an optional extra:
 
 ```bash
 pip install "azurefunctions-agents-runtime[connectors]"
@@ -38,10 +38,10 @@ pip install "azurefunctions-agents-runtime[connectors]"
 
 ## Model Provider Configuration
 
-The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Azure AI Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
+The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Microsoft Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
 
 1. `AZURE_OPENAI_ENDPOINT` → Azure OpenAI
-2. `FOUNDRY_PROJECT_ENDPOINT` → Azure AI Foundry
+2. `FOUNDRY_PROJECT_ENDPOINT` → Microsoft Foundry
 3. `OPENAI_API_KEY` → OpenAI
 
 You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|foundry`.
@@ -50,7 +50,7 @@ You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|found
 | ----------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
 | OpenAI            | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`)                               | `MAF_MODEL` applies directly for OpenAI.                                                                                              |
 | Azure OpenAI      | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION`      | `AZURE_OPENAI_DEPLOYMENT` takes precedence over `MAF_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD); set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
-| Azure AI Foundry  | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | `FOUNDRY_MODEL` takes precedence over `MAF_MODEL`. Uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
+| Microsoft Foundry | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | `FOUNDRY_MODEL` takes precedence over `MAF_MODEL`. Uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
 
 Model resolution precedence is: explicit requested model > provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry) > `MAF_MODEL` > provider default.
 
@@ -124,7 +124,7 @@ app = create_function_app()
 azurefunctions-agents-runtime
 ```
 
-Or use `azurefunctions-agents-runtime[connectors]` to enable the optional connector tools extra.
+Or use `azurefunctions-agents-runtime[connectors]` to enable optional connector trigger bindings.
 
 ### 5. Set the model provider
 
@@ -186,7 +186,7 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
 - **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
 - **Custom tools** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and they become callable
-- **Connector tools** — dynamically generated tools from Azure API Connections
+- **Connector-backed MCP tools** — call Office 365, Teams, SQL, Salesforce, SAP, and other connectors through HTTP MCP servers
 - **MCP servers** — connect to external remote HTTP MCP servers for additional tools
 - **Sandbox** — Python code execution via Azure Container Apps dynamic sessions; if no explicit sandbox session id is supplied, each invocation gets a fresh GUID-backed session
 
@@ -199,11 +199,8 @@ Agent files use YAML frontmatter + markdown body:
 name: Agent Name
 description: What this agent does
 
-# Optional: system tools (connectors and code execution)
+# Optional: system tools (code execution)
 system_tools:
-  tools_from_connections:
-    - connection_id: $SQL_CONNECTION_ID
-      prefix: sales_db      # optional
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
@@ -301,19 +298,15 @@ description: Sends updates to $TEAM_NAME
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: "https://$HOST/api"
-  tools_from_connections:
-    - connection_id: $DEFAULT_CONNECTION_ID
 ---
 
 Send a daily summary email to $TO_EMAIL.
 Post a message to the %TEAM_NAME% team's General channel.
 ```
 
-If `HOST=contoso.internal`, `DEFAULT_CONNECTION_ID=sql-prod`, `TO_EMAIL=alice@example.com`, and `TEAM_NAME=Engineering` are set in the environment, those values resolve inline:
+If `HOST=contoso.internal`, `TO_EMAIL=alice@example.com`, and `TEAM_NAME=Engineering` are set in the environment, those values resolve inline:
 
 > `session_pool_management_endpoint: "https://contoso.internal/api"`
->
-> `connection_id: sql-prod`
 >
 > Send a daily summary email to alice@example.com.
 >
@@ -473,9 +466,9 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ### Required Azure App Settings
 
-Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_MODEL`). For Azure OpenAI and Foundry, the provider-specific deployment/model setting takes precedence over `MAF_MODEL`.
+Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_MODEL`). For Azure OpenAI and Microsoft Foundry, the provider-specific deployment/model setting takes precedence over `MAF_MODEL`.
 
-When the agent uses connector tools, MCP servers with Azure identity auth, or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server.
+When the agent uses connector-backed MCP servers, connector triggers, or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server.
 
 ### Optional config overrides
 
@@ -496,6 +489,9 @@ git clone https://github.com/anthonychu/azure-functions-agents.git
 cd azure-functions-agents
 
 # Install in development mode
+pip install -e .
+
+# Include connector trigger support when working on connector-trigger bindings
 pip install -e ".[connectors]"
 
 # Build a wheel

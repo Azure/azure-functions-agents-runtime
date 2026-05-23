@@ -21,7 +21,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- an Azure AI Foundry project with a model deployment (e.g. `gpt-5.4`)
+- a Microsoft Foundry project with a model deployment (e.g. `gpt-5.4`)
 - An Azure subscription
 
 ## Deploy
@@ -68,7 +68,7 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 Required:
 
-- `FOUNDRY_PROJECT_ENDPOINT`: your Azure AI Foundry project endpoint
+- `FOUNDRY_PROJECT_ENDPOINT`: your Microsoft Foundry project endpoint
 - `FOUNDRY_MODEL`: model deployment name (e.g. `gpt-5.4`)
 - `SUBSCRIPTION_ID`: Azure subscription ID (for querying resources)
 - `O365_MCP_SERVER_URL`: Office 365 Outlook MCP server URL

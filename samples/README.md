@@ -63,13 +63,13 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-The Microsoft Agent Framework supports Azure OpenAI, OpenAI, and Azure AI Foundry. The samples default to Azure OpenAI.
+The Microsoft Agent Framework supports Azure OpenAI, OpenAI, and Microsoft Foundry. The samples default to Azure OpenAI.
 
 | Provider       | `MAF_PROVIDER`  | Required env vars                                                                  |
 | -------------- | --------------- | ---------------------------------------------------------------------------------- |
 | Azure OpenAI   | `azure_openai`  | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential`) |
 | OpenAI         | `openai`        | `OPENAI_API_KEY`                                                                   |
-| Azure Foundry  | `foundry`       | `FOUNDRY_PROJECT_ENDPOINT` (uses `DefaultAzureCredential`)                          |
+| Microsoft Foundry | `foundry`       | `FOUNDRY_PROJECT_ENDPOINT` (uses `DefaultAzureCredential`)                       |
 
 If `MAF_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
 

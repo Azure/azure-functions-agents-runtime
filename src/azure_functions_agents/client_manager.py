@@ -79,7 +79,7 @@ class MAFClientManager(ClientManager):
     ``MAF_PROVIDER=openai|azure_openai|foundry`` wins; otherwise:
 
     1. ``AZURE_OPENAI_ENDPOINT``      → Azure OpenAI
-    2. ``FOUNDRY_PROJECT_ENDPOINT``   → Azure AI Foundry
+    2. ``FOUNDRY_PROJECT_ENDPOINT``   → Microsoft Foundry
     3. ``OPENAI_API_KEY``             → vanilla OpenAI
     """
 
@@ -143,7 +143,7 @@ class MAFClientManager(ClientManager):
             "No MAF provider configured. Set one of: "
             "OPENAI_API_KEY (OpenAI), "
             "AZURE_OPENAI_ENDPOINT (+ AZURE_OPENAI_API_KEY or managed identity) for Azure OpenAI, "
-            "or FOUNDRY_PROJECT_ENDPOINT for Azure AI Foundry. "
+            "or FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry. "
             "You can also set MAF_PROVIDER=openai|azure_openai|foundry to override."
         )
 

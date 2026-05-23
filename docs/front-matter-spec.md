@@ -16,11 +16,10 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Custom tools (auto-discovered from `tools/` directory)
 - System tools (`system_tools`)
   - Code execution sandbox configuration
-  - Connector tools
 - Default runtime settings (model, timeout)
 
 **MCP server discovery:**
-- MCP servers (defined in `mcp.json`)
+- MCP servers (defined in `mcp.json`), including connector-backed MCP servers
 
 **Agent front matter:**
 - **Inherits all discovered capabilities by default**
@@ -61,7 +60,6 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Supported properties:**
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
-  - `tools_from_connections` — Array of connector configurations
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
@@ -114,7 +112,6 @@ Fields are organized into categories based on how they can be used:
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
   - `execute_in_sessions` — Code execution sandbox
-  - `tools_from_connections` — Connector-based tools
 
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
@@ -365,8 +362,6 @@ timeout: 60  # 1 minute for fast agent
 system_tools:
   execute_in_sessions:      # Code execution sandbox configuration
     session_pool_management_endpoint: string
-  tools_from_connections:   # Connector-based tools
-    - connection_id: string
 ```
 
 ---
@@ -396,25 +391,6 @@ system_tools:
 **Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
-
----
-
-##### `system_tools.tools_from_connections`
-- **Type:** `array`
-- **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors as dynamic tools. All agents inherit these tools by default.
-- **Status:** ⚠️ Under review — May be deprecated in favor of MCP-based connector integration
-
-**Global configuration (in `agents.config.yaml`):**
-```yaml
-system_tools:
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
-    - connection_id: $OUTLOOK_CONNECTION_ID
-```
-
-**Note:** Connector auth uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps to select the intended managed identity.
-
-**Note:** This field enables dynamic tool generation from connector APIs. Connector-backed MCP servers are defined in `mcp.json` and participate in the standard MCP discovery flow, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
 
 ---
 
@@ -665,8 +641,6 @@ This example demonstrates the recommended pattern: define shared runtime configu
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
 
 # Global defaults
 model: gpt-4o
@@ -686,7 +660,7 @@ description: A helpful assistant with Python code execution capabilities
 
 You are a helpful assistant. If you need to get up to date information, browse the web for it.
 ```
-*Note: This agent inherits shared runtime defaults plus all discovered capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools).*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities (sandbox, MCP servers, auto-discovered skills and tools). Connector-backed tools are exposed through MCP servers defined in `mcp.json`.*
 
 **Resource Summary Agent (`resource_summary.agent.md`):**
 ```yaml
@@ -902,7 +876,6 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `execute_in_sessions` (object)
-  - `tools_from_connections` (array)
 - `model` (string)
 - `timeout` (number)
 - `tools` (object)

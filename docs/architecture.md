@@ -51,7 +51,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/triggers.py` | Registers each non-main agent trigger, dispatching between built-in, HTTP, and connector trigger paths. | `register_agent()` |
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP endpoints for agents with debug exposure. | `register_debug_endpoints()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
-| `azure_functions_agents/system_tools/connectors/*` | Loads Azure API Connections, caches discovered operations, and generates connector-backed `FunctionTool` wrappers with Azure identity auth that honors `AZURE_CLIENT_ID`. | `cache.py:configure_connector_tools(), get_connector_tools()`; `connectors.py:load_connection()`; `tools.py:generate_tools()`; `arm.py:ArmClient, DataPlaneClient` |
+| `azure_functions_agents/system_tools/connectors/*` | Internal compatibility layer for Azure API Connection action discovery. Customer-facing connector actions should be exposed through connector-backed MCP servers in `mcp.json`. | `cache.py:configure_connector_tools(), get_connector_tools()`; `connectors.py:load_connection()`; `tools.py:generate_tools()`; `arm.py:ArmClient, DataPlaneClient` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming. | `run_agent()`, `run_agent_stream()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`. | `tool()` |
@@ -149,11 +149,12 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 - **Non-main built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which serializes the trigger payload to JSON, turns it into a prompt, and sends it to `runner.run_agent()`. The same shared `registered_names` tracking means host-level Azure Function names auto-suffix on collision rather than failing registration.
 - **Connector trigger:** `registration/triggers.py` resolves the dotted connector decorator dynamically and then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path. Connector-backed agents participate in the same per-app `registered_names` allocation flow.
 
-### Where connector and sandbox tools enter
+### Where MCP and sandbox tools enter
 
-- Connector specs are read from `GlobalConfig.system_tools.tools_from_connections`, carried into `ResolvedAgent.connector_specs`, and only turned into actual tools when registration or execution calls `configure_connector_tools(...)` / `get_connector_tools()`.
+- MCP server definitions are read from `mcp.json`, translated into MAF MCP tool wrappers by `discover_mcp_servers()`, and filtered per agent through capability settings.
+- Connector actions should be surfaced through connector-backed MCP servers. This keeps connector integration on the standard MCP discovery path and lets each server define its own transport, auth, and allowed tool set.
 - Sandbox configuration is read from `GlobalConfig.system_tools.execute_in_sessions`, carried into `ResolvedAgent.sandbox_config`, and turned into per-session tool closures by `build_sandbox_tools_for_session()` right before a request is executed.
-- Both are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
+- Sandbox tools are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
 
 ### What the runner receives from registration
 
@@ -164,7 +165,6 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
-- `AgentCapabilities.use_connector_tools` decides whether connector tools should be pulled from the shared cache.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
 
 The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, and streaming/non-streaming response handling.
@@ -232,7 +232,7 @@ This design keeps global config declarative: shared config says what exists, whi
 ### Other notable seams
 
 - **Skills:** discovered as `SKILL.md` directories and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required.
-- **Connector tools:** connectors are global infrastructure, so they are sourced from `agents.config.yaml`, not from individual agent files.
+- **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector triggers remain available through trigger type dot notation.
 - **Debug endpoints:** debug registration is a separate module so the main trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
 
 ## 7. Related docs
