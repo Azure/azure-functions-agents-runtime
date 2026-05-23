@@ -31,6 +31,8 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, M
    azd env set AZURE_LOCATION eastus2
    ```
 
+   `AZURE_LOCATION` is restricted to regions that support both Azure Functions Flex Consumption and the sample's default Microsoft Foundry `gpt-5.4` Global Standard deployment: `brazilsouth`, `canadacentral`, `canadaeast`, `centralus`, `eastus`, `eastus2`, `northcentralus`, `southcentralus`, `westus`, and `westus3`.
+
 2. **Deploy to Azure:**
 
    ```bash

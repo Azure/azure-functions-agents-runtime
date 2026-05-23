@@ -6,7 +6,19 @@ targetScope = 'subscription'
 param environmentName string
 
 @minLength(1)
-@description('Primary location for all resources')
+@description('Primary location for all resources. Must support Azure Functions Flex Consumption and the default Microsoft Foundry gpt-5.4 Global Standard deployment.')
+@allowed([
+  'brazilsouth'
+  'canadacentral'
+  'canadaeast'
+  'centralus'
+  'eastus'
+  'eastus2'
+  'northcentralus'
+  'southcentralus'
+  'westus'
+  'westus3'
+])
 @metadata({
   azd: {
     type: 'location'
