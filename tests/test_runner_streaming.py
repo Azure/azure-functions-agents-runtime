@@ -24,9 +24,22 @@ class _Update:
 
 
 class _Agent:
-    def run(self, _prompt: str, *, stream: bool, session: object) -> AsyncIterator[_Update]:
+    def run(
+        self,
+        _prompt: str,
+        *,
+        stream: bool,
+        session: object,
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[_Update]:
         assert stream is True
         assert session is not None
+        assert options == {
+            "reasoning": {
+                "effort": "high",
+                "summary": "concise",
+            }
+        }
         return self._updates()
 
     async def _updates(self) -> AsyncIterator[_Update]:
@@ -45,6 +58,9 @@ def _events_from_sse(chunks: list[str]) -> list[dict[str, Any]]:
 
 
 def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
+
     async def fake_build_agent_session_history(**_kwargs: Any) -> tuple[_Agent, object, str]:
         return _Agent(), object(), "test-session"
 
@@ -73,6 +89,30 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
             "result": "ok",
         }
     ]
+
+
+def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
+    monkeypatch.setenv("MAF_REASONING_EFFORT", "medium")
+    monkeypatch.setenv("MAF_REASONING_SUMMARY", "detailed")
+
+    assert runner._build_chat_options_from_environment() == {
+        "reasoning": {
+            "effort": "medium",
+            "summary": "detailed",
+        }
+    }
+
+
+def test_build_chat_options_uses_reasoning_defaults(monkeypatch: Any) -> None:
+    monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
+
+    assert runner._build_chat_options_from_environment() == {
+        "reasoning": {
+            "effort": "high",
+            "summary": "concise",
+        }
+    }
 
 
 def test_discover_user_tools_flattens_single_basemodel_parameter(tmp_path: Path) -> None:

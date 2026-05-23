@@ -19,7 +19,25 @@ param location string
 param foundryProjectEndpoint string
 
 @description('Azure AI Foundry model name or deployment name.')
-param foundryModel string = 'gpt-5.4-pro'
+param foundryModel string = 'gpt-5.4'
+
+@description('Reasoning effort for supported Foundry reasoning models.')
+@allowed([
+  'none'
+  'low'
+  'medium'
+  'high'
+  'xhigh'
+])
+param reasoningEffort string = 'high'
+
+@description('Reasoning summary mode for supported Foundry reasoning models.')
+@allowed([
+  'auto'
+  'concise'
+  'detailed'
+])
+param reasoningSummary string = 'concise'
 
 @description('Email address to send the daily Azure report to.')
 param toEmail string
@@ -99,6 +117,8 @@ module api './app/api.bicep' = {
       MAF_PROVIDER: 'foundry'
       FOUNDRY_PROJECT_ENDPOINT: foundryProjectEndpoint
       FOUNDRY_MODEL: foundryModel
+      MAF_REASONING_EFFORT: reasoningEffort
+      MAF_REASONING_SUMMARY: reasoningSummary
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       TO_EMAIL: toEmail
       SUBSCRIPTION_ID: subscription().subscriptionId

@@ -21,7 +21,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- an Azure AI Foundry project with a model deployment (e.g. `gpt-5.4-pro`)
+- an Azure AI Foundry project with a model deployment (e.g. `gpt-5.4`)
 - An Azure subscription
 
 ## Deploy
@@ -32,7 +32,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    cd samples/daily-azure-report
    azd init
     azd env set FOUNDRY_PROJECT_ENDPOINT <your-foundry-project-endpoint>
-    azd env set FOUNDRY_MODEL gpt-5.4-pro
+    azd env set FOUNDRY_MODEL gpt-5.4
    azd env set TO_EMAIL <recipient@example.com>
    ```
 
@@ -80,13 +80,15 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 Required:
 
 - `FOUNDRY_PROJECT_ENDPOINT`: your Azure AI Foundry project endpoint
-- `FOUNDRY_MODEL`: model deployment name (e.g. `gpt-5.4-pro`)
+- `FOUNDRY_MODEL`: model deployment name (e.g. `gpt-5.4`)
 - `SUBSCRIPTION_ID`: Azure subscription ID (for querying resources)
 - `TO_EMAIL`: recipient email address
 - `O365_CONNECTION_ID`: Office 365 connector ID
 
 Optional:
 
+- `MAF_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
+- `MAF_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
 - `ACA_SESSION_POOL_ENDPOINT`: if set, enables code execution features; if empty, agents work but lose advanced capabilities
 
 Without `SUBSCRIPTION_ID`:

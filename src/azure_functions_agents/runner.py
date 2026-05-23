@@ -62,6 +62,8 @@ from .system_tools.connectors.cache import get_connector_tools
 
 DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "900"))
 DEFAULT_MODEL: str | None = os.environ.get("MAF_MODEL")
+DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_REASONING_SUMMARY = "concise"
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
@@ -143,6 +145,20 @@ def _build_history_provider() -> Any:
     if blob_provider is not None:
         return blob_provider
     return FileHistoryProvider(storage_path=_resolve_sessions_dir())
+
+
+def _env_value(name: str) -> str:
+    return (os.environ.get(name) or "").strip()
+
+
+def _build_chat_options_from_environment() -> dict[str, Any] | None:
+    """Build provider chat options from supported runtime environment variables."""
+    return {
+        "reasoning": {
+            "effort": _env_value("MAF_REASONING_EFFORT") or DEFAULT_REASONING_EFFORT,
+            "summary": _env_value("MAF_REASONING_SUMMARY") or DEFAULT_REASONING_SUMMARY,
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -379,7 +395,14 @@ async def run_agent(
     lock = await _get_session_lock(resolved_id)
     async with lock:
         try:
-            response = await asyncio.wait_for(agent.run(prompt, session=session), timeout=timeout)
+            response = await asyncio.wait_for(
+                agent.run(
+                    prompt,
+                    session=session,
+                    options=_build_chat_options_from_environment(),
+                ),
+                timeout=timeout,
+            )
         except TimeoutError:
             raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -543,7 +566,12 @@ async def run_agent_stream(
             yield f"data: {json.dumps(event)}\n\n"
 
         try:
-            stream = agent.run(prompt, stream=True, session=session)
+            stream = agent.run(
+                prompt,
+                stream=True,
+                session=session,
+                options=_build_chat_options_from_environment(),
+            )
             async for update in stream:
                 if loop.time() > deadline:
                     yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"

@@ -8,6 +8,8 @@
     "TO_EMAIL": "",
     "MAF_PROVIDER": "foundry",
     "FOUNDRY_PROJECT_ENDPOINT": "",
-    "FOUNDRY_MODEL": "gpt-5.4-pro"
+    "FOUNDRY_MODEL": "gpt-5.4",
+    "MAF_REASONING_EFFORT": "high",
+    "MAF_REASONING_SUMMARY": "concise"
   }
 }
