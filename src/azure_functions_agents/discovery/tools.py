@@ -3,13 +3,37 @@ import inspect
 import os
 import sys
 from pathlib import Path
+from typing import get_type_hints
 
 from agent_framework import FunctionTool
+from pydantic import BaseModel
 
 from .._function_tool import tool
 from .._logger import logger
 
 _DISCOVERED_TOOLS_CACHE: dict[Path, list[FunctionTool]] = {}
+
+
+def _single_basemodel_parameter(fn: object) -> type[BaseModel] | None:
+    try:
+        signature = inspect.signature(fn)
+        type_hints = get_type_hints(fn)
+    except Exception:
+        return None
+
+    parameters = [
+        parameter
+        for parameter in signature.parameters.values()
+        if parameter.kind
+        in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+    ]
+    if len(parameters) != 1:
+        return None
+
+    annotation = type_hints.get(parameters[0].name, parameters[0].annotation)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return annotation
+    return None
 
 
 def clear_tool_discovery_cache() -> None:
@@ -91,7 +115,11 @@ def discover_user_tools(app_root: Path) -> list[FunctionTool]:
                 if local_functions:
                     name, fn = local_functions[0]
                     description = (fn.__doc__ or f"Tool: {name}").strip()
-                    picked = tool(fn, name=name, description=description)
+                    schema = _single_basemodel_parameter(fn)
+                    if schema is not None:
+                        picked = tool(fn, name=name, description=description, schema=schema)
+                    else:
+                        picked = tool(fn, name=name, description=description)
                     logger.debug("Auto-wrapped tool %s with description %s", name, description)
 
             if picked is not None:

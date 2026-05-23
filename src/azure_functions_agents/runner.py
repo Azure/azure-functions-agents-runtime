@@ -264,6 +264,31 @@ def _function_call_event(item: Any) -> dict[str, Any]:
     }
 
 
+def _merge_tool_arguments(previous: Any, current: Any) -> Any:
+    if previous is None:
+        return current
+    if current is None:
+        return previous
+    if isinstance(previous, str) and isinstance(current, str):
+        if current.startswith(previous):
+            return current
+        return previous + current
+    return current
+
+
+def _is_complete_json_argument(value: Any) -> bool:
+    if not isinstance(value, str):
+        return value is not None
+    text = value.strip()
+    if not text:
+        return False
+    try:
+        json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
 def _function_result_event(item: Any) -> dict[str, Any]:
     return {
         "type": "tool_end",
@@ -474,6 +499,49 @@ async def run_agent_stream(
     async with lock:
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
+        pending_tool_calls: dict[str, dict[str, Any]] = {}
+        emitted_tool_calls: set[str] = set()
+
+        def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+            event = _function_call_event(item)
+            call_id = event.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id:
+                return None, event
+
+            pending = pending_tool_calls.setdefault(
+                call_id,
+                {
+                    "type": "tool_start",
+                    "tool_call_id": call_id,
+                    "tool_name": event.get("tool_name"),
+                    "arguments": None,
+                },
+            )
+            if event.get("tool_name"):
+                pending["tool_name"] = event["tool_name"]
+            pending["arguments"] = _merge_tool_arguments(
+                pending.get("arguments"),
+                event.get("arguments"),
+            )
+            return call_id, pending
+
+        async def emit_tool_start_if_ready(call_id: str, event: dict[str, Any]) -> AsyncIterator[str]:
+            if call_id in emitted_tool_calls:
+                return
+            if not _is_complete_json_argument(event.get("arguments")):
+                return
+            emitted_tool_calls.add(call_id)
+            yield f"data: {json.dumps(event)}\n\n"
+
+        async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+            if call_id is None or call_id in emitted_tool_calls:
+                return
+            event = pending_tool_calls.get(call_id)
+            if event is None:
+                return
+            emitted_tool_calls.add(call_id)
+            yield f"data: {json.dumps(event)}\n\n"
+
         try:
             stream = agent.run(prompt, stream=True, session=session)
             async for update in stream:
@@ -491,11 +559,25 @@ async def run_agent_stream(
                         if text:
                             yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
                     elif ctype == "function_call":
-                        yield f"data: {json.dumps(_function_call_event(item))}\n\n"
+                        call_id, event = buffer_function_call(item)
+                        if call_id is None:
+                            yield f"data: {json.dumps(event)}\n\n"
+                        else:
+                            async for output in emit_tool_start_if_ready(call_id, event):
+                                yield output
                     elif ctype == "function_result":
+                        call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                        async for output in emit_tool_start_before_result(
+                            call_id if isinstance(call_id, str) else None
+                        ):
+                            yield output
                         yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
                     # Unknown content types are intentionally ignored — the
                     # SSE vocabulary is fixed and the UI doesn't render them.
+            for call_id, event in pending_tool_calls.items():
+                if call_id not in emitted_tool_calls:
+                    emitted_tool_calls.add(call_id)
+                    yield f"data: {json.dumps(event)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except TimeoutError:
             yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
