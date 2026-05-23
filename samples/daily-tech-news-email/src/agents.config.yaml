@@ -4,9 +4,7 @@
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
 
 # Default runtime configuration
-model: $AZURE_OPENAI_DEPLOYMENT
+model: $FOUNDRY_MODEL
 timeout: 900

@@ -14,22 +14,28 @@ param environmentName string
 })
 param location string
 
-@description('Azure OpenAI endpoint (e.g. https://<name>.openai.azure.com/).')
+@description('Azure AI Foundry project endpoint (e.g. https://<name>.services.ai.azure.com/api/projects/<project>).')
 @minLength(1)
-param azureOpenAiEndpoint string
+param foundryProjectEndpoint string
 
-@description('Azure OpenAI model deployment name (e.g. gpt-4o, gpt-4o-mini).')
-param azureOpenAiDeployment string = 'gpt-5.2'
+@description('Azure AI Foundry model name or deployment name.')
+param foundryModel string = 'gpt-5.4'
 
 @description('Email address to send the daily news summary to.')
 param toEmail string
+
+@description('Office 365 Outlook MCP server URL for sending email.')
+@minLength(1)
+param o365McpServerUrl string
+
+@description('Optional managed identity client ID to use when authenticating to the Office 365 Outlook MCP server. Leave empty to use the app-wide identity selection.')
+param o365McpClientId string = ''
 
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 var functionAppName = '${abbrs.webSitesFunctions}agent-func-${resourceToken}'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
-var connectionName = 'office365-${resourceToken}'
 var deployerPrincipalId = deployer().objectId
 
 // Resource Group
@@ -66,17 +72,6 @@ module appServicePlan 'br/public:avm/res/web/serverfarm:0.1.1' = {
   }
 }
 
-// Office 365 API Connection
-module office365Connection './app/office365-connection.bicep' = {
-  name: 'office365Connection'
-  scope: rg
-  params: {
-    connectionName: connectionName
-    location: location
-    tags: tags
-  }
-}
-
 // Function App
 module api './app/api.bicep' = {
   name: 'api'
@@ -94,12 +89,14 @@ module api './app/api.bicep' = {
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
-      AZURE_OPENAI_ENDPOINT: azureOpenAiEndpoint
-      AZURE_OPENAI_DEPLOYMENT: azureOpenAiDeployment
+      MAF_PROVIDER: 'foundry'
+      FOUNDRY_PROJECT_ENDPOINT: foundryProjectEndpoint
+      FOUNDRY_MODEL: foundryModel
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       ACA_SESSION_POOL_ENDPOINT: sessionPool.outputs.poolManagementEndpoint
       TO_EMAIL: toEmail
-      O365_CONNECTION_ID: office365Connection.outputs.connectionId
+      O365_MCP_SERVER_URL: o365McpServerUrl
+      O365_MCP_CLIENT_ID: o365McpClientId
       ENABLE_MULTIPLATFORM_BUILD: 'true'
       PYTHON_ENABLE_INIT_INDEXING: '1'
     }
@@ -136,17 +133,6 @@ module rbac './app/rbac.bicep' = {
   params: {
     storageAccountName: storage.outputs.name
     appInsightsName: monitoring.outputs.name
-    managedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
-  }
-}
-
-// RBAC — Office 365 connector
-module connectorRbac './app/connector-rbac.bicep' = {
-  name: 'connectorRbac'
-  scope: rg
-  dependsOn: [office365Connection]
-  params: {
-    connectionName: connectionName
     managedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
   }
 }
@@ -202,4 +188,3 @@ module monitoring 'br/public:avm/res/insights/component:0.4.1' = {
 // Outputs
 output AZURE_LOCATION string = location
 output AZURE_FUNCTION_NAME string = api.outputs.SERVICE_API_NAME
-output O365_CONNECTION_NAME string = connectionName

@@ -1,9 +1,5 @@
 {
   "servers": {
-    "microsoft-learn": {
-      "type": "http",
-      "url": "https://learn.microsoft.com/api/mcp"
-    },
     "office365-outlook": {
       "type": "http",
       "url": "$O365_MCP_SERVER_URL",

@@ -36,6 +36,21 @@ def build_credential() -> SyncDefaultAzureCredential:
     return DefaultAzureCredential()
 
 
+def build_credential_with_client_id(
+    client_id: str | None,
+) -> SyncDefaultAzureCredential:
+    """Return a sync ``DefaultAzureCredential`` for a caller-supplied client id.
+
+    Pass an empty/``None`` value to fall back to a bare
+    :class:`DefaultAzureCredential`.
+    """
+    from azure.identity import DefaultAzureCredential
+
+    if client_id:
+        return DefaultAzureCredential(managed_identity_client_id=client_id)
+    return DefaultAzureCredential()
+
+
 def build_async_credential() -> AsyncDefaultAzureCredential:
     """Return an async ``DefaultAzureCredential`` honoring ``AZURE_CLIENT_ID``."""
     from azure.identity.aio import DefaultAzureCredential

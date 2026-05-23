@@ -387,7 +387,7 @@ If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and
 
 You can give your agent access to external MCP servers by creating an `mcp.json` file in the app root. Only remote HTTP MCP servers are supported. The `type` field is optional — when omitted, an entry with a `url` is treated as HTTP. When `type` is specified it must be `"http"` or `"streamable-http"`; any other transport (e.g. `stdio`, `sse`) is rejected with a warning.
 
-String values in `mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields are `command`, `args`, `env` values, `url`, `headers` values, `type`, and `tools` entries. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
+String values in `mcp.json` support inline environment-variable substitution with both `$VAR` and `%VAR%`. Eligible fields include `url`, `headers` values, `type`, `tools` entries, and Azure identity auth values such as `auth.scope` and `auth.client_id`. Dictionary keys such as server names, environment-variable names, and header names are not substituted.
 
 ```json
 {
@@ -403,7 +403,18 @@ String values in `mcp.json` support inline environment-variable substitution wit
       "type": "streamable-http",
       "url": "https://example.com/mcp",
       "headers": {
-        "Authorization": "Bearer ${MCP_TOKEN}"
+        "Authorization": "Bearer $MCP_TOKEN"
+      }
+    },
+    "office365-outlook": {
+      "type": "http",
+      "url": "$O365_MCP_SERVER_URL",
+      "tools": ["office365_SendEmailV2"],
+      "load_prompts": false,
+      "auth": {
+        "type": "azure_identity",
+        "scope": "https://apihub.azure.com/.default",
+        "client_id": "$O365_MCP_CLIENT_ID"
       }
     }
   }
@@ -416,8 +427,13 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
+- **`load_tools`** — optional boolean controlling whether tools are loaded from the MCP server (default: `true`)
+- **`load_prompts`** — optional boolean controlling whether prompts are loaded from the MCP server (default: `true`). Set this to `false` for MCP servers that do not implement `prompts/list`.
+- **`auth`** — optional authentication configuration. `auth.type` may be `azure_identity`, `default_azure_credential`, or `managed_identity`. For Azure identity auth, set `auth.scope` to the token scope required by the MCP server.
 
-> **Note**: Entries without a `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
+Azure identity MCP auth uses `DefaultAzureCredential`. By default it follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose an identity for a single MCP server without changing the app-wide identity, set `auth.client_id` (or `auth.managed_identity_client_id` / `auth.identity_client_id`) in that server's `mcp.json` entry. If the configured client id is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
+
+> **Note**: Entries without a `url`, with unresolved placeholders in `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 
 ## Session storage
 
@@ -459,7 +475,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_MODEL`). For Azure OpenAI and Foundry, the provider-specific deployment/model setting takes precedence over `MAF_MODEL`.
 
-When the agent uses connector tools or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the AI Gateway / Logic App connector resource — otherwise `DefaultAzureCredential` will fail to obtain an ARM token at startup. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls.
+When the agent uses connector tools, MCP servers with Azure identity auth, or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server.
 
 ### Optional config overrides
 
@@ -469,6 +485,8 @@ When the agent uses connector tools or `execution_sandbox`, the function app's *
 | `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage |
 | `AGENT_TIMEOUT` | Per-call timeout in seconds (default `900`) |
 | `MAF_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
+| `MAF_REASONING_EFFORT` | Reasoning effort for supported reasoning models (default `high`; valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
+| `MAF_REASONING_SUMMARY` | Reasoning summary mode for supported reasoning models (default `concise`; valid values are `auto`, `concise`, `detailed`) |
 
 ## Development
 

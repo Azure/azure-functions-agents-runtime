@@ -42,12 +42,18 @@ param reasoningSummary string = 'concise'
 @description('Email address to send the daily Azure report to.')
 param toEmail string
 
+@description('Office 365 Outlook MCP server URL for sending email.')
+@minLength(1)
+param o365McpServerUrl string
+
+@description('Optional managed identity client ID to use when authenticating to the Office 365 Outlook MCP server. Leave empty to use the app-wide identity selection.')
+param o365McpClientId string = ''
+
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
 var functionAppName = '${abbrs.webSitesFunctions}agent-func-${resourceToken}'
 var deploymentStorageContainerName = 'app-package-${take(functionAppName, 32)}-${take(toLower(uniqueString(functionAppName, resourceToken)), 7)}'
-var o365ConnectionName = 'office365-${resourceToken}'
 
 // Reader role definition ID
 var readerRoleId = 'acdd72a7-3385-48ef-bd42-f606fba81ae7'
@@ -86,17 +92,6 @@ module appServicePlan 'br/public:avm/res/web/serverfarm:0.1.1' = {
   }
 }
 
-// Office 365 API Connection
-module office365Connection './app/office365-connection.bicep' = {
-  name: 'office365Connection'
-  scope: rg
-  params: {
-    connectionName: o365ConnectionName
-    location: location
-    tags: tags
-  }
-}
-
 // Function App
 module api './app/api.bicep' = {
   name: 'api'
@@ -122,7 +117,8 @@ module api './app/api.bicep' = {
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       TO_EMAIL: toEmail
       SUBSCRIPTION_ID: subscription().subscriptionId
-      O365_CONNECTION_ID: office365Connection.outputs.connectionId
+      O365_MCP_SERVER_URL: o365McpServerUrl
+      O365_MCP_CLIENT_ID: o365McpClientId
       ENABLE_MULTIPLATFORM_BUILD: 'true'
       PYTHON_ENABLE_INIT_INDEXING: '1'
     }
@@ -159,17 +155,6 @@ module rbac './app/rbac.bicep' = {
   params: {
     storageAccountName: storage.outputs.name
     appInsightsName: monitoring.outputs.name
-    managedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
-  }
-}
-
-// RBAC — Office 365 connector
-module connectorRbac './app/connector-rbac.bicep' = {
-  name: 'connectorRbac'
-  scope: rg
-  dependsOn: [office365Connection]
-  params: {
-    connectionName: o365ConnectionName
     managedIdentityPrincipalId: apiUserAssignedIdentity.outputs.principalId
   }
 }

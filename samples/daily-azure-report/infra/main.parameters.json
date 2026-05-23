@@ -6,6 +6,7 @@
     "location": { "value": "${AZURE_LOCATION}" },
     "foundryProjectEndpoint": { "value": "${FOUNDRY_PROJECT_ENDPOINT}" },
     "foundryModel": { "value": "${FOUNDRY_MODEL}" },
+    "o365McpServerUrl": { "value": "${O365_MCP_SERVER_URL}" },
     "toEmail": { "value": "${TO_EMAIL}" }
   }
 }

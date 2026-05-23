@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from agent_framework import MCPStreamableHTTPTool
@@ -49,13 +50,19 @@ class _CapturedMCPStreamableHTTPTool:
         url: str,
         *,
         allowed_tools: list[str] | None = None,
+        load_tools: bool = True,
+        load_prompts: bool = True,
         header_provider: object = None,
+        http_client: object = None,
         **_: object,
     ) -> None:
         self.name = name
         self.url = url
         self.allowed_tools = allowed_tools
+        self.load_tools = load_tools
+        self.load_prompts = load_prompts
         self.header_provider = header_provider
+        self.http_client = http_client
 
 
 def test_discover_mcp_servers_caches_by_resolved_app_root(
@@ -307,6 +314,7 @@ def test_discover_substitutes_inline_in_headers(
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
+    assert tool.http_client is not None
     assert tool.header_provider(None) == {"Authorization": "Bearer abc123"}
 
 
@@ -316,10 +324,174 @@ def test_discover_undefined_variable_stays_literal(tmp_path: Path) -> None:
         {"servers": {"demo": {"type": "http", "url": "https://$MISSING_VAR/api"}}},
     )
 
+    discovered_servers = discover_mcp_servers(tmp_path)
+
+    assert discovered_servers == {}
+
+
+def test_discover_mcp_servers_supports_azure_identity_auth(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeCredential:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_token(self, scope: str) -> SimpleNamespace:
+            self.calls += 1
+            assert scope == "https://apihub.azure.com/.default"
+            return SimpleNamespace(token=f"token-{self.calls}", expires_on=9999999999)
+
+    credential = FakeCredential()
+    monkeypatch.setattr(mcp_discovery, "build_credential", lambda: credential)
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"X-Test": "yes"},
+                    "auth": {
+                        "type": "azure_identity",
+                        "scope": "https://apihub.azure.com/.default",
+                    },
+                }
+            }
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.http_client is not None
+    assert tool.header_provider(None) == {
+        "Authorization": "Bearer token-1",
+        "X-Test": "yes",
+    }
+    assert tool.header_provider(None) == {
+        "Authorization": "Bearer token-1",
+        "X-Test": "yes",
+    }
+    assert credential.calls == 1
+
+
+def test_discover_mcp_servers_supports_azure_identity_client_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeCredential:
+        def get_token(self, scope: str) -> SimpleNamespace:
+            assert scope == "https://apihub.azure.com/.default"
+            return SimpleNamespace(token="client-token", expires_on=9999999999)
+
+    captured_client_ids: list[str | None] = []
+
+    def fake_build_credential_with_client_id(client_id: str | None) -> FakeCredential:
+        captured_client_ids.append(client_id)
+        return FakeCredential()
+
+    monkeypatch.setattr(
+        mcp_discovery,
+        "build_credential_with_client_id",
+        fake_build_credential_with_client_id,
+    )
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "auth": {
+                        "type": "azure_identity",
+                        "scope": "https://apihub.azure.com/.default",
+                        "client_id": "client-123",
+                    },
+                }
+            }
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.header_provider(None) == {"Authorization": "Bearer client-token"}
+    assert captured_client_ids == ["client-123"]
+
+
+def test_discover_mcp_servers_ignores_unresolved_azure_identity_client_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeCredential:
+        def get_token(self, scope: str) -> SimpleNamespace:
+            assert scope == "https://apihub.azure.com/.default"
+            return SimpleNamespace(token="fallback-token", expires_on=9999999999)
+
+    monkeypatch.setattr(mcp_discovery, "build_credential", lambda: FakeCredential())
+    monkeypatch.setattr(
+        mcp_discovery,
+        "build_credential_with_client_id",
+        lambda client_id: pytest.fail(f"unexpected client id credential: {client_id}"),
+    )
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "auth": {
+                        "type": "azure_identity",
+                        "scope": "https://apihub.azure.com/.default",
+                        "client_id": "$O365_MCP_CLIENT_ID",
+                    },
+                }
+            }
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.header_provider(None) == {"Authorization": "Bearer fallback-token"}
+
+
+def test_discover_mcp_servers_supports_load_flags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "demo": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "load_tools": False,
+                    "load_prompts": False,
+                }
+            }
+        },
+    )
+
     tool = discover_mcp_servers(tmp_path)["demo"]
 
-    assert isinstance(tool, MCPStreamableHTTPTool)
-    assert tool.url == "https://$MISSING_VAR/api"
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.load_tools is False
+    assert tool.load_prompts is False
 
 
 def test_discover_does_not_substitute_server_name_keys(

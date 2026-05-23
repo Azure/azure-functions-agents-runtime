@@ -2,23 +2,110 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+import time
 from pathlib import Path
-from typing import Any, cast
+from typing import Any, TypeAlias, cast
 
 from agent_framework import MCPStreamableHTTPTool
 
+from .._credential import build_credential, build_credential_with_client_id
 from .._logger import logger
-from ..config.env import resolve_env_vars_in_data
+from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
-MCPTool = MCPStreamableHTTPTool
+MCPTool: TypeAlias = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
+_DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+_AUTH_CLIENT_ID_KEYS = ("client_id", "managed_identity_client_id", "identity_client_id")
 
 
 def clear_mcp_cache() -> None:
     """Clear cached MCP server discovery results."""
     _DISCOVERED_MCP_SERVERS_CACHE.clear()
+
+
+def _build_header_provider(server: dict[str, Any]) -> Any:
+    headers = server.get("headers")
+    static_headers = (
+        {str(key): str(value) for key, value in headers.items()}
+        if isinstance(headers, dict)
+        else {}
+    )
+
+    auth = server.get("auth")
+    if not isinstance(auth, dict):
+        if not static_headers:
+            return None
+
+        def static_header_provider(_ctx: Any) -> dict[str, str]:
+            return dict(static_headers)
+
+        return static_header_provider
+
+    auth_type = str(auth.get("type", "")).strip().lower().replace("-", "_")
+    if auth_type not in {"azure_identity", "default_azure_credential", "managed_identity"}:
+        logger.warning(
+            "MCP server auth type '%s' is not supported; using static headers only",
+            auth.get("type", ""),
+        )
+        if not static_headers:
+            return None
+
+        def unsupported_auth_header_provider(_ctx: Any) -> dict[str, str]:
+            return dict(static_headers)
+
+        return unsupported_auth_header_provider
+
+    scope = str(auth.get("scope", "")).strip()
+    if not scope:
+        logger.warning("MCP server auth type 'azure_identity' requires a non-empty 'scope'")
+        if not static_headers:
+            return None
+
+        def missing_scope_header_provider(_ctx: Any) -> dict[str, str]:
+            return dict(static_headers)
+
+        return missing_scope_header_provider
+
+    client_id = ""
+    for key in _AUTH_CLIENT_ID_KEYS:
+        value = str(auth.get(key, "")).strip()
+        if value and not has_unresolved_placeholders(value):
+            client_id = value
+            break
+
+    credential = build_credential_with_client_id(client_id) if client_id else build_credential()
+    cached_token: dict[str, str | int] = {"token": "", "expires_on": 0}
+
+    def azure_identity_header_provider(_ctx: Any) -> dict[str, str]:
+        now = int(time.time())
+        expires_on = int(cached_token["expires_on"])
+        if not cached_token["token"] or expires_on - _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS <= now:
+            token = credential.get_token(scope)
+            cached_token["token"] = token.token
+            cached_token["expires_on"] = token.expires_on
+
+        result = dict(static_headers)
+        result["Authorization"] = f"Bearer {cached_token['token']}"
+        return result
+
+    return azure_identity_header_provider
+
+
+def _build_http_client(header_provider: Any) -> Any:
+    if header_provider is None:
+        return None
+
+    from httpx import AsyncClient
+
+    async def inject_headers(request: Any) -> None:
+        headers = await asyncio.to_thread(header_provider, {})
+        for key, value in headers.items():
+            request.headers[key] = value
+
+    return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
 
 
 def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
@@ -31,6 +118,8 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
         allowed_tools = [str(tool) for tool in raw_tools]
     else:
         allowed_tools = None
+    load_tools = bool(server.get("load_tools", True))
+    load_prompts = bool(server.get("load_prompts", True))
 
     if "command" in server or server_type in {"local", "stdio"}:
         logger.warning("MCP stdio transport is not supported; skipping server '%s'", name)
@@ -48,19 +137,19 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
         if not url:
             logger.warning("MCP server '%s': missing 'url', skipping", name)
             return None
-        headers = server.get("headers")
-        header_provider = None
-        if isinstance(headers, dict):
-            static_headers = {str(key): str(value) for key, value in headers.items()}
-
-            def header_provider(_ctx: Any) -> dict[str, str]:
-                return dict(static_headers)
+        if has_unresolved_placeholders(url):
+            logger.warning("MCP server '%s': could not resolve url '%s', skipping", name, url)
+            return None
+        header_provider = _build_header_provider(server)
 
         return MCPStreamableHTTPTool(
             name=name,
             url=url,
             allowed_tools=allowed_tools,
+            load_tools=load_tools,
+            load_prompts=load_prompts,
             header_provider=header_provider,
+            http_client=_build_http_client(header_provider),
         )
 
     if server_type:

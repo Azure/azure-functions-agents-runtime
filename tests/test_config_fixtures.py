@@ -32,13 +32,19 @@ class _CapturedMCPStreamableHTTPTool:
         url: str,
         *,
         allowed_tools: list[str] | None = None,
+        load_tools: bool = True,
+        load_prompts: bool = True,
         header_provider: object = None,
+        http_client: object = None,
         **_: object,
     ) -> None:
         self.name = name
         self.url = url
         self.allowed_tools = allowed_tools
+        self.load_tools = load_tools
+        self.load_prompts = load_prompts
         self.header_provider = header_provider
+        self.http_client = http_client
 
 
 def _specs_by_name(specs):

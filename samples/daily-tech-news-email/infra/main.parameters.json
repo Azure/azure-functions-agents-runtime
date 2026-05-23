@@ -4,8 +4,9 @@
   "parameters": {
     "environmentName": { "value": "${AZURE_ENV_NAME}" },
     "location": { "value": "${AZURE_LOCATION}" },
-    "azureOpenAiEndpoint": { "value": "${AZURE_OPENAI_ENDPOINT}" },
-    "azureOpenAiDeployment": { "value": "${AZURE_OPENAI_DEPLOYMENT}" },
+    "foundryProjectEndpoint": { "value": "${FOUNDRY_PROJECT_ENDPOINT}" },
+    "foundryModel": { "value": "${FOUNDRY_MODEL}" },
+    "o365McpServerUrl": { "value": "${O365_MCP_SERVER_URL}" },
     "toEmail": { "value": "${TO_EMAIL}" }
   }
 }
