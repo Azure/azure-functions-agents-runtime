@@ -21,7 +21,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- an Azure OpenAI resource with a model deployment (e.g. `gpt-5.2`)
+- an Azure AI Foundry project with a model deployment (e.g. `gpt-5.4-pro`)
 - An Azure subscription
 
 ## Deploy
@@ -31,8 +31,8 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    ```bash
    cd samples/daily-azure-report
    azd init
-   azd env set AZURE_OPENAI_ENDPOINT <your-azure-openai-endpoint>
-   azd env set AZURE_OPENAI_DEPLOYMENT gpt-5.2
+    azd env set FOUNDRY_PROJECT_ENDPOINT <your-foundry-project-endpoint>
+    azd env set FOUNDRY_MODEL gpt-5.4-pro
    azd env set TO_EMAIL <recipient@example.com>
    ```
 
@@ -79,8 +79,8 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 Required:
 
-- `AZURE_OPENAI_ENDPOINT`: your Azure OpenAI resource endpoint
-- `AZURE_OPENAI_DEPLOYMENT`: model deployment name (e.g. `gpt-5.2`)
+- `FOUNDRY_PROJECT_ENDPOINT`: your Azure AI Foundry project endpoint
+- `FOUNDRY_MODEL`: model deployment name (e.g. `gpt-5.4-pro`)
 - `SUBSCRIPTION_ID`: Azure subscription ID (for querying resources)
 - `TO_EMAIL`: recipient email address
 - `O365_CONNECTION_ID`: Office 365 connector ID

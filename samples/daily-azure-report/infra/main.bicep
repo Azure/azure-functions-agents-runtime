@@ -14,12 +14,12 @@ param environmentName string
 })
 param location string
 
-@description('Azure OpenAI endpoint (e.g. https://<name>.openai.azure.com/).')
+@description('Azure AI Foundry project endpoint (e.g. https://<name>.services.ai.azure.com/api/projects/<project>).')
 @minLength(1)
-param azureOpenAiEndpoint string
+param foundryProjectEndpoint string
 
-@description('Azure OpenAI model deployment name (e.g. gpt-4o, gpt-4o-mini).')
-param azureOpenAiDeployment string = 'gpt-5.2'
+@description('Azure AI Foundry model name or deployment name.')
+param foundryModel string = 'gpt-5.4-pro'
 
 @description('Email address to send the daily Azure report to.')
 param toEmail string
@@ -96,8 +96,9 @@ module api './app/api.bicep' = {
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
-      AZURE_OPENAI_ENDPOINT: azureOpenAiEndpoint
-      AZURE_OPENAI_DEPLOYMENT: azureOpenAiDeployment
+      MAF_PROVIDER: 'foundry'
+      FOUNDRY_PROJECT_ENDPOINT: foundryProjectEndpoint
+      FOUNDRY_MODEL: foundryModel
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       TO_EMAIL: toEmail
       SUBSCRIPTION_ID: subscription().subscriptionId

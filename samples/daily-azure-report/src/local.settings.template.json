@@ -6,7 +6,8 @@
     "SUBSCRIPTION_ID": "",
     "O365_CONNECTION_ID": "",
     "TO_EMAIL": "",
-    "AZURE_OPENAI_ENDPOINT": "",
-    "AZURE_OPENAI_DEPLOYMENT": "gpt-5.2"
+    "MAF_PROVIDER": "foundry",
+    "FOUNDRY_PROJECT_ENDPOINT": "",
+    "FOUNDRY_MODEL": "gpt-5.4-pro"
   }
 }
