@@ -12,7 +12,6 @@ _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 _UNSUPPORTED_TRIGGER_TYPES: dict[str, str] = {
     "activity_trigger": "Durable Functions triggers are not supported as agent triggers.",
     "assistant_skill_trigger": "Assistant skill triggers are not supported as agent triggers; use agent tools or MCP surfaces instead.",
-    "connector_trigger": "Use dotted connector trigger types instead, such as `connectors.generic_trigger`.",
     "entity_trigger": "Durable Functions triggers are not supported as agent triggers.",
     "mcp_prompt_trigger": "MCP prompt triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
     "mcp_resource_trigger": "MCP resource triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
@@ -64,6 +63,15 @@ def validate_resolved_agent(
                     source_file,
                     "trigger.type",
                     unsupported_message,
+                    "#trigger",
+                )
+            )
+        if "." in trigger_type:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "trigger.type",
+                    "Dotted connector trigger types are not supported. Use `connector_trigger` instead.",
                     "#trigger",
                 )
             )

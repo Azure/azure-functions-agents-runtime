@@ -19,7 +19,7 @@ Runtime rules:
 
 - Do not set `arg_name` in `trigger.args`. The runtime always injects `arg_name: trigger_data` for non-HTTP Azure Functions triggers.
 - `http_trigger` is the agent-runtime name for the Azure Functions `route(...)` decorator. Use `http_trigger`, not `route`.
-- Dotted trigger types such as `teams.new_channel_message_trigger` and `connectors.generic_trigger` are connector triggers and are resolved through `azure-functions-connectors`.
+- Connector-triggered agents use `connector_trigger`, which maps to the Azure Functions Python `connector_trigger(...)` decorator.
 - Other supported trigger types map directly to `FunctionApp.<trigger_type>(arg_name="trigger_data", **trigger.args)`.
 - `timer_trigger` accepts 5-part cron expressions; the runtime prepends seconds before registration.
 - String values under `trigger.*`, including `type`, follow [environment variable substitution](./front-matter-spec.md#environment-variable-substitution).
@@ -45,7 +45,7 @@ Runtime rules:
 | `dapr_service_invocation_trigger` | `dapr_service_invocation_trigger(...)` | Supported | Dapr service invocation trigger. |
 | `dapr_topic_trigger` | `dapr_topic_trigger(...)` | Supported | Dapr pub/sub topic trigger. |
 | `generic_trigger` | `generic_trigger(...)` | Supported | Custom extension binding trigger. |
-| `<connector>.<method>` | `azure-functions-connectors` method | Supported when connector package is installed | Examples: `teams.new_channel_message_trigger`, `connectors.generic_trigger`. |
+| `connector_trigger` | `connector_trigger(...)` | Supported | Generic connector trigger. Falls back to `generic_trigger(type="connectorTrigger")` when the installed Azure Functions package does not expose the native decorator. |
 
 ## Unsupported Trigger Decorators
 
@@ -63,7 +63,7 @@ These Azure Functions Python decorators are intentionally not supported as `.age
 | `mcp_tool_trigger` | Runtime MCP tool endpoints are registered by `debug.mcp`/main-agent debug surfaces. | `debug.mcp: true` or `main.agent.md`. |
 | `mcp_resource_trigger` | Runtime MCP resources are not authored as `.agent.md` triggers. | Runtime MCP/debug surfaces. |
 | `mcp_prompt_trigger` | Runtime MCP prompts are not authored as `.agent.md` triggers. | Runtime MCP/debug surfaces. |
-| `connector_trigger` | The runtime uses dotted connector trigger names through `azure-functions-connectors`. | `connectors.generic_trigger` or a specific dotted connector method. |
+| Dotted connector trigger types such as `teams.new_channel_message_trigger` or `connectors.generic_trigger` | Dotted connector trigger resolution is not supported. | `connector_trigger` |
 
 ## HTTP Trigger
 
@@ -470,18 +470,11 @@ Ref: [Azure Functions custom bindings](https://learn.microsoft.com/azure/azure-f
 
 ## Connector Triggers
 
-Connector triggers use dotted names and are resolved through [`azure-functions-connectors`](https://github.com/anthonychu/azure-functions-connectors-python). Install the connectors extra when using them.
+Connector-triggered agents use `trigger.type: connector_trigger`. The runtime uses the Azure Functions Python `connector_trigger(...)` decorator when it is available, and otherwise registers the equivalent generic binding shape with `type: connectorTrigger`.
 
 ```yaml
 trigger:
-  type: teams.new_channel_message_trigger
-  args:
-    # connector-specific parameters
-```
-
-```yaml
-trigger:
-  type: connectors.generic_trigger
+  type: connector_trigger
   args:
     connection_name: $CONNECTION_NAME
     trigger_identifier: <trigger-id>
@@ -489,10 +482,9 @@ trigger:
 
 Rules:
 
-- Any `trigger.type` containing a dot is treated as a connector trigger.
-- The `connectors.` prefix is removed before method resolution, so `connectors.generic_trigger` resolves to `FunctionsConnectors(app).generic_trigger(...)`.
-- Other dotted names are resolved as nested attributes, for example `teams.new_channel_message_trigger`.
-- If the connectors package is missing, or the dotted method cannot be resolved, the runtime logs a warning/error and skips that function registration.
+- Use `trigger.type: connector_trigger`; dotted connector trigger names are rejected during config validation.
+- The runtime registers the trigger through `FunctionApp.connector_trigger(...)` when available, otherwise through `FunctionApp.generic_trigger(type="connectorTrigger", ...)`.
+- Connector-specific fields are passed through to the Azure Functions connector trigger binding.
 
 Connector actions that an agent calls as tools should be exposed through connector-backed MCP servers in `mcp.json`; connector triggers are only for invoking an agent when an external connector event occurs.
 

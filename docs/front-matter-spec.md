@@ -191,8 +191,8 @@ trigger:
 trigger:
   type: queue_trigger
   args:
-    name: string           # Required. Queue name
-    connection: string     # Optional. App setting name for connection string. Defaults to AzureWebJobsStorage
+    queue_name: string     # Required. Queue name
+    connection: string     # Required. App setting or setting collection for Azure Queue Storage
 ```
 
 #### **Blob Trigger**
@@ -210,15 +210,32 @@ trigger:
   type: event_grid_trigger
 ```
 
-#### **Service Bus Trigger**
+#### **Service Bus Queue Trigger**
 ```yaml
 trigger:
-  type: service_bus_trigger
+  type: service_bus_queue_trigger
   args:
-    queue_name: string           # Required if using queue. Queue name
-    topic_name: string           # Required if using topic. Topic name
-    subscription_name: string    # Required if using topic. Subscription name
-    connection: string           # Optional. App setting name for connection string
+    queue_name: string           # Required. Queue name
+    connection: string           # Required. App setting or setting collection for Service Bus
+```
+
+#### **Service Bus Topic Trigger**
+```yaml
+trigger:
+  type: service_bus_topic_trigger
+  args:
+    topic_name: string           # Required. Topic name
+    subscription_name: string    # Required. Subscription name
+    connection: string           # Required. App setting or setting collection for Service Bus
+```
+
+#### **Connector Trigger**
+```yaml
+trigger:
+  type: connector_trigger
+  args:
+    connection_name: string      # Required by connector binding configuration
+    trigger_identifier: string   # Required by connector binding configuration
 ```
 
 ---

@@ -206,7 +206,7 @@ system_tools:
 
 # For triggered agents only (not `main.agent.md`):
 trigger:
-  type: timer_trigger      # or queue_trigger, teams.new_channel_message_trigger, etc.
+  type: timer_trigger      # or queue_trigger, connector_trigger, etc.
   args:
     schedule: "0 0 9 * * *"  # trigger-specific params passed as kwargs
 
@@ -252,8 +252,7 @@ For a complete reference of all supported triggers and their parameters, see [do
 |---|---|---|
 | `http_trigger` | Runtime HTTP adapter over `app.route(...)` | `http_trigger` |
 | No dots | `app.<type>(...)` | `timer_trigger`, `queue_trigger` |
-| Dots | Connector library method | `teams.new_channel_message_trigger` |
-| `connectors.` prefix | Explicit connector method | `connectors.generic_trigger` |
+| `connector_trigger` | `app.connector_trigger(...)` | `connector_trigger` |
 
 ### HTTP-triggered agents
 
