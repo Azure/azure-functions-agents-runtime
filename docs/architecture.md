@@ -112,13 +112,13 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
    - **Input:** `AgentSpec`, `GlobalConfig`, `discovered_mcp_names: list[str]`, `discovered_skill_names: list[str]`
    - **Output:** `ResolvedAgent`
-   - **Notes:** this is where precedence rules are applied. Model and timeout fall through agent config, global config, environment, and defaults; for model selection specifically, the explicit requested value wins, then provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry), then `MAF_MODEL`, then the provider default. Capability filters turn the global/shared inventories into per-agent allow/deny decisions.
+   - **Notes:** this is where startup-level precedence rules are applied. Timeout resolves from agent front matter, global config, `AGENT_TIMEOUT`, and then the 900-second default. Model resolves from agent front matter, global config, or `MAF_MODEL`; if registration does not request a model, the active `ClientManager` later falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default. Capability filters turn the global/shared inventories into per-agent allow/deny decisions.
 
 6. **Validate the merged configuration**
    - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
    - **Input:** each `ResolvedAgent`, discovered MCP server names as `list[str]`, and discovered skill names as `list[str]`
    - **Output:** the same validated `ResolvedAgent` (or an exception that skips registration for that agent)
-   - **Notes:** validation checks that non-main agents define a trigger and that per-agent `mcp.exclude` entries match MCP servers discovered from `mcp.json`. Unknown skill and tool excludes are logged as warnings during the same pass.
+   - **Notes:** validation checks that non-main agents define a trigger, rejects trigger decorator names that the agent runtime does not support, and ensures per-agent `mcp.exclude` entries match MCP servers discovered from `mcp.json`. Unknown skill and tool excludes are logged as warnings during the same pass.
 
 7. **Build per-agent capabilities**
    - **Implemented by:** `src/azure_functions_agents/registration/capabilities.py:build_capabilities()`
@@ -147,12 +147,13 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 - **Main agent with debug enabled:** `create_function_app()` skips `register_agent()` because `main.agent.md` has no normal trigger, but `register_debug_endpoints()` exposes the chat UI, REST, SSE, and MCP surfaces for interactive use.
 - **Non-main HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which validates JSON input and optionally validates the model's JSON-shaped response before replying. Before the decorator is applied, `create_function_app()` and `register_agent()` coordinate through a shared `registered_names` set so duplicate sanitized stems become `name`, `name_2`, `name_3`, and so on.
 - **Non-main built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which serializes the trigger payload to JSON, turns it into a prompt, and sends it to `runner.run_agent()`. The same shared `registered_names` tracking means host-level Azure Function names auto-suffix on collision rather than failing registration.
-- **Connector trigger:** `registration/triggers.py` resolves the dotted connector decorator dynamically and then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path. Connector-backed agents participate in the same per-app `registered_names` allocation flow.
+- **Connector trigger:** `registration/triggers.py` resolves the dotted connector decorator dynamically and then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path. Connector-triggered agents participate in the same per-app `registered_names` allocation flow.
 
 ### Where MCP and sandbox tools enter
 
 - MCP server definitions are read from `mcp.json`, translated into MAF MCP tool wrappers by `discover_mcp_servers()`, and filtered per agent through capability settings.
 - Connector actions should be surfaced through connector-backed MCP servers. This keeps connector integration on the standard MCP discovery path and lets each server define its own transport, auth, and allowed tool set.
+- Legacy `system_tools.tools_from_connections` entries still flow through `configure_connector_tools()` and `AgentCapabilities.use_connector_tools` for compatibility, but new apps should use connector-backed MCP servers instead.
 - Sandbox configuration is read from `GlobalConfig.system_tools.execute_in_sessions`, carried into `ResolvedAgent.sandbox_config`, and turned into per-session tool closures by `build_sandbox_tools_for_session()` right before a request is executed.
 - Sandbox tools are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
 
@@ -165,6 +166,7 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
+- `AgentCapabilities.use_connector_tools` controls whether the legacy connector-tool compatibility cache is queried.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
 
 The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, and streaming/non-streaming response handling.
@@ -182,7 +184,7 @@ These are the main "passport" objects that move through the pipeline:
 - `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
   - **Created by:** `config/merge.py:compose()`
   - **Consumed by:** validation, capability building, trigger registration, endpoint registration, and sandbox-tool assembly
-- `AgentCapabilities` — final filtered bundle of user tools, MCP tools, skills text, and connector-tool enablement. Defined in `src/azure_functions_agents/registration/capabilities.py` as `AgentCapabilities`.
+- `AgentCapabilities` — final filtered bundle of user tools, MCP tools, skill directories, and legacy connector-tool enablement. Defined in `src/azure_functions_agents/registration/capabilities.py` as `AgentCapabilities`.
   - **Created by:** `registration/capabilities.py:build_capabilities()`
   - **Consumed by:** `registration/triggers.py`, `registration/endpoints.py`, and the handler closures they create
 - `azure.functions.FunctionApp` — the final Azure Functions app object created in `src/azure_functions_agents/app.py:create_function_app()` and returned to the host after registration completes.
@@ -221,7 +223,7 @@ This extension point is deliberately below the registration layer: no trigger or
 
 To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:tool()`.
 
-These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside connector, sandbox, and MCP tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
+These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools, MCP tools, and legacy connector tools when that compatibility path is configured. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 
 ### Per-agent capability filtering
 
@@ -229,7 +231,7 @@ Each agent can narrow the shared inventory with front-matter `mcp`, `tools`, and
 
 This design keeps global config declarative: shared config says what exists, while agent front matter says what to exclude or opt out of. That separation is the reason the runtime has both a discovery stage and a capability-filtering stage instead of folding them together.
 
-### Other notable seams
+### Other notable boundaries
 
 - **Skills:** discovered as `SKILL.md` directories and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector triggers remain available through trigger type dot notation.

@@ -9,6 +9,20 @@ from azure_functions_agents._logger import logger as _logger
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
+_UNSUPPORTED_TRIGGER_TYPES: dict[str, str] = {
+    "activity_trigger": "Durable Functions triggers are not supported as agent triggers.",
+    "assistant_skill_trigger": "Assistant skill triggers are not supported as agent triggers; use agent tools or MCP surfaces instead.",
+    "connector_trigger": "Use dotted connector trigger types instead, such as `connectors.generic_trigger`.",
+    "entity_trigger": "Durable Functions triggers are not supported as agent triggers.",
+    "mcp_prompt_trigger": "MCP prompt triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
+    "mcp_resource_trigger": "MCP resource triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
+    "mcp_tool_trigger": "MCP tool triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
+    "orchestration_trigger": "Durable Functions triggers are not supported as agent triggers.",
+    "route": "Use `http_trigger` instead of the Azure Functions `route` decorator name.",
+    "schedule": "Use `timer_trigger` instead of the Azure Functions `schedule` decorator alias.",
+    "warm_up_trigger": "Warm-up triggers are host lifecycle hooks and are not supported as agent triggers.",
+}
+
 
 def _format_error(
     source_file: str | Path,
@@ -20,6 +34,7 @@ def _format_error(
     normalized_message = message if message.endswith(".") else f"{message}."
     suffix = "" if "See " in normalized_message else f" See {spec_link}."
     return f"{Path(source_file)}: field `{field}`: {normalized_message}{suffix}"
+
 
 def validate_resolved_agent(
     resolved: Any,
@@ -39,6 +54,19 @@ def validate_resolved_agent(
                 "#trigger",
             )
         )
+
+    if resolved.trigger is not None:
+        trigger_type = str(resolved.trigger.type or "").strip()
+        unsupported_message = _UNSUPPORTED_TRIGGER_TYPES.get(trigger_type)
+        if unsupported_message:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "trigger.type",
+                    unsupported_message,
+                    "#trigger",
+                )
+            )
 
     known_mcp = set(discovered_mcp_names)
     for name in getattr(resolved, "mcp_exclude_names", []) or []:

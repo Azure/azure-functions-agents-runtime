@@ -180,7 +180,7 @@ Non-main agents can also opt into their own chat UI and HTTP debug endpoints wit
 Define event-triggered agents with `.agent.md` files. Each file corresponds to a single Azure Function. Supported trigger types:
 
 - **Event triggers** — timer, queue, blob, Event Hub, Service Bus, Cosmos DB, Teams, Office 365, etc.
-- **HTTP triggers** — expose agents as REST API endpoints with structured JSON responses via `response_example`
+- **HTTP triggers** — expose agents as REST API endpoints; add `response_example` or `response_schema` for validated JSON responses
 
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
@@ -250,7 +250,7 @@ For a complete reference of all supported triggers and their parameters, see [do
 
 | Format | Resolves to | Example |
 |---|---|---|
-| `http_trigger` | `app.route(...)` with structured JSON response | `http_trigger` |
+| `http_trigger` | Runtime HTTP adapter over `app.route(...)` | `http_trigger` |
 | No dots | `app.<type>(...)` | `timer_trigger`, `queue_trigger` |
 | Dots | Connector library method | `teams.new_channel_message_trigger` |
 | `connectors.` prefix | Explicit connector method | `connectors.generic_trigger` |

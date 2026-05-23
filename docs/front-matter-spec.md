@@ -45,7 +45,7 @@ For capabilities (MCP, skills, tools):
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
 | **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -60,6 +60,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Supported properties:**
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
+  - `tools_from_connections` (deprecated) — Connector tool configuration; use connector-backed MCP servers in `mcp.json` for new apps
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
@@ -80,6 +81,8 @@ YAML front matter at the top of each agent file.
 - `debug` — Object or boolean for enabling debugging/testing endpoints
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
+- `logger` — Boolean to enable/disable response logging for triggered agents
+- `substitute_variables` — Boolean to enable/disable environment-variable substitution for this agent
 - `system_tools` — Object to opt out of system tools
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
@@ -121,6 +124,7 @@ Fields are organized into categories based on how they can be used:
 - `name`, `description` — Agent identity (required)
 - `trigger` — Invocation method (required for non-main agents)
 - `debug` — Debugging and testing endpoints
+- `logger`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
 - `metadata` — Organizational metadata
 
@@ -150,7 +154,7 @@ Fields are organized into categories based on how they can be used:
 - **Type:** `object`
 - **Typical location:** Agent only
 - **Can override:** N/A (agent-specific only)
-- **Description:** Defines how the agent is invoked. Required for all agents except `main.agent.md`. If `main.agent.md` omits `trigger`, it uses the default HTTP trigger settings.
+- **Description:** Defines how the agent is invoked. Required for all agents except `main.agent.md`. If `main.agent.md` omits `trigger`, the runtime registers the built-in chat UI, `/agent/chat`, `/agent/chatstream`, and MCP debug surfaces instead of a normal trigger.
 - **Structure:** `type` field specifies the trigger type, `args` contains type-specific configuration
 - **Important:** Only **one trigger per agent file** is allowed
 
@@ -179,7 +183,7 @@ trigger:
 trigger:
   type: timer_trigger
   args:
-    schedule: string       # Required. CRON expression (6-field format: second minute hour day month day-of-week)
+    schedule: string       # Required. NCRONTAB expression (6 fields, or 5 fields with seconds prepended)
 ```
 
 #### **Queue Trigger**
@@ -317,7 +321,7 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Specifies which LLM to use for the agent. Valid model identifiers depend on the active provider.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry) → `MAF_MODEL` → provider default
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `MAF_MODEL` env var. If no model is resolved by configuration, the active client manager falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default.
 
 **Global default:**
 ```yaml
@@ -338,7 +342,7 @@ model: gpt-4o-mini  # Use faster model for this agent
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Maximum execution time in seconds for the agent.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `COPILOT_AGENT_TIMEOUT` env var → `900` seconds (default)
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AGENT_TIMEOUT` env var → `900` seconds (default)
 
 **Global default:**
 ```yaml
@@ -362,6 +366,8 @@ timeout: 60  # 1 minute for fast agent
 system_tools:
   execute_in_sessions:      # Code execution sandbox configuration
     session_pool_management_endpoint: string
+  tools_from_connections:   # Deprecated. Use connector-backed MCP servers in mcp.json.
+    - connection_id: string
 ```
 
 ---
@@ -391,6 +397,23 @@ system_tools:
 **Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
+
+---
+
+##### `system_tools.tools_from_connections` (deprecated)
+- **Type:** `array`
+- **Status:** Deprecated. This field remains implemented for compatibility, but new apps should expose connector actions through connector-backed MCP servers in `mcp.json`.
+- **Description:** Loads connector-backed tools directly from Azure connector resources. Prefer MCP because it uses the standard MCP discovery, filtering, authentication, and tool invocation path.
+
+**Legacy global configuration (in `agents.config.yaml`):**
+```yaml
+system_tools:
+  tools_from_connections:
+    - connection_id: $O365_CONNECTION_ID
+      prefix: office365  # optional
+```
+
+**Recommended replacement:** define the connector-backed MCP server in `mcp.json` and filter it with agent `mcp.exclude` when needed.
 
 ---
 
@@ -564,6 +587,34 @@ metadata:
 
 ---
 
+#### `logger`
+- **Type:** `boolean`
+- **Typical location:** Agent only
+- **Can override:** N/A (agent-specific only)
+- **Default:** `true`
+- **Description:** Controls whether triggered and HTTP agents log response summaries. Set to `false` to suppress runtime response logging for an agent.
+
+**Example:**
+```yaml
+logger: false
+```
+
+---
+
+#### `substitute_variables`
+- **Type:** `boolean`
+- **Typical location:** Agent only
+- **Can override:** N/A (agent-specific only)
+- **Default:** `true`
+- **Description:** Controls whether this agent resolves environment variables in front matter values and markdown body text. See [Environment Variable Substitution](#environment-variable-substitution).
+
+**Example:**
+```yaml
+substitute_variables: false
+```
+
+---
+
 ## Environment Variable Substitution
 
 Environment variable substitution is resolved against the Azure Functions process environment. On Azure, Application Settings are exposed to the function host as environment variables, so placeholders can refer to either local environment variables or deployed app settings.
@@ -622,7 +673,8 @@ With `substitute_variables: false`, `model`, `response_example`, and `$TO_EMAIL`
 **Common patterns:**
 - `$ACA_SESSION_POOL_ENDPOINT` — Session pool endpoint
 - `$SUBSCRIPTION_ID` — Azure subscription ID
-- `$O365_CONNECTION_ID` — Office 365 connection resource ID
+- `$O365_MCP_SERVER_URL` — Office 365 Outlook MCP server URL
+- `$O365_MCP_CLIENT_ID` — Optional managed identity client ID for an Office 365 Outlook MCP server
 - `$API_ENDPOINT` — Service endpoint URL
 - `$TO_EMAIL` — Recipient email address
 - `$STORAGE_CONNECTION` — Storage account connection string
@@ -855,7 +907,7 @@ description: An interactive assistant for exploring Azure resources
 Help the user explore resources in subscription $SUBSCRIPTION_ID.
 ```
 
-All configuration uses framework defaults (HTTP trigger, default model, etc.)
+This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug surface, inherited capabilities, and model resolution from environment/provider defaults.
 
 ---
 
@@ -876,6 +928,7 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `execute_in_sessions` (object)
+  - `tools_from_connections` (array, deprecated)
 - `model` (string)
 - `timeout` (number)
 - `tools` (object)
@@ -886,17 +939,17 @@ All configuration uses framework defaults (HTTP trigger, default model, etc.)
 
 1. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
 2. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
-3. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
+3. **Trigger type-specific validation:** Unsupported trigger decorator names are rejected; supported trigger types validate their own required fields in the `args` section
 4. **Environment variables:** Inline `$VAR` and `%VAR%` placeholders in supported string values may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
-5. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
+5. **CRON expressions:** Timer trigger schedules must be valid NCRONTAB expressions; 6-field expressions are passed through, and 5-field expressions have `0` seconds prepended by the runtime
 6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
 7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
 8. **Schema validation:** `input_schema` and `response_schema` must be valid JSON Schema (draft-07 or later)
-9. **Model names:** Must be valid Copilot SDK model identifiers (e.g., `claude-sonnet-4`, `gpt-4o`, `o1`, `o1-mini`)
+9. **Model names:** Must be valid model identifiers for the active Microsoft Agent Framework provider
 10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
-11. **Tool references:** Tools in `tools.exclude` must exist in the `tools/` directory
+11. **Tool references:** Tools in `tools.exclude` are best-effort validated; unknown tool names produce warnings during config validation
 12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
-13. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
+13. **Skill references:** Skills in `skills.exclude` are best-effort validated; unknown skill names produce warnings during config validation
 15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 
 ---
@@ -936,7 +989,7 @@ The `main.agent.md` file is special:
   - `POST /agent/chat` — Non-streaming chat endpoint
   - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
   - MCP tool registration — Tool name derived from the sanitized filename slug (`main` for `main.agent.md`), exposed as `mcpToolTrigger`
-- **No trigger required** — Uses HTTP by default; can be omitted from front matter
+- **No trigger required** — Registers built-in chat UI, chat APIs, and MCP debug surfaces by default; `trigger` can be omitted from front matter
 
 Other agents require an explicit `trigger` definition and have `debug: false` (all debug endpoints disabled) by default.
 
@@ -944,7 +997,7 @@ Other agents require an explicit `trigger` definition and have `debug: false` (a
 ```
 /
   agents.config.yaml           # Global configuration
-  main.agent.md             # Default HTTP agent
+  main.agent.md             # Built-in chat UI, chat APIs, and MCP debug surfaces
   daily_report.agent.md     # Timer-triggered agent
   resource_summary.agent.md # Custom HTTP agent
   function_app.py           # Python Functions entry point
