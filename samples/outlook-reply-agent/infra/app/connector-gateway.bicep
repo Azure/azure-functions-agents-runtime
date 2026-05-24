@@ -1,6 +1,6 @@
 param connectorGatewayName string
 param connectionName string = 'office365-outlook'
-param mcpServerConfigName string = 'Office-365-Outlook-send-email-only'
+param mcpServerConfigName string = 'Office-365-Outlook-draft-replies'
 param location string = resourceGroup().location
 param tags object = {}
 param managedIdentityPrincipalId string
@@ -54,12 +54,26 @@ resource office365ConnectionDeployerAccessPolicy 'Microsoft.Web/connectorGateway
   }
 }
 
+resource office365ConnectionGatewayAccessPolicy 'Microsoft.Web/connectorGateways/connections/accessPolicies@2026-05-01-preview' = {
+  parent: office365Connection
+  name: 'connectorGateway-msi'
+  properties: {
+    principal: {
+      type: 'ActiveDirectory'
+      identity: {
+        objectId: connectorGateway.identity.principalId
+        tenantId: tenantId
+      }
+    }
+  }
+}
+
 resource office365McpServerConfig 'Microsoft.Web/connectorGateways/mcpserverconfigs@2026-05-01-preview' = {
   parent: connectorGateway
   name: mcpServerConfigName
   properties: {
     state: 'Enabled'
-    description: 'Microsoft Office 365 is a cloud-based service that is designed to help meet your organization\'s needs for robust security, reliability, and user productivity.'
+    description: 'Office 365 Outlook draft-reply actions for the Outlook reply agent sample.'
     connectors: [
       {
         name: 'office365'
@@ -68,34 +82,58 @@ resource office365McpServerConfig 'Microsoft.Web/connectorGateways/mcpserverconf
         description: ''
         operations: [
           {
-            name: 'SendEmailV2'
-            displayName: 'Send an email'
-            description: 'This operation sends an email message.'
+            name: 'DraftEmail'
+            displayName: 'Draft an email message'
+            description: 'This operation drafts an email message.'
             userParameters: []
             agentParameters: [
               {
-                name: 'emailMessage'
+                name: 'messageId'
+                schema: {
+                  type: 'string'
+                  description: 'Optional source message ID to draft a reply against.'
+                }
+              }
+              {
+                name: 'draftType'
+                schema: {
+                  type: 'string'
+                  description: 'Optional draft type. Use Reply when drafting a reply to an existing message.'
+                }
+              }
+              {
+                name: 'comment'
+                schema: {
+                  type: 'string'
+                  description: 'Plain-text reply body for Reply drafts. Use this for the generated visible reply content when draftType is Reply; do not include HTML tags or Markdown.'
+                }
+              }
+              {
+                name: 'draftMessage'
                 schema: {
                   type: 'object'
+                  description: 'Draft message envelope. Include To, Subject, and Body for both new drafts and Reply drafts. For Reply drafts, duplicate the plain-text comment in Body and put the visible reply body in comment.'
                   properties: {
                     To: {
                       type: 'string'
                       format: 'email'
                       description: 'Specify email addresses separated by semicolons like someone@contoso.com'
-                      required: true
                     }
                     Subject: {
                       type: 'string'
                       description: 'Specify the subject of the mail'
-                      required: true
                     }
                     Body: {
                       type: 'string'
                       format: 'html'
-                      description: 'Specify the body of the mail'
-                      required: true
+                      description: 'Specify the body of the draft mail'
                     }
                   }
+                  required: [
+                    'To'
+                    'Subject'
+                    'Body'
+                  ]
                 }
               }
             ]
@@ -114,4 +152,5 @@ output connectorGatewayName string = connectorGateway.name
 output connectionId string = office365Connection.id
 output connectionAccessPolicyId string = office365ConnectionAccessPolicy.id
 output deployerConnectionAccessPolicyId string = office365ConnectionDeployerAccessPolicy.id
+output connectorGatewayConnectionAccessPolicyId string = office365ConnectionGatewayAccessPolicy.id
 output mcpEndpointUrl string = office365McpServerConfig.properties.mcpEndpointUrl

@@ -35,7 +35,7 @@ resource foundryProject 'Microsoft.CognitiveServices/accounts/projects@2025-10-0
   }
   properties: {
     displayName: projectName
-    description: 'Daily Azure report sample project'
+    description: 'Outlook reply agent sample project'
   }
 }
 

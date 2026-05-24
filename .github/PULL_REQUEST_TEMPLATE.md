@@ -29,7 +29,7 @@ What kind of change does this Pull Request introduce?
 git clone https://github.com/anthonychu/azure-functions-agents.git
 cd azure-functions-agents
 git checkout [branch-name]
-pip install -e ".[connectors]"
+pip install -e .
 ```
 
 * Test the code

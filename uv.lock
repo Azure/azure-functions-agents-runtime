@@ -247,19 +247,6 @@ wheels = [
 ]
 
 [[package]]
-name = "azure-connectors"
-version = "0.1.0"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "aiohttp" },
-    { name = "azure-identity" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/68/ae/496d955d7dfa6367472eafd4aa64d54616539823a594e5158236a245a1df/azure_connectors-0.1.0.tar.gz", hash = "sha256:93ea4995473c778ef91c360997983063cf69f0b26b9a522dae7a1a25a7da8401", size = 42510, upload-time = "2026-05-05T18:22:26.957Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/66/bf/912ece24ae97bbf36941d26676f6c076e398f862b08fe277eec9e9985660/azure_connectors-0.1.0-py3-none-any.whl", hash = "sha256:c7e1513f46428a0624a557d2a3a85effc1111788887432ebbd81e549bc7b57a6", size = 47288, upload-time = "2026-05-05T18:22:28.934Z" },
-]
-
-[[package]]
 name = "azure-core"
 version = "1.41.0"
 source = { registry = "https://pypi.org/simple" }
@@ -326,6 +313,7 @@ dependencies = [
     { name = "aiohttp" },
     { name = "azure-functions" },
     { name = "azure-identity" },
+    { name = "azure-storage-blob" },
     { name = "azurefunctions-extensions-http-fastapi" },
     { name = "jsonschema" },
     { name = "mcp" },
@@ -334,9 +322,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-connectors = [
-    { name = "azure-connectors" },
-]
 dev = [
     { name = "mypy" },
     { name = "pydantic" },
@@ -352,9 +337,9 @@ requires-dist = [
     { name = "agent-framework-foundry", specifier = "==1.3.*" },
     { name = "agent-framework-openai", specifier = "==1.3.*" },
     { name = "aiohttp", specifier = "==3.13.*" },
-    { name = "azure-connectors", marker = "extra == 'connectors'", specifier = "==0.1.*" },
     { name = "azure-functions", specifier = "==2.1.*" },
     { name = "azure-identity", specifier = "==1.25.*" },
+    { name = "azure-storage-blob", specifier = "==12.28.*" },
     { name = "azurefunctions-extensions-http-fastapi", specifier = "==1.0.*" },
     { name = "jsonschema", specifier = "==4.26.*" },
     { name = "mcp", specifier = "==1.27.*" },
@@ -367,7 +352,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = "==0.15.*" },
     { name = "types-jsonschema", marker = "extra == 'dev'", specifier = "==4.26.*" },
 ]
-provides-extras = ["connectors", "dev"]
+provides-extras = ["dev"]
 
 [[package]]
 name = "azurefunctions-extensions-base"

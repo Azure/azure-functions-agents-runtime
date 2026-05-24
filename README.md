@@ -27,15 +27,6 @@ Add it to your function app's `requirements.txt`:
 azurefunctions-agents-runtime
 ```
 
-### With connector trigger support
-
-Connector triggers (Teams, Office 365, SQL, Salesforce, etc.) require an optional extra:
-
-```bash
-pip install "azurefunctions-agents-runtime[connectors]"
-```
-
-
 ## Model Provider Configuration
 
 The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Microsoft Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
@@ -124,7 +115,7 @@ app = create_function_app()
 azurefunctions-agents-runtime
 ```
 
-Or use `azurefunctions-agents-runtime[connectors]` to enable optional connector trigger bindings.
+Connector-backed tools are exposed through MCP servers in `mcp.json`, and connector-triggered apps use the Azure Functions Connector Extension through the Functions extension bundle. No package extra is required.
 
 ### 5. Set the model provider
 
@@ -489,9 +480,6 @@ cd azure-functions-agents
 
 # Install in development mode
 pip install -e .
-
-# Include connector trigger support when working on connector-trigger bindings
-pip install -e ".[connectors]"
 
 # Build a wheel
 pip install build

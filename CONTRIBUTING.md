@@ -77,7 +77,7 @@ That's it! Thank you for your contribution!
 # Clone the repo and install in editable mode
 git clone https://github.com/anthonychu/azure-functions-agents.git
 cd azure-functions-agents
-pip install -e ".[connectors]"
+pip install -e .
 
 # Build a wheel
 pip install build
