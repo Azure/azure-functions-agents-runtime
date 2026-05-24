@@ -5,7 +5,6 @@
       "url": "$O365_MCP_SERVER_URL",
       "load_prompts": false,
       "auth": {
-        "type": "azure_identity",
         "scope": "https://apihub.azure.com/.default",
         "client_id": "$O365_MCP_CLIENT_ID"
       }

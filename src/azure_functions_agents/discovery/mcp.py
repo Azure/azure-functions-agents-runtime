@@ -18,9 +18,6 @@ MCPTool: TypeAlias = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
-_AUTH_CLIENT_ID_KEYS = ("client_id", "managed_identity_client_id", "identity_client_id")
-
-
 def clear_mcp_cache() -> None:
     """Clear cached MCP server discovery results."""
     _DISCOVERED_MCP_SERVERS_CACHE.clear()
@@ -44,23 +41,9 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
 
         return static_header_provider
 
-    auth_type = str(auth.get("type", "")).strip().lower().replace("-", "_")
-    if auth_type not in {"azure_identity", "default_azure_credential", "managed_identity"}:
-        logger.warning(
-            "MCP server auth type '%s' is not supported; using static headers only",
-            auth.get("type", ""),
-        )
-        if not static_headers:
-            return None
-
-        def unsupported_auth_header_provider(_ctx: Any) -> dict[str, str]:
-            return dict(static_headers)
-
-        return unsupported_auth_header_provider
-
     scope = str(auth.get("scope", "")).strip()
     if not scope:
-        logger.warning("MCP server auth type 'azure_identity' requires a non-empty 'scope'")
+        logger.warning("MCP server auth requires a non-empty 'scope'")
         if not static_headers:
             return None
 
@@ -69,17 +52,14 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
 
         return missing_scope_header_provider
 
-    client_id = ""
-    for key in _AUTH_CLIENT_ID_KEYS:
-        value = str(auth.get(key, "")).strip()
-        if value and not has_unresolved_placeholders(value):
-            client_id = value
-            break
+    client_id = str(auth.get("client_id", "")).strip()
+    if has_unresolved_placeholders(client_id):
+        client_id = ""
 
     credential = build_credential_with_client_id(client_id) if client_id else build_credential()
     cached_token: dict[str, str | int] = {"token": "", "expires_on": 0}
 
-    def azure_identity_header_provider(_ctx: Any) -> dict[str, str]:
+    def default_credential_header_provider(_ctx: Any) -> dict[str, str]:
         now = int(time.time())
         expires_on = int(cached_token["expires_on"])
         if not cached_token["token"] or expires_on - _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS <= now:
@@ -91,7 +71,7 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
         result["Authorization"] = f"Bearer {cached_token['token']}"
         return result
 
-    return azure_identity_header_provider
+    return default_credential_header_provider
 
 
 def _build_http_client(header_provider: Any) -> Any:

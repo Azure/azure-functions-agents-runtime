@@ -395,7 +395,6 @@ String values in `mcp.json` support inline environment-variable substitution wit
       "tools": ["office365_SendEmailV2"],
       "load_prompts": false,
       "auth": {
-        "type": "azure_identity",
         "scope": "https://apihub.azure.com/.default",
         "client_id": "$O365_MCP_CLIENT_ID"
       }
@@ -412,9 +411,9 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 - **`load_tools`** — optional boolean controlling whether tools are loaded from the MCP server (default: `true`)
 - **`load_prompts`** — optional boolean controlling whether prompts are loaded from the MCP server (default: `true`). Set this to `false` for MCP servers that do not implement `prompts/list`.
-- **`auth`** — optional authentication configuration. `auth.type` may be `azure_identity`, `default_azure_credential`, or `managed_identity`. For Azure identity auth, set `auth.scope` to the token scope required by the MCP server.
+- **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
 
-Azure identity MCP auth uses `DefaultAzureCredential`. By default it follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose an identity for a single MCP server without changing the app-wide identity, set `auth.client_id` (or `auth.managed_identity_client_id` / `auth.identity_client_id`) in that server's `mcp.json` entry. If the configured client id is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
+By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
 
 > **Note**: Entries without a `url`, with unresolved placeholders in `url`, or with a `type` other than `"http"` / `"streamable-http"`, are ignored with a warning. Use the remote HTTP transport instead.
 

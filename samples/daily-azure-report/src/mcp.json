@@ -10,7 +10,6 @@
       "tools": ["office365_SendEmailV2"],
       "load_prompts": false,
       "auth": {
-        "type": "azure_identity",
         "scope": "https://apihub.azure.com/.default",
         "client_id": "$O365_MCP_CLIENT_ID"
       }

@@ -329,7 +329,7 @@ def test_discover_undefined_variable_stays_literal(tmp_path: Path) -> None:
     assert discovered_servers == {}
 
 
-def test_discover_mcp_servers_supports_azure_identity_auth(
+def test_discover_mcp_servers_supports_auth_scope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeCredential:
@@ -355,7 +355,6 @@ def test_discover_mcp_servers_supports_azure_identity_auth(
                     "url": "https://example.com/mcp",
                     "headers": {"X-Test": "yes"},
                     "auth": {
-                        "type": "azure_identity",
                         "scope": "https://apihub.azure.com/.default",
                     },
                 }
@@ -379,7 +378,36 @@ def test_discover_mcp_servers_supports_azure_identity_auth(
     assert credential.calls == 1
 
 
-def test_discover_mcp_servers_supports_azure_identity_client_id(
+def test_discover_mcp_servers_auth_without_scope_uses_static_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"X-Test": "yes"},
+                    "auth": {},
+                }
+            }
+        },
+    )
+
+    with caplog.at_level(logging.WARNING):
+        tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.header_provider(None) == {"X-Test": "yes"}
+    assert "requires a non-empty 'scope'" in caplog.text
+
+
+def test_discover_mcp_servers_supports_auth_client_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeCredential:
@@ -409,7 +437,6 @@ def test_discover_mcp_servers_supports_azure_identity_client_id(
                     "type": "http",
                     "url": "https://example.com/mcp",
                     "auth": {
-                        "type": "azure_identity",
                         "scope": "https://apihub.azure.com/.default",
                         "client_id": "client-123",
                     },
@@ -426,7 +453,7 @@ def test_discover_mcp_servers_supports_azure_identity_client_id(
     assert captured_client_ids == ["client-123"]
 
 
-def test_discover_mcp_servers_ignores_unresolved_azure_identity_client_id(
+def test_discover_mcp_servers_ignores_unresolved_auth_client_id(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     class FakeCredential:
@@ -451,7 +478,6 @@ def test_discover_mcp_servers_ignores_unresolved_azure_identity_client_id(
                     "type": "http",
                     "url": "https://example.com/mcp",
                     "auth": {
-                        "type": "azure_identity",
                         "scope": "https://apihub.azure.com/.default",
                         "client_id": "$O365_MCP_CLIENT_ID",
                     },
