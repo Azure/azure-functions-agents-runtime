@@ -71,8 +71,8 @@ def _write_timer_agent(tmp_path: Path, filename: str, display_name: str) -> None
             description: Test agent
             agent_configuration:
               provider: openai
-              openai:
-                model: gpt-4o
+              model: gpt-4o
+              openai: {{}}
             trigger:
               type: timer_trigger
               args:
@@ -107,7 +107,8 @@ def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedA
         agent_configuration=AgentConfiguration.model_validate(
             {
                 "provider": "openai",
-                "openai": {"model": "gpt-4o"},
+                "model": "gpt-4o",
+                "openai": {},
             }
         ),
         enabled_mcp_names=[],
@@ -297,8 +298,8 @@ def test_register_agent_keeps_literal_trigger_args_when_substitution_disabled(
             description: Test agent
             agent_configuration:
               provider: openai
-              openai:
-                model: gpt-4o
+              model: gpt-4o
+              openai: {}
             substitute_variables: false
             trigger:
               type: http_trigger
@@ -672,8 +673,8 @@ def test_register_agent_does_not_double_substitute_trigger_args(
             description: Test agent
             agent_configuration:
               provider: openai
-              openai:
-                model: gpt-4o
+              model: gpt-4o
+              openai: {}
             trigger:
               type: http_trigger
               args:

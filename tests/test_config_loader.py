@@ -29,12 +29,12 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
             """
             agent_configuration:
               provider: openai
+              model: gpt-4o
               timeout: 30
               temperature: 0.4
               top_p: 0.9
               max_tokens: 256
               openai:
-                model: gpt-4o
                 base_url: https://openai.example.test
                 organization: contoso
             system_tools:
@@ -51,12 +51,12 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
 
     assert config.agent_configuration is not None
     assert config.agent_configuration.provider == "openai"
+    assert config.agent_configuration.model == "gpt-4o"
     assert config.agent_configuration.timeout == 30
     assert config.agent_configuration.temperature == 0.4
     assert config.agent_configuration.top_p == 0.9
     assert config.agent_configuration.max_tokens == 256
     assert config.agent_configuration.openai is not None
-    assert config.agent_configuration.openai.model == "gpt-4o"
     assert config.agent_configuration.openai.base_url == "https://openai.example.test"
     assert config.agent_configuration.openai.model_dump()["organization"] == "contoso"
     assert config.system_tools is not None
@@ -64,59 +64,57 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
-    ("provider", "provider_block", "expected_field", "expected_value", "extra_field"),
+    ("provider", "model", "provider_block", "extra_field", "expected_extra"),
     [
         (
             "openai",
+            "gpt-4o",
             """
             openai:
-              model: gpt-4o
               base_url: https://openai.example.test
               organization: contoso
             """,
-            "model",
-            "gpt-4o",
             "organization",
+            "contoso",
         ),
         (
             "azure_openai",
+            "gpt-4o-mini",
             """
             azure_openai:
-              model: gpt-4o-mini
               azure_endpoint: https://azure-openai.example.test
               api_version: "2024-10-21"
               audience: agents
             """,
-            "model",
-            "gpt-4o-mini",
             "audience",
+            "agents",
         ),
         (
             "foundry",
+            "gpt-4.1",
             """
             foundry:
-              model: gpt-4.1
               project_endpoint: https://foundry.example.test
               audience: agents
             """,
-            "model",
-            "gpt-4.1",
             "audience",
+            "agents",
         ),
     ],
 )
 def test_load_global_config_parses_provider_sub_blocks_and_extras(
     tmp_path: Path,
     provider: str,
+    model: str,
     provider_block: str,
-    expected_field: str,
-    expected_value: str,
     extra_field: str,
+    expected_extra: str,
 ) -> None:
     (tmp_path / "agents.config.yaml").write_text(
         (
             "agent_configuration:\n"
             f"  provider: {provider}\n"
+            f"  model: {model}\n"
             f"{textwrap.indent(textwrap.dedent(provider_block).strip(), '  ')}\n"
         ),
         encoding="utf-8",
@@ -125,9 +123,8 @@ def test_load_global_config_parses_provider_sub_blocks_and_extras(
     config = load_global_config(tmp_path)
 
     assert config.agent_configuration is not None
+    assert config.agent_configuration.model == model
     provider_config = config.agent_configuration.provider_config
-    assert getattr(provider_config, expected_field) == expected_value
-    expected_extra = "contoso" if extra_field == "organization" else "agents"
     assert provider_config.model_dump()[extra_field] == expected_extra
 
 
@@ -141,8 +138,8 @@ def test_load_global_config_resolves_api_key_env_var_end_to_end(
             """
             agent_configuration:
               provider: openai
+              model: gpt-4.1
               openai:
-                model: gpt-4.1
                 api_key: $OPENAI_API_KEY
             """
         ).strip(),
@@ -162,8 +159,8 @@ def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) ->
             """
             agent_configuration:
               provider: openai
-              openai:
-                model: $MODEL_NAME
+              model: $MODEL_NAME
+              openai: {}
             """
         ).strip(),
         encoding="utf-8",
@@ -172,8 +169,7 @@ def test_load_global_config_leaves_unset_placeholders_literal(tmp_path: Path) ->
     config = load_global_config(tmp_path)
 
     assert config.agent_configuration is not None
-    assert config.agent_configuration.openai is not None
-    assert config.agent_configuration.openai.model == "$MODEL_NAME"
+    assert config.agent_configuration.model == "$MODEL_NAME"
 
 
 def test_load_global_config_rejects_missing_azure_endpoint_at_load_time(
@@ -308,15 +304,15 @@ def test_load_agent_specs_resolves_frontmatter_strings_in_agent_configuration(
         description: Main agent
         agent_configuration:
           provider: openai
-          openai:
-            model: $AGENT_MODEL
+          model: $AGENT_MODEL
+          openai: {}
         response_example: $RESPONSE_TEMPLATE
         """,
     )
 
     [spec] = load_agent_specs(tmp_path)
     assert spec.agent_configuration is not None
-    assert spec.agent_configuration["openai"]["model"] == "gpt-4.1-mini"
+    assert spec.agent_configuration["model"] == "gpt-4.1-mini"
     assert spec.response_example == '{"status":"ok"}'
 
 
@@ -328,9 +324,9 @@ def test_load_agent_specs_parses_provider_sub_block_and_extras(tmp_path: Path) -
         description: Main agent
         agent_configuration:
           provider: azure_openai
+          model: gpt-4.1
           timeout: 45
           azure_openai:
-            model: gpt-4.1
             azure_endpoint: https://azure-openai.example.test
             api_version: "2024-10-21"
             audience: agents
@@ -341,8 +337,8 @@ def test_load_agent_specs_parses_provider_sub_block_and_extras(tmp_path: Path) -
 
     assert spec.agent_configuration is not None
     assert spec.agent_configuration["provider"] == "azure_openai"
+    assert spec.agent_configuration["model"] == "gpt-4.1"
     assert spec.agent_configuration["timeout"] == 45
-    assert spec.agent_configuration["azure_openai"]["model"] == "gpt-4.1"
     assert (
         spec.agent_configuration["azure_openai"]["azure_endpoint"]
         == "https://azure-openai.example.test"
@@ -390,8 +386,8 @@ def test_post_merge_validation_surfaces_clear_errors_for_provider_mismatch(
         description: Main agent
         agent_configuration:
           provider: openai
+          model: gpt-4o-mini
           azure_openai:
-            model: gpt-4o-mini
             azure_endpoint: https://azure-openai.example.test
             api_version: "2024-10-21"
         """,
@@ -448,8 +444,8 @@ def test_load_agent_specs_rejects_hyphenated_agent_configuration_key(tmp_path: P
         description: Main agent
         agent-configuration:
           provider: openai
-          openai:
-            model: gpt-4o
+          model: gpt-4o
+          openai: {}
         """,
     )
 
@@ -464,8 +460,8 @@ def test_load_global_config_rejects_hyphenated_agent_configuration_key(tmp_path:
             """
             agent-configuration:
               provider: openai
-              openai:
-                model: gpt-4o
+              model: gpt-4o
+              openai: {}
             """
         ).strip(),
         encoding="utf-8",
@@ -521,8 +517,8 @@ def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
         description: Main agent
         agent_configuration:
           provider: openai
+          model: $AGENT_MODEL
           openai:
-            model: $AGENT_MODEL
             api_key: $OPENAI_API_KEY
         substitute_variables: false
         """,
@@ -531,7 +527,7 @@ def test_load_agent_specs_substitute_variables_false_skips_frontmatter_and_body(
 
     [spec] = load_agent_specs(tmp_path)
     assert spec.agent_configuration is not None
-    assert spec.agent_configuration["openai"]["model"] == "$AGENT_MODEL"
+    assert spec.agent_configuration["model"] == "$AGENT_MODEL"
     assert spec.agent_configuration["openai"]["api_key"] == "$OPENAI_API_KEY"
     assert spec.substitute_variables is False
     assert spec.instructions.strip() == "Keep $FOO literal"
@@ -596,9 +592,9 @@ def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
             """
             agent_configuration:
               provider: openai
+              model: gpt-4o
               timeout: "not-a-number"
-              openai:
-                model: gpt-4o
+              openai: {}
             """
         ).strip(),
         encoding="utf-8",
@@ -630,9 +626,9 @@ def test_load_global_config_resolves_numeric_and_bool_values(
             """
             agent_configuration:
               provider: openai
+              model: gpt-4o
               timeout: 60
-              openai:
-                model: gpt-4o
+              openai: {}
             system_tools:
               execute_in_sessions:
                 session_pool_management_endpoint: $ENDPOINT

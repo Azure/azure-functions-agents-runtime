@@ -52,11 +52,13 @@ agent_configuration:
 
 | Provider | Required typed fields | Optional typed fields | Notes |
 | --- | --- | --- | --- |
-| `openai` | `model` or `openai.model` | `openai.base_url`, `openai.api_key` | Top-level `model` is recommended when only the model varies |
-| `azure_openai` | `model` or `azure_openai.model`, plus `azure_openai.azure_endpoint`, `azure_openai.api_version` | `azure_openai.api_key`, `azure_openai.managed_identity_client_id` | If both model paths are set, `azure_openai.model` wins |
-| `foundry` | `model` or `foundry.model`, plus `foundry.project_endpoint` | `foundry.managed_identity_client_id` | Uses `DefaultAzureCredential`; no `api_key` |
+| `openai` | `model` plus `provider: openai` and `openai` | `openai.base_url`, `openai.api_key` | `model` is always top-level under `agent_configuration` |
+| `azure_openai` | `model`, `azure_openai.azure_endpoint`, `azure_openai.api_version` | `azure_openai.api_key`, `azure_openai.managed_identity_client_id` | `model` is always top-level under `agent_configuration` |
+| `foundry` | `model`, `foundry.project_endpoint` | `foundry.managed_identity_client_id` | Uses `DefaultAzureCredential`; `model` stays top-level |
 
-Both model placements are valid, but at least one must be set. For agent overrides, top-level `model` is the shortest way to say "inherit everything else, just change the model":
+`agent_configuration.model` is the required top-level model field (`string | null`). Empty or whitespace-only strings normalize to `null`, and the merged-effective configuration must end with a non-empty model after JSON Merge Patch composition or validation fails with `agent_configuration.model is required.` Setting `model` inside `openai`, `azure_openai`, or `foundry` is rejected; use the top-level field instead.
+
+For agent overrides, top-level `model` is the shortest way to say "inherit everything else, just change the model":
 
 ```yaml
 agent_configuration:
@@ -69,26 +71,6 @@ You can also patch just one nested field:
 agent_configuration:
   azure_openai:
     azure_endpoint: https://secondary-aoai.openai.azure.com/
-```
-
-Sub-block model placement remains supported:
-
-```yaml
-agent_configuration:
-  provider: azure_openai
-  azure_openai:
-    model: $AZURE_OPENAI_DEPLOYMENT
-    azure_endpoint: $AZURE_OPENAI_ENDPOINT
-    api_version: "2024-10-21"
-```
-
-Use YAML `null` to clear inherited values. This is the mitigation when a global provider sub-block model would otherwise override an agent's top-level model:
-
-```yaml
-agent_configuration:
-  model: gpt-4.1-mini
-  azure_openai:
-    model: null
 ```
 
 - **Authentication** — `azure_openai` supports API-key auth and managed identity; `foundry` always uses `DefaultAzureCredential`.
@@ -112,8 +94,8 @@ name: My Agent
 description: A helpful assistant
 agent_configuration:
   provider: openai
+  model: gpt-4o-mini
   openai:
-    model: gpt-4o-mini
     api_key: $OPENAI_API_KEY
 ---
 

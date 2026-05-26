@@ -23,8 +23,8 @@ def _write_agent(
 
             agent_configuration:
               provider: openai
-              openai:
-                model: gpt-4o
+              model: gpt-4o
+              openai: {}
             """
         ).rstrip()
     cleaned_body = textwrap.dedent(body).strip()

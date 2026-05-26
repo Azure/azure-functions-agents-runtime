@@ -1,10 +1,13 @@
 from __future__ import annotations
 
-from typing import Any
-
 import pytest
 from pydantic import ValidationError
 
+from azure_functions_agents.client_manager.providers import (
+    AzureOpenAIConfig,
+    FoundryConfig,
+    OpenAIConfig,
+)
 from azure_functions_agents.config.schema import (
     AgentConfiguration,
     AgentSpec,
@@ -75,11 +78,14 @@ def test_global_config_extra_forbidden() -> None:
 
 
 def test_system_tools_config_parses() -> None:
-    payload: dict[str, Any] = {
-        "execute_in_sessions": {"session_pool_management_endpoint": "https://example.test"},
-        "tools_from_connections": [{"connection_id": "conn-1", "prefix": "o365"}],
-    }
-    config = SystemToolsConfig.model_validate(payload)
+    config = SystemToolsConfig.model_validate(
+        {
+            "execute_in_sessions": {
+                "session_pool_management_endpoint": "https://example.test"
+            },
+            "tools_from_connections": [{"connection_id": "conn-1", "prefix": "o365"}],
+        }
+    )
     assert config.execute_in_sessions is not None
     assert config.tools_from_connections[0].connection_id == "conn-1"
 
@@ -94,62 +100,39 @@ def test_agent_configuration_accepts_top_level_model_only() -> None:
     )
 
     assert config.model == "gpt-4o"
-    assert config.openai is not None
-    assert config.openai.model is None
 
 
 @pytest.mark.parametrize(
-    ("provider", "provider_block"),
+    ("provider_config_class", "provider_kwargs"),
     [
-        ("openai", {"model": "gpt-4o"}),
+        (OpenAIConfig, {}),
         (
-            "azure_openai",
+            AzureOpenAIConfig,
             {
-                "model": "gpt-4o",
                 "azure_endpoint": "https://azure-openai.example.test",
                 "api_version": "2024-10-21",
             },
         ),
-        (
-            "foundry",
-            {
-                "model": "gpt-4o",
-                "project_endpoint": "https://foundry.example.test",
-            },
-        ),
+        (FoundryConfig, {"project_endpoint": "https://foundry.example.test"}),
     ],
+    ids=["openai", "azure_openai", "foundry"],
 )
-def test_agent_configuration_accepts_subblock_model_only(
-    provider: str, provider_block: dict[str, str]
+@pytest.mark.parametrize("model_value", ["gpt-4o", None, ""], ids=["string", "none", "empty"])
+def test_provider_subblock_rejects_model_field(
+    provider_config_class: (
+        type[OpenAIConfig] | type[AzureOpenAIConfig] | type[FoundryConfig]
+    ),
+    provider_kwargs: dict[str, str],
+    model_value: str | None,
 ) -> None:
-    config = AgentConfiguration.model_validate(
-        {
-            "provider": provider,
-            provider: provider_block,
-        }
-    )
+    with pytest.raises(ValidationError) as exc:
+        provider_config_class(model=model_value, **provider_kwargs)
 
-    assert config.provider == provider
-    assert config.model is None
-    assert config.provider_config.model == "gpt-4o"
-
-
-def test_agent_configuration_accepts_both_models_set() -> None:
-    config = AgentConfiguration.model_validate(
-        {
-            "provider": "openai",
-            "model": "gpt-4o",
-            "openai": {"model": "gpt-4o-mini"},
-        }
-    )
-
-    assert config.model == "gpt-4o"
-    assert config.openai is not None
-    assert config.openai.model == "gpt-4o-mini"
+    assert "'model' is not a valid field in a provider sub-block" in str(exc.value)
 
 
 def test_agent_configuration_rejects_when_no_model_anywhere() -> None:
-    with pytest.raises(ValidationError) as exc_info:
+    with pytest.raises(ValidationError) as exc:
         AgentConfiguration.model_validate(
             {
                 "provider": "openai",
@@ -157,53 +140,38 @@ def test_agent_configuration_rejects_when_no_model_anywhere() -> None:
             }
         )
 
-    message = str(exc_info.value)
-    assert "agent_configuration.model" in message
-    assert "agent_configuration.openai.model" in message
-
-
-def test_empty_string_model_normalized_to_none_top_level() -> None:
-    config = AgentConfiguration.model_validate(
-        {
-            "provider": "openai",
-            "model": "",
-            "openai": {"model": "gpt-4o"},
-        }
-    )
-
-    assert config.model is None
-    assert config.openai is not None
-    assert config.openai.model == "gpt-4o"
-
-
-def test_empty_string_model_normalized_to_none_subblock() -> None:
-    config = AgentConfiguration.model_validate(
-        {
-            "provider": "openai",
-            "model": "gpt-4o",
-            "openai": {"model": ""},
-        }
-    )
-
-    assert config.model == "gpt-4o"
-    assert config.openai is not None
-    assert config.openai.model is None
-    assert "model" not in config.openai.model_dump(exclude_none=True)
+    assert "agent_configuration.model is required" in str(exc.value)
 
 
 def test_all_empty_strings_for_model_fails_validation() -> None:
-    with pytest.raises(ValidationError) as exc_info:
+    with pytest.raises(ValidationError) as exc:
         AgentConfiguration.model_validate(
             {
                 "provider": "openai",
                 "model": "   ",
-                "openai": {"model": ""},
+                "openai": {},
             }
         )
 
-    message = str(exc_info.value)
-    assert "agent_configuration.model" in message
-    assert "agent_configuration.openai.model" in message
+    assert "agent_configuration.model is required" in str(exc.value)
+
+
+def test_agent_configuration_full_with_top_level_model_succeeds() -> None:
+    config = AgentConfiguration.model_validate(
+        {
+            "provider": "azure_openai",
+            "model": "gpt-4o",
+            "azure_openai": {
+                "azure_endpoint": "https://azure-openai.example.test",
+                "api_version": "2024-10-21",
+            },
+        }
+    )
+
+    assert config.provider_config.model_dump(exclude_none=True) == {
+        "azure_endpoint": "https://azure-openai.example.test",
+        "api_version": "2024-10-21",
+    }
 
 
 def test_agent_spec_accepts_dict_for_agent_configuration() -> None:
@@ -218,7 +186,7 @@ def test_agent_configuration_rejects_unknown_provider() -> None:
         AgentConfiguration.model_validate(
             {
                 "provider": "bogus",
-                "openai": {"model": "gpt-4o"},
+                "model": "gpt-4o",
             }
         )
 
@@ -235,9 +203,9 @@ def test_agent_configuration_rejects_multiple_provider_sub_blocks() -> None:
         AgentConfiguration.model_validate(
             {
                 "provider": "openai",
-                "openai": {"model": "gpt-4o"},
+                "model": "gpt-4o",
+                "openai": {},
                 "azure_openai": {
-                    "model": "gpt-4o",
                     "azure_endpoint": "https://azure-openai.example.test",
                     "api_version": "2024-10-21",
                 },
@@ -250,8 +218,8 @@ def test_agent_configuration_rejects_mismatched_provider_sub_block() -> None:
         AgentConfiguration.model_validate(
             {
                 "provider": "openai",
+                "model": "gpt-4o",
                 "azure_openai": {
-                    "model": "gpt-4o",
                     "azure_endpoint": "https://azure-openai.example.test",
                     "api_version": "2024-10-21",
                 },

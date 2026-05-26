@@ -21,10 +21,16 @@ from azure_functions_agents.client_manager.providers import (
 from azure_functions_agents.config.schema import AgentConfiguration
 
 
-def _agent_configuration(provider: str, provider_config: dict[str, Any]) -> AgentConfiguration:
+def _agent_configuration(
+    provider: str,
+    provider_config: dict[str, Any],
+    *,
+    model: str,
+) -> AgentConfiguration:
     return AgentConfiguration.model_validate(
         {
             "provider": provider,
+            "model": model,
             provider: provider_config,
         }
     )
@@ -51,9 +57,9 @@ def test_get_chat_client_dispatches_to_provider_factory_and_forwards_extras(
     cfg = AgentConfiguration.model_validate(
         {
             "provider": "openai",
+            "model": "gpt-4.1",
             "timeout": 42,
             "openai": {
-                "model": "gpt-4.1",
                 "base_url": "https://openai.example.test",
                 "organization": "contoso",
             },
@@ -88,8 +94,8 @@ def test_get_chat_client_filters_none_api_key_to_allow_maf_env_fallback(
     cfg = AgentConfiguration.model_validate(
         {
             "provider": "openai",
+            "model": "gpt-4.1-mini",
             "openai": {
-                "model": "gpt-4.1-mini",
                 "api_key": None,
             },
         }
@@ -128,33 +134,6 @@ def test_build_chat_client_injects_top_level_model_into_kwargs(
     assert captured["model"] == "gpt-4o"
 
 
-def test_build_chat_client_lets_subblock_model_win(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_factory(**kwargs: Any) -> object:
-        captured.update(kwargs)
-        return "client"
-
-    monkeypatch.setattr(
-        "azure_functions_agents.client_manager.get_provider",
-        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
-    )
-
-    cfg = AgentConfiguration.model_validate(
-        {
-            "provider": "openai",
-            "model": "gpt-4o",
-            "openai": {"model": "gpt-4o-mini"},
-        }
-    )
-
-    build_chat_client(cfg)
-
-    assert captured["model"] == "gpt-4o-mini"
-
-
 def test_build_chat_client_omits_api_key_after_unset(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -187,33 +166,6 @@ def test_build_chat_client_omits_api_key_after_unset(
     assert "api_key" not in captured
 
 
-def test_build_chat_client_falls_back_to_top_level_when_subblock_model_is_empty_string(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    captured: dict[str, Any] = {}
-
-    def fake_factory(**kwargs: Any) -> object:
-        captured.update(kwargs)
-        return "client"
-
-    monkeypatch.setattr(
-        "azure_functions_agents.client_manager.get_provider",
-        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
-    )
-
-    cfg = AgentConfiguration.model_validate(
-        {
-            "provider": "openai",
-            "model": "gpt-4o",
-            "openai": {"model": ""},
-        }
-    )
-
-    build_chat_client(cfg)
-
-    assert captured["model"] == "gpt-4o"
-
-
 def test_get_chat_client_unknown_provider_raises() -> None:
     cfg = SimpleNamespace(
         provider="bogus",
@@ -223,6 +175,9 @@ def test_get_chat_client_unknown_provider_raises() -> None:
     )
 
     with pytest.raises(UnknownProviderError, match="Unknown provider 'bogus'"):
+        # AgentConfiguration's schema rejects unknown providers at parse time,
+        # so exercising build_chat_client's UnknownProviderError path requires
+        # a duck-typed stub.
         build_chat_client(cfg)  # type: ignore[arg-type]
 
 
@@ -240,9 +195,9 @@ def test_get_chat_client_wraps_type_error_with_diagnostic_message(
     cfg = AgentConfiguration.model_validate(
         {
             "provider": "openai",
+            "model": "gpt-4.1",
             "timeout": 30,
             "openai": {
-                "model": "gpt-4.1",
                 "organization": "contoso",
             },
         }
@@ -252,13 +207,10 @@ def test_get_chat_client_wraps_type_error_with_diagnostic_message(
         build_chat_client(cfg)
 
     message = str(exc_info.value)
-    assert (
-        message
-        == "Failed to construct MAF client for provider 'openai': "
-        "unexpected keyword argument 'organization'. "
-        "Offending kwargs=['model', 'organization', 'timeout']. "
-        "Check your agent_configuration.openai sub-block."
-    )
+    assert "Failed to construct MAF client for provider 'openai'" in message
+    assert "unexpected keyword argument 'organization'" in message
+    assert "Offending kwargs=['organization', 'model', 'timeout']" in message
+    assert "Check your agent_configuration.openai sub-block." in message
 
 
 def test_get_chat_client_azure_openai_api_key_only_uses_api_key_auth(
@@ -283,11 +235,11 @@ def test_get_chat_client_azure_openai_api_key_only_uses_api_key_auth(
             _agent_configuration(
                 "azure_openai",
                 {
-                    "model": "gpt-4.1-mini",
                     "azure_endpoint": "https://example.invalid/",
                     "api_version": "2024-10-21",
                     "api_key": "K",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -332,11 +284,11 @@ def test_get_chat_client_azure_openai_managed_identity_only_uses_yaml_client_id(
             _agent_configuration(
                 "azure_openai",
                 {
-                    "model": "gpt-4.1-mini",
                     "azure_endpoint": "https://example.invalid/",
                     "api_version": "2024-10-21",
                     "managed_identity_client_id": "YAML-GUID",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -362,7 +314,6 @@ def test_get_chat_client_azure_openai_managed_identity_only_uses_yaml_client_id(
 def test_azure_openai_config_rejects_api_key_and_managed_identity_together() -> None:
     with pytest.raises(ValidationError, match="Cannot set both 'api_key'"):
         AzureOpenAIConfig(
-            model="gpt-4.1-mini",
             azure_endpoint="https://example.invalid/",
             api_version="2024-10-21",
             api_key="K",
@@ -392,10 +343,10 @@ def test_get_chat_client_azure_openai_env_api_key_fallback_skips_credential(
             _agent_configuration(
                 "azure_openai",
                 {
-                    "model": "gpt-4.1-mini",
                     "azure_endpoint": "https://example.invalid/",
                     "api_version": "2024-10-21",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -438,10 +389,10 @@ def test_get_chat_client_azure_openai_system_assigned_managed_identity(
             _agent_configuration(
                 "azure_openai",
                 {
-                    "model": "gpt-4.1-mini",
                     "azure_endpoint": "https://example.invalid/",
                     "api_version": "2024-10-21",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -483,10 +434,10 @@ def test_get_chat_client_foundry_managed_identity_client_id_uses_async_credentia
             _agent_configuration(
                 "foundry",
                 {
-                    "model": "gpt-4.1-mini",
                     "project_endpoint": "https://example.invalid/",
                     "managed_identity_client_id": "GUID",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -528,9 +479,9 @@ def test_get_chat_client_foundry_system_assigned_managed_identity(
             _agent_configuration(
                 "foundry",
                 {
-                    "model": "gpt-4.1-mini",
                     "project_endpoint": "https://example.invalid/",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -554,7 +505,6 @@ def test_azure_openai_config_rejects_credential_field_from_yaml() -> None:
     with pytest.raises(ValidationError, match="credential"):
         AzureOpenAIConfig.model_validate(
             {
-                "model": "gpt-4.1-mini",
                 "azure_endpoint": "https://example.invalid/",
                 "api_version": "2024-10-21",
                 "credential": "some-string",
@@ -566,7 +516,6 @@ def test_foundry_config_rejects_credential_field_from_yaml() -> None:
     with pytest.raises(ValidationError, match="credential"):
         FoundryConfig.model_validate(
             {
-                "model": "gpt-4.1-mini",
                 "project_endpoint": "https://example.invalid/",
                 "credential": "...",
             }
@@ -592,22 +541,22 @@ def test_get_chat_client_never_logs_secrets_for_azure_openai_auth_paths(
             _agent_configuration(
                 "azure_openai",
                 {
-                    "model": "gpt-4.1-mini",
                     "azure_endpoint": "https://example.invalid/",
                     "api_version": "2024-10-21",
                     "api_key": "VERY_SECRET_KEY_REDACTED",
                 },
+                model="gpt-4.1-mini",
             )
         )
         build_chat_client(
             _agent_configuration(
                 "azure_openai",
                 {
-                    "model": "gpt-4.1-mini",
                     "azure_endpoint": "https://example.invalid/",
                     "api_version": "2024-10-21",
                     "managed_identity_client_id": "00000000-0000-0000-0000-000000000000",
                 },
+                model="gpt-4.1-mini",
             )
         )
 
@@ -675,8 +624,8 @@ def test_get_chat_client_uses_foundry_provider_payload(
     cfg = AgentConfiguration.model_validate(
         {
             "provider": "foundry",
+            "model": "gpt-4.1",
             "foundry": {
-                "model": "gpt-4.1",
                 "project_endpoint": "https://foundry.example.test",
                 "audience": "agents",
             },
@@ -698,16 +647,16 @@ def test_get_chat_client_uses_foundry_provider_payload(
     [
         {
             "provider": "openai",
+            "model": "gpt-4.1-mini",
             "openai": {
-                "model": "gpt-4.1-mini",
                 "api_key": "fake",
                 "base_url": "https://example.invalid/",
             },
         },
         {
             "provider": "azure_openai",
+            "model": "gpt-4.1-mini",
             "azure_openai": {
-                "model": "gpt-4.1-mini",
                 "api_key": "fake",
                 "azure_endpoint": "https://example.invalid/",
                 "api_version": "2024-10-21",
@@ -747,8 +696,8 @@ def test_get_chat_client_constructs_foundry_client_with_renamed_kwargs(
     cfg = AgentConfiguration.model_validate(
         {
             "provider": "foundry",
+            "model": "gpt-4.1-mini",
             "foundry": {
-                "model": "gpt-4.1-mini",
                 "project_endpoint": "https://example.invalid/",
             },
         }

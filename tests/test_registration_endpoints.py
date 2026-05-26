@@ -74,7 +74,8 @@ def _resolved_agent(
         agent_configuration=AgentConfiguration.model_validate(
             {
                 "provider": "openai",
-                "openai": {"model": "gpt-4o"},
+                "model": "gpt-4o",
+                "openai": {},
             }
         ),
         enabled_mcp_names=[],

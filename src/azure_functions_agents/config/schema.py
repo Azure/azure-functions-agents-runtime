@@ -12,8 +12,14 @@ from azure_functions_agents.client_manager.providers import (
     FoundryConfig,
     OpenAIConfig,
     ProviderConfigBase,
-    normalize_optional_model_value,
 )
+
+
+def _normalize_optional_model_value(value: Any) -> Any:
+    """Treat empty-string / whitespace-only ``model`` values as unset."""
+    if isinstance(value, str) and not value.strip():
+        return None
+    return value
 
 
 class McpFilter(BaseModel):
@@ -131,7 +137,7 @@ class AgentConfiguration(BaseModel):
     @field_validator("model", mode="before")
     @classmethod
     def normalize_model(cls, value: Any) -> Any:
-        return normalize_optional_model_value(value)
+        return _normalize_optional_model_value(value)
 
     @model_validator(mode="after")
     def validate_provider_sub_block(self) -> AgentConfiguration:
@@ -156,18 +162,9 @@ class AgentConfiguration(BaseModel):
 
     @model_validator(mode="after")
     def validate_model_present(self) -> AgentConfiguration:
-        active_subblock = getattr(self, self.provider, None)
-        effective_model = (
-            (active_subblock.model if active_subblock is not None else None) or self.model
-        )
-        if effective_model:
-            return self
-
-        raise ValueError(
-            "agent_configuration.model must be set either at the top level "
-            f"(agent_configuration.model) or inside the provider sub-block "
-            f"(agent_configuration.{self.provider}.model)."
-        )
+        if not self.model:
+            raise ValueError("agent_configuration.model is required.")
+        return self
 
     @property
     def provider_config(self) -> ProviderConfigBase:

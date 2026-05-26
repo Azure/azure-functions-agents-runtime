@@ -1,8 +1,8 @@
 agent_configuration:
   provider: openai
+  model: $OPENAI_MODEL
   timeout: 600
   openai:
-    model: $OPENAI_MODEL
     api_key: $OPENAI_API_KEY
 
 system_tools:

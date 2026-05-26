@@ -9,8 +9,8 @@ trigger:
     auth_level: function
 agent_configuration:
   provider: openai
-  openai:
-    model: $AGENT_MODEL
+  model: $AGENT_MODEL
+  openai: {}
 metadata:
   literal_dollar: "$$API_TOKEN"
   literal_percent: "%%TENANT_ID%%"

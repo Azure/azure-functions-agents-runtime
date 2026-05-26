@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from azure.identity import aio as azure_identity_aio
-from pydantic import BaseModel, ConfigDict, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, model_validator
 
 from azure_functions_agents._logger import logger
 
@@ -19,23 +19,20 @@ class UnknownProviderError(ValueError):
     """Raised when an unrecognized provider name is requested."""
 
 
-def normalize_optional_model_value(value: Any) -> Any:
-    if isinstance(value, str) and not value.strip():
-        return None
-    return value
-
-
 class ProviderConfigBase(BaseModel):
     """Base for per-provider config models. Unknown keys flow through as kwargs."""
 
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
-    model: str | None = None
-
-    @field_validator("model", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def normalize_model(cls, value: Any) -> Any:
-        return normalize_optional_model_value(value)
+    def reject_model_in_subblock(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "model" in data:
+            raise ValueError(
+                "'model' is not a valid field in a provider sub-block; set "
+                "'agent_configuration.model' at the top level instead."
+            )
+        return data
 
 
 class OpenAIConfig(ProviderConfigBase):

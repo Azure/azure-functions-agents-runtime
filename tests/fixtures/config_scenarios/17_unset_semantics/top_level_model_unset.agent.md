@@ -1,8 +1,8 @@
 ---
 name: Top Level Model Unset Agent
-description: Removes the inherited top-level model while keeping the sub-block model.
+description: Unsets the inherited model so post-merge validation fails (model is required).
 agent_configuration:
   model:
 ---
 
-Unset only the top-level model.
+Unsetting the only `model` placement triggers the post-merge required-field error.

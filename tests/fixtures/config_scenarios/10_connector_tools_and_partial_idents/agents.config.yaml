@@ -1,8 +1,8 @@
 agent_configuration:
   provider: openai
+  model: $OPENAI_MODEL
   timeout: 1200
-  openai:
-    model: $OPENAI_MODEL
+  openai: {}
 
 system_tools:
   execute_in_sessions:

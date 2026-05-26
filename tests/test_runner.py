@@ -12,10 +12,11 @@ from azure_functions_agents.config.schema import AgentConfiguration
 def _openai_agent_configuration(**overrides: object) -> AgentConfiguration:
     payload: dict[str, object] = {
         "provider": "openai",
+        "model": "gpt-4o",
         "timeout": 15,
         "temperature": 0.2,
         "max_tokens": 256,
-        "openai": {"model": "gpt-4o"},
+        "openai": {},
     }
     payload.update(overrides)
     return AgentConfiguration.model_validate(payload)

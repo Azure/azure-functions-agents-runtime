@@ -20,7 +20,8 @@ def _openai_agent_configuration() -> AgentConfiguration:
     return AgentConfiguration.model_validate(
         {
             "provider": "openai",
-            "openai": {"model": "gpt-4o"},
+            "model": "gpt-4o",
+            "openai": {},
         }
     )
 

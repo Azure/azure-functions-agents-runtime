@@ -34,7 +34,7 @@ def build_chat_client(cfg: AgentConfiguration) -> ChatClient:
     """Construct and return a chat client from resolved agent configuration."""
     provider = _normalize_provider(cfg.provider)
     kwargs: dict[str, Any] = cfg.provider_config.model_dump(exclude_none=True)
-    kwargs.setdefault("model", cfg.model)
+    kwargs["model"] = cfg.model
     if cfg.timeout is not None:
         kwargs.setdefault("timeout", cfg.timeout)
 
