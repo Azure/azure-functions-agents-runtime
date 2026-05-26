@@ -13,7 +13,7 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, M
 - **MCP server** — `/runtime/webhooks/mcp` for connecting from VS Code, Claude Desktop, etc.
 - **Microsoft Foundry** — provisions an AI Services account, Foundry project, and `gpt-5.4` deployment
 - **Code execution** — sandboxed Python via ACA Dynamic Sessions with Playwright support
-- **Session persistence** — multi-turn conversations stored on Azure Files
+- **Session persistence** — multi-turn conversations stored in Azure Blob Storage
 
 ## Prerequisites
 

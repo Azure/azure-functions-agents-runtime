@@ -1,4 +1,4 @@
-# azure-functions-agents (Preview)
+# azurefunctions-agents-runtime (Preview)
 
 > **Public preview.** The features described here are available for preview use and may change before general availability.
 
@@ -450,6 +450,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`basic-chat`](samples/basic-chat) — minimal chat agent with sandbox
 - [`daily-azure-report`](samples/daily-azure-report) — timer-triggered agent that emails a daily Azure status report
 - [`daily-tech-news-email`](samples/daily-tech-news-email) — timer-triggered agent that scrapes news and emails a digest
+- [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
 
 ## Deployment Notes
 
@@ -474,8 +475,8 @@ When the agent uses connector-backed MCP servers, connector triggers, or `execut
 
 ```bash
 # Clone the repo
-git clone https://github.com/anthonychu/azure-functions-agents.git
-cd azure-functions-agents
+git clone https://github.com/Azure/azure-functions-agent-runtime.git
+cd azure-functions-agent-runtime
 
 # Install in development mode
 pip install -e .

@@ -18,7 +18,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 ### Prerequisites
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- Python 3.12+
+- Python 3.13+
 - an OpenAI API key (https://platform.openai.com/api-keys) 
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
@@ -125,7 +125,7 @@ Each sample exposes different endpoints. See the sample's README for testing det
 
 If you see an exception like `System.ArgumentException: Destination is too short` from `Azure.Functions.Cli.Helpers.PythonHelpers`, check Python first, then update Azure Functions Core Tools.
 
-1. Verify Python 3.12+ is available.
+1. Verify Python 3.13+ is available.
 
 **Bash:**
 
@@ -194,14 +194,14 @@ cd samples/<sample-name>/src
 **Bash:**
 
 ```bash
-pip uninstall -y azure-functions-agents
+pip uninstall -y azurefunctions-agents-runtime
 pip install -e ../../..
 ```
 
 **PowerShell:**
 
 ```powershell
-pip uninstall -y azure-functions-agents
+pip uninstall -y azurefunctions-agents-runtime
 pip install -e ..\..\..
 ```
 
