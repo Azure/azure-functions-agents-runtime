@@ -22,7 +22,6 @@ def _resolved(
     mcp_disabled: bool = False,
     tools_disabled: bool = False,
     exclude: list[str] | None = None,
-    connector_specs: list[Any] | None = None,
 ) -> Any:
     return SimpleNamespace(
         enabled_skills_names=enabled_skills_names or [],
@@ -31,7 +30,6 @@ def _resolved(
         mcp_disabled=mcp_disabled,
         tools_disabled=tools_disabled,
         tool_filter=SimpleNamespace(exclude=exclude or []),
-        connector_specs=connector_specs or [],
     )
 
 

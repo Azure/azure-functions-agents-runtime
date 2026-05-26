@@ -26,7 +26,6 @@ from azure_functions_agents.config.schema import (
     SystemToolsAgentOverride,
     SystemToolsConfig,
     ToolsFilter,
-    ToolsFromConnectionEntry,
     TriggerSpec,
 )
 from azure_functions_agents.config.validation import validate_resolved_agent
@@ -126,7 +125,6 @@ def test_compose_end_to_end() -> None:
             execute_in_sessions=ExecuteInSessionsConfig(
                 session_pool_management_endpoint="https://example.test"
             ),
-            tools_from_connections=[ToolsFromConnectionEntry(connection_id="conn-1")],
         ),
     )
     spec = AgentSpec(
@@ -156,7 +154,6 @@ def test_compose_end_to_end() -> None:
     assert resolved.enabled_skills_names == ["public"]
     assert resolved.tool_filter.exclude == ["danger", "foo"]
     assert resolved.sandbox_config == global_config.system_tools.execute_in_sessions
-    assert resolved.connector_specs == global_config.system_tools.tools_from_connections
     assert resolved.metadata == {"team": "x"}
 
 
@@ -240,13 +237,6 @@ def test_resolve_sandbox_no_global_returns_none() -> None:
     """Defensive: when the global config has no system_tools block, sandbox is None."""
     spec = AgentSpec(name="A", description="d")
     assert _resolve_sandbox(spec, GlobalConfig()) is None
-
-
-def test_resolve_connectors_no_global_returns_empty() -> None:
-    """Defensive: when the global config has no system_tools block, connectors list is empty."""
-    from azure_functions_agents.config.merge import _resolve_connectors
-
-    assert _resolve_connectors(GlobalConfig()) == []
 
 
 def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:

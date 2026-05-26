@@ -739,16 +739,12 @@
 
 		function normalizeIntermediateResponses(values) {
 			const input = Array.isArray(values) ? values : [];
-			const seen = new Set();
 			const result = [];
 
 			for (const value of input) {
 				if (typeof value !== "string") continue;
-				const text = value.trim();
-				if (!text) continue;
-				if (seen.has(text)) continue;
-				seen.add(text);
-				result.push(text);
+				if (!value) continue;
+				result.push(value);
 			}
 
 			return result;

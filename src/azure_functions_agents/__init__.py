@@ -32,7 +32,6 @@ from .runner import (
     run_copilot_agent,
     run_copilot_agent_stream,
 )
-from .system_tools.connectors.cache import configure_connector_tools, get_connector_tools
 from .system_tools.sandbox import create_sandbox_tools
 
 __all__ = [
@@ -41,11 +40,9 @@ __all__ = [
     "AgentResult",
     "ClientManager",
     "MAFClientManager",
-    "configure_connector_tools",
     "create_function_app",
     "create_sandbox_tools",
     "get_client_manager",
-    "get_connector_tools",
     "resolve_config_dir",
     "run_agent",
     "run_agent_stream",

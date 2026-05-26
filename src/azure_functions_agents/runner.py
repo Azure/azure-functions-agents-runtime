@@ -54,7 +54,6 @@ from .client_manager import get_client_manager
 from .config.paths import get_app_root, resolve_config_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
-from .system_tools.connectors.cache import get_connector_tools
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -62,6 +61,8 @@ from .system_tools.connectors.cache import get_connector_tools
 
 DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "900"))
 DEFAULT_MODEL: str | None = os.environ.get("MAF_MODEL")
+DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_REASONING_SUMMARY = "concise"
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
@@ -145,6 +146,20 @@ def _build_history_provider() -> Any:
     return FileHistoryProvider(storage_path=_resolve_sessions_dir())
 
 
+def _env_value(name: str) -> str:
+    return (os.environ.get(name) or "").strip()
+
+
+def _build_chat_options_from_environment() -> dict[str, Any] | None:
+    """Build provider chat options from supported runtime environment variables."""
+    return {
+        "reasoning": {
+            "effort": _env_value("MAF_REASONING_EFFORT") or DEFAULT_REASONING_EFFORT,
+            "summary": _env_value("MAF_REASONING_SUMMARY") or DEFAULT_REASONING_SUMMARY,
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # Agent + session construction
 # ---------------------------------------------------------------------------
@@ -175,7 +190,6 @@ async def _build_agent_session_history(
     tools: list[Any] | None,
     mcp_tools: list[Any] | None,
     skill_paths: list[Path] | None,
-    use_connector_tools: bool,
     model: str | None,
     sandbox_tools: list[Any] | None,
 ) -> tuple[Any, Any, str]:
@@ -206,16 +220,13 @@ async def _build_agent_session_history(
 
     history_provider = _build_history_provider()
 
-    # Tool list: resolved user tools + optional connector tools + per-call
-    # sandbox tools + resolved MCP tools.
+    # Tool list: resolved user tools + per-call sandbox tools + resolved MCP
+    # tools.
     app_root = get_app_root()
     resolved_tools: list[Any] = (
         list(discover_user_tools(app_root)) if tools is None else list(tools)
     )
 
-    connectors = await get_connector_tools() if use_connector_tools else None
-    if connectors:
-        resolved_tools.extend(connectors)
     if sandbox_tools:
         resolved_tools.extend(sandbox_tools)
 
@@ -264,6 +275,31 @@ def _function_call_event(item: Any) -> dict[str, Any]:
     }
 
 
+def _merge_tool_arguments(previous: Any, current: Any) -> Any:
+    if previous is None:
+        return current
+    if current is None:
+        return previous
+    if isinstance(previous, str) and isinstance(current, str):
+        if current.startswith(previous):
+            return current
+        return previous + current
+    return current
+
+
+def _is_complete_json_argument(value: Any) -> bool:
+    if not isinstance(value, str):
+        return value is not None
+    text = value.strip()
+    if not text:
+        return False
+    try:
+        json.loads(text)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    return True
+
+
 def _function_result_event(item: Any) -> dict[str, Any]:
     return {
         "type": "tool_end",
@@ -286,7 +322,6 @@ async def run_agent(
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
     skill_paths: list[Path] | None = None,
-    use_connector_tools: bool = True,
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
@@ -306,8 +341,8 @@ async def run_agent(
     tools:
         Optional user-tool override. ``None`` auto-discovers user tools from
         the app root. When a list is provided (including ``[]``), that exact
-        list becomes the user-tool set. Connector tools, sandbox tools, and
-        MCP tools are controlled separately and may still be added.
+        list becomes the user-tool set. Sandbox tools and MCP tools are
+        controlled separately and may still be added.
     mcp_tools:
         Optional MCP tool list. ``None`` auto-discovers tools from
         ``mcp.json``; an explicit list is used as-is. Pass ``[]`` to disable
@@ -315,11 +350,6 @@ async def run_agent(
     skill_paths:
         Optional list of skill directories to expose via MAF's
         :class:`SkillsProvider`. ``None`` or ``[]`` disables skills.
-    use_connector_tools:
-        Whether to include connector tools discovered from the shared cache.
-        This is separate from ``tools``. ``run_agent()`` defaults to ``True``;
-        higher-level config-driven callers can treat ``None`` as "use the
-        configured default" before calling this function.
     model:
         Optional model/deployment override. When omitted the
         :class:`ClientManager` resolves the value from environment variables.
@@ -336,7 +366,7 @@ async def run_agent(
     Notes
     -----
     To fully disable all tools from a direct API call, pass
-    ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
+    ``tools=[], mcp_tools=[], sandbox_tools=None``.
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
@@ -346,7 +376,6 @@ async def run_agent(
         tools=tools,
         mcp_tools=mcp_tools,
         skill_paths=skill_paths,
-        use_connector_tools=use_connector_tools,
         model=model,
         sandbox_tools=sandbox_tools,
     )
@@ -354,7 +383,14 @@ async def run_agent(
     lock = await _get_session_lock(resolved_id)
     async with lock:
         try:
-            response = await asyncio.wait_for(agent.run(prompt, session=session), timeout=timeout)
+            response = await asyncio.wait_for(
+                agent.run(
+                    prompt,
+                    session=session,
+                    options=_build_chat_options_from_environment(),
+                ),
+                timeout=timeout,
+            )
         except TimeoutError:
             raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -414,7 +450,6 @@ async def run_agent_stream(
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
     skill_paths: list[Path] | None = None,
-    use_connector_tools: bool = True,
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
@@ -426,9 +461,6 @@ async def run_agent_stream(
     * ``tools`` controls the user tool set. ``None`` auto-discovers user
       tools from the app root; a provided list (including ``[]``) is used
       exactly as that user-tool set.
-    * ``use_connector_tools`` separately controls connector tools. Callers that
-      want config-driven defaults can treat ``None`` as "use the configured
-      default" before calling this function.
     * ``mcp_tools`` separately controls MCP tools. ``None`` auto-discovers
       from ``mcp.json``; pass ``[]`` to disable MCP tools.
     * ``sandbox_tools`` separately controls sandbox tools. ``None`` adds no
@@ -436,7 +468,7 @@ async def run_agent_stream(
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
     * To fully disable all tools from a direct API call, pass
-      ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
+      ``tools=[], mcp_tools=[], sandbox_tools=None``.
 
     Event vocabulary (kept stable for the chat UI):
 
@@ -459,7 +491,6 @@ async def run_agent_stream(
             tools=tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
-            use_connector_tools=use_connector_tools,
             model=model,
             sandbox_tools=sandbox_tools,
         )
@@ -474,8 +505,56 @@ async def run_agent_stream(
     async with lock:
         loop = asyncio.get_event_loop()
         deadline = loop.time() + timeout
+        pending_tool_calls: dict[str, dict[str, Any]] = {}
+        emitted_tool_calls: set[str] = set()
+
+        def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+            event = _function_call_event(item)
+            call_id = event.get("tool_call_id")
+            if not isinstance(call_id, str) or not call_id:
+                return None, event
+
+            pending = pending_tool_calls.setdefault(
+                call_id,
+                {
+                    "type": "tool_start",
+                    "tool_call_id": call_id,
+                    "tool_name": event.get("tool_name"),
+                    "arguments": None,
+                },
+            )
+            if event.get("tool_name"):
+                pending["tool_name"] = event["tool_name"]
+            pending["arguments"] = _merge_tool_arguments(
+                pending.get("arguments"),
+                event.get("arguments"),
+            )
+            return call_id, pending
+
+        async def emit_tool_start_if_ready(call_id: str, event: dict[str, Any]) -> AsyncIterator[str]:
+            if call_id in emitted_tool_calls:
+                return
+            if not _is_complete_json_argument(event.get("arguments")):
+                return
+            emitted_tool_calls.add(call_id)
+            yield f"data: {json.dumps(event)}\n\n"
+
+        async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+            if call_id is None or call_id in emitted_tool_calls:
+                return
+            event = pending_tool_calls.get(call_id)
+            if event is None:
+                return
+            emitted_tool_calls.add(call_id)
+            yield f"data: {json.dumps(event)}\n\n"
+
         try:
-            stream = agent.run(prompt, stream=True, session=session)
+            stream = agent.run(
+                prompt,
+                stream=True,
+                session=session,
+                options=_build_chat_options_from_environment(),
+            )
             async for update in stream:
                 if loop.time() > deadline:
                     yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
@@ -491,11 +570,25 @@ async def run_agent_stream(
                         if text:
                             yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
                     elif ctype == "function_call":
-                        yield f"data: {json.dumps(_function_call_event(item))}\n\n"
+                        call_id, event = buffer_function_call(item)
+                        if call_id is None:
+                            yield f"data: {json.dumps(event)}\n\n"
+                        else:
+                            async for output in emit_tool_start_if_ready(call_id, event):
+                                yield output
                     elif ctype == "function_result":
+                        call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                        async for output in emit_tool_start_before_result(
+                            call_id if isinstance(call_id, str) else None
+                        ):
+                            yield output
                         yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
                     # Unknown content types are intentionally ignored — the
                     # SSE vocabulary is fixed and the UI doesn't render them.
+            for call_id, event in pending_tool_calls.items():
+                if call_id not in emitted_tool_calls:
+                    emitted_tool_calls.add(call_id)
+                    yield f"data: {json.dumps(event)}\n\n"
             yield f"data: {json.dumps({'type': 'done'})}\n\n"
         except TimeoutError:
             yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"

@@ -17,7 +17,6 @@ class AgentCapabilities:
     filtered_user_tools: list[Any] | None = None
     filtered_mcp_tools: list[MCPTool] | None = None
     enabled_skill_paths: list[Path] = field(default_factory=list)
-    use_connector_tools: bool = False
 
 
 def _tool_name(tool: object) -> str:
@@ -68,5 +67,4 @@ def build_capabilities(
         filtered_user_tools=filtered_user_tools,
         filtered_mcp_tools=filtered_mcp_tools,
         enabled_skill_paths=enabled_skill_paths,
-        use_connector_tools=bool(resolved.connector_specs) and not resolved.tools_disabled,
     )

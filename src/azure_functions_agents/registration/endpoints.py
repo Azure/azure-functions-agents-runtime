@@ -18,7 +18,6 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 
 from .._logger import logger
 from ..config import ResolvedAgent
-from ..system_tools.connectors.cache import configure_connector_tools
 from ._handlers import build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_debug_slug
 from .capabilities import AgentCapabilities
@@ -36,10 +35,6 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
 )
 
 _DEBUG_SLUG_ATTR = "_afa_debug_slug_names"
-
-
-def _dump_connector_specs(resolved: ResolvedAgent) -> list[dict[str, Any]]:
-    return [spec.model_dump() for spec in resolved.connector_specs]
 
 
 def _format_exception_message(exc: Exception) -> str:
@@ -94,14 +89,6 @@ def _ensure_unique_non_main_slug(app: func.FunctionApp, resolved: ResolvedAgent)
     )
 
 
-def _configure_connector_tools_if_needed(
-    resolved: ResolvedAgent, capabilities: AgentCapabilities
-) -> None:
-    if not capabilities.use_connector_tools or not resolved.connector_specs:
-        return
-    configure_connector_tools(_dump_connector_specs(resolved))
-
-
 def _index_path() -> Path:
     return Path(__file__).resolve().parent.parent / "public" / "index.html"
 
@@ -129,7 +116,6 @@ async def _run_debug_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
-        use_connector_tools=capabilities.use_connector_tools,
     )
 
 
@@ -152,7 +138,6 @@ def _run_debug_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
-        use_connector_tools=capabilities.use_connector_tools,
     )
 
 
@@ -361,8 +346,6 @@ def register_debug_endpoints(
     slug: str | None = None,
 ) -> None:
     """Register debug chat UI, REST chat, and MCP endpoints for one agent."""
-
-    _configure_connector_tools_if_needed(resolved, capabilities)
 
     slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
     if not resolved.is_main and (resolved.debug.chat or resolved.debug.http or resolved.debug.mcp):

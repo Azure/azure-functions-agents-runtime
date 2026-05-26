@@ -24,11 +24,7 @@ dependencies = [
     "mcp==1.27.*",
 ]
 
-
 [project.optional-dependencies]
-connectors = [
-    "azure-connectors==0.1.*",
-]
 dev = [
     "ruff==0.15.*",
     "mypy==2.1.*",

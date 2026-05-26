@@ -32,13 +32,19 @@ class _CapturedMCPStreamableHTTPTool:
         url: str,
         *,
         allowed_tools: list[str] | None = None,
+        load_tools: bool = True,
+        load_prompts: bool = True,
         header_provider: object = None,
+        http_client: object = None,
         **_: object,
     ) -> None:
         self.name = name
         self.url = url
         self.allowed_tools = allowed_tools
+        self.load_tools = load_tools
+        self.load_prompts = load_prompts
         self.header_provider = header_provider
+        self.http_client = http_client
 
 
 def _specs_by_name(specs):
@@ -386,57 +392,6 @@ def test_code_block_preservation(monkeypatch: pytest.MonkeyPatch) -> None:
     # "leaked" must never appear inside fenced regions — easiest check: it
     # should appear nowhere because every occurrence of those vars is fenced.
     assert "leaked" not in body
-
-
-# ---------------------------------------------------------------------------
-# 10 — connector tools list + partial-identifier behavior
-# ---------------------------------------------------------------------------
-
-
-def test_connector_tools_and_partial_identifiers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    fixture = FIXTURES_ROOT / "10_connector_tools_and_partial_idents"
-
-    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "gpt-4o")
-    monkeypatch.setenv("ACA_SESSION_POOL_ENDPOINT", "https://pool.example.test")
-    monkeypatch.setenv("GITHUB_CONNECTION_ID", "conn-gh")
-    monkeypatch.setenv("SERVICENOW_CONNECTION_ID", "conn-sn")
-    monkeypatch.setenv("REGION", "westus3")
-    monkeypatch.setenv("TENANT", "tenant-xyz")
-
-    global_config = load_global_config(fixture)
-    specs = load_agent_specs(fixture, strict=True)
-
-    assert global_config.model == "gpt-4o"
-    assert global_config.timeout == 1200
-    assert global_config.system_tools is not None
-    assert global_config.system_tools.execute_in_sessions is not None
-    assert (
-        global_config.system_tools.execute_in_sessions.session_pool_management_endpoint
-        == "https://pool.example.test"
-    )
-    connectors = global_config.system_tools.tools_from_connections
-    assert [c.connection_id for c in connectors] == ["conn-gh", "conn-sn"]
-    assert connectors[0].prefix == "github"
-    assert connectors[1].prefix is None
-
-    assert len(specs) == 1
-    spec = specs[0]
-    assert spec.name == "Partial Identifier Agent"
-    assert spec.metadata is not None
-    # $REGION resolves, `-primary` is preserved literally.
-    assert spec.metadata["primary_region"] == "westus3-primary"
-    # %REGION-secondary% never matches the percent pattern (hyphen breaks the
-    # identifier), so it stays exactly as written.
-    assert spec.metadata["raw_label"] == "%REGION-secondary%"
-    # `$TENANT.id` resolves the identifier and leaves `.id` as a suffix.
-    assert spec.metadata["tenant_ref"] == "tenant-xyz.id"
-
-    # Body shows the same partial-identifier rules.
-    assert "primary region is westus3-primary" in spec.instructions
-    assert "%REGION-secondary%" in spec.instructions
-    assert "Tenant pointer: tenant-xyz.id" in spec.instructions
 
 
 # ---------------------------------------------------------------------------

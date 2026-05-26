@@ -5,8 +5,9 @@ Each subdirectory is a standalone Azure Functions app deployable with [`azd up`]
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
-| [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 | | | ✅ | |
-| [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 | ✅ MS Learn | ✅ azure-resources | | ✅ |
+| [outlook-reply-agent](outlook-reply-agent/) | Office 365 Outlook | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
+| [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
+| [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 
 ## Run Locally (optional)
 
@@ -17,7 +18,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 ### Prerequisites
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- Python 3.12+
+- Python 3.13+
 - an OpenAI API key (https://platform.openai.com/api-keys) 
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
@@ -63,13 +64,13 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-The Microsoft Agent Framework supports Azure OpenAI, OpenAI, and Azure AI Foundry. The samples default to Azure OpenAI.
+The Microsoft Agent Framework supports Azure OpenAI, OpenAI, and Microsoft Foundry. The samples default to Azure OpenAI.
 
 | Provider       | `MAF_PROVIDER`  | Required env vars                                                                  |
 | -------------- | --------------- | ---------------------------------------------------------------------------------- |
 | Azure OpenAI   | `azure_openai`  | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential`) |
 | OpenAI         | `openai`        | `OPENAI_API_KEY`                                                                   |
-| Azure Foundry  | `foundry`       | `FOUNDRY_PROJECT_ENDPOINT` (uses `DefaultAzureCredential`)                          |
+| Microsoft Foundry | `foundry`       | `FOUNDRY_PROJECT_ENDPOINT` (uses `DefaultAzureCredential`)                       |
 
 If `MAF_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
 
@@ -124,7 +125,7 @@ Each sample exposes different endpoints. See the sample's README for testing det
 
 If you see an exception like `System.ArgumentException: Destination is too short` from `Azure.Functions.Cli.Helpers.PythonHelpers`, check Python first, then update Azure Functions Core Tools.
 
-1. Verify Python 3.12+ is available.
+1. Verify Python 3.13+ is available.
 
 **Bash:**
 
@@ -193,14 +194,14 @@ cd samples/<sample-name>/src
 **Bash:**
 
 ```bash
-pip uninstall -y azure-functions-agents
+pip uninstall -y azurefunctions-agents-runtime
 pip install -e ../../..
 ```
 
 **PowerShell:**
 
 ```powershell
-pip uninstall -y azure-functions-agents
+pip uninstall -y azurefunctions-agents-runtime
 pip install -e ..\..\..
 ```
 

@@ -1,10 +1,5 @@
 # Global configuration for all agents in this function app
 
-# Shared infrastructure - Email capabilities via Office 365 connector
-system_tools:
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
-
 # Default runtime configuration
-model: $AZURE_OPENAI_DEPLOYMENT
+model: $FOUNDRY_MODEL
 timeout: 900

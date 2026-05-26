@@ -36,7 +36,6 @@ from azure_functions_agents.config.schema import (
     SystemToolsAgentOverride,
     SystemToolsConfig,
     ToolsFilter,
-    ToolsFromConnectionEntry,
     TriggerSpec,
 )
 from azure_functions_agents.config.validation import (
@@ -57,7 +56,6 @@ __all__ = [
     "SystemToolsAgentOverride",
     "SystemToolsConfig",
     "ToolsFilter",
-    "ToolsFromConnectionEntry",
     "TriggerSpec",
     "_app_root",
     "_to_bool",

@@ -1,23 +1,22 @@
 # Daily Tech News Email
 
-A timer-triggered agent that fetches the day's top tech news headlines, summarizes them, and emails a digest using the Office 365 connector.
+A timer-triggered agent that fetches the day's top tech news headlines, summarizes them, and emails a digest using an Office 365 Outlook MCP server.
 
 | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|
-| Timer | | ✅ Office 365 | | | ✅ | |
+| Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 
 ## Features
 
 - **Timer trigger** — runs daily at 15:00 UTC
 - **Code execution** — uses ACA Dynamic Sessions to fetch tech news from public RSS feeds and Hacker News
-- **Office 365 connector** — sends the email via an Azure API Connection
+- **Office 365 Outlook connector** — provisions a v2 connection under a Connector Gateway and exposes the send-email operation through an MCP server
 - **Variable substitution** — recipient email address configured via `$TO_EMAIL` environment variable. Substitution applies to all config string values (agent instructions, `agents.config.yaml`, `mcp.json`)
 
 ## Prerequisites
 
 - [Azure Developer CLI (`azd`)](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd)
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- an Azure OpenAI resource with a model deployment (e.g. `gpt-5.2`)
 - An Azure subscription
 
 ## Deploy
@@ -27,10 +26,11 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
    ```bash
    cd samples/daily-tech-news-email
    azd init
-   azd env set AZURE_OPENAI_ENDPOINT <your-azure-openai-endpoint>
-   azd env set AZURE_OPENAI_DEPLOYMENT gpt-5.2
+  azd env set AZURE_LOCATION eastus2
    azd env set TO_EMAIL <recipient@example.com>
    ```
+
+  `AZURE_LOCATION` is restricted to regions that support Azure Functions Flex Consumption, Microsoft.Web Connector Gateways, and the sample's default Microsoft Foundry `gpt-5.4` Global Standard deployment: `centralus`, `eastus`, `eastus2`, `northcentralus`, `southcentralus`, and `westus`.
 
 2. **Deploy to Azure:**
 
@@ -38,17 +38,15 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
    azd up
    ```
 
-   This provisions all resources (Function App, storage, ACA session pool, Office 365 API connection) and deploys the code.
+    This provisions all resources (Function App, Microsoft Foundry, storage, ACA session pool, Connector Gateway, Office 365 Outlook v2 connection, connection access policies for the Function App identity and deployer, and MCP server config) and deploys the code.
 
-3. **Authenticate the Office 365 connector:**
+3. **Authenticate the Office 365 Outlook connection:**
 
-   After deployment, the Office 365 connection is created but **not yet authenticated**. You need to authorize it manually:
+    Open the deployed Office 365 Outlook connection in the Azure portal and complete authentication. The deployment output includes `O365_CONNECTION_ID`; after signing in, the connection status should be `Connected`:
 
-   - Go to the [Azure portal](https://portal.azure.com)
-   - Navigate to the resource group created by `azd` (named `rg-<environment-name>`)
-   - Find the **API Connection** resource (named `office365-...`)
-   - Click **Edit API connection** in the left menu
-   - Click **Authorize**, sign in with your Microsoft account, then click **Save**
+    ```bash
+    az resource show --ids "$(azd env get-value O365_CONNECTION_ID)" --query properties.overallStatus -o tsv
+    ```
 
 4. **Verify:**
 
@@ -73,18 +71,26 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 Required:
 
-- `AZURE_OPENAI_ENDPOINT`: your Azure OpenAI resource endpoint
-- `AZURE_OPENAI_DEPLOYMENT`: model deployment name (e.g. `gpt-5.2`)
+- `FOUNDRY_PROJECT_ENDPOINT`: your Microsoft Foundry project endpoint
+- `FOUNDRY_MODEL`: model deployment name (e.g. `gpt-5.4`)
 - `ACA_SESSION_POOL_ENDPOINT`: needed for code execution (fetching news)
+- `O365_MCP_SERVER_URL`: Office 365 Outlook MCP server URL
 - `TO_EMAIL`: recipient email address
-- `O365_CONNECTION_ID`: Office 365 connector ID
+
+Optional:
+
+- `MAF_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
+- `MAF_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
+- `O365_MCP_CLIENT_ID`: managed identity client ID for the Office 365 Outlook MCP server; defaults to the app-wide identity selection
+
+If `O365_MCP_CLIENT_ID` is set, only the Office 365 Outlook MCP server uses that managed identity. If it is empty, the MCP server uses the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain.
 
 Without `ACA_SESSION_POOL_ENDPOINT`:
 
 - The timer still fires, but the agent cannot fetch news (execute_python unavailable)
-- Email sending may fail due to missing connector tools
+- Email sending may fail if the agent cannot build the news summary
 
-Without `O365_CONNECTION_ID`:
+Without `O365_MCP_SERVER_URL`:
 
 - The agent cannot send email
 
@@ -113,10 +119,10 @@ Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_tech_news" `
 
 ## How It Works
 
-- [`daily_tech_news.agent.md`](src/daily_tech_news.agent.md) defines the agent with a timer trigger, code execution sandbox, and Office 365 connector tools
-- The `tools_from_connections` frontmatter references the Office 365 API Connection. At runtime, the framework discovers **all available actions** on the connector (send email, manage contacts, calendar operations, etc.) and exposes them as tools the agent can call. This agent uses the send email action, but any connector action is available without additional configuration.
+- [`daily_tech_news.agent.md`](src/daily_tech_news.agent.md) defines the agent with a timer trigger, code execution sandbox, and Office 365 Outlook MCP email tool
+- [`mcp.json`](src/mcp.json) configures the Office 365 Outlook MCP server provisioned by Bicep and limits the exposed tool set to `office365_SendEmailV2`
 - When the timer fires, the agent:
   1. Uses `execute_python` to fetch tech news from public RSS feeds and Hacker News
   2. Summarizes the top stories into an HTML email
-  3. Calls the Office 365 send email tool to deliver the summary to the configured recipient
+  3. Calls the Office 365 Outlook MCP email tool to deliver the summary to the configured recipient
 - The `$TO_EMAIL` variable in the agent instructions is replaced with the actual email address at load time. Inline `$VAR` and `%VAR%` substitution applies to all config string values
