@@ -38,7 +38,7 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
    azd up
    ```
 
-   This provisions all resources (Function App, storage, ACA session pool, Office 365 API connection) and deploys the code.
+   This provisions all resources (Function App, storage, ACA session pool, Office 365 API connection) and deploys the code. The sample's `prepackage` hook builds the local runtime wheel and refreshes `src\requirements.txt` before zip packaging.
 
 3. **Authenticate the Office 365 connector:**
 

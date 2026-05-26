@@ -58,7 +58,6 @@ def test_get_chat_client_dispatches_to_provider_factory_and_forwards_extras(
         {
             "provider": "openai",
             "model": "gpt-4.1",
-            "timeout": 42,
             "openai": {
                 "base_url": "https://openai.example.test",
                 "organization": "contoso",
@@ -73,7 +72,6 @@ def test_get_chat_client_dispatches_to_provider_factory_and_forwards_extras(
         "model": "gpt-4.1",
         "base_url": "https://openai.example.test",
         "organization": "contoso",
-        "timeout": 42,
     }
 
 
@@ -132,6 +130,38 @@ def test_build_chat_client_injects_top_level_model_into_kwargs(
     build_chat_client(cfg)
 
     assert captured["model"] == "gpt-4o"
+
+
+def test_build_chat_client_does_not_forward_top_level_timeout_to_provider_kwargs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return "client"
+
+    monkeypatch.setattr(
+        "azure_functions_agents.client_manager.get_provider",
+        lambda provider: ProviderSpec(provider, AzureOpenAIConfig, fake_factory),
+    )
+
+    cfg = AgentConfiguration.model_validate(
+        {
+            "provider": "azure_openai",
+            "model": "gpt-4o",
+            "timeout": 900,
+            "azure_openai": {
+                "azure_endpoint": "https://example.invalid/",
+                "api_version": "2024-10-21",
+                "api_key": "fake-key-for-construction",
+            },
+        }
+    )
+
+    build_chat_client(cfg)
+
+    assert "timeout" not in captured
 
 
 def test_build_chat_client_omits_api_key_after_unset(
@@ -209,7 +239,7 @@ def test_get_chat_client_wraps_type_error_with_diagnostic_message(
     message = str(exc_info.value)
     assert "Failed to construct MAF client for provider 'openai'" in message
     assert "unexpected keyword argument 'organization'" in message
-    assert "Offending kwargs=['organization', 'model', 'timeout']" in message
+    assert "Offending kwargs=['organization', 'model']" in message
     assert "Check your agent_configuration.openai sub-block." in message
 
 

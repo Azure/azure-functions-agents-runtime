@@ -114,7 +114,15 @@ class AgentConfiguration(BaseModel):
 
     provider: str
     model: str | None = None
-    timeout: int | None = None
+    timeout: int | None = Field(
+        default=None,
+        description=(
+            "Per-agent-run wall-clock timeout in seconds, enforced by the "
+            "runtime for both non-streaming and streaming runs. If the "
+            "deadline expires the runtime cancels the run and surfaces a "
+            "timeout error. Not forwarded to the provider SDK."
+        ),
+    )
     temperature: float | None = None
     top_p: float | None = None
     max_tokens: int | None = None

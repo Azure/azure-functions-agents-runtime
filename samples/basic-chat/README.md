@@ -38,6 +38,8 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, a
    azd up
    ```
 
+   The sample's `prepackage` hook builds the local runtime wheel and refreshes `src\requirements.txt` before zip packaging.
+
 3. **Open the chat UI:**
 
    Navigate to the Function App URL shown in the deployment output (`https://<app-name>.azurewebsites.net/`).

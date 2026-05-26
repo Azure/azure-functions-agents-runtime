@@ -35,8 +35,6 @@ def build_chat_client(cfg: AgentConfiguration) -> ChatClient:
     provider = _normalize_provider(cfg.provider)
     kwargs: dict[str, Any] = cfg.provider_config.model_dump(exclude_none=True)
     kwargs["model"] = cfg.model
-    if cfg.timeout is not None:
-        kwargs.setdefault("timeout", cfg.timeout)
 
     # AUDIT: never log kwarg values, never log raw config, never log a credential object.
     logger.info("MAF provider=%s kwargs=%s", provider, _safe_kwarg_summary(kwargs))

@@ -4,3 +4,9 @@ services:
     project: ./src
     language: python
     host: function
+    hooks:
+      prepackage:
+        windows: |
+          ..\..\scripts\sync-sample-wheels.ps1 -Sample .
+        posix: |
+          python ../../scripts/sync_sample_wheels.py --sample .

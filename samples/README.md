@@ -17,7 +17,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 ### Prerequisites
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
-- Python 3.12+
+- Python 3.13+
 - credentials and settings for the model provider referenced by the sample's `agent_configuration` (for example Azure OpenAI endpoint/deployment, API keys, or `az login` for managed identity)
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
@@ -29,7 +29,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 cd samples/<sample-name>/src
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.dev.txt
 ```
 
 **PowerShell (Windows):**
@@ -38,7 +38,7 @@ pip install -r requirements.txt
 cd samples/<sample-name>/src
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements.dev.txt
 ```
 
 ### 2. Create local settings
@@ -116,7 +116,7 @@ Each sample exposes different endpoints. See the sample's README for testing det
 
 If you see an exception like `System.ArgumentException: Destination is too short` from `Azure.Functions.Cli.Helpers.PythonHelpers`, check Python first, then update Azure Functions Core Tools.
 
-1. Verify Python 3.12+ is available.
+1. Verify Python 3.13+ is available.
 
 **Bash:**
 
@@ -162,7 +162,7 @@ func start
 
 ### Local source changes are not reflected at runtime
 
-By default, sample `requirements.txt` files install a released wheel. If you are developing this repo and editing files under `src/azure_functions_agents`, install the package in editable mode so the sample uses your local source.
+Sample `requirements.txt` files are generated for Azure deployment and install a wheel bundled under `src/wheels/`. For local development in this repo, install `requirements.dev.txt` so the sample uses your editable local source.
 
 1. Activate the sample virtual environment.
 
@@ -180,20 +180,18 @@ cd samples/<sample-name>/src
 .venv\Scripts\Activate.ps1
 ```
 
-1. Replace the wheel install with an editable local install.
+1. Install local-development dependencies.
 
 **Bash:**
 
 ```bash
-pip uninstall -y azure-functions-agents
-pip install -e ../../..
+pip install -r requirements.dev.txt
 ```
 
 **PowerShell:**
 
 ```powershell
-pip uninstall -y azure-functions-agents
-pip install -e ..\..\..
+pip install -r requirements.dev.txt
 ```
 
 1. Restart the Functions host (`func start`).

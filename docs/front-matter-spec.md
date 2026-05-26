@@ -330,7 +330,7 @@ agent_configuration:
   # Exactly one provider block, named the same as `provider`
   azure_openai:
     azure_endpoint: $AZURE_OPENAI_ENDPOINT
-    api_version: "2024-10-21"
+    api_version: "v1"
 ```
 
 **Model field rules**
@@ -348,9 +348,9 @@ agent_configuration:
 | `temperature` | `number` | Default response randomness |
 | `top_p` | `number` | Default nucleus sampling value |
 | `max_tokens` | `integer` | Default output token limit |
-| `timeout` | `number` | Request timeout in seconds |
+| `timeout` | `integer` | Runtime-enforced per-agent-run wall-clock timeout in seconds |
 
-These are the only top-level chat knobs supported in this PR. A pass-through `ChatOptions` block for non-universal knobs such as `stop`, `seed`, and `data_sources` is intentionally out of scope and will come in a future PR.
+These are the only top-level chat knobs supported in this PR. `timeout` is not forwarded to the provider SDK; the runtime enforces it as a strict wall-clock deadline around the full `agent.run(...)` call for both non-streaming and streaming runs. On expiry, non-streaming `run_agent` raises `Agent run timed out after {timeout}s`, and streaming `run_agent_stream` emits an SSE event with payload `data: {"type": "error", "content": "Timeout after {timeout}s"}`. A pass-through `ChatOptions` block for non-universal knobs such as `stop`, `seed`, and `data_sources` is intentionally out of scope and will come in a future PR.
 
 **Partial overrides use JSON Merge Patch (RFC 7396)**
 
@@ -425,7 +425,7 @@ agent_configuration:
   timeout: 900
   azure_openai:
     azure_endpoint: https://my-aoai.openai.azure.com/
-    api_version: "2024-10-21"
+    api_version: "v1"
     api_key: $AZURE_OPENAI_API_KEY
 ```
 
@@ -494,7 +494,7 @@ agent_configuration:
   model: gpt-4o
   azure_openai:
     azure_endpoint: https://my-aoai.openai.azure.com/
-    api_version: "2024-10-21"
+    api_version: "v1"
     api_key: $AZURE_OPENAI_API_KEY
 ```
 
@@ -506,7 +506,7 @@ agent_configuration:
   model: gpt-4o
   azure_openai:
     azure_endpoint: https://my-aoai.openai.azure.com/
-    api_version: "2024-10-21"
+    api_version: "v1"
 ```
 
 User-assigned managed identity:
@@ -528,7 +528,7 @@ agent_configuration:
   model: gpt-4o
   azure_openai:
     azure_endpoint: https://my-aoai.openai.azure.com/
-    api_version: "2024-10-21"
+    api_version: "v1"
 ```
 
 Local development uses the same configuration as system-assigned managed identity. `DefaultAzureCredential()` falls through its normal developer credential chain until the code runs in Azure.
@@ -1041,7 +1041,7 @@ agent_configuration:
   timeout: 900
   azure_openai:
     azure_endpoint: https://my-aoai.openai.azure.com/
-    api_version: "2024-10-21"
+    api_version: "v1"
     api_key: $AZURE_OPENAI_API_KEY
 
 mcp:
@@ -1067,7 +1067,7 @@ agent_configuration:
   timeout: 60         # Override: shorter timeout instead of global default
   azure_openai:
     azure_endpoint: https://my-aoai.openai.azure.com/
-    api_version: "2024-10-21"
+    api_version: "v1"
     api_key: $AZURE_OPENAI_API_KEY
 
 # Capability filters
@@ -1132,7 +1132,7 @@ agent_configuration:
   model: gpt-4o
   azure_openai:
     azure_endpoint: $AZURE_OPENAI_ENDPOINT
-    api_version: "2024-10-21"
+    api_version: "v1"
 ```
 
 **Agent (`main.agent.md`):**
@@ -1173,7 +1173,7 @@ The agent inherits `agent_configuration` and the default HTTP trigger from the f
   - `temperature` (number)
   - `top_p` (number)
   - `max_tokens` (integer)
-  - `timeout` (number)
+  - `timeout` (integer | null)
   - `openai` (object)
   - `azure_openai` (object)
   - `foundry` (object)
@@ -1197,7 +1197,7 @@ The agent inherits `agent_configuration` and the default HTTP trigger from the f
 12. **Nested provider `model` rejection:** `model` is not allowed inside `openai`, `azure_openai`, or `foundry`; set `agent_configuration.model` instead
 13. **Required provider fields:** Each provider's required typed fields must be present after merge (`azure_endpoint`/`api_version` for `azure_openai`, `project_endpoint` for `foundry`)
 14. **Universal knobs:** `temperature`, `top_p`, `max_tokens`, and `timeout` must match their declared types
-15. **Timeout limits:** `timeout` must be a positive number; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
+15. **Timeout behavior:** `timeout` is enforced by the runtime as a strict per-agent-run wall-clock deadline in seconds for both non-streaming and streaming runs. Choose a value that stays within your Azure Functions hosting plan's invocation limit (for example 5 min on Consumption, 30 min on Premium).
 16. **Tool references:** Tools in `tools.exclude` must exist as Python modules under the `tools/` directory
 17. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
 18. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`

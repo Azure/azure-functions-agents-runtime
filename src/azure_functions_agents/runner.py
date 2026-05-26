@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterable, AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, TypedDict, cast
@@ -313,9 +313,11 @@ async def run_agent(
         Per-call agent instructions (typically the body of an ``*.agent.md``
         file). Combined with the tool-restriction prefix and any skills text.
     agent_configuration:
-        Resolved provider selection and universal generation knobs. The runner
-        forwards this object to ``build_chat_client(...)`` and uses
-        ``timeout`` / ``temperature`` / ``top_p`` / ``max_tokens`` from it.
+        Resolved provider selection and runtime/model knobs. The runner
+        forwards provider settings to ``build_chat_client(...)``, converts
+        ``temperature`` / ``top_p`` / ``max_tokens`` into MAF ``ChatOptions``,
+        and enforces ``timeout`` itself as a per-agent-run wall-clock deadline
+        around ``agent.run(...)``.
     tools:
         Optional user-tool override. ``None`` auto-discovers user tools from
         the app root. When a list is provided (including ``[]``), that exact
@@ -364,10 +366,8 @@ async def run_agent(
     lock = await _get_session_lock(resolved_id)
     async with lock:
         try:
-            if timeout is None:
+            async with asyncio.timeout(timeout):
                 response = await agent.run(prompt, session=session)
-            else:
-                response = await asyncio.wait_for(agent.run(prompt, session=session), timeout=timeout)
         except TimeoutError:
             raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -417,6 +417,36 @@ async def run_agent(
 # ---------------------------------------------------------------------------
 # Public API: run_agent_stream (SSE)
 # ---------------------------------------------------------------------------
+
+
+async def _iter_with_deadline[T](
+    stream: AsyncIterable[T], deadline: float | None
+) -> AsyncIterator[T]:
+    """Yield updates from ``stream``, raising :class:`TimeoutError` if ``deadline`` is exceeded.
+
+    Each provider-side ``__anext__()`` call is wrapped in :func:`asyncio.wait_for`,
+    which runs it in a sub-task. When the deadline expires, only that sub-task is
+    cancelled — not the outer task driving the SSE consumer. This is what lets the
+    streaming generator catch :class:`TimeoutError` and emit the terminal SSE error
+    event without cancelling the downstream consumer (e.g. the FastAPI response).
+
+    Using :func:`asyncio.wait_for` per iteration rather than wrapping the whole
+    ``async for`` in :func:`asyncio.timeout` is deliberate: :func:`asyncio.timeout`
+    cancels the current task, and for async generators the "current task" while
+    suspended at ``yield`` is the consumer — not the generator.
+    """
+    iterator = stream.__aiter__()
+    while True:
+        remaining = (
+            None
+            if deadline is None
+            else max(0.0, deadline - asyncio.get_event_loop().time())
+        )
+        try:
+            update = await asyncio.wait_for(iterator.__anext__(), timeout=remaining)
+        except StopAsyncIteration:
+            return
+        yield update
 
 
 async def run_agent_stream(
@@ -484,14 +514,10 @@ async def run_agent_stream(
 
     lock = await _get_session_lock(resolved_id)
     async with lock:
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout if timeout is not None else None
+        deadline = asyncio.get_event_loop().time() + timeout if timeout is not None else None
         try:
             stream = agent.run(prompt, stream=True, session=session)
-            async for update in stream:
-                if deadline is not None and loop.time() > deadline:
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
-                    return
+            async for update in _iter_with_deadline(stream, deadline):
                 for item in getattr(update, "contents", None) or []:
                     ctype = _content_type(item)
                     if ctype == "text":

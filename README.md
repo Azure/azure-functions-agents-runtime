@@ -38,7 +38,9 @@ pip install "azurefunctions-agents-runtime[connectors]"
 
 ## Model Provider Configuration
 
-The runtime reads model settings from `agent_configuration` in `agents.config.yaml` or agent front matter. Agent overrides are JSON Merge Patch over the inherited global block. This is the single source of truth for provider selection, universal knobs (`temperature`, `top_p`, `max_tokens`, `timeout`), and provider-specific typed fields.
+The runtime reads model settings from `agent_configuration` in `agents.config.yaml` or agent front matter. Agent overrides are JSON Merge Patch over the inherited global block. This is the single source of truth for provider selection, universal knobs (`temperature`, `top_p`, `max_tokens`), the top-level `timeout`, and provider-specific typed fields.
+
+`timeout` is a runtime-enforced per-agent-run wall-clock deadline in seconds and is not forwarded to the provider SDK. The runtime enforces it for both non-streaming and streaming paths. On expiry, non-streaming `run_agent` raises `Agent run timed out after {timeout}s`; streaming `run_agent_stream` emits an SSE event with payload `data: {"type": "error", "content": "Timeout after {timeout}s"}`.
 
 ```yaml
 agent_configuration:
@@ -47,7 +49,7 @@ agent_configuration:
   timeout: 900
   azure_openai:
     azure_endpoint: $AZURE_OPENAI_ENDPOINT
-    api_version: "2024-10-21"
+    api_version: "v1"
 ```
 
 | Provider | Required typed fields | Optional typed fields | Notes |

@@ -2,7 +2,7 @@
   "servers": {
     "microsoft-learn": {
       "type": "http",
-      "url": "https://learn.microsoft.com/api/mcp"
+      "url": "https://$MSFT_LEARN_URI/api/mcp"
     }
   }
 }
