@@ -8,7 +8,6 @@ import azure.functions as func
 
 from .._logger import logger
 from ..config import ResolvedAgent
-from ..system_tools.connectors.cache import configure_connector_tools
 from . import _naming
 from ._handlers import (
     AUTH_LEVEL_MAP,
@@ -25,18 +24,6 @@ __all__ = [
 ]
 
 _function_name_from_source = _naming._function_name_from_source
-
-
-def _dump_connector_specs(resolved: ResolvedAgent) -> list[dict[str, Any]]:
-    return [spec.model_dump() for spec in resolved.connector_specs]
-
-
-def _configure_connector_tools_if_needed(
-    resolved: ResolvedAgent, capabilities: AgentCapabilities
-) -> None:
-    if not capabilities.use_connector_tools or not resolved.connector_specs:
-        return
-    configure_connector_tools(_dump_connector_specs(resolved))
 
 
 def _register_builtin_agent(
@@ -145,8 +132,6 @@ def register_agent(
             resolved.name,
             registered_names.copy(),
         )
-
-    _configure_connector_tools_if_needed(resolved, capabilities)
 
     if resolved.is_main and trigger_type == "http_trigger":
         logger.debug(

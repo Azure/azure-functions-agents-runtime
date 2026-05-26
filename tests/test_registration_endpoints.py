@@ -72,7 +72,6 @@ def _resolved_agent(
         enabled_skills_names=[],
         tool_filter=ToolsFilter(),
         sandbox_config=None,
-        connector_specs=[],
         input_schema=input_schema,
         response_schema=None,
         response_example=None,

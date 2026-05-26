@@ -60,7 +60,6 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Supported properties:**
 - `system_tools` — Object containing system-level tools configuration
   - `execute_in_sessions` — Object with code execution sandbox configuration
-  - `tools_from_connections` (deprecated) — Connector tool configuration; use connector-backed MCP servers in `mcp.json` for new apps
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
@@ -383,8 +382,6 @@ timeout: 60  # 1 minute for fast agent
 system_tools:
   execute_in_sessions:      # Code execution sandbox configuration
     session_pool_management_endpoint: string
-  tools_from_connections:   # Deprecated. Use connector-backed MCP servers in mcp.json.
-    - connection_id: string
 ```
 
 ---
@@ -414,23 +411,6 @@ system_tools:
 **Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
-
----
-
-##### `system_tools.tools_from_connections` (deprecated)
-- **Type:** `array`
-- **Status:** Deprecated. This field remains implemented for compatibility, but new apps should expose connector actions through connector-backed MCP servers in `mcp.json`.
-- **Description:** Loads connector-backed tools directly from Azure connector resources. Prefer MCP because it uses the standard MCP discovery, filtering, authentication, and tool invocation path.
-
-**Legacy global configuration (in `agents.config.yaml`):**
-```yaml
-system_tools:
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
-      prefix: office365  # optional
-```
-
-**Recommended replacement:** define the connector-backed MCP server in `mcp.json` and filter it with agent `mcp.exclude` when needed.
 
 ---
 
@@ -945,7 +925,6 @@ This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug s
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `execute_in_sessions` (object)
-  - `tools_from_connections` (array, deprecated)
 - `model` (string)
 - `timeout` (number)
 - `tools` (object)

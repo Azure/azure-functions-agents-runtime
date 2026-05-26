@@ -54,7 +54,6 @@ from .client_manager import get_client_manager
 from .config.paths import get_app_root, resolve_config_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
-from .system_tools.connectors.cache import get_connector_tools
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -191,7 +190,6 @@ async def _build_agent_session_history(
     tools: list[Any] | None,
     mcp_tools: list[Any] | None,
     skill_paths: list[Path] | None,
-    use_connector_tools: bool,
     model: str | None,
     sandbox_tools: list[Any] | None,
 ) -> tuple[Any, Any, str]:
@@ -222,16 +220,13 @@ async def _build_agent_session_history(
 
     history_provider = _build_history_provider()
 
-    # Tool list: resolved user tools + optional connector tools + per-call
-    # sandbox tools + resolved MCP tools.
+    # Tool list: resolved user tools + per-call sandbox tools + resolved MCP
+    # tools.
     app_root = get_app_root()
     resolved_tools: list[Any] = (
         list(discover_user_tools(app_root)) if tools is None else list(tools)
     )
 
-    connectors = await get_connector_tools() if use_connector_tools else None
-    if connectors:
-        resolved_tools.extend(connectors)
     if sandbox_tools:
         resolved_tools.extend(sandbox_tools)
 
@@ -327,7 +322,6 @@ async def run_agent(
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
     skill_paths: list[Path] | None = None,
-    use_connector_tools: bool = True,
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
@@ -347,8 +341,8 @@ async def run_agent(
     tools:
         Optional user-tool override. ``None`` auto-discovers user tools from
         the app root. When a list is provided (including ``[]``), that exact
-        list becomes the user-tool set. Connector tools, sandbox tools, and
-        MCP tools are controlled separately and may still be added.
+        list becomes the user-tool set. Sandbox tools and MCP tools are
+        controlled separately and may still be added.
     mcp_tools:
         Optional MCP tool list. ``None`` auto-discovers tools from
         ``mcp.json``; an explicit list is used as-is. Pass ``[]`` to disable
@@ -356,11 +350,6 @@ async def run_agent(
     skill_paths:
         Optional list of skill directories to expose via MAF's
         :class:`SkillsProvider`. ``None`` or ``[]`` disables skills.
-    use_connector_tools:
-        Whether to include connector tools discovered from the shared cache.
-        This is separate from ``tools``. ``run_agent()`` defaults to ``True``;
-        higher-level config-driven callers can treat ``None`` as "use the
-        configured default" before calling this function.
     model:
         Optional model/deployment override. When omitted the
         :class:`ClientManager` resolves the value from environment variables.
@@ -377,7 +366,7 @@ async def run_agent(
     Notes
     -----
     To fully disable all tools from a direct API call, pass
-    ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
+    ``tools=[], mcp_tools=[], sandbox_tools=None``.
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
@@ -387,7 +376,6 @@ async def run_agent(
         tools=tools,
         mcp_tools=mcp_tools,
         skill_paths=skill_paths,
-        use_connector_tools=use_connector_tools,
         model=model,
         sandbox_tools=sandbox_tools,
     )
@@ -462,7 +450,6 @@ async def run_agent_stream(
     tools: list[Any] | None = None,
     mcp_tools: list[Any] | None = None,
     skill_paths: list[Path] | None = None,
-    use_connector_tools: bool = True,
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
@@ -474,9 +461,6 @@ async def run_agent_stream(
     * ``tools`` controls the user tool set. ``None`` auto-discovers user
       tools from the app root; a provided list (including ``[]``) is used
       exactly as that user-tool set.
-    * ``use_connector_tools`` separately controls connector tools. Callers that
-      want config-driven defaults can treat ``None`` as "use the configured
-      default" before calling this function.
     * ``mcp_tools`` separately controls MCP tools. ``None`` auto-discovers
       from ``mcp.json``; pass ``[]`` to disable MCP tools.
     * ``sandbox_tools`` separately controls sandbox tools. ``None`` adds no
@@ -484,7 +468,7 @@ async def run_agent_stream(
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
     * To fully disable all tools from a direct API call, pass
-      ``tools=[], mcp_tools=[], sandbox_tools=None, use_connector_tools=False``.
+      ``tools=[], mcp_tools=[], sandbox_tools=None``.
 
     Event vocabulary (kept stable for the chat UI):
 
@@ -507,7 +491,6 @@ async def run_agent_stream(
             tools=tools,
             mcp_tools=mcp_tools,
             skill_paths=skill_paths,
-            use_connector_tools=use_connector_tools,
             model=model,
             sandbox_tools=sandbox_tools,
         )

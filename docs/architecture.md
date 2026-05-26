@@ -51,7 +51,6 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/triggers.py` | Registers each non-main agent trigger, dispatching between the runtime HTTP adapter and Azure Functions trigger decorators. | `register_agent()` |
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP endpoints for agents with debug exposure. | `register_debug_endpoints()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
-| `azure_functions_agents/system_tools/connectors/*` | Internal compatibility layer for Azure API Connection action discovery. Customer-facing connector actions should be exposed through connector-backed MCP servers in `mcp.json`. | `cache.py:configure_connector_tools(), get_connector_tools()`; `connectors.py:load_connection()`; `tools.py:generate_tools()`; `arm.py:ArmClient, DataPlaneClient` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming. | `run_agent()`, `run_agent_stream()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`. | `tool()` |
@@ -152,8 +151,7 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 ### Where MCP and sandbox tools enter
 
 - MCP server definitions are read from `mcp.json`, translated into MAF MCP tool wrappers by `discover_mcp_servers()`, and filtered per agent through capability settings.
-- Connector actions should be surfaced through connector-backed MCP servers. This keeps connector integration on the standard MCP discovery path and lets each server define its own transport, auth, and allowed tool set.
-- Legacy `system_tools.tools_from_connections` entries still flow through `configure_connector_tools()` and `AgentCapabilities.use_connector_tools` for compatibility, but new apps should use connector-backed MCP servers instead.
+- Connector actions are surfaced through connector-backed MCP servers. This keeps connector integration on the standard MCP discovery path and lets each server define its own transport, auth, and allowed tool set.
 - Sandbox configuration is read from `GlobalConfig.system_tools.execute_in_sessions`, carried into `ResolvedAgent.sandbox_config`, and turned into per-session tool closures by `build_sandbox_tools_for_session()` right before a request is executed.
 - Sandbox tools are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
 
@@ -166,7 +164,6 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
-- `AgentCapabilities.use_connector_tools` controls whether the legacy connector-tool compatibility cache is queried.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
 
 The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, and streaming/non-streaming response handling.
@@ -184,7 +181,7 @@ These are the main "passport" objects that move through the pipeline:
 - `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
   - **Created by:** `config/merge.py:compose()`
   - **Consumed by:** validation, capability building, trigger registration, endpoint registration, and sandbox-tool assembly
-- `AgentCapabilities` — final filtered bundle of user tools, MCP tools, skill directories, and legacy connector-tool enablement. Defined in `src/azure_functions_agents/registration/capabilities.py` as `AgentCapabilities`.
+- `AgentCapabilities` — final filtered bundle of user tools, MCP tools, and skill directories. Defined in `src/azure_functions_agents/registration/capabilities.py` as `AgentCapabilities`.
   - **Created by:** `registration/capabilities.py:build_capabilities()`
   - **Consumed by:** `registration/triggers.py`, `registration/endpoints.py`, and the handler closures they create
 - `azure.functions.FunctionApp` — the final Azure Functions app object created in `src/azure_functions_agents/app.py:create_function_app()` and returned to the host after registration completes.
@@ -223,7 +220,7 @@ This extension point is deliberately below the registration layer: no trigger or
 
 To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:tool()`.
 
-These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools, MCP tools, and legacy connector tools when that compatibility path is configured. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
+These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools and MCP tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 
 ### Per-agent capability filtering
 

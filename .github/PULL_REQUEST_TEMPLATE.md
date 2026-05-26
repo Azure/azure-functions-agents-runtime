@@ -26,8 +26,8 @@ What kind of change does this Pull Request introduce?
 *  Get the code
 
 ```
-git clone https://github.com/anthonychu/azure-functions-agents.git
-cd azure-functions-agents
+git clone https://github.com/Azure/azure-functions-agents-runtime.git
+cd azure-functions-agents-runtime
 git checkout [branch-name]
 pip install -e .
 ```

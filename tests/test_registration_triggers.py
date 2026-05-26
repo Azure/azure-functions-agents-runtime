@@ -117,7 +117,6 @@ def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedA
         enabled_skills_names=[],
         tool_filter=ToolsFilter(),
         sandbox_config=None,
-        connector_specs=[],
         input_schema=None,
         response_schema=None,
         response_example=None,

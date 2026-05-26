@@ -19,8 +19,6 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
             system_tools:
               execute_in_sessions:
                 session_pool_management_endpoint: https://example.test
-              tools_from_connections:
-                - connection_id: conn-1
             """
         ).strip(),
         encoding="utf-8",
@@ -30,7 +28,7 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
     assert config.model == "gpt-4o"
     assert config.timeout == 12
     assert config.system_tools is not None
-    assert config.system_tools.tools_from_connections[0].connection_id == "conn-1"
+    assert config.system_tools.execute_in_sessions is not None
 
 
 def test_load_global_config_resolves_all_string_values(

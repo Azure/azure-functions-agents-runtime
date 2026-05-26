@@ -66,22 +66,12 @@ class ExecuteInSessionsConfig(BaseModel):
     session_pool_management_endpoint: str
 
 
-class ToolsFromConnectionEntry(BaseModel):
-    """A connection-backed tool discovery entry from agents.config.yaml."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    connection_id: str
-    prefix: str | None = None
-
-
 class SystemToolsConfig(BaseModel):
     """Global system tool configuration shared across agents."""
 
     model_config = ConfigDict(extra="forbid")
 
     execute_in_sessions: ExecuteInSessionsConfig | None = None
-    tools_from_connections: list[ToolsFromConnectionEntry] = Field(default_factory=list)
 
 
 class SystemToolsAgentOverride(BaseModel):
@@ -152,7 +142,6 @@ class ResolvedAgent(BaseModel):
     skills_disabled: bool = False
     mcp_disabled: bool = False
     sandbox_config: ExecuteInSessionsConfig | None
-    connector_specs: list[ToolsFromConnectionEntry]
     input_schema: dict[str, Any] | None
     response_schema: dict[str, Any] | None
     response_example: str | None

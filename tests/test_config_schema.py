@@ -76,8 +76,6 @@ def test_global_config_extra_forbidden() -> None:
 def test_system_tools_config_parses() -> None:
     payload: dict[str, Any] = {
         "execute_in_sessions": {"session_pool_management_endpoint": "https://example.test"},
-        "tools_from_connections": [{"connection_id": "conn-1", "prefix": "o365"}],
     }
     config = SystemToolsConfig.model_validate(payload)
     assert config.execute_in_sessions is not None
-    assert config.tools_from_connections[0].connection_id == "conn-1"
