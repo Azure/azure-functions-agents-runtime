@@ -45,26 +45,6 @@ You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|found
 
 Model resolution precedence is: explicit requested model > provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry) > `MAF_MODEL` > provider default.
 
-### Plugging in a custom client manager
-
-Provider auto-detection lives behind a small interface. To integrate a new chat client, implement `ClientManager` and register your instance once at startup:
-
-```python
-from azure_functions_agents import ClientManager, set_client_manager
-
-class MyCustomClientManager(ClientManager):
-    def resolve_model(self, model_override=None):
-        return model_override or "my-model"
-    def build_chat_client(self, model_override=None):
-        return MyChatClient(model=self.resolve_model(model_override))
-    async def close(self):
-        ...
-
-set_client_manager(MyCustomClientManager())
-```
-
-Once set, every call to `run_agent` / `run_agent_stream` and every triggered agent uses your client.
-
 ## Quick Start
 
 ### 1. Create the agent file
