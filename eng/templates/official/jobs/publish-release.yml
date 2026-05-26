@@ -40,7 +40,7 @@ jobs:
 
         # Create GitHub credential
         git config --global user.name "AzureFunctions"
-        git config --global user.email "azfunc@microsoft.com"
+        git config --global user.email "azurefunctions@microsoft.com"
 
         # Heading to Artifact Repository
         Write-Host "Operating based on azure-functions-agent-runtime"
@@ -84,7 +84,7 @@ jobs:
 
         # Create GitHub credential
         git config --global user.name "AzureFunctions"
-        git config --global user.email "azfunc@microsoft.com"
+        git config --global user.email "azurefunctions@microsoft.com"
 
         # Clone Repository
         git clone "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime"
