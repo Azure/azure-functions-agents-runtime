@@ -595,26 +595,3 @@ async def run_agent_stream(
         except Exception as exc:
             logger.error("Agent stream failed: %s", exc, exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-
-
-# ---------------------------------------------------------------------------
-# Removed-API stubs (one release of clear errors before symbol removal)
-# ---------------------------------------------------------------------------
-
-
-def run_copilot_agent(*_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
-    """Removed in 1.0.0. Use :func:`run_agent` instead."""
-    raise RuntimeError(
-        "run_copilot_agent was removed in azure-functions-agents 1.0.0. "
-        "The runtime now uses the Microsoft Agent Framework. Migrate to "
-        "azure_functions_agents.run_agent."
-    )
-
-
-def run_copilot_agent_stream(*_args: object, **_kwargs: object) -> None:  # pragma: no cover - stub
-    """Removed in 1.0.0. Use :func:`run_agent_stream` instead."""
-    raise RuntimeError(
-        "run_copilot_agent_stream was removed in azure-functions-agents 1.0.0. "
-        "The runtime now uses the Microsoft Agent Framework. Migrate to "
-        "azure_functions_agents.run_agent_stream."
-    )
