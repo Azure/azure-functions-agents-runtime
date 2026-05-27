@@ -1,0 +1,6 @@
+name: outlook-reply-agent
+services:
+  api:
+    project: ./src
+    language: python
+    host: function

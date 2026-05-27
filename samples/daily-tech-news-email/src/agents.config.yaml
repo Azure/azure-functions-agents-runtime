@@ -4,14 +4,11 @@
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
 
 # Default runtime configuration
 agent_configuration:
-  provider: azure_openai
-  model: $AZURE_OPENAI_DEPLOYMENT
+  provider: foundry
+  model: $FOUNDRY_MODEL
   timeout: 900
-  azure_openai:
-    azure_endpoint: $AZURE_OPENAI_ENDPOINT
-    api_version: "v1"
+  foundry:
+    project_endpoint: $FOUNDRY_PROJECT_ENDPOINT

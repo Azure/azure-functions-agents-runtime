@@ -19,7 +19,6 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     SkillsFilter,
     ToolsFilter,
-    ToolsFromConnectionEntry,
 )
 
 logger = logging.getLogger(__name__)
@@ -140,12 +139,6 @@ def _resolve_sandbox(
     return None
 
 
-def _resolve_connectors(global_config: GlobalConfig) -> list[ToolsFromConnectionEntry]:
-    if global_config.system_tools is None:
-        return []
-    return list(global_config.system_tools.tools_from_connections)
-
-
 def apply_mcp_filter(
     global_mcp: list[str], spec_mcp: bool | McpFilter | None
 ) -> tuple[list[str], bool]:
@@ -227,7 +220,6 @@ def compose(
         skills_disabled=skills_disabled,
         mcp_disabled=mcp_disabled,
         sandbox_config=_resolve_sandbox(spec, global_config),
-        connector_specs=_resolve_connectors(global_config),
         input_schema=spec.input_schema,
         response_schema=spec.response_schema,
         response_example=spec.response_example,

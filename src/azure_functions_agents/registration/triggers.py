@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable
-from typing import Any, cast
+from typing import Any
 
 import azure.functions as func
 
 from .._logger import logger
 from ..config import ResolvedAgent
-from ..system_tools.connectors.cache import configure_connector_tools
 from . import _naming
 from ._handlers import (
     AUTH_LEVEL_MAP,
@@ -25,20 +23,7 @@ __all__ = [
     "register_agent",
 ]
 
-_CONNECTORS_INSTANCES: dict[int, object] = {}
 _function_name_from_source = _naming._function_name_from_source
-
-
-def _dump_connector_specs(resolved: ResolvedAgent) -> list[dict[str, Any]]:
-    return [spec.model_dump() for spec in resolved.connector_specs]
-
-
-def _configure_connector_tools_if_needed(
-    resolved: ResolvedAgent, capabilities: AgentCapabilities
-) -> None:
-    if not capabilities.use_connector_tools or not resolved.connector_specs:
-        return
-    configure_connector_tools(_dump_connector_specs(resolved))
 
 
 def _register_builtin_agent(
@@ -49,7 +34,12 @@ def _register_builtin_agent(
     trigger_params: dict[str, Any],
     trigger_type: str,
 ) -> None:
+    trigger_params = dict(trigger_params)
     decorator_fn = getattr(app, trigger_type, None)
+    if decorator_fn is None and trigger_type == "connector_trigger":
+        decorator_fn = getattr(app, "generic_trigger", None)
+        trigger_params.setdefault("type", "connectorTrigger")
+
     if decorator_fn is None:
         logger.warning(
             "Skipping '%s': unknown trigger type '%s'",
@@ -62,7 +52,6 @@ def _register_builtin_agent(
         trigger_params["schedule"] = normalize_timer_schedule(str(trigger_params["schedule"]))
 
     handler = make_agent_handler(resolved, trigger_type, capabilities)
-    trigger_params = dict(trigger_params)
     trigger_params["arg_name"] = "trigger_data"
 
     decorated = decorator_fn(**trigger_params)(handler)
@@ -117,66 +106,6 @@ def _register_http_agent(
     )
 
 
-def _register_connector_agent(
-    app: func.FunctionApp,
-    resolved: ResolvedAgent,
-    capabilities: AgentCapabilities,
-    function_name: str,
-    trigger_params: dict[str, Any],
-    trigger_type: str,
-) -> None:
-    app_key = id(app)
-    connectors_instance = _CONNECTORS_INSTANCES.get(app_key)
-
-    if connectors_instance is None:
-        try:
-            import azure.functions_connectors as fc
-
-            connectors_instance = fc.FunctionsConnectors(app)
-            _CONNECTORS_INSTANCES[app_key] = connectors_instance
-        except ImportError:
-            logger.error(
-                "Skipping '%s': azure-functions-connectors package not installed. "
-                "Install from: https://github.com/anthonychu/azure-functions-connectors-python",
-                function_name,
-            )
-            return
-
-    parts = trigger_type.removeprefix("connectors.").split(".")
-    obj: Any = connectors_instance
-    try:
-        for part in parts:
-            obj = getattr(obj, part)
-    except AttributeError:
-        logger.warning(
-            "Skipping '%s': could not resolve connector trigger '%s'",
-            function_name,
-            trigger_type,
-        )
-        return
-
-    if not callable(obj):
-        logger.warning(
-            "Skipping '%s': resolved connector trigger '%s' is not callable",
-            function_name,
-            trigger_type,
-        )
-        return
-
-    decorator_fn = cast(Callable[..., Callable[[Any], Any]], obj)
-
-    handler = make_agent_handler(resolved, trigger_type, capabilities)
-
-    decorated = decorator_fn(**trigger_params)(handler)
-    decorated = app.function_name(name=function_name)(decorated)
-    logger.info(
-        "Registered '%s' (%s) — %s",
-        function_name,
-        trigger_type,
-        resolved.name,
-    )
-
-
 def register_agent(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
@@ -204,8 +133,6 @@ def register_agent(
             registered_names.copy(),
         )
 
-    _configure_connector_tools_if_needed(resolved, capabilities)
-
     if resolved.is_main and trigger_type == "http_trigger":
         logger.debug(
             "Skipping http_trigger registration for main agent '%s'; "
@@ -216,19 +143,6 @@ def register_agent(
 
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
-        if registered_names is not None:
-            registered_names.add(function_name)
-        return
-
-    if "." in trigger_type:
-        _register_connector_agent(
-            app,
-            resolved,
-            capabilities,
-            function_name,
-            trigger_params,
-            trigger_type,
-        )
         if registered_names is not None:
             registered_names.add(function_name)
         return

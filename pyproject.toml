@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "azurefunctions-agents-runtime"
-version = "0.0.0dev3"
+version = "0.0.0dev6"
 description = "A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework."
 readme = "README.md"
 license = {text = "MIT"}
@@ -24,11 +24,7 @@ dependencies = [
     "mcp==1.27.*",
 ]
 
-
 [project.optional-dependencies]
-connectors = [
-    "azure-connectors==0.1.*",
-]
 dev = [
     "ruff==0.15.*",
     "mypy==2.1.*",

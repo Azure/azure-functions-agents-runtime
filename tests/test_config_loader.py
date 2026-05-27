@@ -40,8 +40,6 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
             system_tools:
               execute_in_sessions:
                 session_pool_management_endpoint: https://example.test
-              tools_from_connections:
-                - connection_id: conn-1
             """
         ).strip(),
         encoding="utf-8",
@@ -60,7 +58,7 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
     assert config.agent_configuration.openai.base_url == "https://openai.example.test"
     assert config.agent_configuration.openai.model_dump()["organization"] == "contoso"
     assert config.system_tools is not None
-    assert config.system_tools.tools_from_connections[0].connection_id == "conn-1"
+    assert config.system_tools.execute_in_sessions is not None
 
 
 @pytest.mark.parametrize(

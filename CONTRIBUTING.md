@@ -75,9 +75,9 @@ That's it! Thank you for your contribution!
 
 ```bash
 # Clone the repo and install in editable mode
-git clone https://github.com/Azure/azure-functions-agent-runtime.git
-cd azure-functions-agent-runtime
-pip install -e ".[connectors]"
+git clone https://github.com/Azure/azure-functions-agents-runtime.git
+cd azure-functions-agents-runtime
+pip install -e .
 
 # Build a wheel
 pip install build

@@ -1,15 +1,9 @@
 # Global configuration for all agents in this function app
 
-# Shared infrastructure - Email capabilities via Office 365 connector
-system_tools:
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
-
 # Default runtime configuration
 agent_configuration:
-  provider: azure_openai
-  model: $AZURE_OPENAI_DEPLOYMENT
+  provider: foundry
+  model: $FOUNDRY_MODEL
   timeout: 900
-  azure_openai:
-    azure_endpoint: $AZURE_OPENAI_ENDPOINT
-    api_version: "v1"
+  foundry:
+    project_endpoint: $FOUNDRY_PROJECT_ENDPOINT

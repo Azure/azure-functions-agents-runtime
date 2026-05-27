@@ -62,7 +62,6 @@ def _resolved_agent(
         tool_filter=ToolsFilter(),
         tools_disabled=tools_disabled,
         sandbox_config=sandbox_config,
-        connector_specs=[],
         input_schema=None,
         response_schema=response_schema,
         response_example=None,

@@ -5,8 +5,9 @@ Each subdirectory is a standalone Azure Functions app deployable with [`azd up`]
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
-| [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 | | | ✅ | |
-| [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 | ✅ MS Learn | ✅ azure-resources | ✅ | ✅ |
+| [outlook-reply-agent](outlook-reply-agent/) | Office 365 Outlook | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
+| [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
+| [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 
 ## Run Locally (optional)
 
@@ -18,7 +19,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
 - Python 3.13+
-- credentials and settings for the model provider referenced by the sample's `agent_configuration` (for example Azure OpenAI endpoint/deployment, API keys, or `az login` for managed identity)
+- credentials and settings for the model provider referenced by the sample's checked-in `agent_configuration` (the samples default to Microsoft Foundry, so `az login` is the common path)
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
 ### 1. Install dependencies
@@ -63,9 +64,17 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-Samples select their model provider through the checked-in `agent_configuration` block in their agent config. For local runs, set the environment variables referenced by that config (for example `OPENAI_API_KEY`, `AZURE_OPENAI_API_KEY`, or provider-specific endpoint values).
+Samples select their model provider through the checked-in `agent_configuration` block in each sample's config. The samples currently default to Microsoft Foundry.
 
-For Azure OpenAI, that usually means setting your resource endpoint (for example `https://<name>.openai.azure.com/`) plus whatever deployment and API-version values the sample config references. If the sample omits `api_key`, authentication uses `DefaultAzureCredential`, so run `az login` locally first.
+| Provider | Typical local settings |
+| --- | --- |
+| Microsoft Foundry | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` |
+| Azure OpenAI | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` plus a matching `agent_configuration.model` |
+
+For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint and `FOUNDRY_MODEL` to your model deployment name (for example, `gpt-5.4`). Authentication uses `DefaultAzureCredential`, so run `az login` locally first.
+
+Azure OpenAI and OpenAI remain supported alternatives. If you switch providers, update the sample's `agent_configuration` and the corresponding environment variables in `local.settings.json`. For Azure OpenAI, that usually means setting your resource endpoint (for example `https://<name>.openai.azure.com/`) plus the deployment and API-version values referenced by the config. If the sample omits `api_key`, authentication uses `DefaultAzureCredential`.
 
 **Sample-specific variables:**
 

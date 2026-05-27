@@ -16,9 +16,10 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Custom tools (auto-discovered from `tools/`)
 - System tools (`system_tools`)
 - Shared model configuration in `agent_configuration`
+  - Code execution sandbox configuration
 
 **MCP server discovery:**
-- MCP servers (defined in `mcp.json`)
+- MCP servers (defined in `mcp.json`), including connector-backed MCP servers
 
 **Agent front matter:**
 - Inherits discovered capabilities by default
@@ -62,7 +63,6 @@ Optional file in the app root that defines shared infrastructure and runtime def
 **Supported properties:**
 - `system_tools` — system-level tools configuration
   - `execute_in_sessions` — code execution sandbox configuration
-  - `tools_from_connections` — connector configurations
 - `agent_configuration` — shared runtime configuration block
 - `tools` — tool filtering configuration
 
@@ -110,7 +110,6 @@ Fields are organized by how they are used:
 - `tools` — auto-discovered from `tools/`
 - `system_tools` — system-level capabilities configured globally and optionally disabled per agent
   - `execute_in_sessions` — code execution sandbox
-  - `tools_from_connections` — connector tools
 
 **Runtime settings (global defaults, overridable in agents):**
 - `agent_configuration` — the only supported model-configuration block
@@ -146,7 +145,7 @@ Fields are organized by how they are used:
 - **Type:** `object`
 - **Typical location:** Agent only
 - **Can override:** N/A (agent-specific only)
-- **Description:** Defines how the agent is invoked. Required for all agents except `main.agent.md`. If `main.agent.md` omits `trigger`, it uses the default HTTP trigger settings.
+- **Description:** Defines how the agent is invoked. Required for all agents except `main.agent.md`. If `main.agent.md` omits `trigger`, the runtime registers the built-in chat UI, `/agent/chat`, `/agent/chatstream`, and MCP debug surfaces instead of a normal trigger.
 - **Structure:** `type` field specifies the trigger type, `args` contains type-specific configuration
 - **Important:** Only **one trigger per agent file** is allowed
 
@@ -175,7 +174,7 @@ trigger:
 trigger:
   type: timer_trigger
   args:
-    schedule: string       # Required. CRON expression (6-field format: second minute hour day month day-of-week)
+    schedule: string       # Required. NCRONTAB expression (6 fields, or 5 fields with seconds prepended)
 ```
 
 #### **Queue Trigger**
@@ -183,8 +182,8 @@ trigger:
 trigger:
   type: queue_trigger
   args:
-    name: string           # Required. Queue name
-    connection: string     # Optional. App setting name for connection string. Defaults to AzureWebJobsStorage
+    queue_name: string     # Required. Queue name
+    connection: string     # Required. App setting or setting collection for Azure Queue Storage
 ```
 
 #### **Blob Trigger**
@@ -202,15 +201,32 @@ trigger:
   type: event_grid_trigger
 ```
 
-#### **Service Bus Trigger**
+#### **Service Bus Queue Trigger**
 ```yaml
 trigger:
-  type: service_bus_trigger
+  type: service_bus_queue_trigger
   args:
-    queue_name: string           # Required if using queue. Queue name
-    topic_name: string           # Required if using topic. Topic name
-    subscription_name: string    # Required if using topic. Subscription name
-    connection: string           # Optional. App setting name for connection string
+    queue_name: string           # Required. Queue name
+    connection: string           # Required. App setting or setting collection for Service Bus
+```
+
+#### **Service Bus Topic Trigger**
+```yaml
+trigger:
+  type: service_bus_topic_trigger
+  args:
+    topic_name: string           # Required. Topic name
+    subscription_name: string    # Required. Subscription name
+    connection: string           # Required. App setting or setting collection for Service Bus
+```
+
+#### **Connector Trigger**
+```yaml
+trigger:
+  type: connector_trigger
+  args:
+    connection_name: string      # Required by connector binding configuration
+    trigger_identifier: string   # Required by connector binding configuration
 ```
 
 ---
@@ -586,8 +602,6 @@ New providers plug in through the provider registry by adding a new `ProviderSpe
 system_tools:
   execute_in_sessions:      # Code execution sandbox configuration
     session_pool_management_endpoint: string
-  tools_from_connections:   # Connector-based tools
-    - connection_id: string
 ```
 
 ---
@@ -617,25 +631,6 @@ system_tools:
 **Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
-
----
-
-##### `system_tools.tools_from_connections`
-- **Type:** `array`
-- **Description:** Loads connector-based tools (e.g., Office 365, Outlook, SharePoint) from Azure Logic App connectors as dynamic tools. All agents inherit these tools by default.
-- **Status:** ⚠️ Under review — May be deprecated in favor of MCP-based connector integration
-
-**Global configuration (in `agents.config.yaml`):**
-```yaml
-system_tools:
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
-    - connection_id: $OUTLOOK_CONNECTION_ID
-```
-
-**Note:** Connector auth uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps to select the intended managed identity.
-
-**Note:** This field enables dynamic tool generation from connector APIs. Connector-backed MCP servers are defined in `mcp.json` and participate in the standard MCP discovery flow, which provides better standardization and discoverability. The future direction between these two approaches is under consideration.
 
 ---
 
@@ -809,6 +804,34 @@ metadata:
 
 ---
 
+#### `logger`
+- **Type:** `boolean`
+- **Typical location:** Agent only
+- **Can override:** N/A (agent-specific only)
+- **Default:** `true`
+- **Description:** Controls whether triggered and HTTP agents log response summaries. Set to `false` to suppress runtime response logging for an agent.
+
+**Example:**
+```yaml
+logger: false
+```
+
+---
+
+#### `substitute_variables`
+- **Type:** `boolean`
+- **Typical location:** Agent only
+- **Can override:** N/A (agent-specific only)
+- **Default:** `true`
+- **Description:** Controls whether this agent resolves environment variables in front matter values and markdown body text. See [Environment Variable Substitution](#environment-variable-substitution).
+
+**Example:**
+```yaml
+substitute_variables: false
+```
+
+---
+
 ## Environment Variable Substitution
 
 Environment variable substitution is resolved against the Azure Functions process environment. On Azure, Application Settings are exposed to the function host as environment variables, so placeholders can refer to either local environment variables or deployed app settings.
@@ -871,7 +894,8 @@ With `substitute_variables: false`, `agent_configuration.model`, `response_examp
 **Common patterns:**
 - `$ACA_SESSION_POOL_ENDPOINT` — Session pool endpoint
 - `$SUBSCRIPTION_ID` — Azure subscription ID
-- `$O365_CONNECTION_ID` — Office 365 connection resource ID
+- `$O365_MCP_SERVER_URL` — Office 365 Outlook MCP server URL
+- `$O365_MCP_CLIENT_ID` — Optional managed identity client ID for an Office 365 Outlook MCP server
 - `$API_ENDPOINT` — Service endpoint URL
 - `$TO_EMAIL` — Recipient email address
 - `$STORAGE_CONNECTION` — Storage account connection string
@@ -890,8 +914,6 @@ This example demonstrates the recommended pattern: define shared runtime configu
 system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
-  tools_from_connections:
-    - connection_id: $O365_CONNECTION_ID
 
 # Global defaults
 agent_configuration:
@@ -918,7 +940,7 @@ description: A helpful assistant with Python code execution capabilities
 
 You are a helpful assistant. If you need to get up to date information, browse the web for it.
 ```
-*Note: This agent inherits shared runtime defaults plus all discovered capabilities (sandbox, connectors, MCP servers, auto-discovered skills and tools).*
+*Note: This agent inherits shared runtime defaults plus all discovered capabilities (sandbox, MCP servers, auto-discovered skills and tools). Connector-backed tools are exposed through MCP servers defined in `mcp.json`.*
 
 **Resource Summary Agent (`resource_summary.agent.md`):**
 ```yaml
@@ -1166,7 +1188,6 @@ The agent inherits `agent_configuration` and the default HTTP trigger from the f
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `execute_in_sessions` (object)
-  - `tools_from_connections` (array)
 - `agent_configuration` (object)
   - `provider` (string)
   - `model` (string | null)
@@ -1185,9 +1206,9 @@ The agent inherits `agent_configuration` and the default HTTP trigger from the f
 
 1. **Single trigger per file:** Only one trigger can be specified per `.agent.md` file
 2. **Trigger structure:** When specified, trigger must have `type` field; `args` field is optional for triggers with no configuration
-3. **Trigger type-specific validation:** Each trigger type validates its own required fields in the `args` section
+3. **Trigger type-specific validation:** Unsupported trigger decorator names are rejected; supported trigger types validate their own required fields in the `args` section
 4. **Environment variables:** Inline `$VAR` and `%VAR%` placeholders in supported string values may be backed by environment variables or Azure Application Settings; if no value is defined, the literal placeholder is preserved
-5. **CRON expressions:** Timer trigger schedules must be valid 6-field CRON expressions
+5. **CRON expressions:** Timer trigger schedules must be valid NCRONTAB expressions; 6-field expressions are passed through, and 5-field expressions have `0` seconds prepended by the runtime
 6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
 7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
 8. **Schema validation:** `input_schema` and `response_schema` must be valid JSON Schema (draft-07 or later)
@@ -1240,7 +1261,7 @@ The `main.agent.md` file is special:
   - `POST /agent/chat` — Non-streaming chat endpoint
   - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
   - MCP tool registration — Tool name derived from the sanitized filename slug (`main` for `main.agent.md`), exposed as `mcpToolTrigger`
-- **No trigger required** — Uses HTTP by default; can be omitted from front matter
+- **No trigger required** — Registers built-in chat UI, chat APIs, and MCP debug surfaces by default; `trigger` can be omitted from front matter
 
 Other agents require an explicit `trigger` definition and have `debug: false` (all debug endpoints disabled) by default.
 
@@ -1248,7 +1269,7 @@ Other agents require an explicit `trigger` definition and have `debug: false` (a
 ```
 /
   agents.config.yaml           # Global configuration
-  main.agent.md             # Default HTTP agent
+  main.agent.md             # Built-in chat UI, chat APIs, and MCP debug surfaces
   daily_report.agent.md     # Timer-triggered agent
   resource_summary.agent.md # Custom HTTP agent
   function_app.py           # Python Functions entry point

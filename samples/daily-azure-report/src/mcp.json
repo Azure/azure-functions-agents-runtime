@@ -2,7 +2,17 @@
   "servers": {
     "microsoft-learn": {
       "type": "http",
-      "url": "https://$MSFT_LEARN_URI/api/mcp"
+      "url": "https://learn.microsoft.com/api/mcp"
+    },
+    "office365-outlook": {
+      "type": "http",
+      "url": "$O365_MCP_SERVER_URL",
+      "tools": ["office365_SendEmailV2"],
+      "load_prompts": false,
+      "auth": {
+        "scope": "https://apihub.azure.com/.default",
+        "client_id": "$O365_MCP_CLIENT_ID"
+      }
     }
   }
 }

@@ -19,7 +19,6 @@ from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_debug_endpoints
 from .registration.triggers import register_agent
-from .system_tools.connectors.cache import configure_connector_tools
 
 
 def _debug_enabled(app_debug: Any) -> bool:
@@ -51,10 +50,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     skills = discover_skills(resolved_root)
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
-    if global_config.system_tools and global_config.system_tools.tools_from_connections:
-        configure_connector_tools(
-            [entry.model_dump() for entry in global_config.system_tools.tools_from_connections]
-        )
 
     app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     registered_names: set[str] = set()

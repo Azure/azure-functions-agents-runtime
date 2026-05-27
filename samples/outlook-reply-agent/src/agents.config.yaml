@@ -1,0 +1,13 @@
+# Global configuration for all agents in this function app
+
+system_tools:
+  execute_in_sessions:
+    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+
+# Default runtime configuration
+agent_configuration:
+  provider: foundry
+  model: $FOUNDRY_MODEL
+  timeout: 900
+  foundry:
+    project_endpoint: $FOUNDRY_PROJECT_ENDPOINT

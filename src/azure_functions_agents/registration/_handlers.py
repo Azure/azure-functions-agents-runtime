@@ -195,7 +195,6 @@ def make_agent_handler(
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
                 skill_paths=capabilities.enabled_skill_paths,
-                use_connector_tools=capabilities.use_connector_tools,
             )
 
             if _should_log(resolved):
@@ -264,7 +263,6 @@ def make_http_agent_handler(
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
                 skill_paths=capabilities.enabled_skill_paths,
-                use_connector_tools=capabilities.use_connector_tools,
             )
 
             if _should_log(resolved):
