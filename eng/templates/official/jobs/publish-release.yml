@@ -17,6 +17,10 @@ parameters:
     type: string
     default: 'azurefunctions-agents-runtime'
     displayName: 'Pipeline artifact name produced by the Build stage'
+  - name: partnerReleasePipelineUrl
+    type: string
+    default: 'https://dev.azure.com/azure-sdk/internal/_build?definitionId=6991'
+    displayName: 'Azure SDK partner-release pipeline URL (used in manual PyPI publish instructions)'
 
 jobs:
   - job: "CreateReleaseBranch"
@@ -185,10 +189,41 @@ jobs:
             # Upload all distribution files (whl and tar.gz) to partner blob
             azcopy copy "$distFolder/*" "https://azuresdkpartnerdrops.blob.core.windows.net/drops/$blobPath/$version/"
 
+            $blobPathFull = "$blobPath/$version"
+            $partnerReleaseUrl = '${{ parameters.partnerReleasePipelineUrl }}'
+
             Write-Host ""
-            Write-Host "Upload complete. To publish to PyPI:"
-            Write-Host "  1. Go to Azure DevOps: python - partner-release pipeline"
-            Write-Host "  2. Click 'Run Pipeline'"
-            Write-Host "  3. Set BlobPath to: $blobPath/$version"
+            Write-Host "##[section]Upload complete. Manual step required to publish to PyPI."
+            Write-Host "  1. Open the partner-release pipeline:"
+            Write-Host "       $partnerReleaseUrl"
+            Write-Host "  2. Click 'Run pipeline'."
+            Write-Host "  3. Set BlobPath to (copy-paste):"
+            Write-Host "       $blobPathFull"
+            Write-Host "  4. Click 'Run'."
+            Write-Host "  5. Return to this run and approve the next manual gate to close out the release."
+            # Surface the manual step prominently in the run summary
+            Write-Host "##vso[task.logissue type=warning]Publish to PyPI: open $partnerReleaseUrl and run with BlobPath=$blobPathFull"
         env:
           AZCOPY_AUTO_LOGIN_TYPE: 'PSCRED'
+
+  - job: "ConfirmPyPIPublishStarted"
+    dependsOn: ['PublishRelease']
+    displayName: '(Manual) Confirm partner-release pipeline started'
+    pool: server
+    steps:
+      - task: ManualValidation@1
+        displayName: 'Confirm PyPI publish triggered'
+        inputs:
+          notifyUsers: ''
+          instructions: |
+            Version ${{ parameters.libraryVersion }} has been uploaded to the Azure SDK partner drops blob.
+
+            To complete the release, manually trigger the partner-release pipeline:
+              1. Open: ${{ parameters.partnerReleasePipelineUrl }}
+              2. Click "Run pipeline".
+              3. Set BlobPath to:
+                   ${{ parameters.blobPath }}/${{ parameters.libraryVersion }}
+              4. Click "Run".
+
+            Approve this gate once the partner-release pipeline has been started.
+            Reject if the blob upload looks wrong or you do not intend to publish.

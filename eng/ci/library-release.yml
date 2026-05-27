@@ -18,6 +18,10 @@ parameters:
     type: string
     default: 'azurefunctions-agents-runtime'
     displayName: 'Pipeline artifact name produced by the Build stage'
+  - name: partnerReleasePipelineUrl
+    type: string
+    default: 'https://dev.azure.com/azure-sdk/internal/_build?definitionId=6991'
+    displayName: 'Azure SDK partner-release pipeline URL (used in manual PyPI publish instructions)'
 
 resources:
   repositories:
@@ -53,3 +57,4 @@ extends:
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}
               artifactName: ${{ parameters.artifactName }}
+              partnerReleasePipelineUrl: ${{ parameters.partnerReleasePipelineUrl }}
