@@ -79,8 +79,8 @@ Required:
 
 Optional:
 
-- `MAF_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
-- `MAF_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
+- `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
+- `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
 - `O365_MCP_CLIENT_ID`: managed identity client ID for the Office 365 Outlook MCP server; defaults to the app-wide identity selection
 
 If `O365_MCP_CLIENT_ID` is set, only the Office 365 Outlook MCP server uses that managed identity. If it is empty, the MCP server uses the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain.

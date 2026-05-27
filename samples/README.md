@@ -64,17 +64,17 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-The Microsoft Agent Framework supports Microsoft Foundry, Azure OpenAI, and OpenAI. The samples default to Microsoft Foundry and their templates pin `MAF_PROVIDER` to `foundry`.
+The Microsoft Agent Framework supports Microsoft Foundry, Azure OpenAI, and OpenAI. The samples default to Microsoft Foundry and their templates pin `AZURE_FUNCTIONS_AGENTS_PROVIDER` to `foundry`.
 
-| Provider | `MAF_PROVIDER` | Required env vars |
+| Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars |
 | --- | --- | --- |
 | Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` (uses `DefaultAzureCredential`) |
 | Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential` unless an API key is set) |
-| OpenAI | `openai` | `OPENAI_API_KEY`, optional `MAF_MODEL` |
+| OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` |
 
 For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint and `FOUNDRY_MODEL` to your model deployment name (for example, `gpt-5.4`). Authentication uses `DefaultAzureCredential` — run `az login` locally.
 
-OpenAI and Azure OpenAI remain supported alternatives. If you switch providers, update `MAF_PROVIDER` and the provider-specific settings in `local.settings.json`; if `MAF_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
+OpenAI and Azure OpenAI remain supported alternatives. If you switch providers, update `AZURE_FUNCTIONS_AGENTS_PROVIDER` and the provider-specific settings in `local.settings.json`; if `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
 
 **Sample-specific variables:**
 

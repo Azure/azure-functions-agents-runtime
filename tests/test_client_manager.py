@@ -25,9 +25,9 @@ def test_resolve_model_requested_wins(
     provider_env: str,
     provider_model: str,
 ) -> None:
-    monkeypatch.setenv("MAF_PROVIDER", provider)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
     monkeypatch.setenv(provider_env, provider_model)
-    monkeypatch.setenv("MAF_MODEL", "fallback-model")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "fallback-model")
 
     assert MAFClientManager().resolve_model("requested-model") == "requested-model"
 
@@ -45,9 +45,9 @@ def test_resolve_model_prefers_provider_specific_env(
     provider_env: str,
     provider_model: str,
 ) -> None:
-    monkeypatch.setenv("MAF_PROVIDER", provider)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
     monkeypatch.setenv(provider_env, provider_model)
-    monkeypatch.setenv("MAF_MODEL", "fallback-model")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "fallback-model")
 
     assert MAFClientManager().resolve_model(None) == provider_model
 
@@ -60,17 +60,26 @@ def test_resolve_model_prefers_provider_specific_env(
         ("openai", None),
     ],
 )
-def test_resolve_model_uses_maf_model_as_fallback(
+def test_resolve_model_uses_runtime_model_as_fallback(
     monkeypatch: pytest.MonkeyPatch,
     provider: str,
     provider_env: str | None,
 ) -> None:
-    monkeypatch.setenv("MAF_PROVIDER", provider)
-    monkeypatch.setenv("MAF_MODEL", "fallback-model")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL", "fallback-model")
     if provider_env:
         monkeypatch.delenv(provider_env, raising=False)
 
     assert MAFClientManager().resolve_model(None) == "fallback-model"
+
+
+def test_resolve_model_accepts_legacy_maf_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
+    monkeypatch.setenv("MAF_PROVIDER", "openai")
+    monkeypatch.setenv("MAF_MODEL", "legacy-fallback-model")
+
+    assert MAFClientManager().resolve_model(None) == "legacy-fallback-model"
 
 
 @pytest.mark.parametrize(
@@ -86,7 +95,8 @@ def test_resolve_model_uses_default_when_no_override_exists(
     provider: str,
     default_model: str,
 ) -> None:
-    monkeypatch.setenv("MAF_PROVIDER", provider)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
     monkeypatch.delenv("MAF_MODEL", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
     monkeypatch.delenv("FOUNDRY_MODEL", raising=False)

@@ -83,8 +83,8 @@ Required:
 
 Optional:
 
-- `MAF_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
-- `MAF_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
+- `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
+- `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
 - `O365_MCP_CLIENT_ID`: managed identity client ID for the Office 365 Outlook MCP server; defaults to the app-wide identity selection
 - `ACA_SESSION_POOL_ENDPOINT`: if set, enables code execution features; if empty, agents work but lose advanced capabilities
 

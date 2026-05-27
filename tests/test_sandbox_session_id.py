@@ -12,7 +12,7 @@ from azure_functions_agents.system_tools import sandbox
 
 
 def _sandbox_config() -> dict[str, str]:
-    return {"session_pool_management_endpoint": "https://sandbox.example"}
+    return {"endpoint": "https://sandbox.example"}
 
 
 def _capture_aca_session_ids(
@@ -22,8 +22,8 @@ def _capture_aca_session_ids(
 ) -> list[str]:
     aca_session_ids: list[str] = []
 
-    async def fake_ensure_shared_resources() -> None:
-        return None
+    async def fake_ensure_shared_resources(_client_id: str | None) -> tuple[object, object]:
+        return object(), object()
 
     async def fake_execute_code(
         endpoint: str,
@@ -37,8 +37,6 @@ def _capture_aca_session_ids(
 
     monkeypatch.setattr(sandbox, "_ensure_shared_resources", fake_ensure_shared_resources)
     monkeypatch.setattr(sandbox, "_execute_code", fake_execute_code)
-    monkeypatch.setattr(sandbox, "_token_provider", object())
-    monkeypatch.setattr(sandbox, "_http_session", object())
     monkeypatch.setattr(sandbox, "_setup_sessions", set())
 
     if fallback_session_id is ...:

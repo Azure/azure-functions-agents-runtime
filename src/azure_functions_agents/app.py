@@ -22,7 +22,7 @@ from .registration.triggers import register_agent
 
 
 def _debug_enabled(app_debug: Any) -> bool:
-    return bool(app_debug.chat or app_debug.http or app_debug.mcp)
+    return bool(app_debug.chat_ui or app_debug.chat_api or app_debug.mcp)
 
 
 def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
@@ -73,7 +73,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_skills=skills,
         )
         allocated_name: str | None = None
-        if not resolved.is_main and (resolved.trigger is not None or _debug_enabled(resolved.debug)):
+        if not resolved.is_main and (
+            resolved.trigger is not None or _debug_enabled(resolved.debug_endpoints)
+        ):
             allocated_name = allocate_unique_function_name(
                 resolved.source_file,
                 resolved.name,
@@ -87,7 +89,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 registered_names=registered_names if allocated_name is None else None,
                 function_name=allocated_name,
             )
-        if _debug_enabled(resolved.debug):
+        if _debug_enabled(resolved.debug_endpoints):
             register_debug_endpoints(app, resolved, capabilities, slug=allocated_name)
 
     if not agent_specs:

@@ -11,7 +11,7 @@ tools: false
 skills: false
 mcp: false
 system_tools:
-  execute_in_sessions: false
+  dynamic_sessions_code_interpreter: false
 ---
 
 You are restricted to no external capabilities. Respond using only the LLM's own knowledge.

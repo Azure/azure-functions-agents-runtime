@@ -7,5 +7,5 @@ tools:
     - execute_shell
 
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: https://pool.example.test
+  dynamic_sessions_code_interpreter:
+    endpoint: https://pool.example.test

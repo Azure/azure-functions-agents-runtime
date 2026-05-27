@@ -9,7 +9,7 @@ from typing import Any
 
 from azure_functions_agents.config.schema import (
     DebugConfig,
-    ExecuteInSessionsConfig,
+    DynamicSessionsCodeInterpreterConfig,
     ResolvedAgent,
     ToolsFilter,
 )
@@ -38,7 +38,7 @@ class DummyRequest:
 def _resolved_agent(
     *,
     response_schema: dict[str, Any] | None,
-    sandbox_config: ExecuteInSessionsConfig | None = None,
+    sandbox_config: DynamicSessionsCodeInterpreterConfig | None = None,
     tools_disabled: bool = False,
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
@@ -48,7 +48,7 @@ def _resolved_agent(
         trigger=None,
         instructions="Return JSON",
         is_main=True,
-        debug=DebugConfig(),
+        debug_endpoints=DebugConfig(),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -134,9 +134,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
     disabled = build_sandbox_tools_for_session(
         _resolved_agent(
             response_schema=None,
-            sandbox_config=ExecuteInSessionsConfig(
-                session_pool_management_endpoint="https://sandbox.example"
-            ),
+            sandbox_config=DynamicSessionsCodeInterpreterConfig(endpoint="https://sandbox.example"),
             tools_disabled=True,
         ),
         "session-123",
@@ -144,9 +142,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
     enabled = build_sandbox_tools_for_session(
         _resolved_agent(
             response_schema=None,
-            sandbox_config=ExecuteInSessionsConfig(
-                session_pool_management_endpoint="https://sandbox.example"
-            ),
+            sandbox_config=DynamicSessionsCodeInterpreterConfig(endpoint="https://sandbox.example"),
         ),
         "session-456",
     )
@@ -155,7 +151,7 @@ def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
     assert enabled == ["execute_python"]
     assert create_calls == [
         (
-            {"session_pool_management_endpoint": "https://sandbox.example"},
+            {"endpoint": "https://sandbox.example", "client_id": None},
             "session-456",
         )
     ]
@@ -175,9 +171,7 @@ def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypa
 
     resolved = _resolved_agent(
         response_schema=None,
-        sandbox_config=ExecuteInSessionsConfig(
-            session_pool_management_endpoint="https://sandbox.example"
-        ),
+        sandbox_config=DynamicSessionsCodeInterpreterConfig(endpoint="https://sandbox.example"),
     )
 
     first = build_sandbox_tools_for_session(resolved, None)
@@ -315,7 +309,9 @@ def test_non_http_handler_generates_fresh_session_id_per_invocation(monkeypatch:
         lambda: SimpleNamespace(hex=next(generated_ids)),
     )
 
-    handler = make_agent_handler(_resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities())
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities()
+    )
 
     asyncio.run(handler({"message": 1}))
     asyncio.run(handler({"message": 2}))
@@ -341,7 +337,9 @@ def test_non_http_handler_passes_instructions_only_as_system_message(monkeypatch
         fake_run_agent,
     )
 
-    handler = make_agent_handler(_resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities())
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities()
+    )
 
     asyncio.run(handler({"message": "hello"}))
 
@@ -361,7 +359,9 @@ def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:
         fake_run_agent,
     )
 
-    handler = make_agent_handler(_resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities())
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities()
+    )
 
     try:
         asyncio.run(handler({"message": "boom"}))

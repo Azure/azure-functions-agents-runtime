@@ -29,17 +29,17 @@ azurefunctions-agents-runtime
 
 ## Model Provider Configuration
 
-The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `MAF_PROVIDER=foundry`.
+The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`.
 
-| Provider | `MAF_PROVIDER` | Required env vars | Notes |
+| Provider | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Required env vars | Notes |
 | --- | --- | --- | --- |
 | Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
-| Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `MAF_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
-| OpenAI | `openai` | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `MAF_MODEL` applies directly for OpenAI. |
+| Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
+| OpenAI | `openai` | `OPENAI_API_KEY`, optional `AZURE_FUNCTIONS_AGENTS_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `AZURE_FUNCTIONS_AGENTS_MODEL` applies directly for OpenAI. |
 
-If `MAF_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `MAF_PROVIDER` to make the provider choice intentional.
+If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `AZURE_FUNCTIONS_AGENTS_PROVIDER` to make the provider choice intentional.
 
-Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `MAF_MODEL` > provider default.
+Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
 
 ## Quick Start
 
@@ -111,7 +111,7 @@ For local development with Microsoft Foundry, sign in with `az login`, then crea
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "MAF_PROVIDER": "foundry",
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
     "FOUNDRY_PROJECT_ENDPOINT": "https://<project-name>.<region>.services.ai.azure.com/api/projects/<project-name>",
     "FOUNDRY_MODEL": "gpt-5.4"
   }
@@ -149,7 +149,7 @@ Define an agent with a markdown file. When `main.agent.md` is present, the runti
 - **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
-Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug.chat: true` (or `debug: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
+Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 ### Event-driven agents (`<name>.agent.md`)
 
@@ -177,8 +177,8 @@ description: What this agent does
 
 # Optional: system tools (code execution)
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 # For triggered agents only (not `main.agent.md`):
 trigger:
@@ -205,7 +205,7 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`main.agent.md`** — creates HTTP chat, MCP, and UI endpoints. No other triggers are supported in this file.
-- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. With `debug.chat: true` (or `debug: true`), it also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`. The sanitized filename stem becomes the base Azure Function name. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the non-main debug slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#debug`](docs/front-matter-spec.md#debug).
+- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. With `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`), it also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`. The sanitized filename stem becomes the base Azure Function name. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the non-main debug slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#debug_endpoints`](docs/front-matter-spec.md#debug_endpoints).
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -271,8 +271,8 @@ Variable references are resolved inline at load time anywhere string values are 
 name: Notifier
 description: Sends updates to $TEAM_NAME
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: "https://$HOST/api"
+  dynamic_sessions_code_interpreter:
+    endpoint: "https://$HOST/api"
 ---
 
 Send a daily summary email to $TO_EMAIL.
@@ -281,7 +281,7 @@ Post a message to the %TEAM_NAME% team's General channel.
 
 If `HOST=contoso.internal`, `TO_EMAIL=alice@example.com`, and `TEAM_NAME=Engineering` are set in the environment, those values resolve inline:
 
-> `session_pool_management_endpoint: "https://contoso.internal/api"`
+> `endpoint: "https://contoso.internal/api"`
 >
 > Send a daily summary email to alice@example.com.
 >
@@ -328,7 +328,7 @@ When a `main.agent.md` file exists in your app root, the runtime automatically r
 
 ### Chat UI
 
-A built-in single-page chat interface served at `/` for the main agent, and at `/agents/{slug}/` for any non-main agent with `debug.chat: true` (or `debug: true`). For non-main agents, `{slug}` comes from the `.agent.md` filename after sanitization, not from the display `name:` field. No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
+A built-in single-page chat interface served at `/` for the main agent, and at `/agents/{slug}/` for any non-main agent with `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`). For non-main agents, `{slug}` comes from the `.agent.md` filename after sanitization, not from the display `name:` field. No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
@@ -337,7 +337,7 @@ On first load, you'll be prompted for the base URL and a function key (for deplo
 POST endpoints for programmatic access:
 
 - **Main agent:** `POST /agent/chat` and `POST /agent/chatstream`
-- **Non-main agent with `debug.chat: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream` (`{slug}` comes from the `.agent.md` filename after sanitization)
+- **Non-main agent with `debug_endpoints.chat_api: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream` (`{slug}` comes from the `.agent.md` filename after sanitization)
 
 The JSON endpoint returns `session_id`, `response`, and `tool_calls`. The streaming endpoint uses Server-Sent Events (SSE) with `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error` events.
 
@@ -349,7 +349,7 @@ An MCP-compatible endpoint at `/runtime/webhooks/mcp` that any MCP client (VS Co
 
 ### Without `main.agent.md`
 
-If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and `/runtime/webhooks/mcp` endpoint are disabled. The app still runs triggered functions, and non-main agents can still opt into per-agent chat surfaces with `debug.chat: true` (or `debug: true`). See [`docs/front-matter-spec.md#debug`](docs/front-matter-spec.md#debug).
+If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and `/runtime/webhooks/mcp` endpoint are disabled. The app still runs triggered functions, and non-main agents can still opt into per-agent chat surfaces with `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`). See [`docs/front-matter-spec.md#debug_endpoints`](docs/front-matter-spec.md#debug_endpoints).
 
 ## MCP Server Configuration
 
@@ -421,7 +421,7 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
 - **Local dev fallback.** When neither `AzureWebJobsStorage` nor
   `AzureWebJobsStorage__blobServiceUri` is set, history falls back to MAF's
   `FileHistoryProvider` writing to
-  `{AZURE_FUNCTIONS_AGENTS_CONFIG_DIR}/agent-sessions/{session_id}.jsonl`,
+  `{AZURE_FUNCTIONS_AGENTS_SESSION_DIR}/agent-sessions/{session_id}.jsonl`,
   defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
@@ -441,20 +441,23 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ### Required Azure App Settings
 
-Set the model provider env vars described above. The preview samples use Microsoft Foundry (`MAF_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_MODEL`). Azure OpenAI (`AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`) and OpenAI (`OPENAI_API_KEY` and optionally `MAF_MODEL`) are supported alternatives. For Microsoft Foundry and Azure OpenAI, the provider-specific model/deployment setting takes precedence over `MAF_MODEL`.
+Set the model provider env vars described above. The preview samples use Microsoft Foundry (`AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_MODEL`). Azure OpenAI (`AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`) and OpenAI (`OPENAI_API_KEY` and optionally `AZURE_FUNCTIONS_AGENTS_MODEL`) are supported alternatives. For Microsoft Foundry and Azure OpenAI, the provider-specific model/deployment setting takes precedence over `AZURE_FUNCTIONS_AGENTS_MODEL`.
 
-When the agent uses connector-backed MCP servers, connector triggers, or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server.
+When the agent uses connector-backed MCP servers, connector triggers, or `dynamic_sessions_code_interpreter`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server. For an individual code interpreter pool, set `system_tools.dynamic_sessions_code_interpreter.client_id`.
 
 ### Optional config overrides
 
 | Setting | Purpose |
 |---|---|
 | `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
-| `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR` | Override the directory used for session storage |
-| `AGENT_TIMEOUT` | Per-call timeout in seconds (default `900`) |
-| `MAF_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
-| `MAF_REASONING_EFFORT` | Reasoning effort for supported reasoning models (default `high`; valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
-| `MAF_REASONING_SUMMARY` | Reasoning summary mode for supported reasoning models (default `concise`; valid values are `auto`, `concise`, `detailed`) |
+| `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Override the directory used for local session storage |
+| `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
+| `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
+| `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Reasoning effort for supported reasoning models (default `high`; valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
+| `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Reasoning summary mode for supported reasoning models (default `concise`; valid values are `auto`, `concise`, `detailed`) |
+
+Deprecated aliases from earlier previews still work with startup warnings: `MAF_PROVIDER`, `MAF_MODEL`, `AGENT_TIMEOUT`, `MAF_REASONING_EFFORT`, `MAF_REASONING_SUMMARY`, and `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR`.
 
 ## Development
 

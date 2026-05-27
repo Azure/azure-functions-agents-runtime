@@ -157,11 +157,11 @@ module api './app/api.bicep' = {
     identityId: apiUserAssignedIdentity.outputs.resourceId
     identityClientId: apiUserAssignedIdentity.outputs.clientId
     appSettings: {
-      MAF_PROVIDER: 'foundry'
+      AZURE_FUNCTIONS_AGENTS_PROVIDER: 'foundry'
       FOUNDRY_PROJECT_ENDPOINT: foundry.outputs.projectEndpoint
       FOUNDRY_MODEL: foundry.outputs.modelDeploymentName
-      MAF_REASONING_EFFORT: reasoningEffort
-      MAF_REASONING_SUMMARY: reasoningSummary
+      AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT: reasoningEffort
+      AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY: reasoningSummary
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       TO_EMAIL: toEmail
       SUBSCRIPTION_ID: subscription().subscriptionId

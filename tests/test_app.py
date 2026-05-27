@@ -87,12 +87,12 @@ def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names
         """
         name: Daily Report Dash
         description: Desc
-        debug:
-          chat: true
+        debug_endpoints:
+            chat_ui: true
         trigger:
-          type: timer_trigger
-          args:
-            schedule: "0 0 * * * *"
+            type: timer_trigger
+            args:
+                schedule: "0 0 * * * *"
         """,
     )
     _write_agent(
@@ -101,12 +101,12 @@ def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names
         """
         name: Daily Report Underscore
         description: Desc
-        debug:
-          chat: true
+        debug_endpoints:
+            chat_ui: true
         trigger:
-          type: timer_trigger
-          args:
-            schedule: "0 5 * * * *"
+            type: timer_trigger
+            args:
+                schedule: "0 5 * * * *"
         """,
     )
 

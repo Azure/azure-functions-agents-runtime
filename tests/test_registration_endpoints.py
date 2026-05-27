@@ -65,7 +65,7 @@ def _resolved_agent(
         trigger=None,
         instructions="Assist the user.",
         is_main=is_main,
-        debug=debug,
+        debug_endpoints=debug,
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -112,7 +112,7 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
     # Confirm the chat UI uses the prefix-preserving regex so non-main pages also
     # work when served behind Azure Functions' default `api` route prefix or
     # any reverse-proxy prefix (matches the trailing `/agents/{slug}` segment).
-    assert r'pathname.match(/^(.*)\/agents\/([^/]+)\/?$/)' in html
+    assert r"pathname.match(/^(.*)\/agents\/([^/]+)\/?$/)" in html
     # Fallback when no /agents/{slug} segment matches preserves the page prefix
     # while still resolving `/` to `/agent`.
     assert 'window.location.pathname === "/"' in html
@@ -223,7 +223,9 @@ def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
         calls["run_agent"] = kwargs
         return SimpleNamespace(session_id=kwargs["session_id"], content="ok", tool_calls=[])
 
-    monkeypatch.setattr("azure_functions_agents.registration.endpoints.uuid.uuid4", lambda: FakeUuid())
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.uuid.uuid4", lambda: FakeUuid()
+    )
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints.build_sandbox_tools_for_session",
         fake_build_sandbox_tools_for_session,
@@ -264,7 +266,9 @@ def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_too
         calls["run_agent_stream"] = kwargs
         return "stream"
 
-    monkeypatch.setattr("azure_functions_agents.registration.endpoints.uuid.uuid4", lambda: FakeUuid())
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.uuid.uuid4", lambda: FakeUuid()
+    )
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints.build_sandbox_tools_for_session",
         fake_build_sandbox_tools_for_session,
@@ -357,7 +361,9 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     )
 
     register_debug_endpoints(app, resolved, AgentCapabilities())
-    chat_route = next(route for route in app.routes if route["route"] == "agents/secondary_agent/chat")
+    chat_route = next(
+        route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
+    )
 
     response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
 

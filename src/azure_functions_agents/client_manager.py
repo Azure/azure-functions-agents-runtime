@@ -29,6 +29,7 @@ from typing import Any
 
 from ._credential import build_async_credential
 from ._logger import logger
+from .config.env import runtime_env_value
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -76,7 +77,8 @@ class MAFClientManager(ClientManager):
     """Build Microsoft Agent Framework chat clients.
 
     Selects a provider from environment variables — explicit
-    ``MAF_PROVIDER=openai|azure_openai|foundry`` wins; otherwise:
+    ``AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry`` wins;
+    deprecated ``MAF_PROVIDER`` is accepted as an alias. Otherwise:
 
     1. ``AZURE_OPENAI_ENDPOINT``      → Azure OpenAI
     2. ``FOUNDRY_PROJECT_ENDPOINT``   → Microsoft Foundry
@@ -86,19 +88,18 @@ class MAFClientManager(ClientManager):
     name = "maf"
 
     def resolve_model(self, requested: str | None) -> str:
-        """Resolve model as requested > provider-specific env > MAF_MODEL > default."""
+        """Resolve model as requested > provider-specific env > runtime env > default."""
         if requested:
             return requested
         provider = self._provider()
+        runtime_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL", legacy_name="MAF_MODEL")
         if provider == "azure_openai":
             return (
-                os.environ.get("AZURE_OPENAI_DEPLOYMENT")
-                or os.environ.get("MAF_MODEL")
-                or _DEFAULT_OPENAI_MODEL
+                os.environ.get("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
             )
         if provider == "foundry":
-            return os.environ.get("FOUNDRY_MODEL") or os.environ.get("MAF_MODEL") or _DEFAULT_FOUNDRY_MODEL
-        return os.environ.get("MAF_MODEL") or _DEFAULT_OPENAI_MODEL
+            return os.environ.get("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
+        return runtime_model or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
         provider = self._provider()
@@ -111,7 +112,8 @@ class MAFClientManager(ClientManager):
         if provider == "foundry":
             return self._build_foundry(resolved)
         raise RuntimeError(
-            f"Unknown MAF_PROVIDER '{provider}'. Use one of: openai, azure_openai, foundry."
+            f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
+            "Use one of: openai, azure_openai, foundry."
         )
 
     # ------------------------------------------------------------------
@@ -119,18 +121,23 @@ class MAFClientManager(ClientManager):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _env(name: str) -> str:
+    def _env(name: str, *, legacy_name: str | None = None) -> str:
         """Return ``$name`` stripped, or ``""`` if missing/blank.
 
         Empty-string env vars are common in local.settings.json templates and
         ``azd env set X ""`` workflows. We treat them as if the variable were
         unset so auto-detection does not pick them up.
         """
+        if legacy_name is not None:
+            return runtime_env_value(name, legacy_name=legacy_name)
         return (os.environ.get(name) or "").strip()
 
     @classmethod
     def _provider(cls) -> str:
-        explicit = cls._env("MAF_PROVIDER").lower()
+        explicit = cls._env(
+            "AZURE_FUNCTIONS_AGENTS_PROVIDER",
+            legacy_name="MAF_PROVIDER",
+        ).lower()
         if explicit:
             return explicit
         if cls._env("AZURE_OPENAI_ENDPOINT"):
@@ -144,7 +151,8 @@ class MAFClientManager(ClientManager):
             "OPENAI_API_KEY (OpenAI), "
             "AZURE_OPENAI_ENDPOINT (+ AZURE_OPENAI_API_KEY or managed identity) for Azure OpenAI, "
             "or FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry. "
-            "You can also set MAF_PROVIDER=openai|azure_openai|foundry to override."
+            "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry "
+            "to override."
         )
 
     @classmethod
@@ -163,7 +171,8 @@ class MAFClientManager(ClientManager):
         endpoint = cls._env("AZURE_OPENAI_ENDPOINT")
         if not endpoint:
             raise RuntimeError(
-                "MAF_PROVIDER=azure_openai requires AZURE_OPENAI_ENDPOINT to be set."
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "
+                "AZURE_OPENAI_ENDPOINT to be set."
             )
         kwargs: dict[str, Any] = {
             "model": model,
@@ -188,7 +197,10 @@ class MAFClientManager(ClientManager):
 
         endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
         if not endpoint:
-            raise RuntimeError("MAF_PROVIDER=foundry requires FOUNDRY_PROJECT_ENDPOINT to be set.")
+            raise RuntimeError(
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "
+                "FOUNDRY_PROJECT_ENDPOINT to be set."
+            )
         return FoundryChatClient(
             project_endpoint=endpoint,
             model=model,

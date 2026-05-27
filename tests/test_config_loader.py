@@ -17,8 +17,8 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
             model: gpt-4o
             timeout: 12
             system_tools:
-              execute_in_sessions:
-                session_pool_management_endpoint: https://example.test
+                            dynamic_sessions_code_interpreter:
+                                endpoint: https://example.test
             """
         ).strip(),
         encoding="utf-8",
@@ -28,7 +28,7 @@ def test_load_global_config_valid(tmp_path: Path) -> None:
     assert config.model == "gpt-4o"
     assert config.timeout == 12
     assert config.system_tools is not None
-    assert config.system_tools.execute_in_sessions is not None
+    assert config.system_tools.dynamic_sessions_code_interpreter is not None
 
 
 def test_load_global_config_resolves_all_string_values(
@@ -291,8 +291,8 @@ def test_load_global_config_resolves_numeric_and_bool_values(
             """
             timeout: 60
             system_tools:
-              execute_in_sessions:
-                session_pool_management_endpoint: $ENDPOINT
+                            dynamic_sessions_code_interpreter:
+                                endpoint: $ENDPOINT
             """
         ).strip(),
         encoding="utf-8",
@@ -300,12 +300,9 @@ def test_load_global_config_resolves_numeric_and_bool_values(
     config = load_global_config(tmp_path)
     assert config.timeout == 60  # numeric value passed through unchanged
     assert config.system_tools is not None
-    assert config.system_tools.execute_in_sessions is not None
+    assert config.system_tools.dynamic_sessions_code_interpreter is not None
     # Env var resolved on the string field
-    assert (
-        config.system_tools.execute_in_sessions.session_pool_management_endpoint
-        == "https://example.test"
-    )
+    assert config.system_tools.dynamic_sessions_code_interpreter.endpoint == "https://example.test"
 
 
 def test_load_agent_specs_malformed_frontmatter_yaml_raises(tmp_path: Path) -> None:

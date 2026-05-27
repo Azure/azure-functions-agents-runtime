@@ -4,7 +4,7 @@
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
     "ACA_SESSION_POOL_ENDPOINT": "",
-    "MAF_PROVIDER": "foundry",
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
     "FOUNDRY_PROJECT_ENDPOINT": "",
     "FOUNDRY_MODEL": "gpt-5.4"
   }

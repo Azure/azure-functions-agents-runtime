@@ -2,8 +2,8 @@
 ACA Dynamic Sessions sandbox — execute_python tool.
 
 Provides an ``execute_python`` tool backed by Azure Container Apps dynamic
-sessions (code-interpreter pools). Configured via the ``execution_sandbox``
-block in agent frontmatter.
+sessions (code-interpreter pools). Configured via the
+``dynamic_sessions_code_interpreter`` system tool configuration.
 
 Each agent can have its own session pool endpoint. The ACA session id is
 usually derived from the runtime's ``session_id`` (passed in by the runner via
@@ -26,7 +26,7 @@ import aiohttp
 from azure.identity.aio import get_bearer_token_provider
 from pydantic import BaseModel, Field
 
-from .._credential import build_async_credential
+from .._credential import build_async_credential, build_async_credential_with_client_id
 from .._function_tool import FunctionTool, tool
 from .._logger import logger
 from ..config.env import has_unresolved_placeholders, substitute_env_vars_in_value
@@ -200,35 +200,49 @@ async def _execute_code(
 # Factory: create per-agent execute_python tool
 # ---------------------------------------------------------------------------
 
-# Shared credential and HTTP session (created lazily, reused across agents).
-# These are process-wide because building credentials and aiohttp sessions is
-# expensive — one is enough for the entire app.
-_credential: DefaultAzureCredential | None = None
-_token_provider: Callable[[], Awaitable[str]] | None = None
+# Shared credentials and HTTP session (created lazily, reused across agents).
+# Credentials are keyed by client id because each code-interpreter pool can
+# select a different user-assigned managed identity.
+_credentials: dict[str, DefaultAzureCredential] = {}
+_token_providers: dict[str, Callable[[], Awaitable[str]]] = {}
 _http_session: aiohttp.ClientSession | None = None
 _init_lock = asyncio.Lock()
 
 # Track which ACA sessions have been set up (Playwright helper loaded)
-_setup_sessions: set[str] = set()
+_setup_sessions: set[tuple[str, str]] = set()
 _setup_lock = asyncio.Lock()
 
 
-async def _ensure_shared_resources() -> None:
-    """Lazily create the shared credential, token provider, and HTTP session."""
-    global _credential, _token_provider, _http_session
-    if _token_provider is not None:
-        return
+async def _ensure_shared_resources(
+    client_id: str | None,
+) -> tuple[Callable[[], Awaitable[str]], aiohttp.ClientSession]:
+    """Lazily create shared credential/token resources for the requested identity."""
+    global _http_session
+    credential_key = client_id or ""
+    token_provider = _token_providers.get(credential_key)
+    if token_provider is not None and _http_session is not None:
+        return token_provider, _http_session
+
     async with _init_lock:
-        if _token_provider is not None:
-            return
-        _credential = build_async_credential()
-        _token_provider = get_bearer_token_provider(
-            _credential, "https://dynamicsessions.io/.default"
-        )
-        _http_session = aiohttp.ClientSession()
+        token_provider = _token_providers.get(credential_key)
+        if token_provider is None:
+            credential = (
+                build_async_credential_with_client_id(client_id)
+                if client_id
+                else build_async_credential()
+            )
+            _credentials[credential_key] = credential
+            token_provider = get_bearer_token_provider(
+                credential, "https://dynamicsessions.io/.default"
+            )
+            _token_providers[credential_key] = token_provider
+        if _http_session is None:
+            _http_session = aiohttp.ClientSession()
         logger.debug(
-            "execution_sandbox: shared credential, token provider, and HTTP session initialized"
+            "dynamic_sessions_code_interpreter: shared credential, token provider, "
+            "and HTTP session initialized"
         )
+        return token_provider, _http_session
 
 
 def create_sandbox_tools(
@@ -241,8 +255,9 @@ def create_sandbox_tools(
     Parameters
     ----------
     config:
-        The ``execution_sandbox`` block from agent frontmatter. Must contain
-        ``session_pool_management_endpoint``.
+        The ``system_tools.dynamic_sessions_code_interpreter`` block. Must
+        contain ``endpoint``. Optional ``client_id`` selects a user-assigned
+        managed identity for the session pool.
     fallback_session_id:
         Used as the ACA session identifier so the REPL state persists across
         ``execute_python`` calls within the same conversation. The runner
@@ -253,19 +268,35 @@ def create_sandbox_tools(
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """
-    raw_endpoint = config.get("session_pool_management_endpoint", "")
+    raw_endpoint = config.get("endpoint") or config.get("session_pool_management_endpoint", "")
     if not raw_endpoint:
-        logger.warning("execution_sandbox: missing 'session_pool_management_endpoint', skipping")
+        logger.warning("dynamic_sessions_code_interpreter: missing 'endpoint', skipping")
         return []
 
     endpoint = substitute_env_vars_in_value(str(raw_endpoint))
     if not endpoint or has_unresolved_placeholders(endpoint):
-        logger.warning("execution_sandbox: could not resolve endpoint '%s', skipping", raw_endpoint)
+        logger.warning(
+            "dynamic_sessions_code_interpreter: could not resolve endpoint '%s', skipping",
+            raw_endpoint,
+        )
         return []
+
+    raw_client_id = config.get("client_id")
+    client_id = None
+    if raw_client_id:
+        resolved_client_id = substitute_env_vars_in_value(str(raw_client_id))
+        if has_unresolved_placeholders(resolved_client_id):
+            logger.warning(
+                "dynamic_sessions_code_interpreter: could not resolve client_id '%s'; "
+                "using the default Azure credential identity",
+                raw_client_id,
+            )
+        else:
+            client_id = resolved_client_id.strip() or None
 
     aca_session_id = fallback_session_id or uuid.uuid4().hex
     logger.info(
-        "execution_sandbox: creating tool with endpoint %s (aca_session=%s)",
+        "dynamic_sessions_code_interpreter: creating tool with endpoint %s (aca_session=%s)",
         endpoint,
         aca_session_id,
     )
@@ -276,22 +307,22 @@ def create_sandbox_tools(
         schema=ExecutePythonParams,
     )
     async def execute_python(params: ExecutePythonParams) -> str:
-        await _ensure_shared_resources()
-        token_provider = _token_provider
-        http_session = _http_session
-        assert token_provider is not None
-        assert http_session is not None
+        token_provider, http_session = await _ensure_shared_resources(client_id)
 
         code = params.code or ""
         if not code.strip():
             return json.dumps({"error": "No code provided"})
 
-        logger.info("execution_sandbox: executing code in ACA session %s", aca_session_id)
+        logger.info(
+            "dynamic_sessions_code_interpreter: executing code in ACA session %s",
+            aca_session_id,
+        )
 
         try:
             # Pre-load Playwright helper on first call per session
             async with _setup_lock:
-                if aca_session_id not in _setup_sessions:
+                setup_key = (endpoint, aca_session_id)
+                if setup_key not in _setup_sessions:
                     await _execute_code(
                         endpoint,
                         _ACA_SESSION_SETUP,
@@ -299,7 +330,7 @@ def create_sandbox_tools(
                         token_provider,
                         http_session,
                     )
-                    _setup_sessions.add(aca_session_id)
+                    _setup_sessions.add(setup_key)
 
             result = await _execute_code(
                 endpoint,
@@ -309,18 +340,18 @@ def create_sandbox_tools(
                 http_session,
             )
             logger.info(
-                "execution_sandbox: ACA session %s completed successfully",
+                "dynamic_sessions_code_interpreter: ACA session %s completed successfully",
                 aca_session_id,
             )
             return result
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             logger.error(
-                "execution_sandbox: ACA session %s failed: %s",
+                "dynamic_sessions_code_interpreter: ACA session %s failed: %s",
                 aca_session_id,
                 error_msg,
             )
             return json.dumps({"error": error_msg})
 
-    logger.info("execution_sandbox: execute_python tool created")
+    logger.info("dynamic_sessions_code_interpreter: execute_python tool created")
     return [execute_python]

@@ -7,10 +7,10 @@
     "O365_MCP_SERVER_URL": "",
     "O365_MCP_CLIENT_ID": "",
     "TO_EMAIL": "",
-    "MAF_PROVIDER": "foundry",
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
     "FOUNDRY_PROJECT_ENDPOINT": "",
     "FOUNDRY_MODEL": "gpt-5.4",
-    "MAF_REASONING_EFFORT": "high",
-    "MAF_REASONING_SUMMARY": "concise"
+    "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT": "high",
+    "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY": "concise"
   }
 }

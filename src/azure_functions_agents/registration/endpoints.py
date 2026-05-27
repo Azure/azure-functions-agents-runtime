@@ -348,7 +348,10 @@ def register_debug_endpoints(
     """Register debug chat UI, REST chat, and MCP endpoints for one agent."""
 
     slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
-    if not resolved.is_main and (resolved.debug.chat or resolved.debug.http or resolved.debug.mcp):
+    debug_endpoints = resolved.debug_endpoints
+    if not resolved.is_main and (
+        debug_endpoints.chat_ui or debug_endpoints.chat_api or debug_endpoints.mcp
+    ):
         if slug in _debug_slug_registry(app):
             slug = _ensure_unique_non_main_slug(app, resolved)
         else:
@@ -358,7 +361,7 @@ def register_debug_endpoints(
         ("main" if resolved.is_main else f"agent_{slug}") + "_debug"
     )
 
-    if resolved.debug.chat:
+    if debug_endpoints.chat_ui:
         route = "{*ignored}" if resolved.is_main else f"agents/{slug}/"
         _register_chat_page(
             app,
@@ -368,7 +371,7 @@ def register_debug_endpoints(
         )
         logger.info("Registered debug chat page for '%s' at /%s", resolved.name, route)
 
-    if resolved.debug.chat or resolved.debug.http:
+    if debug_endpoints.chat_api:
         chat_route = "agent/chat" if resolved.is_main else f"agents/{slug}/chat"
         stream_route = "agent/chatstream" if resolved.is_main else f"agents/{slug}/chatstream"
         _register_http_chat(
@@ -392,7 +395,7 @@ def register_debug_endpoints(
             stream_route,
         )
 
-    if resolved.debug.mcp:
+    if debug_endpoints.mcp:
         _register_mcp_endpoint(
             app,
             resolved,

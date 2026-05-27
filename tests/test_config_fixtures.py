@@ -92,10 +92,9 @@ def test_global_defaults_inherited() -> None:
     assert global_config.model == "gpt-4o"
     assert global_config.timeout == 900
     assert global_config.system_tools is not None
-    assert global_config.system_tools.execute_in_sessions is not None
-    assert (
-        global_config.system_tools.execute_in_sessions.session_pool_management_endpoint
-        == "https://pool.example.test"
+    assert global_config.system_tools.dynamic_sessions_code_interpreter is not None
+    assert global_config.system_tools.dynamic_sessions_code_interpreter.endpoint == (
+        "https://pool.example.test"
     )
 
     assert len(specs) == 1
@@ -126,19 +125,16 @@ def test_env_substitution_resolves_known_vars(monkeypatch: pytest.MonkeyPatch) -
     assert global_config.model == "gpt-4o-mini"
     assert global_config.timeout == 600
     assert global_config.system_tools is not None
-    assert global_config.system_tools.execute_in_sessions is not None
-    assert (
-        global_config.system_tools.execute_in_sessions.session_pool_management_endpoint
-        == "https://pool.contoso.test"
+    assert global_config.system_tools.dynamic_sessions_code_interpreter is not None
+    assert global_config.system_tools.dynamic_sessions_code_interpreter.endpoint == (
+        "https://pool.contoso.test"
     )
 
     assert len(specs) == 1
     spec = specs[0]
     assert spec.name == "Azure Reporter"
     # description in frontmatter mixes both %VAR% and $VAR styles.
-    assert spec.description == (
-        "Reports on subscription sub-123 and emails alerts@contoso.test."
-    )
+    assert spec.description == ("Reports on subscription sub-123 and emails alerts@contoso.test.")
     # Unset env var should remain literal.
     assert spec.model == "$AGENT_MODEL_OVERRIDE"
     assert spec.trigger is not None
@@ -264,7 +260,7 @@ def test_capability_filtering_fixture() -> None:
     assert locked.skills is False
     assert locked.mcp is False
     assert locked.system_tools is not None
-    assert locked.system_tools.execute_in_sessions is False
+    assert locked.system_tools.dynamic_sessions_code_interpreter is False
     assert locked.trigger is not None
     assert locked.trigger.args["route"] == "locked-down"
 
@@ -296,20 +292,20 @@ def test_debug_endpoint_variants() -> None:
 
     main = by_name["Debug Main"]
     assert main.is_main is True
-    assert main.debug is None  # resolver applies main-default later
+    assert main.debug_endpoints is None  # resolver applies main-default later
 
     on = by_name["Debug Shorthand On"]
-    assert on.debug is True
+    assert on.debug_endpoints is True
     assert on.trigger is not None and on.trigger.args["route"] == "debug-on"
 
     off = by_name["Debug Shorthand Off"]
-    assert off.debug is False
+    assert off.debug_endpoints is False
 
     mixed = by_name["Debug Mixed"]
-    assert isinstance(mixed.debug, DebugConfig)
-    assert mixed.debug.chat is True
-    assert mixed.debug.http is True
-    assert mixed.debug.mcp is False
+    assert isinstance(mixed.debug_endpoints, DebugConfig)
+    assert mixed.debug_endpoints.chat_ui is True
+    assert mixed.debug_endpoints.chat_api is True
+    assert mixed.debug_endpoints.mcp is False
 
 
 # ---------------------------------------------------------------------------
@@ -337,9 +333,7 @@ def test_schemas_and_metadata_parsed() -> None:
     assert spec.response_schema is not None
     assert spec.response_schema["required"] == ["status", "summary"]
     assert (
-        spec.response_schema["properties"]["findings"]["items"]["properties"][
-            "severity"
-        ]["type"]
+        spec.response_schema["properties"]["findings"]["items"]["properties"]["severity"]["type"]
         == "string"
     )
 
@@ -407,9 +401,7 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("NODE_BIN", "/usr/local/bin/node")
     monkeypatch.setenv("WORKSPACE_ROOT", "/srv/workspace")
     monkeypatch.setenv("MCP_LOG_LEVEL", "debug")
-    monkeypatch.setattr(
-        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
-    )
+    monkeypatch.setattr(mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool)
     # Intentionally leave UNSET_API_KEY unset to confirm it stays literal.
 
     # The agent file itself should also load cleanly through the loader.
