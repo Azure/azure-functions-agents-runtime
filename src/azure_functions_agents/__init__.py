@@ -29,8 +29,6 @@ from .runner import (
     AgentResult,
     run_agent,
     run_agent_stream,
-    run_copilot_agent,
-    run_copilot_agent_stream,
 )
 from .system_tools.sandbox import create_sandbox_tools
 
@@ -46,8 +44,6 @@ __all__ = [
     "resolve_config_dir",
     "run_agent",
     "run_agent_stream",
-    "run_copilot_agent",
-    "run_copilot_agent_stream",
     "set_app_root",
     "set_client_manager",
     "shutdown_client_manager",
