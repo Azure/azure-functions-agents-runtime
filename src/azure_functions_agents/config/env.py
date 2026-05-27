@@ -6,8 +6,6 @@ import os
 import re
 from typing import Any
 
-from azure_functions_agents._logger import logger
-
 _VAR_NAME_FRAGMENT = r"[A-Za-z_][A-Za-z0-9_]*"
 
 _ESCAPED_DOLLAR_PATTERN = re.compile(rf"\$\$({_VAR_NAME_FRAGMENT})")
@@ -18,7 +16,6 @@ _INLINE_PERCENT_PATTERN = re.compile(rf"%({_VAR_NAME_FRAGMENT})%")
 _LITERAL_DOLLAR_SENTINEL = "\x00AF_LITERAL_DOLLAR:"
 _LITERAL_PERCENT_SENTINEL = "\x00AF_LITERAL_PERCENT:"
 _LITERAL_SENTINEL_SUFFIX = "\x00"
-_WARNED_ENV_ALIASES: set[tuple[str, str]] = set()
 
 
 def _escaped_dollar_replacer(match: re.Match[str]) -> str:
@@ -87,28 +84,9 @@ def resolve_env_vars_in_data(value: Any) -> Any:
     return value
 
 
-def runtime_env_value(name: str, *, legacy_name: str | None = None) -> str:
-    """Return a stripped runtime env var value, honoring one deprecated alias."""
-    value = os.environ.get(name)
-    if value is not None:
-        return value.strip()
-
-    if legacy_name is None:
-        return ""
-
-    legacy_value = os.environ.get(legacy_name)
-    if legacy_value is None:
-        return ""
-
-    warning_key = (legacy_name, name)
-    if warning_key not in _WARNED_ENV_ALIASES:
-        logger.warning(
-            "Environment variable %s is deprecated; use %s instead.",
-            legacy_name,
-            name,
-        )
-        _WARNED_ENV_ALIASES.add(warning_key)
-    return legacy_value.strip()
+def runtime_env_value(name: str) -> str:
+    """Return a stripped runtime env var value, or an empty string if unset."""
+    return (os.environ.get(name) or "").strip()
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

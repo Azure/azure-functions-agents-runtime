@@ -32,10 +32,7 @@ def get_app_root() -> Path:
 
 def resolve_config_dir() -> str:
     """Resolve the config directory used to persist agent-session history files."""
-    explicit_path = runtime_env_value(
-        "AZURE_FUNCTIONS_AGENTS_SESSION_DIR",
-        legacy_name="AZURE_FUNCTIONS_AGENTS_CONFIG_DIR",
-    )
+    explicit_path = runtime_env_value("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")
     if explicit_path:
         logger.info("Using session dir override: %s", explicit_path)
         return explicit_path

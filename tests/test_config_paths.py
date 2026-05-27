@@ -49,14 +49,4 @@ def test_resolve_config_dir_priority(monkeypatch: pytest.MonkeyPatch, tmp_path: 
     assert paths.resolve_config_dir() == r"C:\config\preferred"
 
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", raising=False)
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR", raising=False)
     assert Path(paths.resolve_config_dir()) == (tmp_path / ".azure-functions-agents").resolve()
-
-
-def test_resolve_config_dir_accepts_legacy_config_dir_alias(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    monkeypatch.setattr(paths.os.path, "expanduser", lambda p: str(tmp_path / p.lstrip("~/")))
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_SESSION_DIR", raising=False)
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR", r"C:\config\legacy")
-    assert paths.resolve_config_dir() == r"C:\config\legacy"

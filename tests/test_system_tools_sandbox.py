@@ -28,13 +28,3 @@ def test_create_sandbox_tools_accepts_resolved_inline_endpoint(
     tools = create_sandbox_tools({"endpoint": "https://$HOST/api"})
 
     assert len(tools) == 1
-
-
-def test_create_sandbox_tools_accepts_legacy_endpoint_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("HOST", "example.com")
-
-    tools = create_sandbox_tools({"session_pool_management_endpoint": "https://$HOST/api"})
-
-    assert len(tools) == 1

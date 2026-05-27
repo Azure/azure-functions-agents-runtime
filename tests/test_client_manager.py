@@ -73,15 +73,6 @@ def test_resolve_model_uses_runtime_model_as_fallback(
     assert MAFClientManager().resolve_model(None) == "fallback-model"
 
 
-def test_resolve_model_accepts_legacy_maf_aliases(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", raising=False)
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
-    monkeypatch.setenv("MAF_PROVIDER", "openai")
-    monkeypatch.setenv("MAF_MODEL", "legacy-fallback-model")
-
-    assert MAFClientManager().resolve_model(None) == "legacy-fallback-model"
-
-
 @pytest.mark.parametrize(
     ("provider", "default_model"),
     [
@@ -97,7 +88,6 @@ def test_resolve_model_uses_default_when_no_override_exists(
 ) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
-    monkeypatch.delenv("MAF_MODEL", raising=False)
     monkeypatch.delenv("AZURE_OPENAI_DEPLOYMENT", raising=False)
     monkeypatch.delenv("FOUNDRY_MODEL", raising=False)
 

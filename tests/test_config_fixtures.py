@@ -72,7 +72,7 @@ def test_minimal_main_only_agent() -> None:
     assert spec.name == "Minimal Assistant"
     assert spec.is_main is True
     assert spec.trigger is None
-    assert spec.debug is None
+    assert spec.debug_endpoints is None
     assert spec.model is None
     assert "helpful assistant" in spec.instructions
     assert spec.substitute_variables is True

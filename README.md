@@ -457,8 +457,6 @@ When the agent uses connector-backed MCP servers, connector triggers, or `dynami
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Reasoning effort for supported reasoning models (default `high`; valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Reasoning summary mode for supported reasoning models (default `concise`; valid values are `auto`, `concise`, `detailed`) |
 
-Deprecated aliases from earlier previews still work with startup warnings: `MAF_PROVIDER`, `MAF_MODEL`, `AGENT_TIMEOUT`, `MAF_REASONING_EFFORT`, `MAF_REASONING_SUMMARY`, and `AZURE_FUNCTIONS_AGENTS_CONFIG_DIR`.
-
 ## Development
 
 ```bash

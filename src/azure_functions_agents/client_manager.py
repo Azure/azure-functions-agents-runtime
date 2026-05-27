@@ -77,8 +77,7 @@ class MAFClientManager(ClientManager):
     """Build Microsoft Agent Framework chat clients.
 
     Selects a provider from environment variables — explicit
-    ``AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry`` wins;
-    deprecated ``MAF_PROVIDER`` is accepted as an alias. Otherwise:
+    ``AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry`` wins. Otherwise:
 
     1. ``AZURE_OPENAI_ENDPOINT``      → Azure OpenAI
     2. ``FOUNDRY_PROJECT_ENDPOINT``   → Microsoft Foundry
@@ -92,7 +91,7 @@ class MAFClientManager(ClientManager):
         if requested:
             return requested
         provider = self._provider()
-        runtime_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL", legacy_name="MAF_MODEL")
+        runtime_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
         if provider == "azure_openai":
             return (
                 os.environ.get("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
@@ -121,23 +120,18 @@ class MAFClientManager(ClientManager):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _env(name: str, *, legacy_name: str | None = None) -> str:
+    def _env(name: str) -> str:
         """Return ``$name`` stripped, or ``""`` if missing/blank.
 
         Empty-string env vars are common in local.settings.json templates and
         ``azd env set X ""`` workflows. We treat them as if the variable were
         unset so auto-detection does not pick them up.
         """
-        if legacy_name is not None:
-            return runtime_env_value(name, legacy_name=legacy_name)
         return (os.environ.get(name) or "").strip()
 
     @classmethod
     def _provider(cls) -> str:
-        explicit = cls._env(
-            "AZURE_FUNCTIONS_AGENTS_PROVIDER",
-            legacy_name="MAF_PROVIDER",
-        ).lower()
+        explicit = cls._env("AZURE_FUNCTIONS_AGENTS_PROVIDER").lower()
         if explicit:
             return explicit
         if cls._env("AZURE_OPENAI_ENDPOINT"):

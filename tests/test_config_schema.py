@@ -36,31 +36,8 @@ def test_agent_spec_debug_variants(value: bool | None | DebugConfig) -> None:
     assert spec.debug_endpoints == value
 
 
-def test_agent_spec_accepts_legacy_debug_alias() -> None:
-    spec = AgentSpec(name="X", description="Y", debug=True)
-    assert spec.debug_endpoints is True
-
-
-def test_agent_spec_rejects_debug_and_debug_endpoints() -> None:
-    with pytest.raises(ValidationError):
-        AgentSpec.model_validate(
-            {
-                "name": "X",
-                "description": "Y",
-                "debug": True,
-                "debug_endpoints": True,
-            }
-        )
-
-
 def test_debug_config_chat_ui_enables_chat_api() -> None:
     config = DebugConfig(chat_ui=True)
-    assert config.chat_ui is True
-    assert config.chat_api is True
-
-
-def test_debug_config_accepts_legacy_names() -> None:
-    config = DebugConfig(chat=True, http=True)
     assert config.chat_ui is True
     assert config.chat_api is True
 
@@ -106,16 +83,6 @@ def test_global_config_extra_forbidden() -> None:
 def test_system_tools_config_parses() -> None:
     payload: dict[str, Any] = {
         "dynamic_sessions_code_interpreter": {"endpoint": "https://example.test"},
-    }
-    config = SystemToolsConfig.model_validate(payload)
-    assert config.dynamic_sessions_code_interpreter == DynamicSessionsCodeInterpreterConfig(
-        endpoint="https://example.test"
-    )
-
-
-def test_system_tools_config_accepts_legacy_execute_in_sessions_alias() -> None:
-    payload: dict[str, Any] = {
-        "execute_in_sessions": {"session_pool_management_endpoint": "https://example.test"},
     }
     config = SystemToolsConfig.model_validate(payload)
     assert config.dynamic_sessions_code_interpreter == DynamicSessionsCodeInterpreterConfig(

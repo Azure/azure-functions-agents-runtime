@@ -332,8 +332,6 @@ debug_endpoints: true   # Main: chat_ui, chat_api, and mcp; non-main: chat_ui an
 debug_endpoints: false  # Equivalent to chat_ui: false, chat_api: false, mcp: false
 ```
 
-Deprecated alias: `debug` still works during migration and maps to `debug_endpoints`, but files must not define both.
-
 ---
 
 #### `model`
@@ -415,8 +413,6 @@ system_tools:
 ```
 
 **Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `client_id` for this tool when set, otherwise `AZURE_CLIENT_ID` in multi-identity Function Apps.
-
-Deprecated aliases: `system_tools.execute_in_sessions` and `session_pool_management_endpoint` still work during migration, but files must not define both old and new names.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
 

@@ -20,7 +20,6 @@ from azure_functions_agents.config.schema import (
     AgentSpec,
     DebugConfig,
     DynamicSessionsCodeInterpreterConfig,
-    ExecuteInSessionsConfig,
     GlobalConfig,
     McpFilter,
     SkillsFilter,
@@ -45,14 +44,6 @@ def test_resolve_model_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _resolve_model(AgentSpec(name="A", description="B"), GlobalConfig()) is None
 
 
-def test_resolve_model_accepts_legacy_maf_model_alias(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_MODEL", raising=False)
-    monkeypatch.setenv("MAF_MODEL", "legacy-env-model")
-    assert (
-        _resolve_model(AgentSpec(name="A", description="B"), GlobalConfig()) == "legacy-env-model"
-    )
-
-
 def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS", "33")
     global_config = GlobalConfig(timeout=22)
@@ -61,14 +52,6 @@ def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _resolve_timeout(AgentSpec(name="A", description="B"), GlobalConfig()) == 33
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS", raising=False)
     assert _resolve_timeout(AgentSpec(name="A", description="B"), GlobalConfig()) == DEFAULT_TIMEOUT
-
-
-def test_resolve_timeout_accepts_legacy_agent_timeout_alias(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS", raising=False)
-    monkeypatch.setenv("AGENT_TIMEOUT", "44")
-    assert _resolve_timeout(AgentSpec(name="A", description="B"), GlobalConfig()) == 44
 
 
 def test_resolve_debug() -> None:
@@ -113,20 +96,6 @@ def test_resolve_sandbox() -> None:
             global_config,
         )
         is None
-    )
-
-
-def test_resolve_sandbox_accepts_legacy_config_alias() -> None:
-    global_config = GlobalConfig(
-        system_tools=SystemToolsConfig(
-            execute_in_sessions=ExecuteInSessionsConfig(
-                session_pool_management_endpoint="https://example.test"
-            )
-        )
-    )
-    assert global_config.system_tools is not None
-    assert _resolve_sandbox(AgentSpec(name="A", description="B"), global_config) == (
-        global_config.system_tools.dynamic_sessions_code_interpreter
     )
 
 

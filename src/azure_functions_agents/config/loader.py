@@ -46,18 +46,6 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         raise ValueError(f"{source_file}: invalid YAML frontmatter: {exc}") from exc
 
     metadata = dict(post.metadata or {})
-    if "debug" in metadata and "debug_endpoints" not in metadata:
-        logger.warning(
-            "%s: `debug` is deprecated; use `debug_endpoints` instead.",
-            source_file,
-        )
-    agent_system_tools = metadata.get("system_tools")
-    if isinstance(agent_system_tools, dict) and "execute_in_sessions" in agent_system_tools:
-        logger.warning(
-            "%s: `system_tools.execute_in_sessions` is deprecated; use "
-            "`system_tools.dynamic_sessions_code_interpreter` instead.",
-            source_file,
-        )
     substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
 
     normalized = dict(metadata)
@@ -98,13 +86,6 @@ def load_global_config(app_root: Path) -> GlobalConfig:
         )
 
     normalized = _normalize_global_config_dict(data)
-    system_tools = normalized.get("system_tools")
-    if isinstance(system_tools, dict) and "execute_in_sessions" in system_tools:
-        logger.warning(
-            "%s: `system_tools.execute_in_sessions` is deprecated; use "
-            "`system_tools.dynamic_sessions_code_interpreter` instead.",
-            source_file,
-        )
     try:
         return GlobalConfig.model_validate(normalized)
     except ValidationError as exc:

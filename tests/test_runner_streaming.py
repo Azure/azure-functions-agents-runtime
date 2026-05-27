@@ -66,8 +66,6 @@ def _events_from_sse(chunks: list[str]) -> list[dict[str, Any]]:
 def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> None:
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
-    monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
 
     async def fake_build_agent_session_history(**_kwargs: Any) -> tuple[_Agent, object, str]:
         return _Agent(), object(), "test-session"
@@ -114,27 +112,11 @@ def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
 def test_build_chat_options_uses_reasoning_defaults(monkeypatch: Any) -> None:
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
-    monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
 
     assert runner._build_chat_options_from_environment() == {
         "reasoning": {
             "effort": "high",
             "summary": "concise",
-        }
-    }
-
-
-def test_build_chat_options_accepts_legacy_reasoning_aliases(monkeypatch: Any) -> None:
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
-    monkeypatch.setenv("MAF_REASONING_EFFORT", "medium")
-    monkeypatch.setenv("MAF_REASONING_SUMMARY", "detailed")
-
-    assert runner._build_chat_options_from_environment() == {
-        "reasoning": {
-            "effort": "medium",
-            "summary": "detailed",
         }
     }
 

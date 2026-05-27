@@ -268,7 +268,7 @@ def create_sandbox_tools(
 
     Returns a list with one tool, or an empty list if the config is invalid.
     """
-    raw_endpoint = config.get("endpoint") or config.get("session_pool_management_endpoint", "")
+    raw_endpoint = config.get("endpoint", "")
     if not raw_endpoint:
         logger.warning("dynamic_sessions_code_interpreter: missing 'endpoint', skipping")
         return []

@@ -54,7 +54,7 @@ def _resolved_agent(
     *,
     name: str,
     is_main: bool,
-    debug: DebugConfig,
+    debug_endpoints: DebugConfig,
     source_file: str | Path | None = None,
     input_schema: dict[str, Any] | None = None,
 ) -> ResolvedAgent:
@@ -65,7 +65,7 @@ def _resolved_agent(
         trigger=None,
         instructions="Assist the user.",
         is_main=is_main,
-        debug_endpoints=debug,
+        debug_endpoints=debug_endpoints,
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -94,7 +94,7 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug=DebugConfig(chat=True),
+        debug_endpoints=DebugConfig(chat_ui=True),
         source_file=source_file,
     )
 
@@ -133,7 +133,7 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
         _resolved_agent(
             name="Daily Report",
             is_main=False,
-            debug=DebugConfig(chat=True),
+            debug_endpoints=DebugConfig(chat_ui=True),
             source_file=source_a,
         ),
         AgentCapabilities(),
@@ -143,7 +143,7 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
         _resolved_agent(
             name="Daily Report",
             is_main=False,
-            debug=DebugConfig(chat=True),
+            debug_endpoints=DebugConfig(chat_ui=True),
             source_file=source_b,
         ),
         AgentCapabilities(),
@@ -175,7 +175,7 @@ def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
             _resolved_agent(
                 name="Daily Report Dash",
                 is_main=False,
-                debug=DebugConfig(chat=True),
+                debug_endpoints=DebugConfig(chat_ui=True),
                 source_file=source_a,
             ),
             AgentCapabilities(),
@@ -185,7 +185,7 @@ def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
             _resolved_agent(
                 name="Daily Report Underscore",
                 is_main=False,
-                debug=DebugConfig(chat=True),
+                debug_endpoints=DebugConfig(chat_ui=True),
                 source_file=source_b,
             ),
             AgentCapabilities(),
@@ -207,7 +207,7 @@ def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
 def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
-    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug=DebugConfig(chat=True))
+    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug_endpoints=DebugConfig(chat_ui=True))
     calls: dict[str, Any] = {}
 
     class FakeUuid:
@@ -250,7 +250,7 @@ def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
 def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
-    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug=DebugConfig(chat=True))
+    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug_endpoints=DebugConfig(chat_ui=True))
     calls: dict[str, Any] = {}
 
     class FakeUuid:
@@ -300,7 +300,7 @@ def test_register_debug_endpoints_chat_also_registers_http_routes_for_non_main_a
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug=DebugConfig(chat=True),
+        debug_endpoints=DebugConfig(chat_ui=True),
         source_file=source_file,
     )
 
@@ -322,7 +322,7 @@ def test_register_debug_endpoints_chat_and_http_do_not_double_register_routes(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug=DebugConfig(chat=True, http=True),
+        debug_endpoints=DebugConfig(chat_ui=True, chat_api=True),
         source_file=source_file,
     )
 
@@ -344,7 +344,7 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug=DebugConfig(chat=True),
+        debug_endpoints=DebugConfig(chat_ui=True),
         source_file=source_file,
         input_schema={"type": "object", "required": ["subscription_id"]},
     )
@@ -385,7 +385,7 @@ def test_debug_chat_stream_endpoint_skips_input_schema_validation(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug=DebugConfig(chat=True),
+        debug_endpoints=DebugConfig(chat_ui=True),
         source_file=source_file,
         input_schema={"type": "object", "required": ["subscription_id"]},
     )

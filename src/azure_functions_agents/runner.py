@@ -61,10 +61,7 @@ from .discovery.tools import discover_user_tools
 
 
 def _runtime_timeout_default() -> float:
-    env_timeout = runtime_env_value(
-        "AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS",
-        legacy_name="AGENT_TIMEOUT",
-    )
+    env_timeout = runtime_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
     if env_timeout:
         try:
             return float(env_timeout)
@@ -77,13 +74,7 @@ def _runtime_timeout_default() -> float:
 
 
 DEFAULT_TIMEOUT = _runtime_timeout_default()
-DEFAULT_MODEL: str | None = (
-    runtime_env_value(
-        "AZURE_FUNCTIONS_AGENTS_MODEL",
-        legacy_name="MAF_MODEL",
-    )
-    or None
-)
+DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 DEFAULT_REASONING_EFFORT = "high"
 DEFAULT_REASONING_SUMMARY = "concise"
 
@@ -169,25 +160,13 @@ def _build_history_provider() -> Any:
     return FileHistoryProvider(storage_path=_resolve_sessions_dir())
 
 
-def _env_value(name: str, *, legacy_name: str | None = None) -> str:
-    if legacy_name is None:
-        return runtime_env_value(name)
-    return runtime_env_value(name, legacy_name=legacy_name)
-
-
 def _build_chat_options_from_environment() -> dict[str, Any] | None:
     """Build provider chat options from supported runtime environment variables."""
     return {
         "reasoning": {
-            "effort": _env_value(
-                "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT",
-                legacy_name="MAF_REASONING_EFFORT",
-            )
+            "effort": runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT")
             or DEFAULT_REASONING_EFFORT,
-            "summary": _env_value(
-                "AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY",
-                legacy_name="MAF_REASONING_SUMMARY",
-            )
+            "summary": runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY")
             or DEFAULT_REASONING_SUMMARY,
         }
     }
