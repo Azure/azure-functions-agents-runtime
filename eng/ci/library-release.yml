@@ -6,6 +6,22 @@ parameters:
     type: string
     default: 'azure-functions/python/azurefunctions-agents-runtime'
     displayName: 'Blob path prefix under drops container'
+  - name: githubOrg
+    type: string
+    default: 'Azure'
+    displayName: 'GitHub organization that owns the source repository'
+  - name: githubRepo
+    type: string
+    default: 'azure-functions-agents-runtime'
+    displayName: 'GitHub repository name (used in URLs and as the local clone folder)'
+  - name: artifactName
+    type: string
+    default: 'azurefunctions-agents-runtime'
+    displayName: 'Pipeline artifact name produced by the Build stage'
+  - name: partnerReleasePipelineUrl
+    type: string
+    default: 'https://dev.azure.com/azure-sdk/internal/_build?definitionId=6991'
+    displayName: 'Azure SDK partner-release pipeline URL (used in manual PyPI publish instructions)'
 
 resources:
   repositories:
@@ -27,6 +43,8 @@ extends:
         displayName: 'Build Azure Functions Agent Runtime'
         jobs:
           - template: /eng/templates/official/jobs/build-artifacts.yml@self
+            parameters:
+              artifactName: ${{ parameters.artifactName }}
 
       - stage: Release
         displayName: 'Release Azure Functions Agent Runtime'
@@ -36,3 +54,7 @@ extends:
             parameters:
               libraryVersion: ${{ parameters.libraryVersion }}
               blobPath: ${{ parameters.blobPath }}
+              githubOrg: ${{ parameters.githubOrg }}
+              githubRepo: ${{ parameters.githubRepo }}
+              artifactName: ${{ parameters.artifactName }}
+              partnerReleasePipelineUrl: ${{ parameters.partnerReleasePipelineUrl }}

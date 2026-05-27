@@ -5,6 +5,22 @@ parameters:
     type: string
     default: 'azure-functions/python/azurefunctions-agents-runtime'
     displayName: 'Blob path under drops container'
+  - name: githubOrg
+    type: string
+    default: 'Azure'
+    displayName: 'GitHub organization that owns the source repository'
+  - name: githubRepo
+    type: string
+    default: 'azure-functions-agents-runtime'
+    displayName: 'GitHub repository name (used in URLs and as the local clone folder)'
+  - name: artifactName
+    type: string
+    default: 'azurefunctions-agents-runtime'
+    displayName: 'Pipeline artifact name produced by the Build stage'
+  - name: partnerReleasePipelineUrl
+    type: string
+    default: 'https://dev.azure.com/azure-sdk/internal/_build?definitionId=6991'
+    displayName: 'Azure SDK partner-release pipeline URL (used in manual PyPI publish instructions)'
 
 jobs:
   - job: "CreateReleaseBranch"
@@ -43,7 +59,7 @@ jobs:
         git config --global user.email "azurefunctions@microsoft.com"
 
         # Heading to Artifact Repository
-        Write-Host "Operating based on azure-functions-agent-runtime"
+        Write-Host "Operating based on ${{ parameters.githubRepo }}"
         git checkout -b "release/$newLibraryVersion"
 
         # Change pyproject.toml version
@@ -55,7 +71,7 @@ jobs:
 
         # Create release branch release/X.Y.Z
         Write-Host "Creating release branch release/$newLibraryVersion"
-        git remote set-url origin "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime.git"
+        git remote set-url origin "https://${githubUser}:${githubToken}@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git"
         git push --set-upstream origin "release/$newLibraryVersion"
       displayName: 'Push release/x.y.z'
 
@@ -69,7 +85,7 @@ jobs:
       inputs:
         notifyUsers: ''  # No email notifications sent
         instructions: |
-          1. Check if the https://github.com/Azure/azure-functions-agent-runtime/tree/release/${{ parameters.libraryVersion }} build succeeds and passes all unit tests.
+          1. Check if the https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/tree/release/${{ parameters.libraryVersion }} build succeeds and passes all unit tests.
           2. If not, modify the release/${{ parameters.libraryVersion }} branch.
           3. Ensure release/${{ parameters.libraryVersion }} branch contains all necessary changes.
 
@@ -87,9 +103,9 @@ jobs:
         git config --global user.email "azurefunctions@microsoft.com"
 
         # Clone Repository
-        git clone "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime"
-        Write-Host "Cloned azure-functions-agent-runtime into local"
-        Set-Location "azure-functions-agent-runtime"
+        git clone "https://${githubUser}:${githubToken}@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}"
+        Write-Host "Cloned ${{ parameters.githubRepo }} into local"
+        Set-Location "${{ parameters.githubRepo }}"
         git checkout "origin/release/$newLibraryVersion"
 
         # Create release tag X.Y.Z
@@ -99,28 +115,107 @@ jobs:
         # Push tag to remote
         git push origin $newLibraryVersion
       displayName: 'Tag and push x.y.z'
+      
+    - download: current
+      artifact: ${{ parameters.artifactName }}
+      displayName: 'Download build artifacts'
+
     - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
 
-        # Create GitHub credential
-        $credential = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
+        $credential = [System.Convert]::ToBase64String(
+            [System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
 
-        # Create Release Note
-        Write-Host "Creating release note in GitHub"
-        $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
-        $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/Azure/azure-functions-agent-runtime/releases"
-
-        # Return Value
-        if ($response.StatusCode -ne 201) {
-            Write-Host "Failed to create release note in GitHub"
-            exit -1
+        $apiHeaders = @{
+            "Accept"               = "application/vnd.github+json"
+            "Authorization"        = "Basic $credential"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "Content-Type"         = "application/json"
         }
 
-        $draftUrl = $response | ConvertFrom-Json | Select -expand url
-        Write-Host "Release draft created in $draftUrl"
-      displayName: 'Create GitHub release draft'
+        # ---- Locate and validate assets BEFORE creating the release ----
+        $distFolder = Join-Path '$(Pipeline.Workspace)' (Join-Path '${{ parameters.artifactName }}' 'dist')
+        if (-not (Test-Path -LiteralPath $distFolder)) {
+            throw "Distribution folder not found: $distFolder"
+        }
+
+        $assetsToUpload = @(
+            Get-ChildItem -LiteralPath $distFolder -File |
+                Where-Object { $_.Name -like '*.whl' -or $_.Name -like '*.tar.gz' } |
+                Sort-Object Name
+        )
+        if ($assetsToUpload.Count -eq 0) {
+            throw "No .whl or .tar.gz files found in $distFolder"
+        }
+        Write-Host "Assets to upload:"
+        $assetsToUpload | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Length) bytes)" }
+
+        # ---- Create draft release ----
+        Write-Host "Creating GitHub draft release for $newLibraryVersion"
+        $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
+        $createResponse = Invoke-WebRequest -Headers $apiHeaders -Method Post -Body "$body" `
+            -Uri "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
+        if ($createResponse.StatusCode -ne 201) {
+            throw "Failed to create release. HTTP $($createResponse.StatusCode)"
+        }
+        $release = $createResponse.Content | ConvertFrom-Json
+        Write-Host "Draft release created: $($release.html_url)"
+
+        # ---- Upload assets; fail hard on duplicate-name (PyPI-style) ----
+        $uploadUrlBase = $release.upload_url -replace '\{\?name,label\}$', ''
+        $uploadHeaders = @{
+            "Accept"               = "application/vnd.github+json"
+            "Authorization"        = "Basic $credential"
+            "X-GitHub-Api-Version" = "2022-11-28"
+        }
+
+        # Wrap upload loop so any failure deletes the incomplete draft release.
+        # This keeps the world clean for retries: an operator can rerun the job
+        # without manually purging a stranded empty/partial draft.
+        try {
+            foreach ($asset in $assetsToUpload) {
+                $assetUploadUrl = '{0}?name={1}' -f $uploadUrlBase, [System.Uri]::EscapeDataString($asset.Name)
+                Write-Host "Uploading $($asset.Name)..."
+                try {
+                    $uploadResponse = Invoke-WebRequest -Headers $uploadHeaders -Method Post `
+                        -Uri $assetUploadUrl -ContentType 'application/octet-stream' -InFile $asset.FullName
+                } catch {
+                    $status = $null
+                    if ($_.Exception.Response) {
+                        $status = [int]$_.Exception.Response.StatusCode
+                    }
+                    if ($status -eq 422) {
+                        throw "Asset '$($asset.Name)' already exists on release $newLibraryVersion. GitHub releases must be unique per filename (same policy as PyPI). If this is intentional, delete the asset from the GitHub release UI and rerun, or bump the version."
+                    }
+                    throw "Upload failed for $($asset.Name): HTTP $status - $($_.Exception.Message)"
+                }
+                if ($uploadResponse.StatusCode -ne 201) {
+                    throw "Upload failed for $($asset.Name). HTTP $($uploadResponse.StatusCode)"
+                }
+                Write-Host "  -> uploaded"
+            }
+        } catch {
+            $uploadError = $_
+            if ($release -and $release.id) {
+                $releaseDeleteUri = "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases/$($release.id)"
+                Write-Host "##[warning]Asset upload failed. Cleaning up incomplete draft release $($release.id)..."
+                try {
+                    Invoke-WebRequest -Headers $apiHeaders -Method Delete -Uri $releaseDeleteUri | Out-Null
+                    Write-Host "Draft release $($release.id) deleted."
+                } catch {
+                    Write-Host "##[warning]Failed to delete draft release $($release.id): $($_.Exception.Message). Manual cleanup required at https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
+                }
+            }
+            throw $uploadError
+        }
+
+        Write-Host "All assets attached to draft release: $($release.html_url)"
+      displayName: 'Create GitHub release draft and attach assets'
 
   - job: "CheckGitHubRelease"
     dependsOn: ['CreateReleaseTag']
@@ -131,7 +226,7 @@ jobs:
       displayName: 'Write GitHub release note'
       inputs:
         notifyUsers: ''
-        instructions: 'Please head to https://github.com/Azure/azure-functions-agent-runtime/releases to finish the release note'
+        instructions: 'Please head to https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases to finish the release note'
 
   - job: PublishRelease
     dependsOn: ['CheckGitHubRelease']
@@ -146,7 +241,7 @@ jobs:
       - checkout: none
 
       - download: current
-        artifact: azurefunctions-agents-runtime
+        artifact: ${{ parameters.artifactName }}
         displayName: 'Download build artifacts'
 
       - task: AzurePowerShell@5
@@ -159,7 +254,7 @@ jobs:
           Inline: |
             $version = '${{ parameters.libraryVersion }}'
             $blobPath = '${{ parameters.blobPath }}'
-            $distFolder = '$(Pipeline.Workspace)/azurefunctions-agents-runtime/dist'
+            $distFolder = '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dist'
 
             Write-Host "Uploading Python artifacts for version: $version"
             Write-Host "Source folder: $distFolder"
@@ -173,10 +268,41 @@ jobs:
             # Upload all distribution files (whl and tar.gz) to partner blob
             azcopy copy "$distFolder/*" "https://azuresdkpartnerdrops.blob.core.windows.net/drops/$blobPath/$version/"
 
+            $blobPathFull = "$blobPath/$version"
+            $partnerReleaseUrl = '${{ parameters.partnerReleasePipelineUrl }}'
+
             Write-Host ""
-            Write-Host "Upload complete. To publish to PyPI:"
-            Write-Host "  1. Go to Azure DevOps: python - partner-release pipeline"
-            Write-Host "  2. Click 'Run Pipeline'"
-            Write-Host "  3. Set BlobPath to: $blobPath/$version"
+            Write-Host "##[section]Upload complete. Manual step required to publish to PyPI."
+            Write-Host "  1. Open the partner-release pipeline:"
+            Write-Host "       $partnerReleaseUrl"
+            Write-Host "  2. Click 'Run pipeline'."
+            Write-Host "  3. Set BlobPath to (copy-paste):"
+            Write-Host "       $blobPathFull"
+            Write-Host "  4. Click 'Run'."
+            Write-Host "  5. Return to this run and approve the next manual gate to close out the release."
+            # Surface the manual step prominently in the run summary
+            Write-Host "##vso[task.logissue type=warning]Publish to PyPI: open $partnerReleaseUrl and run with BlobPath=$blobPathFull"
         env:
           AZCOPY_AUTO_LOGIN_TYPE: 'PSCRED'
+
+  - job: "ConfirmPyPIPublishStarted"
+    dependsOn: ['PublishRelease']
+    displayName: '(Manual) Confirm partner-release pipeline started'
+    pool: server
+    steps:
+      - task: ManualValidation@1
+        displayName: 'Confirm PyPI publish triggered'
+        inputs:
+          notifyUsers: ''
+          instructions: |
+            Version ${{ parameters.libraryVersion }} has been uploaded to the Azure SDK partner drops blob.
+
+            To complete the release, manually trigger the partner-release pipeline:
+              1. Open: ${{ parameters.partnerReleasePipelineUrl }}
+              2. Click "Run pipeline".
+              3. Set BlobPath to:
+                   ${{ parameters.blobPath }}/${{ parameters.libraryVersion }}
+              4. Click "Run".
+
+            Approve this gate once the partner-release pipeline has been started.
+            Reject if the blob upload looks wrong or you do not intend to publish.

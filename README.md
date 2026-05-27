@@ -460,8 +460,8 @@ When the agent uses connector-backed MCP servers, connector triggers, or `execut
 
 ```bash
 # Clone the repo
-git clone https://github.com/Azure/azure-functions-agent-runtime.git
-cd azure-functions-agent-runtime
+git clone https://github.com/Azure/azure-functions-agents-runtime.git
+cd azure-functions-agents-runtime
 
 # Install in development mode
 pip install -e .
