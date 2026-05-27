@@ -34,7 +34,12 @@ class _Agent:
     ) -> AsyncIterator[_Update]:
         assert stream is True
         assert session is not None
-        assert options is None
+        assert options == {
+            "reasoning": {
+                "effort": "high",
+                "summary": "concise",
+            }
+        }
         return self._updates()
 
     async def _updates(self) -> AsyncIterator[_Update]:
@@ -104,20 +109,14 @@ def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
     }
 
 
-def test_build_chat_options_omits_reasoning_when_unset(monkeypatch: Any) -> None:
+def test_build_chat_options_uses_reasoning_defaults(monkeypatch: Any) -> None:
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
-
-    assert runner._build_chat_options_from_environment() is None
-
-
-def test_build_chat_options_allows_partial_reasoning_configuration(monkeypatch: Any) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "low")
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
     assert runner._build_chat_options_from_environment() == {
         "reasoning": {
-            "effort": "low",
+            "effort": "high",
+            "summary": "concise",
         }
     }
 

@@ -75,6 +75,8 @@ def _runtime_timeout_default() -> float:
 
 DEFAULT_TIMEOUT = _runtime_timeout_default()
 DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
+DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_REASONING_SUMMARY = "concise"
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
@@ -160,16 +162,14 @@ def _build_history_provider() -> Any:
 
 def _build_chat_options_from_environment() -> dict[str, Any] | None:
     """Build provider chat options from supported runtime environment variables."""
-    reasoning: dict[str, str] = {}
-    effort = runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT")
-    if effort:
-        reasoning["effort"] = effort
-    summary = runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY")
-    if summary:
-        reasoning["summary"] = summary
-    if not reasoning:
-        return None
-    return {"reasoning": reasoning}
+    return {
+        "reasoning": {
+            "effort": runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT")
+            or DEFAULT_REASONING_EFFORT,
+            "summary": runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY")
+            or DEFAULT_REASONING_SUMMARY,
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
