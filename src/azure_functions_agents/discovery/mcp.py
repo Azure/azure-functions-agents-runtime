@@ -6,7 +6,7 @@ import asyncio
 import json
 import time
 from pathlib import Path
-from typing import Any, TypeAlias, cast
+from typing import Any, cast
 
 from agent_framework import MCPStreamableHTTPTool
 
@@ -14,7 +14,7 @@ from .._credential import build_credential, build_credential_with_client_id
 from .._logger import logger
 from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
-MCPTool: TypeAlias = MCPStreamableHTTPTool
+type MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300

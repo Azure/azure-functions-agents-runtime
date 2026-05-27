@@ -2,8 +2,9 @@ import importlib.util
 import inspect
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import get_type_hints
+from typing import Any, get_type_hints
 
 from agent_framework import FunctionTool
 from pydantic import BaseModel
@@ -14,7 +15,7 @@ from .._logger import logger
 _DISCOVERED_TOOLS_CACHE: dict[Path, list[FunctionTool]] = {}
 
 
-def _single_basemodel_parameter(fn: object) -> type[BaseModel] | None:
+def _single_basemodel_parameter(fn: Callable[..., Any]) -> type[BaseModel] | None:
     try:
         signature = inspect.signature(fn)
         type_hints = get_type_hints(fn)
