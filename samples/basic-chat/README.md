@@ -39,6 +39,8 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, M
    azd up
    ```
 
+   The sample's `prepackage` hook builds the local runtime wheel and refreshes `src\requirements.txt` before zip packaging.
+
 3. **Open the chat UI:**
 
    Navigate to the Function App URL shown in the deployment output (`https://<app-name>.azurewebsites.net/`).
@@ -66,6 +68,7 @@ Once `func start` is running:
 ## How It Works
 
 - [`main.agent.md`](src/main.agent.md) defines the agent with code execution sandbox support
+- [`src/agents.config.yaml`](src/agents.config.yaml) provides the shared Foundry runtime configuration and enables ACA Dynamic Sessions for the app
 - The Bicep template creates a Microsoft Foundry project and `gpt-5.4` deployment for cloud runs
 - The framework registers HTTP chat endpoints, an MCP server, and a built-in chat UI
 - The agent can answer questions and run Python code in a secure sandbox when needed

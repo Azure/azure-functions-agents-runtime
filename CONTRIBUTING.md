@@ -75,8 +75,8 @@ That's it! Thank you for your contribution!
 
 ```bash
 # Clone the repo and install in editable mode
-git clone https://github.com/anthonychu/azure-functions-agents.git
-cd azure-functions-agents
+git clone https://github.com/Azure/azure-functions-agents-runtime.git
+cd azure-functions-agents-runtime
 pip install -e .
 
 # Build a wheel

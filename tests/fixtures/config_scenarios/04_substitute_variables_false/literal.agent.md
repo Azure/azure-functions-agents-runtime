@@ -1,7 +1,10 @@
 ---
 name: Literal Agent
 description: Demonstrates substitute_variables=false keeping placeholders literal.
-model: $AGENT_MODEL
+agent_configuration:
+  provider: openai
+  model: $AGENT_MODEL
+  openai: {}
 substitute_variables: false
 trigger:
   type: http_trigger

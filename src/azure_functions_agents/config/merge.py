@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
-import os
+import logging
+from copy import deepcopy
+from typing import Any
 
+from pydantic import ValidationError
+
+from azure_functions_agents.client_manager.providers import PROVIDER_REGISTRY
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     AgentSpec,
     DebugConfig,
     ExecuteInSessionsConfig,
@@ -15,7 +21,24 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
 )
 
+logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT = 900.0
+
+
+def _json_merge_patch(base: dict[str, Any], override: dict[str, Any] | None) -> dict[str, Any]:
+    """Apply RFC 7396 JSON Merge Patch of ``override`` onto ``base`` and return a new dict."""
+    if override is None:
+        return deepcopy(base)
+
+    result = deepcopy(base)
+    for key, value in override.items():
+        if value is None:
+            result.pop(key, None)
+        elif isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _json_merge_patch(result[key], value)
+        else:
+            result[key] = deepcopy(value)
+    return result
 
 
 def _resolve_debug(spec: AgentSpec) -> DebugConfig:
@@ -30,22 +53,80 @@ def _resolve_debug(spec: AgentSpec) -> DebugConfig:
     return DebugConfig(chat=False, http=False, mcp=False)
 
 
-def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    return spec.model or global_config.model or os.environ.get("MAF_MODEL")
+def _non_empty_provider_sub_blocks(configuration: dict[str, Any] | None) -> list[str]:
+    if configuration is None:
+        return []
+
+    return [
+        provider
+        for provider in PROVIDER_REGISTRY
+        if isinstance(configuration.get(provider), dict) and bool(configuration.get(provider))
+    ]
 
 
-def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
-    if spec.timeout is not None:
-        return spec.timeout
-    if global_config.timeout is not None:
-        return global_config.timeout
-    env_timeout = os.environ.get("AGENT_TIMEOUT")
-    if env_timeout is not None:
-        try:
-            return float(env_timeout)
-        except ValueError:
-            pass
-    return DEFAULT_TIMEOUT
+def _compose_agent_configuration(
+    spec: AgentSpec,
+    global_config: GlobalConfig,
+) -> AgentConfiguration:
+    agent_config = spec.agent_configuration
+    global_agent_config = global_config.agent_configuration
+
+    if agent_config is None and global_agent_config is None:
+        raise ValueError(
+            f"Agent {spec.name!r} must declare agent_configuration either at the global "
+            "level or per-agent level."
+        )
+
+    base_payload = (
+        global_agent_config.model_dump(exclude_unset=False, exclude_none=False)
+        if global_agent_config is not None
+        else {}
+    )
+    merged_payload = _json_merge_patch(base_payload, agent_config)
+
+    global_provider = global_agent_config.provider if global_agent_config is not None else None
+    explicit_provider = (
+        merged_payload.get("provider")
+        if agent_config is not None and "provider" in agent_config
+        else None
+    )
+    provider = explicit_provider if isinstance(explicit_provider, str) else None
+    agent_provider_blocks = _non_empty_provider_sub_blocks(agent_config)
+    if provider is None:
+        provider = (
+            agent_provider_blocks[0]
+            if len(agent_provider_blocks) == 1
+            else global_provider
+        )
+
+    if provider is None:
+        raise ValueError(
+            f"Agent {spec.name!r} could not resolve agent_configuration.provider."
+        )
+
+    agent_switches_provider = (
+        global_provider is not None
+        and provider != global_provider
+        and agent_config is not None
+        and ("provider" in agent_config or provider in agent_provider_blocks)
+    )
+    if agent_switches_provider:
+        assert global_provider is not None
+        logger.debug(
+            "Agent %s overrides global provider %r with %r; dropping the global "
+            "provider sub-block during merge.",
+            spec.name,
+            global_provider,
+            provider,
+        )
+        merged_payload.pop(global_provider, None)
+
+    merged_payload["provider"] = provider
+
+    try:
+        return AgentConfiguration.model_validate(merged_payload)
+    except ValidationError as exc:
+        raise ValueError(str(exc.errors(include_input=False))) from None
 
 
 def _resolve_sandbox(
@@ -117,6 +198,8 @@ def compose(
     if spec.logger is not None:
         metadata["logger"] = spec.logger
 
+    agent_configuration = _compose_agent_configuration(spec, global_config)
+
     resolved = ResolvedAgent(
         name=spec.name,
         description=spec.description,
@@ -124,8 +207,7 @@ def compose(
         instructions=spec.instructions,
         is_main=spec.is_main,
         debug=_resolve_debug(spec),
-        model=_resolve_model(spec, global_config),
-        timeout=_resolve_timeout(spec, global_config),
+        agent_configuration=agent_configuration,
         enabled_mcp_names=enabled_mcp,
         enabled_skills_names=enabled_skills,
         mcp_exclude_names=list(spec.mcp.exclude) if isinstance(spec.mcp, McpFilter) else [],

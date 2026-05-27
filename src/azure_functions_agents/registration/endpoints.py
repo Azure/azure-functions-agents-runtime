@@ -109,8 +109,7 @@ async def _run_debug_agent(
     return await _run_agent(
         prompt,
         instructions=resolved.instructions,
-        timeout=resolved.timeout,
-        model=resolved.model,
+        agent_configuration=resolved.agent_configuration,
         session_id=resolved_session_id,
         sandbox_tools=sandbox_tools,
         tools=capabilities.filtered_user_tools,
@@ -131,8 +130,7 @@ def _run_debug_agent_stream(
     return _run_agent_stream(
         prompt,
         instructions=resolved.instructions,
-        timeout=resolved.timeout,
-        model=resolved.model,
+        agent_configuration=resolved.agent_configuration,
         session_id=resolved_session_id,
         sandbox_tools=sandbox_tools,
         tools=capabilities.filtered_user_tools,

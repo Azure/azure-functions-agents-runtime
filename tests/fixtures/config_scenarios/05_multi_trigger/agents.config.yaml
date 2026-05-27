@@ -1,2 +1,5 @@
-model: gpt-4o
-timeout: 300
+agent_configuration:
+  provider: openai
+  model: gpt-4o
+  timeout: 300
+  openai: {}

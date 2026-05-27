@@ -17,6 +17,16 @@ def _write_agent(
     body: str = "Assist the user.",
 ) -> None:
     cleaned_frontmatter = textwrap.dedent(frontmatter).strip()
+    if "agent_configuration:" not in cleaned_frontmatter:
+        cleaned_frontmatter += textwrap.dedent(
+            """
+
+            agent_configuration:
+              provider: openai
+              model: gpt-4o
+              openai: {}
+            """
+        ).rstrip()
     cleaned_body = textwrap.dedent(body).strip()
     (tmp_path / filename).write_text(
         f"---\n{cleaned_frontmatter}\n---\n{cleaned_body}\n",

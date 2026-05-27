@@ -19,7 +19,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 
 - [Azure Functions Core Tools](https://learn.microsoft.com/azure/azure-functions/functions-run-local)
 - Python 3.13+
-- Azure credentials with access to a Microsoft Foundry project (`az login`)
+- credentials and settings for the model provider referenced by the sample's checked-in `agent_configuration` (the samples default to Microsoft Foundry, so `az login` is the common path)
 - (Optional) [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) for local storage emulation
 
 ### 1. Install dependencies
@@ -30,7 +30,7 @@ If you would instead prefer to run locally (for local development, testing, etc.
 cd samples/<sample-name>/src
 python -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.dev.txt
 ```
 
 **PowerShell (Windows):**
@@ -39,7 +39,7 @@ pip install -r requirements.txt
 cd samples/<sample-name>/src
 python -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+pip install -r requirements.dev.txt
 ```
 
 ### 2. Create local settings
@@ -64,17 +64,17 @@ Edit `local.settings.json` and set the required values. See each sample's README
 
 **Model provider (required for all samples):**
 
-The Microsoft Agent Framework supports Microsoft Foundry, Azure OpenAI, and OpenAI. The samples default to Microsoft Foundry and their templates pin `MAF_PROVIDER` to `foundry`.
+Samples select their model provider through the checked-in `agent_configuration` block in each sample's config. The samples currently default to Microsoft Foundry.
 
-| Provider | `MAF_PROVIDER` | Required env vars |
-| --- | --- | --- |
-| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` (uses `DefaultAzureCredential`) |
-| Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT` (uses `DefaultAzureCredential` unless an API key is set) |
-| OpenAI | `openai` | `OPENAI_API_KEY`, optional `MAF_MODEL` |
+| Provider | Typical local settings |
+| --- | --- |
+| Microsoft Foundry | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` |
+| Azure OpenAI | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_KEY` |
+| OpenAI | `OPENAI_API_KEY` plus a matching `agent_configuration.model` |
 
-For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint and `FOUNDRY_MODEL` to your model deployment name (for example, `gpt-5.4`). Authentication uses `DefaultAzureCredential` — run `az login` locally.
+For Foundry, set `FOUNDRY_PROJECT_ENDPOINT` to your project endpoint and `FOUNDRY_MODEL` to your model deployment name (for example, `gpt-5.4`). Authentication uses `DefaultAzureCredential`, so run `az login` locally first.
 
-OpenAI and Azure OpenAI remain supported alternatives. If you switch providers, update `MAF_PROVIDER` and the provider-specific settings in `local.settings.json`; if `MAF_PROVIDER` is unset, the runtime auto-detects in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`.
+Azure OpenAI and OpenAI remain supported alternatives. If you switch providers, update the sample's `agent_configuration` and the corresponding environment variables in `local.settings.json`. For Azure OpenAI, that usually means setting your resource endpoint (for example `https://<name>.openai.azure.com/`) plus the deployment and API-version values referenced by the config. If the sample omits `api_key`, authentication uses `DefaultAzureCredential`.
 
 **Sample-specific variables:**
 
@@ -171,7 +171,7 @@ func start
 
 ### Local source changes are not reflected at runtime
 
-By default, sample `requirements.txt` files install a released wheel. If you are developing this repo and editing files under `src/azure_functions_agents`, install the package in editable mode so the sample uses your local source.
+Sample `requirements.txt` files are generated for Azure deployment and install a wheel bundled under `src/wheels/`. For local development in this repo, install `requirements.dev.txt` so the sample uses your editable local source.
 
 1. Activate the sample virtual environment.
 
@@ -189,20 +189,18 @@ cd samples/<sample-name>/src
 .venv\Scripts\Activate.ps1
 ```
 
-1. Replace the wheel install with an editable local install.
+1. Install local-development dependencies.
 
 **Bash:**
 
 ```bash
-pip uninstall -y azurefunctions-agents-runtime
-pip install -e ../../..
+pip install -r requirements.dev.txt
 ```
 
 **PowerShell:**
 
 ```powershell
-pip uninstall -y azurefunctions-agents-runtime
-pip install -e ..\..\..
+pip install -r requirements.dev.txt
 ```
 
 1. Restart the Functions host (`func start`).

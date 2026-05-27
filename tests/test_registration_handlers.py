@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     DebugConfig,
     ExecuteInSessionsConfig,
     ResolvedAgent,
@@ -49,8 +50,13 @@ def _resolved_agent(
         instructions="Return JSON",
         is_main=True,
         debug=DebugConfig(),
-        model=None,
-        timeout=1.0,
+        agent_configuration=AgentConfiguration.model_validate(
+            {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "openai": {},
+            }
+        ),
         enabled_mcp_names=[],
         enabled_skills_names=[],
         tool_filter=ToolsFilter(),
@@ -195,6 +201,7 @@ def test_build_sandbox_tools_generates_unique_guid_when_session_missing(monkeypa
 def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> None:
     sandbox_session_ids: list[str | None] = []
     run_kwargs: dict[str, Any] = {}
+    resolved = _resolved_agent(response_schema=None)
 
     def fake_build_sandbox_tools(resolved: ResolvedAgent, session_id: str | None) -> list[str]:
         sandbox_session_ids.append(session_id)
@@ -213,7 +220,7 @@ def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> 
         fake_run_agent,
     )
 
-    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+    handler = make_http_agent_handler(resolved, AgentCapabilities())
 
     response = asyncio.run(
         handler(DummyRequest({"hello": "world"}, headers={"X-MS-SESSION-ID": "client-session"}))
@@ -224,11 +231,13 @@ def test_http_handler_uses_case_insensitive_session_header(monkeypatch: Any) -> 
     assert sandbox_session_ids == ["client-session"]
     assert run_kwargs["session_id"] == "client-session"
     assert run_kwargs["sandbox_tools"] == ["sandbox:client-session"]
+    assert run_kwargs["agent_configuration"] == resolved.agent_configuration
 
 
 def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) -> None:
     sandbox_session_ids: list[str | None] = []
     run_kwargs: dict[str, Any] = {}
+    resolved = _resolved_agent(response_schema=None)
 
     def fake_build_sandbox_tools(resolved: ResolvedAgent, session_id: str | None) -> list[str]:
         sandbox_session_ids.append(session_id)
@@ -251,7 +260,7 @@ def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) ->
         lambda: SimpleNamespace(hex="generated-session"),
     )
 
-    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+    handler = make_http_agent_handler(resolved, AgentCapabilities())
 
     response = asyncio.run(handler(DummyRequest({"hello": "world"})))
 
@@ -260,6 +269,7 @@ def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) ->
     assert sandbox_session_ids == ["generated-session"]
     assert run_kwargs["session_id"] == "generated-session"
     assert run_kwargs["sandbox_tools"] == ["sandbox:generated-session"]
+    assert run_kwargs["agent_configuration"] == resolved.agent_configuration
 
 
 def test_http_handler_passes_instructions_only_as_system_message(monkeypatch: Any) -> None:

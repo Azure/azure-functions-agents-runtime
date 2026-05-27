@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from azure_functions_agents import runner
+from azure_functions_agents.config.schema import AgentConfiguration
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 
 
@@ -57,6 +58,16 @@ def _events_from_sse(chunks: list[str]) -> list[dict[str, Any]]:
     return events
 
 
+def _openai_agent_configuration() -> AgentConfiguration:
+    return AgentConfiguration.model_validate(
+        {
+            "provider": "openai",
+            "model": "gpt-4o",
+            "openai": {},
+        }
+    )
+
+
 def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> None:
     monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
@@ -67,7 +78,13 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt",
+                agent_configuration=_openai_agent_configuration(),
+            )
+        ]
 
     events = _events_from_sse(asyncio.run(collect()))
     tool_starts = [event for event in events if event["type"] == "tool_start"]

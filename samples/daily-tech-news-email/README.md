@@ -38,7 +38,7 @@ A timer-triggered agent that fetches the day's top tech news headlines, summariz
    azd up
    ```
 
-    This provisions all resources (Function App, Microsoft Foundry, storage, ACA session pool, Connector Gateway, Office 365 Outlook v2 connection, connection access policies for the Function App identity and deployer, and MCP server config) and deploys the code.
+   This provisions all resources (Function App, Microsoft Foundry, storage, ACA session pool, Connector Gateway, Office 365 Outlook v2 connection, connection access policies for the Function App identity and deployer, and MCP server config) and deploys the code. The sample's `prepackage` hook builds the local runtime wheel and refreshes `src\requirements.txt` before zip packaging.
 
 3. **Authenticate the Office 365 Outlook connection:**
 

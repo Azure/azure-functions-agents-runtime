@@ -17,7 +17,7 @@ flowchart LR
     F -->|"ResolvedAgent"| G["registration/capabilities.py<br/>build_capabilities"]
     G -->|"AgentCapabilities"| H["registration/triggers.py<br/>registration/endpoints.py"]
     H -->|"Decorators applied"| I["azure.functions.FunctionApp"]
-    J["client_manager.py<br/>ClientManager"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream"]
+    J["client_manager/<br/>provider registry"] -.->|"chat client"| K["runner.py<br/>run_agent<br/>run_agent_stream"]
     H -.->|"handler closures + ResolvedAgent + AgentCapabilities"| K
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
 ```
@@ -52,7 +52,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP endpoints for agents with debug exposure. | `register_debug_endpoints()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming. | `run_agent()`, `run_agent_stream()` |
-| `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
+| `azure_functions_agents/client_manager/` | Validates provider config and constructs MAF chat clients through the internal provider registry. | `build_chat_client()`, `providers.py` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`. | `tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 
@@ -62,7 +62,7 @@ A few boundaries are worth calling out explicitly:
 - `discovery/` answers **"what is available in this project folder?"**
 - `registration/` answers **"which Azure Functions surfaces should exist for this agent?"**
 - `system_tools/` answers **"which runtime-provided tools can be attached on demand?"**
-- `runner.py` and `client_manager.py` answer **"once invoked, how does an agent call the model and its tools?"**
+- `runner.py` and `client_manager/` answer **"once invoked, how does an agent call the model and its tools?"**
 
 ### Typical startup trace
 
@@ -111,7 +111,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
    - **Input:** `AgentSpec`, `GlobalConfig`, `discovered_mcp_names: list[str]`, `discovered_skill_names: list[str]`
    - **Output:** `ResolvedAgent`
-   - **Notes:** this is where startup-level precedence rules are applied. Timeout resolves from agent front matter, global config, `AGENT_TIMEOUT`, and then the 900-second default. Model resolves from agent front matter, global config, or `MAF_MODEL`; if registration does not request a model, the active `ClientManager` later falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default. Capability filters turn the global/shared inventories into per-agent allow/deny decisions.
+   - **Notes:** this is where startup-level precedence rules are applied. `agent_configuration` is merged agent-over-global with JSON Merge Patch semantics, and capability filters turn the global/shared inventories into per-agent allow/deny decisions.
 
 6. **Validate the merged configuration**
    - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
@@ -139,7 +139,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 ### Where the registration stage hands off to execution
 
-Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities`; the runner then asks the active `ClientManager` to build a chat client and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
+Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities`; the runner then resolves the built-in provider from `agent_configuration`, constructs the chat client through `client_manager/providers.py`, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager/`).
 
 ### Registration paths in practice
 
@@ -160,7 +160,7 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`, the registration layer has already done most of the policy work:
 
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
-- `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
+- `ResolvedAgent.agent_configuration` becomes the execution settings hand-off.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
@@ -175,7 +175,7 @@ These are the main "passport" objects that move through the pipeline:
 - `AgentSpec` — raw parsed front matter plus markdown body for one `.agent.md` file. Defined in `src/azure_functions_agents/config/schema.py` as `AgentSpec`.
   - **Created by:** `config/loader.py:_load_agent_spec()`
   - **Consumed by:** `config/merge.py:compose()`
-- `GlobalConfig` — parsed `agents.config.yaml`, including system-tool, model, timeout, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
+- `GlobalConfig` — parsed `agents.config.yaml`, including system-tool, `agent_configuration`, and tool-filter defaults. Defined in `src/azure_functions_agents/config/schema.py` as `GlobalConfig`.
   - **Created by:** `config/loader.py:load_global_config()`
   - **Consumed by:** `config/merge.py:compose()`
 - `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
@@ -196,7 +196,7 @@ In shorthand, the runtime's startup path is:
 
 At invocation time, the runtime continues with:
 
-`ResolvedAgent` + `AgentCapabilities` + request/trigger payload --handler--> `runner.run_agent()` / `run_agent_stream()` --client manager--> model response
+`ResolvedAgent` + `AgentCapabilities` + request/trigger payload --handler--> `runner.run_agent()` / `run_agent_stream()` --provider registry--> model response
 
 ### Why the types are split this way
 
@@ -206,15 +206,13 @@ At invocation time, the runtime continues with:
 - `AgentCapabilities` is intentionally narrower than `ResolvedAgent`; it contains only execution-ready capability objects and flags.
 - `FunctionApp` is external to the package, which is why the runtime creates it late and mutates it only after config translation is complete.
 
-This split keeps parsing, policy, Azure binding registration, and runtime execution loosely coupled. It also makes it easier to extend one layer—such as client selection or connector tooling—without changing the others.
+This split keeps parsing, policy, Azure binding registration, and runtime execution loosely coupled. It also makes it easier to extend one layer—such as provider-spec contributions or connector tooling—without changing the others.
 
 ## 6. Extension points
 
-### Custom inference client
+### Provider contributions
 
-To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and the README section [Plugging in a custom client manager](../README.md#plugging-in-a-custom-client-manager).
-
-This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it.
+Execution is always Microsoft Agent Framework-backed. `ResolvedAgent.agent_configuration` selects one of the built-in providers, and `client_manager/providers.py` maps that provider to the corresponding client factory. To add a new backend, contribute a new `ProviderSpec` in-repo rather than swapping the runtime's client-construction path at startup.
 
 ### Custom tools
 

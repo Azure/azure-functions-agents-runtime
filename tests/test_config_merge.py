@@ -2,21 +2,26 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+from azure_functions_agents.client_manager import build_chat_client
+from azure_functions_agents.client_manager.providers import (
+    AzureOpenAIConfig,
+    OpenAIConfig,
+    ProviderSpec,
+)
 from azure_functions_agents.config.merge import (
-    DEFAULT_TIMEOUT,
     _resolve_debug,
-    _resolve_model,
     _resolve_sandbox,
-    _resolve_timeout,
     apply_mcp_filter,
     apply_skills_filter,
     apply_tools_filter,
     compose,
 )
 from azure_functions_agents.config.schema import (
+    AgentConfiguration,
     AgentSpec,
     DebugConfig,
     ExecuteInSessionsConfig,
@@ -28,30 +33,530 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     TriggerSpec,
 )
-from azure_functions_agents.config.validation import validate_resolved_agent
+from azure_functions_agents.config.validation import (
+    validate_agent_configuration,
+    validate_resolved_agent,
+)
 
 
-def test_resolve_model_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MAF_MODEL", "env-model")
-    global_config = GlobalConfig(model="global-model")
-    assert (
-        _resolve_model(AgentSpec(name="A", description="B", model="agent-model"), global_config)
-        == "agent-model"
+def _agent_layer(configuration: AgentConfiguration) -> dict[str, Any]:
+    return configuration.model_dump(exclude_unset=True, exclude_none=False)
+
+
+def _openai_agent_configuration(**overrides: object) -> AgentConfiguration:
+    payload: dict[str, object] = {
+        "provider": "openai",
+        "model": "gpt-4o",
+        "timeout": 900,
+        "temperature": 0.4,
+        "top_p": 0.9,
+        "max_tokens": 512,
+        "openai": {
+            "base_url": "https://openai.example.test",
+            "organization": "global-org",
+        },
+    }
+    payload.update(overrides)
+    return AgentConfiguration.model_validate(payload)
+
+
+def _azure_agent_configuration(**overrides: object) -> AgentConfiguration:
+    payload: dict[str, object] = {
+        "provider": "azure_openai",
+        "model": "gpt-4o-mini",
+        "timeout": 120,
+        "azure_openai": {
+            "azure_endpoint": "https://azure-openai.example.test",
+            "api_version": "2024-10-21",
+        },
+    }
+    payload.update(overrides)
+    return AgentConfiguration.model_validate(payload)
+
+
+def _global_config(**overrides: object) -> GlobalConfig:
+    payload: dict[str, object] = {
+        "agent_configuration": _openai_agent_configuration(),
+    }
+    payload.update(overrides)
+    return GlobalConfig.model_validate(payload)
+
+
+def _capture_client_kwargs(
+    monkeypatch: pytest.MonkeyPatch, configuration: AgentConfiguration
+) -> dict[str, Any]:
+    captured: dict[str, Any] = {}
+
+    def fake_factory(**kwargs: Any) -> object:
+        captured.update(kwargs)
+        return object()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.client_manager.get_provider",
+        lambda provider: ProviderSpec(provider, OpenAIConfig, fake_factory),
     )
-    assert _resolve_model(AgentSpec(name="A", description="B"), global_config) == "global-model"
-    assert _resolve_model(AgentSpec(name="A", description="B"), GlobalConfig()) == "env-model"
-    monkeypatch.delenv("MAF_MODEL", raising=False)
-    assert _resolve_model(AgentSpec(name="A", description="B"), GlobalConfig()) is None
+
+    build_chat_client(configuration)
+    return captured
 
 
-def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_compose_uses_agent_only_agent_configuration() -> None:
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration=_agent_layer(_openai_agent_configuration(timeout=60)),
+        ),
+        GlobalConfig(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.provider == "openai"
+    assert resolved.agent_configuration.model == "gpt-4o"
+    assert resolved.agent_configuration.timeout == 60
+    assert resolved.agent_configuration.openai == OpenAIConfig(
+        base_url="https://openai.example.test",
+        organization="global-org",
+    )
+
+
+def test_compose_uses_global_only_agent_configuration() -> None:
+    global_config = _global_config()
+
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", is_main=True),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration == global_config.agent_configuration
+
+
+def test_compose_agent_universal_knobs_override_global_values() -> None:
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration=_agent_layer(
+                _openai_agent_configuration(
+                    model="gpt-4.1",
+                    timeout=60,
+                    temperature=0.1,
+                    top_p=0.8,
+                    max_tokens=128,
+                    openai={},
+                )
+            ),
+        ),
+        _global_config(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.timeout == 60
+    assert resolved.agent_configuration.temperature == 0.1
+    assert resolved.agent_configuration.top_p == 0.8
+    assert resolved.agent_configuration.max_tokens == 128
+    assert resolved.agent_configuration.openai is not None
+    assert resolved.agent_configuration.model == "gpt-4.1"
+    assert resolved.agent_configuration.openai.base_url == "https://openai.example.test"
+    assert resolved.agent_configuration.openai.model_dump()["organization"] == "global-org"
+
+
+def test_compose_shallow_merges_same_provider_sub_block_per_key() -> None:
+    global_config = _global_config(
+        agent_configuration=_openai_agent_configuration(
+            model="gpt-4o",
+            openai={
+                "base_url": "https://global.example.test",
+                "organization": "global-org",
+                "project": "global-project",
+            }
+        )
+    )
+    spec = AgentSpec(
+        name="Agent",
+        description="desc",
+        is_main=True,
+        agent_configuration=_agent_layer(
+            _openai_agent_configuration(
+                model="gpt-4.1",
+                timeout=30,
+                openai={
+                    "base_url": "https://agent.example.test",
+                    "region": "westus3",
+                },
+            )
+        ),
+    )
+
+    resolved = compose(spec, global_config, discovered_mcp_names=[], discovered_skill_names=[])
+
+    assert resolved.agent_configuration.timeout == 30
+    assert resolved.agent_configuration.model == "gpt-4.1"
+    assert resolved.agent_configuration.openai == OpenAIConfig(
+        base_url="https://agent.example.test",
+        organization="global-org",
+        project="global-project",
+        region="westus3",
+    )
+
+
+def test_compose_cross_provider_override_drops_global_provider_block(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    with caplog.at_level(logging.DEBUG):
+        resolved = compose(
+            AgentSpec(
+                name="Agent",
+                description="desc",
+                is_main=True,
+                agent_configuration=_agent_layer(
+                    _azure_agent_configuration(
+                        model="gpt-4.1",
+                        azure_openai={
+                            "azure_endpoint": "https://agent-azure.example.test",
+                            "api_version": "2024-10-21",
+                            "audience": "agents",
+                        }
+                    )
+                ),
+            ),
+            _global_config(),
+            discovered_mcp_names=[],
+            discovered_skill_names=[],
+        )
+
+    assert resolved.agent_configuration.provider == "azure_openai"
+    assert resolved.agent_configuration.model == "gpt-4.1"
+    assert resolved.agent_configuration.openai is None
+    assert resolved.agent_configuration.azure_openai == AzureOpenAIConfig(
+        azure_endpoint="https://agent-azure.example.test",
+        api_version="2024-10-21",
+        audience="agents",
+    )
+    assert "dropping the global provider sub-block during merge" in caplog.text
+
+
+def test_agent_only_overrides_endpoint_preserves_siblings() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "azure_openai",
+                "model": "gpt-4o",
+                "timeout": 120,
+                "azure_openai": {
+                    "azure_endpoint": "https://global-azure.example.test",
+                    "api_version": "2024-10-21",
+                    "api_key": "global-key",
+                },
+            }
+        }
+    )
+
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration={
+                "azure_openai": {"azure_endpoint": "https://agent-azure.example.test"}
+            },
+        ),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.model == "gpt-4o"
+    assert resolved.agent_configuration.azure_openai == AzureOpenAIConfig(
+        azure_endpoint="https://agent-azure.example.test",
+        api_version="2024-10-21",
+        api_key="global-key",
+    )
+
+
+def test_agent_only_overrides_top_level_model() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "openai": {},
+            }
+        }
+    )
+
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration={"model": "gpt-4o-mini"},
+        ),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.model == "gpt-4o-mini"
+
+
+def test_agent_provider_inferred_from_sole_subblock() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "openai",
+                "model": "x",
+                "openai": {},
+            }
+        }
+    )
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration={
+                "azure_openai": {
+                    "azure_endpoint": "https://agent-azure.example.test",
+                    "api_version": "2024-10-21",
+                }
+            },
+        ),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.provider == "azure_openai"
+    assert resolved.agent_configuration.model == "x"
+    assert resolved.agent_configuration.openai is None
+    assert resolved.agent_configuration.azure_openai is not None
+    assert (
+        resolved.agent_configuration.azure_openai.azure_endpoint
+        == "https://agent-azure.example.test"
+    )
+
+
+def test_agent_explicit_null_unsets_inherited_api_key() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "azure_openai",
+                "model": "gpt-4o",
+                "azure_openai": {
+                    "azure_endpoint": "https://global-azure.example.test",
+                    "api_version": "2024-10-21",
+                    "api_key": "sk-xxx",
+                },
+            }
+        }
+    )
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration={
+                "azure_openai": {
+                    "api_key": None,
+                    "managed_identity_client_id": "cid",
+                }
+            },
+        ),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.azure_openai is not None
+    assert resolved.agent_configuration.azure_openai.api_key is None
+    assert resolved.agent_configuration.azure_openai.managed_identity_client_id == "cid"
+
+
+def test_agent_explicit_null_on_required_field_raises_post_merge(tmp_path: Path) -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "azure_openai",
+                "model": "gpt-4o",
+                "azure_openai": {
+                    "azure_endpoint": "https://global-azure.example.test",
+                    "api_version": "2024-10-21",
+                },
+            }
+        }
+    )
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration={"azure_openai": {"azure_endpoint": None}},
+            source_file=str(tmp_path / "agent.agent.md"),
+        ),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    with pytest.raises(
+        ValueError,
+        match=r"agent_configuration\.azure_openai\.azure_endpoint must be set",
+    ):
+        validate_agent_configuration(
+            resolved.agent_configuration,
+            source_file=tmp_path / "agent.agent.md",
+            agent_name="Agent",
+        )
+
+
+def test_agent_explicit_null_on_top_level_model_raises_post_merge() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "azure_openai",
+                "model": "A",
+                "azure_openai": {
+                    "azure_endpoint": "https://global-azure.example.test",
+                    "api_version": "2024-10-21",
+                },
+            }
+        }
+    )
+    with pytest.raises(ValueError, match=r"agent_configuration\.model is required"):
+        compose(
+            AgentSpec(
+                name="Agent",
+                description="desc",
+                is_main=True,
+                agent_configuration={"model": None},
+            ),
+            global_config,
+            discovered_mcp_names=[],
+            discovered_skill_names=[],
+        )
+
+
+def test_global_top_level_model_propagates_to_resolved_config() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "openai": {},
+            }
+        }
+    )
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", is_main=True),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.model == "gpt-4o"
+
+
+def test_agent_model_overrides_global_model() -> None:
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "openai",
+                "model": "gpt-4o",
+                "openai": {},
+            }
+        }
+    )
+    resolved = compose(
+        AgentSpec(
+            name="Agent",
+            description="desc",
+            is_main=True,
+            agent_configuration={"model": "gpt-4o-mini"},
+        ),
+        global_config,
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.model == "gpt-4o-mini"
+
+
+def test_merge_validation_error_message_does_not_contain_secrets() -> None:
+    secret = "VERY_SECRET_VALUE_DO_NOT_LEAK"
+    global_config = GlobalConfig.model_validate(
+        {
+            "agent_configuration": {
+                "provider": "azure_openai",
+                "model": "gpt-4o",
+                "azure_openai": {
+                    "azure_endpoint": "https://global-azure.example.test",
+                    "api_version": "2024-10-21",
+                },
+            }
+        }
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        compose(
+            AgentSpec(
+                name="Agent",
+                description="desc",
+                is_main=True,
+                agent_configuration={"azure_openai": {"api_version": [secret]}},
+            ),
+            global_config,
+            discovered_mcp_names=[],
+            discovered_skill_names=[],
+        )
+
+    assert secret not in str(exc_info.value)
+
+
+def test_compose_requires_agent_configuration_anywhere() -> None:
+    with pytest.raises(ValueError, match="must declare agent_configuration either at the global level"):
+        compose(
+            AgentSpec(name="Agent", description="desc", is_main=True),
+            GlobalConfig(),
+            discovered_mcp_names=[],
+            discovered_skill_names=[],
+        )
+
+
+def test_removed_non_secret_env_vars_do_not_influence_compose(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("MAF_MODEL", "env-model")
     monkeypatch.setenv("AGENT_TIMEOUT", "33")
-    global_config = GlobalConfig(timeout=22)
-    assert _resolve_timeout(AgentSpec(name="A", description="B", timeout=11), global_config) == 11
-    assert _resolve_timeout(AgentSpec(name="A", description="B"), global_config) == 22
-    assert _resolve_timeout(AgentSpec(name="A", description="B"), GlobalConfig()) == 33
-    monkeypatch.delenv("AGENT_TIMEOUT", raising=False)
-    assert _resolve_timeout(AgentSpec(name="A", description="B"), GlobalConfig()) == DEFAULT_TIMEOUT
+    monkeypatch.setenv("OPENAI_BASE_URL", "https://env-openai.example.test")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://env-azure.example.test")
+
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", is_main=True),
+        _global_config(
+            agent_configuration=_openai_agent_configuration(
+                timeout=15,
+                openai={
+                    "base_url": "https://config-openai.example.test",
+                },
+                model="config-model",
+            )
+        ),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.agent_configuration.timeout == 15
+    assert resolved.agent_configuration.model == "config-model"
+    assert resolved.agent_configuration.openai == OpenAIConfig(
+        base_url="https://config-openai.example.test",
+    )
 
 
 def test_resolve_debug() -> None:
@@ -68,7 +573,7 @@ def test_resolve_debug() -> None:
 
 
 def test_resolve_sandbox() -> None:
-    global_config = GlobalConfig(
+    global_config = _global_config(
         system_tools=SystemToolsConfig(
             execute_in_sessions=ExecuteInSessionsConfig(
                 session_pool_management_endpoint="https://example.test"
@@ -117,9 +622,7 @@ def test_apply_tools_filter() -> None:
 
 
 def test_compose_end_to_end() -> None:
-    global_config = GlobalConfig(
-        model="global-model",
-        timeout=10,
+    global_config = _global_config(
         tools=ToolsFilter(exclude=["danger"]),
         system_tools=SystemToolsConfig(
             execute_in_sessions=ExecuteInSessionsConfig(
@@ -148,8 +651,7 @@ def test_compose_end_to_end() -> None:
     )
 
     assert global_config.system_tools is not None
-    assert resolved.model == "global-model"
-    assert resolved.timeout == 10
+    assert resolved.agent_configuration == global_config.agent_configuration
     assert resolved.enabled_mcp_names == ["learn"]
     assert resolved.enabled_skills_names == ["public"]
     assert resolved.tool_filter.exclude == ["danger", "foo"]
@@ -160,7 +662,7 @@ def test_compose_end_to_end() -> None:
 def test_compose_copies_logger_into_metadata() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", logger=False, is_main=True),
-        GlobalConfig(),
+        _global_config(),
         discovered_mcp_names=[],
         discovered_skill_names=[],
     )
@@ -171,7 +673,7 @@ def test_compose_copies_logger_into_metadata() -> None:
 def test_compose_preserves_substitute_variables_flag() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", substitute_variables=False, is_main=True),
-        GlobalConfig(),
+        _global_config(),
         discovered_mcp_names=[],
         discovered_skill_names=[],
     )
@@ -193,7 +695,7 @@ def test_compose_defers_warning_only_validation(
     with caplog.at_level(logging.WARNING):
         resolved = compose(
             spec,
-            GlobalConfig(),
+            _global_config(),
             discovered_mcp_names=[],
             discovered_skill_names=["known-skill"],
         )
@@ -213,8 +715,6 @@ def test_compose_defers_warning_only_validation(
 
 
 def test_resolve_debug_explicit_false() -> None:
-    """Defensive: explicit debug: false returns an all-disabled DebugConfig (overrides the
-    is_main default-true behavior)."""
     spec = AgentSpec(name="Main", description="d", debug=False, is_main=True)
     debug = _resolve_debug(spec)
     assert debug.chat is False
@@ -222,22 +722,9 @@ def test_resolve_debug_explicit_false() -> None:
     assert debug.mcp is False
 
 
-def test_resolve_timeout_garbage_env_falls_back_to_default(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Defensive: a non-numeric AGENT_TIMEOUT env var must NOT crash; falls through to the
-    framework default."""
-    monkeypatch.setenv("AGENT_TIMEOUT", "not-a-number")
-    spec = AgentSpec(name="A", description="d")
-    global_config = GlobalConfig()
-    assert _resolve_timeout(spec, global_config) == DEFAULT_TIMEOUT
-
-
 def test_resolve_sandbox_no_global_returns_none() -> None:
-    """Defensive: when the global config has no system_tools block, sandbox is None."""
     spec = AgentSpec(name="A", description="d")
-    assert _resolve_sandbox(spec, GlobalConfig()) is None
-
+    assert _resolve_sandbox(spec, _global_config(system_tools=None)) is None
 
 def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:
     """Defensive: when an agent doesn't specify tools, it inherits the global filter as-is."""
@@ -251,7 +738,6 @@ def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:
 
 
 def test_apply_tools_filter_true_inherits_global() -> None:
-    """`tools: true` shorthand also inherits the global filter."""
     global_filter = ToolsFilter(exclude=["bash"])
     effective, disabled = apply_tools_filter(True, global_filter)
     assert disabled is False
@@ -259,8 +745,6 @@ def test_apply_tools_filter_true_inherits_global() -> None:
 
 
 def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
-    """Defensive: when neither agent nor global declares a tools filter, an empty (allow-all)
-    filter is returned."""
     effective, disabled = apply_tools_filter(None, None)
     assert disabled is False
     assert effective.exclude == []
@@ -269,7 +753,7 @@ def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
 def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", is_main=True),
-        GlobalConfig(),
+        _global_config(),
         discovered_mcp_names=["a", "b"],
         discovered_skill_names=[],
     )
@@ -280,22 +764,10 @@ def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:
 def test_compose_disables_mcp_when_agent_sets_mcp_false() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", is_main=True, mcp=False),
-        GlobalConfig(),
+        _global_config(),
         discovered_mcp_names=["a", "b"],
         discovered_skill_names=[],
     )
 
     assert resolved.enabled_mcp_names == []
     assert resolved.mcp_disabled is True
-
-
-def test_compose_excludes_specific_mcp_servers() -> None:
-    resolved = compose(
-        AgentSpec(name="Agent", description="desc", is_main=True, mcp=McpFilter(exclude=["a"])),
-        GlobalConfig(),
-        discovered_mcp_names=["a", "b", "c"],
-        discovered_skill_names=[],
-    )
-
-    assert resolved.enabled_mcp_names == ["b", "c"]
-    assert resolved.mcp_exclude_names == ["a"]

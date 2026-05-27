@@ -189,8 +189,7 @@ def make_agent_handler(
             result = await _run_agent(
                 prompt,
                 instructions=resolved.instructions,
-                timeout=resolved.timeout,
-                model=resolved.model,
+                agent_configuration=resolved.agent_configuration,
                 session_id=session_id,
                 sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
                 tools=capabilities.filtered_user_tools,
@@ -258,8 +257,7 @@ def make_http_agent_handler(
             result = await _run_agent(
                 prompt,
                 instructions=resolved.instructions,
-                timeout=resolved.timeout,
-                model=resolved.model,
+                agent_configuration=resolved.agent_configuration,
                 session_id=session_id,
                 sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
                 tools=capabilities.filtered_user_tools,

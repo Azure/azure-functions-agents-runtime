@@ -1,2 +1,2 @@
--e ../../..
+./wheels/azurefunctions_agents_runtime-0.0.0.dev3-py3-none-any.whl
 jmespath

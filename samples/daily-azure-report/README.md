@@ -15,7 +15,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 - **Microsoft Learn MCP server** — gives the agent access to Azure documentation for looking up correct API paths and versions
 - **`azure-resources` skill** — packages ARM REST API knowledge (paths, api-versions, tips) so the agent instructions can focus on the job, not the technical details
 - **Interactive chat UI** — `main.agent.md` enables the built-in chat interface for ad-hoc Azure queries
-- **Variable substitution** — subscription ID and recipient email configured via environment variables. Substitution applies to all config string values (agent instructions, `agents.config.yaml`, `mcp.json`)
+- **Variable substitution** — recipient email and the timer/chat subscription ID can come from environment variables. The `resource_summary` HTTP agent instead reads `subscription_id` from the request body. Substitution applies to all config string values (agent instructions, `agents.config.yaml`, `mcp.json`)
 
 ## Prerequisites
 
@@ -42,7 +42,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
    azd up
    ```
 
-    This provisions all resources (Function App, Microsoft Foundry, storage, Connector Gateway, Office 365 Outlook v2 connection, connection access policies for the Function App identity and deployer, and MCP server config) and deploys the code. The subscription ID is automatically detected from the deployment. The managed identity is granted Reader access on the subscription for querying resources.
+   This provisions all resources (Function App, Microsoft Foundry, storage, Connector Gateway, Office 365 Outlook v2 connection, connection access policies for the Function App identity and deployer, and MCP server config) and deploys the code. The sample's `prepackage` hook builds the local runtime wheel and refreshes `src\requirements.txt` before zip packaging. The subscription ID is automatically detected from the deployment. The managed identity is granted Reader access on the subscription for querying resources.
 
   3. **Authenticate the Office 365 Outlook connection:**
 
@@ -86,14 +86,13 @@ Optional:
 - `MAF_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
 - `MAF_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
 - `O365_MCP_CLIENT_ID`: managed identity client ID for the Office 365 Outlook MCP server; defaults to the app-wide identity selection
-- `ACA_SESSION_POOL_ENDPOINT`: if set, enables code execution features; if empty, agents work but lose advanced capabilities
 
 If `O365_MCP_CLIENT_ID` is set, only the Office 365 Outlook MCP server uses that managed identity. If it is empty, the MCP server uses the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain.
 
 Without `SUBSCRIPTION_ID`:
 
-- The `azure_rest` tool cannot authenticate to query Azure resources
-- Both timer and HTTP agents fail
+- The timer agent and the `main.agent.md` chat agent do not know which subscription to query
+- The `resource_summary` HTTP agent can still work if each request body supplies `subscription_id`
 
 Without `O365_MCP_SERVER_URL`:
 
@@ -127,7 +126,7 @@ Invoke-WebRequest -Uri "http://localhost:7071/admin/functions/daily_azure_report
 ```bash
 curl -X POST http://localhost:7071/resource-summary \
   -H "Content-Type: application/json" \
-  -d '{}'
+  -d '{"subscription_id":"<subscription-id>"}'
 ```
 
 **PowerShell:**
@@ -136,7 +135,7 @@ curl -X POST http://localhost:7071/resource-summary \
 Invoke-WebRequest -Uri "http://localhost:7071/resource-summary" `
   -Method POST `
   -ContentType "application/json" `
-  -Body '{}'
+  -Body '{"subscription_id":"<subscription-id>"}'
 ```
 
 ## How It Works
@@ -152,6 +151,7 @@ Invoke-WebRequest -Uri "http://localhost:7071/resource-summary" `
 - [`tools/azure_rest.py`](src/tools/azure_rest.py) — custom tool for authenticated ARM REST API calls with JMESPath query filtering
 - [`mcp.json`](src/mcp.json) — Microsoft Learn MCP server for Azure documentation lookups and the Office 365 Outlook MCP server provisioned by Bicep for sending email
 - [`skills/azure-resources/SKILL.md`](src/skills/azure-resources/SKILL.md) — ARM REST API knowledge (paths, api-versions, tips)
+- [`src/agents.config.yaml`](src/agents.config.yaml) provides the shared Foundry runtime configuration for all agents
 - When the timer fires, the agent:
   1. Calls the `azure_rest` tool to list resources in the subscription
   2. Filters for resources created or modified in the last 24 hours
@@ -163,5 +163,5 @@ Invoke-WebRequest -Uri "http://localhost:7071/resource-summary" `
   {"total_resources": 239, "by_type": {...}, "by_location": {...}}
   ```
 
-- `$SUBSCRIPTION_ID` and `$TO_EMAIL` in the agent instructions are replaced with actual values at load time. Inline `$VAR` and `%VAR%` substitution applies to all config string values
-- `SUBSCRIPTION_ID` is automatically set from the deployment subscription — no manual input needed
+- `$SUBSCRIPTION_ID` and `$TO_EMAIL` in agent instructions are replaced with actual values at load time when those variables are present. Inline `$VAR` and `%VAR%` substitution applies to all config string values
+- The deployment infrastructure populates `SUBSCRIPTION_ID` for the timer and chat agents, while the HTTP `resource_summary` endpoint expects callers to send `subscription_id` in the request body

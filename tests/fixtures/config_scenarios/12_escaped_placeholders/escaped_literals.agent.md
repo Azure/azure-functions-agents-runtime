@@ -7,7 +7,10 @@ trigger:
     route: escaped-literals
     methods: ["POST"]
     auth_level: function
-model: $AGENT_MODEL
+agent_configuration:
+  provider: openai
+  model: $AGENT_MODEL
+  openai: {}
 metadata:
   literal_dollar: "$$API_TOKEN"
   literal_percent: "%%TENANT_ID%%"

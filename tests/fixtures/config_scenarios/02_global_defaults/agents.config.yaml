@@ -1,6 +1,9 @@
 # Global defaults shared by every agent in this app.
-model: gpt-4o
-timeout: 900
+agent_configuration:
+  provider: openai
+  model: gpt-4o
+  timeout: 900
+  openai: {}
 
 system_tools:
   execute_in_sessions:

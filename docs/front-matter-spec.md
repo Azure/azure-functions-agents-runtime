@@ -4,99 +4,95 @@
 
 Azure Functions agents use a **two-tier configuration system**:
 
-1. **Global Configuration** (`agents.config.yaml`) — Infrastructure and runtime defaults
-2. **Agent-Specific Configuration** (`.agent.md` front matter) — Agent behavior, triggers, and capability filtering
+1. **Global configuration** (`agents.config.yaml`) for shared infrastructure and runtime defaults
+2. **Agent front matter** (`.agent.md`) for per-agent behavior, triggers, and overrides
 
-Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
+Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures runtime behavior; the markdown body is the agent's system prompt.
 
 ### Configuration Model
 
-**Global configuration defines infrastructure and defaults:**
-- Skills (auto-discovered from `skills/` directory)
-- Custom tools (auto-discovered from `tools/` directory)
+**Global configuration defines shared defaults:**
+- Skills (auto-discovered from `skills/`)
+- Custom tools (auto-discovered from `tools/`)
 - System tools (`system_tools`)
+- Shared model configuration in `agent_configuration`
   - Code execution sandbox configuration
-- Default runtime settings (model, timeout)
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
 
 **Agent front matter:**
-- **Inherits all discovered capabilities by default**
-- Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
-- Can **override** runtime settings (model, timeout)
-- Must define **trigger** (how the agent is invoked)
-- Can enable **HTTP/MCP endpoints** for testing and composition
+- Inherits discovered capabilities by default
+- Can filter MCP servers, skills, or tools with exclude lists
+- Can override shared `agent_configuration`
+- Must define `trigger` (except `main.agent.md`)
+- Can enable HTTP/MCP debug endpoints
 
 ### Configuration Precedence
 
-For runtime settings (model, timeout):
-1. **Agent front matter** — Explicit overrides in `.agent.md` files
-2. **Global configuration** — Values in `agents.config.yaml`
-3. **Environment variables** — App settings and env vars
-4. **Framework defaults** — Built-in default values
+For runtime settings, the single source of truth is `agent_configuration`:
+
+1. **Agent front matter** — per-agent `agent_configuration`
+2. **Global configuration** — shared `agent_configuration`
+3. **Framework defaults** — only for omitted optional values
+
+Inline env-var substitution (`$VAR` / `%VAR%`) happens **before** schema validation, so environment variables are just one way to supply field values inside `agent_configuration`; they are not a separate runtime fallback tier for required non-secret settings. Provider selection is internal to the runtime: `agent_configuration.provider` must name one of the built-in providers, and extending that list means adding a new provider spec in the repository rather than plugging in a custom client manager at app startup.
 
 For capabilities (MCP, skills, tools):
 1. **Auto-discovered** — MCP servers from `mcp.json`, plus skills and tools from their directories
-2. **Filtered per-agent** using exclude lists in agent front matter
+2. **Filtered per-agent** — exclude lists in front matter
 
 ### Quick Reference: Required vs Optional
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Global** (`agents.config.yaml`) | None (file is optional; see note below) | `system_tools`, `agent_configuration`, `tools` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `agent_configuration`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
+> **Note:** Although `agents.config.yaml` is optional, every agent that issues LLM calls needs an effective `agent_configuration` with `provider`, the active provider block, and `model` — supplied either in `agents.config.yaml` or in the agent's own front matter. See [`agent_configuration`](#agent_configuration).
 
 ---
 
 ## Configuration Files
 
 ### Global Configuration (`agents.config.yaml`)
-Optional file in the root directory that defines shared infrastructure and runtime defaults for all agents.
+Optional file in the app root that defines shared infrastructure and runtime defaults for all agents.
 
-**Required properties:** None (entire file is optional)
+**Required properties:** None
 
 **Supported properties:**
-- `system_tools` — Object containing system-level tools configuration
-  - `execute_in_sessions` — Object with code execution sandbox configuration
-- `model` — String specifying default LLM model identifier
-- `timeout` — Number specifying default execution timeout in seconds
-- `tools` — Object for tool filtering configuration
+- `system_tools` — system-level tools configuration
+  - `execute_in_sessions` — code execution sandbox configuration
+- `agent_configuration` — shared runtime configuration block
+- `tools` — tool filtering configuration
 
-**Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
-
-**Key principle:** `agents.config.yaml` defines shared runtime configuration. Agents filter discovered capabilities and choose what they use.
+**Note:** MCP servers (from `mcp.json`), skills (from `skills/`), and custom tools (from `tools/`) are auto-discovered. Agents can filter them with exclude lists.
 
 ### Agent Configuration (`.agent.md` front matter)
 YAML front matter at the top of each agent file.
 
 **Required properties:**
-- `name` — String, display name for the agent
-- `description` — String, brief description of the agent's purpose
-- `trigger` — Object defining how the agent is invoked (optional for `main.agent.md` only)
+- `name` — display name for the agent
+- `description` — short description of the agent's purpose
+- `trigger` — invocation method (optional for `main.agent.md` only)
 
 **Optional properties:**
-- `debug` — Object or boolean for enabling debugging/testing endpoints
-- `model` — String to override global default model
-- `timeout` — Number to override global default timeout
-- `logger` — Boolean to enable/disable response logging for triggered agents
-- `substitute_variables` — Boolean to enable/disable environment-variable substitution for this agent
-- `system_tools` — Object to opt out of system tools
-- `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
-- `skills` — Object with exclude lists or false to filter skills
-- `tools` — Object with exclude lists or false to filter tools
-- `input_schema` — Object, JSON Schema for HTTP request validation
-- `response_schema` — Object, JSON Schema for response validation
-- `response_example` — String, example response for documentation
-- `metadata` — Object, additional organizational metadata
-
+- `debug` — enable chat / HTTP / MCP debug endpoints
+- `agent_configuration` — per-agent runtime override block
+- `system_tools` — opt out of shared system tools
+- `mcp` — inherit, disable, or exclude MCP servers
+- `skills` — exclude skills or disable skill inheritance
+- `tools` — exclude tools or disable tool inheritance
+- `input_schema` — JSON Schema for HTTP request validation
+- `response_schema` — JSON Schema for HTTP response validation
+- `response_example` — example response for HTTP documentation
+- `metadata` — additional organizational metadata
 
 **File structure:**
 ```
 /
-  agents.config.yaml          # Optional: Global defaults
-  *.agent.md               # Agents (require trigger)
+  agents.config.yaml   # Optional global defaults
+  *.agent.md           # Agent files
   ...
 ```
 
@@ -104,34 +100,30 @@ YAML front matter at the top of each agent file.
 
 ## Field Reference
 
-Fields are organized into categories based on how they can be used:
+Fields are organized by how they are used:
 
 ### Field Categories
 
-**Infrastructure (Discovered capabilities, filtered in agents):**
-- `mcp` — MCP servers discovered from `mcp.json`, filtered in agents
-- `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
-- `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
-- `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
-  - `execute_in_sessions` — Code execution sandbox
+**Infrastructure (discovered capabilities, filtered in agents):**
+- `mcp` — MCP servers discovered from `mcp.json`
+- `skills` — auto-discovered from `skills/`
+- `tools` — auto-discovered from `tools/`
+- `system_tools` — system-level capabilities configured globally and optionally disabled per agent
+  - `execute_in_sessions` — code execution sandbox
 
-**Runtime Settings (Global defaults, overridable in agents):**
-- `model` — LLM selection
-- `timeout` — Execution time limit
+**Runtime settings (global defaults, overridable in agents):**
+- `agent_configuration` — the only supported model-configuration block
 
-**Agent-Specific (Agent front matter only):**
-- `name`, `description` — Agent identity (required)
-- `trigger` — Invocation method (required for non-main agents)
-- `debug` — Debugging and testing endpoints
-- `logger`, `substitute_variables` — Agent runtime behavior switches
+**Agent-specific (front matter only):**
+- `name`, `description` — agent identity
+- `trigger` — invocation method
+- `debug` — debug/test endpoints
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
-- `metadata` — Organizational metadata
-
----
+- `metadata` — organizational metadata
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name`, `description`, and `trigger` (except `main.agent.md` where `trigger` is optional).
+**Summary:** Every `.agent.md` file must have `name`, `description`, and `trigger` (except `main.agent.md`, where `trigger` is optional).
 
 #### `name`
 - **Type:** `string`
@@ -332,43 +324,271 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 
 ---
 
-#### `model`
-- **Type:** `string`
-- **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
+#### `agent_configuration`
+- **Type:** `object`
+- **Location:** Global (`agents.config.yaml`) for defaults, Agent (front matter) for overrides
 - **Can override:** Yes
-- **Description:** Specifies which LLM to use for the agent. Valid model identifiers depend on the active provider.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `MAF_MODEL` env var. If no model is resolved by configuration, the active client manager falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default.
+- **Description:** The single source of truth for model/provider configuration. The block contains universal generation knobs plus exactly one active provider block named the same as `provider`.
+- **Precedence:** Agent `agent_configuration` JSON Merge Patch → Global `agent_configuration` → framework defaults for omitted optional values
 
-**Global default:**
+**Canonical schema overview (recommended style):**
 ```yaml
-model: gpt-4o
+agent_configuration:
+  provider: azure_openai          # required: openai | azure_openai | foundry
+  model: $AZURE_OPENAI_DEPLOYMENT # required top-level field
+  timeout: 900
+
+  # Universal knobs (optional)
+  temperature: 0.2
+  top_p: 0.95
+  max_tokens: 1000
+
+  # Exactly one provider block, named the same as `provider`
+  azure_openai:
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "v1"
 ```
 
-**Agent override:**
+**Model field rules**
+
+- `agent_configuration.model` is a top-level field with type `string | null`.
+- Empty or whitespace-only string values are normalized to `null`.
+- At least one configuration layer (`agents.config.yaml` or agent front matter) must supply `model`, and the merged-effective value must be non-empty after JSON Merge Patch composition.
+- If the merged-effective config still has no model, validation fails with `agent_configuration.model is required.` See [Validation Rules](#validation-rules).
+- Setting `model` inside `openai`, `azure_openai`, or `foundry` (for example `agent_configuration.azure_openai.model`) is rejected at parse time. Use the top-level `agent_configuration.model` instead.
+
+**Universal knobs**
+
+| Field | Type | Notes |
+|---|---|---|
+| `temperature` | `number` | Default response randomness |
+| `top_p` | `number` | Default nucleus sampling value |
+| `max_tokens` | `integer` | Default output token limit |
+| `timeout` | `integer` | Runtime-enforced per-agent-run wall-clock timeout in seconds |
+
+These are the only top-level chat knobs supported in this PR. `timeout` is not forwarded to the provider SDK; the runtime enforces it as a strict wall-clock deadline around the full `agent.run(...)` call for both non-streaming and streaming runs. On expiry, non-streaming `run_agent` raises `Agent run timed out after {timeout}s`, and streaming `run_agent_stream` emits an SSE event with payload `data: {"type": "error", "content": "Timeout after {timeout}s"}`. A pass-through `ChatOptions` block for non-universal knobs such as `stop`, `seed`, and `data_sources` is intentionally out of scope and will come in a future PR.
+
+**Partial overrides use JSON Merge Patch (RFC 7396)**
+
+Agent front matter `agent_configuration` is parsed as a raw mapping, merged over the inherited global config with JSON Merge Patch semantics, then validated as a complete config. That means:
+
+- Sibling keys are preserved unless you explicitly replace or delete them.
+- You can override a single nested field without restating `provider`, `model`, or the rest of the provider block.
+- YAML `null` (or `~`) deletes the inherited key before validation.
+
+**Agent override: just change the model**
 ```yaml
-model: gpt-4o-mini  # Use faster model for this agent
+agent_configuration:
+  model: gpt-4.1-mini
 ```
 
-**Note:** Model parameters (temperature, max_tokens, etc.) are configured globally via environment variables or SDK configuration, not in the front matter.
+If the global config already supplies `provider`, endpoints, API version, and other settings, this one-line override keeps them.
 
----
-
-#### `timeout`
-- **Type:** `number`
-- **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
-- **Can override:** Yes
-- **Description:** Maximum execution time in seconds for the agent.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AGENT_TIMEOUT` env var → `900` seconds (default)
-
-**Global default:**
+**Agent override: patch only one nested field**
 ```yaml
-timeout: 900  # 15 minutes
+agent_configuration:
+  azure_openai:
+    azure_endpoint: https://secondary-aoai.openai.azure.com/
 ```
 
-**Agent override:**
+The inherited `provider`, `model`, `timeout`, and `azure_openai.api_version` remain in place.
+
+**`null` means "unset"**
+
 ```yaml
-timeout: 60  # 1 minute for fast agent
+agent_configuration:
+  azure_openai:
+    api_key: null
 ```
+
+That removes the inherited `api_key` from the composed config, which is useful when you want the runtime to fall back to managed identity selection instead of API-key auth.
+
+Required fields are still enforced **after merge**. For example, `model`, `azure_openai.azure_endpoint`, `azure_openai.api_version`, and `foundry.project_endpoint` cannot be removed if the final composed config would be incomplete.
+
+**Validation timing**
+
+- Global `agents.config.yaml` is validated at parse time.
+- Agent front matter `agent_configuration` is merged with the inherited global block first, then the composed result is validated.
+- Env-var substitution runs **before** either validation pass.
+
+**Unresolved env vars are not unsets**
+
+If `$FOO` is not defined, substitution leaves the literal string `"$FOO"` in the YAML value. That is **not** the same as `null`, and it does not delete the field. Use YAML `null` / `~` when you need true JSON Merge Patch deletion semantics.
+
+**Minimal provider examples**
+
+OpenAI:
+```yaml
+agent_configuration:
+  provider: openai
+  model: gpt-4o-mini
+  temperature: 0.2
+  top_p: 0.95
+  max_tokens: 1000
+  timeout: 900
+  openai:
+    api_key: $OPENAI_API_KEY
+```
+
+Azure OpenAI:
+```yaml
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  temperature: 0.2
+  top_p: 0.95
+  max_tokens: 1000
+  timeout: 900
+  azure_openai:
+    azure_endpoint: https://my-aoai.openai.azure.com/
+    api_version: "v1"
+    api_key: $AZURE_OPENAI_API_KEY
+```
+
+Azure AI Foundry:
+```yaml
+agent_configuration:
+  provider: foundry
+  model: gpt-4o
+  temperature: 0.2
+  top_p: 0.95
+  max_tokens: 1000
+  timeout: 900
+  foundry:
+    project_endpoint: https://my-project.cognitiveservices.azure.com/
+```
+
+Foundry uses `DefaultAzureCredential`; there is no `api_key` field for this provider.
+
+**Per-provider field map (required after merge)**
+
+| Provider | MAF client | Model arg name | Endpoint arg name | Secret arg name | Required typed fields | Optional typed fields |
+|---|---|---|---|---|---|---|
+| `openai` | [`agent_framework.openai.OpenAIChatClient`](https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.openai.openaichatclient?view=agent-framework-python-latest) | `model` | `base_url` | `api_key` | `agent_configuration.model` | `base_url`, `api_key` |
+| `azure_openai` | [`agent_framework.openai.OpenAIChatClient`](https://learn.microsoft.com/en-us/python/api/agent-framework-core/agent_framework.openai.openaichatclient?view=agent-framework-python-latest) | `model` | `azure_endpoint` | `api_key` | `agent_configuration.model`, `azure_endpoint`, `api_version` | `api_key`, `managed_identity_client_id` |
+| `foundry` | `agent_framework.foundry.FoundryChatClient` | `model` | `project_endpoint` | — | `agent_configuration.model`, `project_endpoint` | `managed_identity_client_id` |
+
+Provider sub-blocks accept arbitrary additional keys. After typed validation, any extra keys are forwarded directly as `**kwargs` to the MAF client constructor for the active provider.
+
+##### Authentication
+
+`azure_openai` and `foundry` both use `azure.identity.aio.DefaultAzureCredential` (async) when the runtime selects managed-identity or other Entra ID-based authentication.
+
+**Field reference**
+
+| Field | Type | Notes |
+|---|---|---|
+| `azure_openai.api_key` | `str | None` | Optional API key for the Azure OpenAI resource |
+| `azure_openai.managed_identity_client_id` | `str | None` | Optional user-assigned managed identity client ID; mutually exclusive with `api_key` |
+| `foundry.managed_identity_client_id` | `str | None` | Optional user-assigned managed identity client ID |
+
+Global config validation happens at parse time. Agent overrides are validated after merge. In both cases, setting both `azure_openai.api_key` and `azure_openai.managed_identity_client_id` is invalid, and a `credential:` YAML key is rejected for both `azure_openai` and `foundry` because `TokenCredential` objects cannot be materialized from YAML.
+
+**Azure OpenAI auth decision matrix**
+
+| Condition | Behavior | `auth_mode` log value |
+|---|---|---|
+| `api_key` is set | Use API-key auth | `api_key` |
+| `managed_identity_client_id` is set | Inject `DefaultAzureCredential(managed_identity_client_id=...)` | `managed_identity_user_assigned` |
+| Neither field is set and `AZURE_OPENAI_API_KEY` is present in the environment | Do not inject a credential; MAF resolves API-key auth from the environment | `api_key_env_fallback` |
+| Neither field is set and `AZURE_OPENAI_API_KEY` is absent | Inject bare `DefaultAzureCredential()` | `managed_identity_system_assigned` |
+
+**Foundry auth decision matrix**
+
+| Condition | Behavior | `auth_mode` log value |
+|---|---|---|
+| `managed_identity_client_id` is set | Inject `DefaultAzureCredential(managed_identity_client_id=...)` | `managed_identity_user_assigned` |
+| `managed_identity_client_id` is omitted | Inject bare `DefaultAzureCredential()` | `managed_identity_system_assigned` |
+
+**YAML examples**
+
+API-key auth:
+
+```yaml
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  azure_openai:
+    azure_endpoint: https://my-aoai.openai.azure.com/
+    api_version: "v1"
+    api_key: $AZURE_OPENAI_API_KEY
+```
+
+System-assigned managed identity:
+
+```yaml
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  azure_openai:
+    azure_endpoint: https://my-aoai.openai.azure.com/
+    api_version: "v1"
+```
+
+User-assigned managed identity:
+
+```yaml
+agent_configuration:
+  provider: foundry
+  model: gpt-4o
+  foundry:
+    project_endpoint: https://my-project.cognitiveservices.azure.com/
+    managed_identity_client_id: 11111111-2222-3333-4444-555555555555
+```
+
+Local development:
+
+```yaml
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  azure_openai:
+    azure_endpoint: https://my-aoai.openai.azure.com/
+    api_version: "v1"
+```
+
+Local development uses the same configuration as system-assigned managed identity. `DefaultAzureCredential()` falls through its normal developer credential chain until the code runs in Azure.
+
+**Note:** Azure OpenAI Entra ID auth requires the resource to use a custom subdomain. If the resource does not have one, authentication fails at request time rather than during config parsing.
+
+**Operational logging contract**
+
+Each provider construction emits exactly one INFO log line in the form `MAF auth provider=<name> mode=<auth_mode> mi_client_id_set=<bool>`. Operators can grep for `mode=managed_identity_system_assigned` to spot unexpected fallback behavior, and `mi_client_id_set` is always a boolean flag rather than the managed identity GUID.
+
+**Workload identity**
+
+When `managed_identity_client_id` is set, the same value also seeds `workload_identity_client_id` inside the `DefaultAzureCredential` chain. This is useful for AKS workload-identity deployments that rely on the workload identity leg instead of IMDS.
+
+**Environment variables and secrets**
+
+Use env-var substitution for secrets:
+
+```yaml
+agent_configuration:
+  provider: openai
+  model: gpt-4o-mini
+  openai:
+    api_key: $OPENAI_API_KEY
+```
+
+The runtime supports the syntax implemented in `src/azure_functions_agents/config/env.py`:
+- `$VAR`
+- `%VAR%`
+- literal escapes `$$VAR` and `%%VAR%%`
+
+This is the recommended pattern for secrets. Required non-secret values such as `model`, `base_url`, `azure_endpoint`, `api_version`, and `project_endpoint` must come from `agent_configuration`, not from runtime env-var fallbacks. Removed fallbacks include `MAF_MODEL`, `AGENT_TIMEOUT`, `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_API_VERSION`, `AZURE_OPENAI_CHAT_DEPLOYMENT_NAME`, `AZURE_AI_PROJECT_ENDPOINT`, `AZURE_AI_MODEL_DEPLOYMENT_NAME`, and `FOUNDRY_*`.
+
+If a referenced env var is missing, the unresolved placeholder stays as a literal string (for example `"$AZURE_OPENAI_DEPLOYMENT"`). That is not treated as an unset value; only YAML `null` / `~` removes a field during merge.
+
+**Naming convention**
+
+Use underscores everywhere: `agent_configuration`, `azure_openai`, `top_p`, `max_tokens`, `model`, `azure_endpoint`, `project_endpoint`.
+
+Rationale: MAF constructor kwargs and `ChatOptions` fields are underscore-only, so the YAML uses the same naming convention. That keeps the provider sub-block as a direct kwargs bag and avoids a translation layer.
+
+**Provider registry extensibility**
+
+New providers plug in through the provider registry by adding a new `ProviderSpec`; see `src/azure_functions_agents/client_manager/providers.py`.
 
 ---
 
@@ -657,7 +877,11 @@ Set `substitute_variables: false` in an agent's frontmatter to disable both fron
 ```yaml
 ---
 name: Notifier
-model: $AGENT_MODEL
+agent_configuration:
+  provider: openai
+  model: $AGENT_MODEL
+  openai:
+    api_key: $OPENAI_API_KEY
 substitute_variables: false
 response_example: $RESPONSE_TEMPLATE
 ---
@@ -665,7 +889,7 @@ response_example: $RESPONSE_TEMPLATE
 Send a daily summary email to $TO_EMAIL.
 ```
 
-With `substitute_variables: false`, `model`, `response_example`, and `$TO_EMAIL` in the body all remain literal.
+With `substitute_variables: false`, `agent_configuration.model`, `response_example`, and `$TO_EMAIL` in the body all remain literal.
 
 **Common patterns:**
 - `$ACA_SESSION_POOL_ENDPOINT` — Session pool endpoint
@@ -692,8 +916,15 @@ system_tools:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 # Global defaults
-model: gpt-4o
-timeout: 900
+agent_configuration:
+  provider: foundry
+  model: gpt-4o
+  temperature: 0.2
+  top_p: 0.95
+  max_tokens: 1000
+  timeout: 900
+  foundry:
+    project_endpoint: https://my-project.cognitiveservices.azure.com/
 
 # Global tool configuration
 tools:
@@ -798,8 +1029,12 @@ system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
-model: claude-sonnet-4
-timeout: 600
+agent_configuration:
+  provider: openai
+  model: gpt-4o-mini
+  timeout: 600
+  openai:
+    api_key: $OPENAI_API_KEY
 ```
 
 **Agent (`main.agent.md`):**
@@ -822,8 +1057,18 @@ system_tools:
   execute_in_sessions:
     session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
 
-model: gpt-4o
-timeout: 900
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  timeout: 900
+  azure_openai:
+    azure_endpoint: https://my-aoai.openai.azure.com/
+    api_version: "v1"
+    api_key: $AZURE_OPENAI_API_KEY
+
+mcp:
+  - microsoft-learn
+  - azure-devops
 ```
 
 **Agent with Overrides (`fast_agent.agent.md`):**
@@ -836,8 +1081,16 @@ trigger:
   type: http_trigger
 
 # Runtime overrides
-model: gpt-4o-mini  # Override: use faster model instead of global default
-timeout: 60         # Override: shorter timeout instead of global default
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o-mini  # Override: use faster model instead of global default
+  temperature: 0.1
+  top_p: 0.9
+  timeout: 60         # Override: shorter timeout instead of global default
+  azure_openai:
+    azure_endpoint: https://my-aoai.openai.azure.com/
+    api_version: "v1"
+    api_key: $AZURE_OPENAI_API_KEY
 
 # Capability filters
 system_tools:
@@ -850,7 +1103,7 @@ skills:
 
 You are a fast agent optimized for simple queries.
 ```
-*Note: This agent overrides runtime settings (model, timeout), opts out of the sandbox, and excludes specific MCP servers and skills.*
+*Note: This agent overrides `agent_configuration`, opts out of the sandbox, and excludes specific MCP servers and skills.*
 
 ### Example 4: Agent Using Exclude Pattern
 
@@ -892,7 +1145,17 @@ You are a basic agent with most capabilities but some exclusions for security.
 
 ### Example 5: Minimal Configuration
 
-**No global configuration file** (`agents.config.yaml` omitted)
+**No per-agent `agent_configuration`** — relies entirely on the global default.
+
+**`agents.config.yaml`:**
+```yaml
+agent_configuration:
+  provider: azure_openai
+  model: gpt-4o
+  azure_openai:
+    azure_endpoint: $AZURE_OPENAI_ENDPOINT
+    api_version: "v1"
+```
 
 **Agent (`main.agent.md`):**
 ```yaml
@@ -904,7 +1167,7 @@ description: An interactive assistant for exploring Azure resources
 Help the user explore resources in subscription $SUBSCRIPTION_ID.
 ```
 
-This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug surface, inherited capabilities, and model resolution from environment/provider defaults.
+The agent inherits `agent_configuration` and the default HTTP trigger from the framework; no per-agent overrides are needed.
 
 ---
 
@@ -918,15 +1181,23 @@ This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug s
 3. **`trigger`** — Required for all agents except `main.agent.md` (object with `type` field)
 
 **Global Configuration (`agents.config.yaml`):**
-- **No required properties** — The entire file is optional
+- **No required properties** — The entire file is optional, but every agent that issues LLM calls still needs an effective `agent_configuration`. Either supply it here as a shared default, or in each agent's own front matter.
 
 ### Supported Properties
 
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `execute_in_sessions` (object)
-- `model` (string)
-- `timeout` (number)
+- `agent_configuration` (object)
+  - `provider` (string)
+  - `model` (string | null)
+  - `temperature` (number)
+  - `top_p` (number)
+  - `max_tokens` (integer)
+  - `timeout` (integer | null)
+  - `openai` (object)
+  - `azure_openai` (object)
+  - `foundry` (object)
 - `tools` (object)
 
 **Agent Front Matter (`.agent.md`) — All properties from Field Reference section**
@@ -941,12 +1212,17 @@ This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug s
 6. **HTTP methods:** Must be valid HTTP verbs (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)
 7. **Auth levels:** Must be one of: `anonymous`, `function`, `admin`
 8. **Schema validation:** `input_schema` and `response_schema` must be valid JSON Schema (draft-07 or later)
-9. **Model names:** Must be valid model identifiers for the active Microsoft Agent Framework provider
-10. **Timeout limits:** Must be positive numbers; consider Azure Functions timeout limits (5 min for Consumption, 30 min for Premium)
-11. **Tool references:** Tools in `tools.exclude` are best-effort validated; unknown tool names produce warnings during config validation
-12. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
-13. **Skill references:** Skills in `skills.exclude` are best-effort validated; unknown skill names produce warnings during config validation
-15. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
+9. **Provider selection:** `agent_configuration.provider` must match a registered provider
+10. **Provider block matching:** Exactly one provider sub-block may be present, and its key must match `provider`
+11. **Top-level model requirement:** `agent_configuration.model` is required after merge, must be non-empty, and is validated after JSON Merge Patch composition
+12. **Nested provider `model` rejection:** `model` is not allowed inside `openai`, `azure_openai`, or `foundry`; set `agent_configuration.model` instead
+13. **Required provider fields:** Each provider's required typed fields must be present after merge (`azure_endpoint`/`api_version` for `azure_openai`, `project_endpoint` for `foundry`)
+14. **Universal knobs:** `temperature`, `top_p`, `max_tokens`, and `timeout` must match their declared types
+15. **Timeout behavior:** `timeout` is enforced by the runtime as a strict per-agent-run wall-clock deadline in seconds for both non-streaming and streaming runs. Choose a value that stays within your Azure Functions hosting plan's invocation limit (for example 5 min on Consumption, 30 min on Premium).
+16. **Tool references:** Tools in `tools.exclude` must exist as Python modules under the `tools/` directory
+17. **MCP server references:** Servers in `mcp.exclude` must be defined in MCP configuration discovered from `mcp.json`
+18. **Skill references:** Skills in `skills.exclude` must exist as directories under `skills/`
+19. **Configuration file location:** `agents.config.yaml` must be in the same directory as agent `.md` files
 
 ---
 
