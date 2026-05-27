@@ -5,6 +5,18 @@ parameters:
     type: string
     default: 'azure-functions/python/azurefunctions-agents-runtime'
     displayName: 'Blob path under drops container'
+  - name: githubOrg
+    type: string
+    default: 'Azure'
+    displayName: 'GitHub organization that owns the source repository'
+  - name: githubRepo
+    type: string
+    default: 'azure-functions-agents-runtime'
+    displayName: 'GitHub repository name (used in URLs and as the local clone folder)'
+  - name: artifactName
+    type: string
+    default: 'azurefunctions-agents-runtime'
+    displayName: 'Pipeline artifact name produced by the Build stage'
 
 jobs:
   - job: "CreateReleaseBranch"
@@ -43,7 +55,7 @@ jobs:
         git config --global user.email "azurefunctions@microsoft.com"
 
         # Heading to Artifact Repository
-        Write-Host "Operating based on azure-functions-agent-runtime"
+        Write-Host "Operating based on ${{ parameters.githubRepo }}"
         git checkout -b "release/$newLibraryVersion"
 
         # Change pyproject.toml version
@@ -55,7 +67,7 @@ jobs:
 
         # Create release branch release/X.Y.Z
         Write-Host "Creating release branch release/$newLibraryVersion"
-        git remote set-url origin "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime.git"
+        git remote set-url origin "https://${githubUser}:${githubToken}@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git"
         git push --set-upstream origin "release/$newLibraryVersion"
       displayName: 'Push release/x.y.z'
 
@@ -69,7 +81,7 @@ jobs:
       inputs:
         notifyUsers: ''  # No email notifications sent
         instructions: |
-          1. Check if the https://github.com/Azure/azure-functions-agent-runtime/tree/release/${{ parameters.libraryVersion }} build succeeds and passes all unit tests.
+          1. Check if the https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/tree/release/${{ parameters.libraryVersion }} build succeeds and passes all unit tests.
           2. If not, modify the release/${{ parameters.libraryVersion }} branch.
           3. Ensure release/${{ parameters.libraryVersion }} branch contains all necessary changes.
 
@@ -87,9 +99,9 @@ jobs:
         git config --global user.email "azurefunctions@microsoft.com"
 
         # Clone Repository
-        git clone "https://${githubUser}:${githubToken}@github.com/Azure/azure-functions-agent-runtime"
-        Write-Host "Cloned azure-functions-agent-runtime into local"
-        Set-Location "azure-functions-agent-runtime"
+        git clone "https://${githubUser}:${githubToken}@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}"
+        Write-Host "Cloned ${{ parameters.githubRepo }} into local"
+        Set-Location "${{ parameters.githubRepo }}"
         git checkout "origin/release/$newLibraryVersion"
 
         # Create release tag X.Y.Z
@@ -110,7 +122,7 @@ jobs:
         # Create Release Note
         Write-Host "Creating release note in GitHub"
         $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
-        $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/Azure/azure-functions-agent-runtime/releases"
+        $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
 
         # Return Value
         if ($response.StatusCode -ne 201) {
@@ -131,7 +143,7 @@ jobs:
       displayName: 'Write GitHub release note'
       inputs:
         notifyUsers: ''
-        instructions: 'Please head to https://github.com/Azure/azure-functions-agent-runtime/releases to finish the release note'
+        instructions: 'Please head to https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases to finish the release note'
 
   - job: PublishRelease
     dependsOn: ['CheckGitHubRelease']
@@ -146,7 +158,7 @@ jobs:
       - checkout: none
 
       - download: current
-        artifact: azurefunctions-agents-runtime
+        artifact: ${{ parameters.artifactName }}
         displayName: 'Download build artifacts'
 
       - task: AzurePowerShell@5
@@ -159,7 +171,7 @@ jobs:
           Inline: |
             $version = '${{ parameters.libraryVersion }}'
             $blobPath = '${{ parameters.blobPath }}'
-            $distFolder = '$(Pipeline.Workspace)/azurefunctions-agents-runtime/dist'
+            $distFolder = '$(Pipeline.Workspace)/${{ parameters.artifactName }}/dist'
 
             Write-Host "Uploading Python artifacts for version: $version"
             Write-Host "Source folder: $distFolder"
