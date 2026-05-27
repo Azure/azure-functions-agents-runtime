@@ -2,5 +2,5 @@ model: $AZURE_OPENAI_DEPLOYMENT
 timeout: 600
 
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT

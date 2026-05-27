@@ -34,18 +34,19 @@ class _Agent:
     ) -> AsyncIterator[_Update]:
         assert stream is True
         assert session is not None
-        assert options == {
-            "reasoning": {
-                "effort": "high",
-                "summary": "concise",
-            }
-        }
+        assert options is None
         return self._updates()
 
     async def _updates(self) -> AsyncIterator[_Update]:
-        yield _Update([_Content("function_call", call_id="call_1", name="azure_rest", arguments='{"')])
-        yield _Update([_Content("function_call", call_id="call_1", name="azure_rest", arguments="path")])
-        yield _Update([_Content("function_call", call_id="call_1", name="azure_rest", arguments='":"/x"}')])
+        yield _Update(
+            [_Content("function_call", call_id="call_1", name="azure_rest", arguments='{"')]
+        )
+        yield _Update(
+            [_Content("function_call", call_id="call_1", name="azure_rest", arguments="path")]
+        )
+        yield _Update(
+            [_Content("function_call", call_id="call_1", name="azure_rest", arguments='":"/x"}')]
+        )
         yield _Update([_Content("function_result", call_id="call_1", result="ok")])
 
 
@@ -58,8 +59,8 @@ def _events_from_sse(chunks: list[str]) -> list[dict[str, Any]]:
 
 
 def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> None:
-    monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
     async def fake_build_agent_session_history(**_kwargs: Any) -> tuple[_Agent, object, str]:
         return _Agent(), object(), "test-session"
@@ -92,8 +93,8 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
 
 
 def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
-    monkeypatch.setenv("MAF_REASONING_EFFORT", "medium")
-    monkeypatch.setenv("MAF_REASONING_SUMMARY", "detailed")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "medium")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", "detailed")
 
     assert runner._build_chat_options_from_environment() == {
         "reasoning": {
@@ -103,14 +104,20 @@ def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
     }
 
 
-def test_build_chat_options_uses_reasoning_defaults(monkeypatch: Any) -> None:
-    monkeypatch.delenv("MAF_REASONING_EFFORT", raising=False)
-    monkeypatch.delenv("MAF_REASONING_SUMMARY", raising=False)
+def test_build_chat_options_omits_reasoning_when_unset(monkeypatch: Any) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+
+    assert runner._build_chat_options_from_environment() is None
+
+
+def test_build_chat_options_allows_partial_reasoning_configuration(monkeypatch: Any) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", "low")
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
     assert runner._build_chat_options_from_environment() == {
         "reasoning": {
-            "effort": "high",
-            "summary": "concise",
+            "effort": "low",
         }
     }
 
@@ -143,6 +150,9 @@ def test_discover_user_tools_flattens_single_basemodel_parameter(tmp_path: Path)
 
         assert "path" in parameters["properties"]
         assert "params" not in parameters["properties"]
-        assert asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}, skip_parsing=True)) == "/subscriptions/1"
+        assert (
+            asyncio.run(tool.invoke(arguments={"path": "/subscriptions/1"}, skip_parsing=True))
+            == "/subscriptions/1"
+        )
     finally:
         clear_tool_discovery_cache()

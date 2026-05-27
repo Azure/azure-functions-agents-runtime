@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import os
-
+from azure_functions_agents.config.env import runtime_env_value
 from azure_functions_agents.config.schema import (
     AgentSpec,
     DebugConfig,
-    ExecuteInSessionsConfig,
+    DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
     ResolvedAgent,
@@ -19,19 +18,23 @@ DEFAULT_TIMEOUT = 900.0
 
 
 def _resolve_debug(spec: AgentSpec) -> DebugConfig:
-    if isinstance(spec.debug, DebugConfig):
-        return spec.debug
-    if spec.debug is True:
-        return DebugConfig(chat=True, http=True, mcp=True)
-    if spec.debug is False:
-        return DebugConfig(chat=False, http=False, mcp=False)
+    debug_endpoints = spec.debug_endpoints
+    if isinstance(debug_endpoints, DebugConfig):
+        return debug_endpoints
+    if debug_endpoints is True:
+        if spec.is_main:
+            return DebugConfig(chat_ui=True, chat_api=True, mcp=True)
+        return DebugConfig(chat_ui=True, chat_api=True, mcp=False)
+    if debug_endpoints is False:
+        return DebugConfig(chat_ui=False, chat_api=False, mcp=False)
     if spec.is_main:
-        return DebugConfig(chat=True, http=True, mcp=True)
-    return DebugConfig(chat=False, http=False, mcp=False)
+        return DebugConfig(chat_ui=True, chat_api=True, mcp=True)
+    return DebugConfig(chat_ui=False, chat_api=False, mcp=False)
 
 
 def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    return spec.model or global_config.model or os.environ.get("MAF_MODEL")
+    env_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
+    return spec.model or global_config.model or env_model or None
 
 
 def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
@@ -39,8 +42,8 @@ def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
         return spec.timeout
     if global_config.timeout is not None:
         return global_config.timeout
-    env_timeout = os.environ.get("AGENT_TIMEOUT")
-    if env_timeout is not None:
+    env_timeout = runtime_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
+    if env_timeout:
         try:
             return float(env_timeout)
         except ValueError:
@@ -50,11 +53,11 @@ def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
 
 def _resolve_sandbox(
     spec: AgentSpec, global_config: GlobalConfig
-) -> ExecuteInSessionsConfig | None:
-    if spec.system_tools and spec.system_tools.execute_in_sessions is False:
+) -> DynamicSessionsCodeInterpreterConfig | None:
+    if spec.system_tools and spec.system_tools.dynamic_sessions_code_interpreter is False:
         return None
     if global_config.system_tools:
-        return global_config.system_tools.execute_in_sessions
+        return global_config.system_tools.dynamic_sessions_code_interpreter
     return None
 
 
@@ -123,7 +126,7 @@ def compose(
         trigger=spec.trigger,
         instructions=spec.instructions,
         is_main=spec.is_main,
-        debug=_resolve_debug(spec),
+        debug_endpoints=_resolve_debug(spec),
         model=_resolve_model(spec, global_config),
         timeout=_resolve_timeout(spec, global_config),
         enabled_mcp_names=enabled_mcp,

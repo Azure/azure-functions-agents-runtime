@@ -5,9 +5,9 @@ trigger:
   type: http_trigger
   args:
     route: "debug-mixed"
-debug:
-  chat: true
-  http: true
+debug_endpoints:
+  chat_ui: true
+  chat_api: true
   mcp: false
 ---
 

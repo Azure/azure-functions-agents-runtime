@@ -5,7 +5,7 @@ trigger:
   type: http_trigger
   args:
     route: "debug-off"
-debug: false
+debug_endpoints: false
 ---
 
 You are an agent with debug surfaces explicitly disabled.

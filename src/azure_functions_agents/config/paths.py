@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 
 from azure_functions_agents._logger import logger
+from azure_functions_agents.config.env import runtime_env_value
 
 _app_root: Path | None = None
 
@@ -31,9 +32,9 @@ def get_app_root() -> Path:
 
 def resolve_config_dir() -> str:
     """Resolve the config directory used to persist agent-session history files."""
-    explicit_path = os.environ.get("AZURE_FUNCTIONS_AGENTS_CONFIG_DIR")
+    explicit_path = runtime_env_value("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")
     if explicit_path:
-        logger.info("Using config dir override: %s", explicit_path)
+        logger.info("Using session dir override: %s", explicit_path)
         return explicit_path
 
     fallback_path = str(Path(os.path.expanduser("~/.azure-functions-agents")).resolve())

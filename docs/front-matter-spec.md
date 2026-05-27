@@ -59,7 +59,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 
 **Supported properties:**
 - `system_tools` — Object containing system-level tools configuration
-  - `execute_in_sessions` — Object with code execution sandbox configuration
+  - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
@@ -77,7 +77,7 @@ YAML front matter at the top of each agent file.
 - `trigger` — Object defining how the agent is invoked (optional for `main.agent.md` only)
 
 **Optional properties:**
-- `debug` — Object or boolean for enabling debugging/testing endpoints
+- `debug_endpoints` — Object or boolean for enabling debugging/testing endpoints
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
@@ -113,7 +113,7 @@ Fields are organized into categories based on how they can be used:
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
-  - `execute_in_sessions` — Code execution sandbox
+  - `dynamic_sessions_code_interpreter` — ACA Dynamic Sessions code interpreter
 
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
@@ -122,7 +122,7 @@ Fields are organized into categories based on how they can be used:
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
 - `trigger` — Invocation method (required for non-main agents)
-- `debug` — Debugging and testing endpoints
+- `debug_endpoints` — Debugging and testing endpoints
 - `logger`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
 - `metadata` — Organizational metadata
@@ -239,35 +239,37 @@ trigger:
 
 ---
 
-#### `debug`
+#### `debug_endpoints`
 - **Type:** `object`
 - **Location:** Agent only (front matter)
 - **Can override:** N/A (agent-specific only)
-- **Default:** All disabled (`false`) for regular agents; all enabled (`true`) for `main.agent.md`
+- **Default:** All disabled (`false`) for regular agents; chat UI, chat API, and MCP enabled for `main.agent.md`
 - **Description:** Enables debugging and testing endpoints for the agent. Useful for development, testing, and agent composition.
 
 **Structure:**
 ```yaml
-debug:
-  chat: boolean   # Enable chat UI plus chat/chatstream APIs
-  http: boolean   # Enable REST API endpoints even without the chat UI
-  mcp: boolean    # Enable MCP tool registration for agent-to-agent calls
+debug_endpoints:
+  chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
+  chat_api: boolean  # Enable REST API endpoints even without the chat UI
+  mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
 ```
+
+`chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `mcp` is enabled only when explicitly set on non-main agents.
 
 **Endpoint Details:**
 
-**`chat: true`** — Interactive Chat UI
+**`chat_ui: true`** — Interactive Chat UI
 - **Routes by agent type:** `{slug}` below is the sanitized filename-based value described in [Function name resolution](#function-name-resolution).
 
-  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `debug.mcp: true` |
+  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `debug_endpoints.mcp: true` |
   | --- | --- | --- | --- | --- |
   | `main.agent.md` | `/` | `/agent/chat` | `/agent/chatstream` | Registers the `main` MCP tool through the shared runtime MCP webhook |
-  | Any other `.agent.md` with `debug.chat: true` | `/agents/{slug}/` | `/agents/{slug}/chat` | `/agents/{slug}/chatstream` | Registers an MCP tool named `{slug}` through the shared runtime MCP webhook |
+  | Any other `.agent.md` with `debug_endpoints.chat_ui: true` | `/agents/{slug}/` | `/agents/{slug}/chat` | `/agents/{slug}/chatstream` | Registers an MCP tool named `{slug}` through the shared runtime MCP webhook |
 - **Purpose:** Browser-based chat interface for manual testing and interaction
-- **Behavior:** Also registers the backing REST endpoints the built-in page calls, so `debug.chat: true` is self-sufficient
+- **Behavior:** Also registers the backing REST endpoints the built-in page calls, so `debug_endpoints.chat_ui: true` is self-sufficient
 - **Use case:** Test any agent (timer, queue, HTTP) via a web UI during development
 
-**`http: true`** — REST API Endpoints
+**`chat_api: true`** — REST API Endpoints
 - **Routes:** Registers the same `POST` routes shown above for the relevant agent type, but without the chat UI page
 - **Behavior:** Useful when you want programmatic access without exposing the chat page
 - **Request body:** `{"prompt": "your question or instruction"}`
@@ -292,10 +294,10 @@ trigger:
   args:
     schedule: "0 0 7 * * *"
 
-debug:
-  chat: true   # Enable UI for manual testing
-  http: true   # Enable REST API for integration tests
-  mcp: true    # Expose as MCP tool for other agents
+debug_endpoints:
+  chat_ui: true   # Enable UI for manual testing
+  chat_api: true  # Enable REST API for integration tests
+  mcp: true       # Expose as MCP tool for other agents
 ```
 
 **Enable only HTTP API (no UI, no MCP):**
@@ -305,8 +307,8 @@ trigger:
   args:
     queue_name: "tasks"
 
-debug:
-  http: true   # Enable REST API only
+debug_endpoints:
+  chat_api: true   # Enable REST API only
 ```
 
 **Enable only MCP tool (for agent composition):**
@@ -316,18 +318,18 @@ trigger:
   args:
     schedule: "0 0 7 * * *"
 
-debug:
+debug_endpoints:
   mcp: true   # Expose as tool for other agents to call
 ```
 
-**Shorthand for enabling all:**
+**Shorthand for enabling debug endpoints:**
 ```yaml
-debug: true   # Equivalent to chat: true, http: true, mcp: true
+debug_endpoints: true   # Main: chat_ui, chat_api, and mcp; non-main: chat_ui and chat_api only
 ```
 
 **Shorthand for disabling all:**
 ```yaml
-debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
+debug_endpoints: false  # Equivalent to chat_ui: false, chat_api: false, mcp: false
 ```
 
 ---
@@ -337,7 +339,7 @@ debug: false  # Equivalent to chat: false, http: false, mcp: false (default)
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Specifies which LLM to use for the agent. Valid model identifiers depend on the active provider.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `MAF_MODEL` env var. If no model is resolved by configuration, the active client manager falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default.
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AZURE_FUNCTIONS_AGENTS_MODEL` env var. If no model is resolved by configuration, the active client manager falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default.
 
 **Global default:**
 ```yaml
@@ -358,7 +360,7 @@ model: gpt-4o-mini  # Use faster model for this agent
 - **Location:** Global (`agents.config.yaml`) for default, Agent (front matter) for override
 - **Can override:** Yes
 - **Description:** Maximum execution time in seconds for the agent.
-- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AGENT_TIMEOUT` env var → `900` seconds (default)
+- **Precedence:** Agent front matter → Global `agents.config.yaml` → `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` env var → `900` seconds (default)
 
 **Global default:**
 ```yaml
@@ -380,21 +382,23 @@ timeout: 60  # 1 minute for fast agent
 **Structure:**
 ```yaml
 system_tools:
-  execute_in_sessions:      # Code execution sandbox configuration
-    session_pool_management_endpoint: string
+  dynamic_sessions_code_interpreter:      # ACA Dynamic Sessions code interpreter
+    endpoint: string
+    client_id: string | null
 ```
 
 ---
 
-##### `system_tools.execute_in_sessions`
+##### `system_tools.dynamic_sessions_code_interpreter`
 - **Type:** `object` (global), `boolean` (agent)
-- **Description:** Configures Python code execution environment using Azure Container Apps dynamic sessions. All agents inherit sandbox access by default. Agents can opt out by setting to `false`.
+- **Description:** Configures the built-in `execute_python` tool using Azure Container Apps dynamic sessions. All agents inherit code interpreter access by default. Agents can opt out by setting to `false`.
 
 **Global configuration (in `agents.config.yaml`):**
 ```yaml
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT
+    client_id: $ACA_SESSION_POOL_CLIENT_ID
 ```
 
 **Agent opt-out (in agent front matter):**
@@ -404,11 +408,11 @@ name: Simple Agent
 description: An agent that doesn't need code execution
 
 system_tools:
-  execute_in_sessions: false  # Opt out of code execution capabilities
+  dynamic_sessions_code_interpreter: false  # Opt out of code execution capabilities
 ---
 ```
 
-**Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `AZURE_CLIENT_ID` in multi-identity Function Apps.
+**Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `client_id` for this tool when set, otherwise `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
 
@@ -688,8 +692,8 @@ This example demonstrates the recommended pattern: define shared runtime configu
 ```yaml
 # Shared infrastructure
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 # Global defaults
 model: gpt-4o
@@ -775,10 +779,10 @@ trigger:
   args:
     schedule: "0 0 * * * *"  # Every hour
 
-debug:
-  chat: true   # Enable chat UI for manual testing
-  http: true   # Enable REST API endpoints for integration tests
-  mcp: true    # Expose as MCP tool for other agents
+debug_endpoints:
+  chat_ui: true   # Enable chat UI for manual testing
+  chat_api: true  # Enable REST API endpoints for integration tests
+  mcp: true       # Expose as MCP tool for other agents
 ---
 
 Run scheduled Azure resource checks. Can be triggered on schedule, via HTTP endpoints, or called as a tool by other agents.
@@ -786,8 +790,8 @@ Run scheduled Azure resource checks. Can be triggered on schedule, via HTTP endp
 
 This creates:
 - Timer trigger: Runs every hour automatically
-- Chat UI: `GET /` for browser-based testing
-- HTTP endpoints: `POST /agent/chat`, `POST /agent/chatstream` for programmatic access
+- Chat UI: `GET /agents/scheduled_task/` for browser-based testing
+- HTTP endpoints: `POST /agents/scheduled_task/chat`, `POST /agents/scheduled_task/chatstream` for programmatic access
 - MCP tool: `scheduled_task` tool callable by other agents
 
 ### Example 2: Simple Single-Agent Application
@@ -795,8 +799,8 @@ This creates:
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 model: claude-sonnet-4
 timeout: 600
@@ -819,8 +823,8 @@ This example shows how to override runtime settings and filter capabilities per-
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 model: gpt-4o
 timeout: 900
@@ -841,7 +845,7 @@ timeout: 60         # Override: shorter timeout instead of global default
 
 # Capability filters
 system_tools:
-  execute_in_sessions: false  # Opt out of code execution for security/performance
+  dynamic_sessions_code_interpreter: false  # Opt out of code execution for security/performance
 mcp:
   exclude: ["experimental-server"]  # Exclude a discovered MCP server
 skills:
@@ -859,8 +863,8 @@ Assume `mcp.json` defines the `microsoft-learn`, `azure-devops`, `github-copilot
 **Global Configuration (`agents.config.yaml`):**
 ```yaml
 system_tools:
-  execute_in_sessions:
-    session_pool_management_endpoint: $ACA_SESSION_POOL_ENDPOINT
+  dynamic_sessions_code_interpreter:
+    endpoint: $ACA_SESSION_POOL_ENDPOINT
 
 tools:
   exclude: ["bash", "execute_shell"]  # Exclude dangerous tools globally
@@ -924,7 +928,7 @@ This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug s
 
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
-  - `execute_in_sessions` (object)
+  - `dynamic_sessions_code_interpreter` (object)
 - `model` (string)
 - `timeout` (number)
 - `tools` (object)
@@ -970,7 +974,7 @@ For non-main agents, two related identifiers are derived from the source filenam
   - If another agent in the same `create_function_app()` call already uses that sanitized name, append `_2`, `_3`, and so on until the name is unique.
   - Example: `daily-report.agent.md` → `daily_report`; if `daily_report.agent.md` also exists, the second Azure Function name becomes `daily_report_2`.
 
-- **Debug slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `debug.mcp: true`):
+- **Debug slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `debug_endpoints.mcp: true`):
   - Uses the same filename sanitization rules.
   - Uses the same collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, append `_2`, `_3`, and so on until the slug is unique.
   - In practice, the debug slug stays paired with the allocated Azure Function name for the same agent (for example, `daily_report_2` maps to `/agents/daily_report_2/`).
@@ -980,14 +984,14 @@ In other words, the display `name:` field is never used to derive registered Azu
 
 **Main agent behavior:**
 The `main.agent.md` file is special:
-- **Debug endpoints enabled by default** (`debug: true`):
+- **Debug endpoints enabled by default** (`debug_endpoints` omitted):
   - `GET /` — Chat UI page
   - `POST /agent/chat` — Non-streaming chat endpoint
   - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
   - MCP tool registration — Tool name derived from the sanitized filename slug (`main` for `main.agent.md`), exposed as `mcpToolTrigger`
 - **No trigger required** — Registers built-in chat UI, chat APIs, and MCP debug surfaces by default; `trigger` can be omitted from front matter
 
-Other agents require an explicit `trigger` definition and have `debug: false` (all debug endpoints disabled) by default.
+Other agents require an explicit `trigger` definition and have `debug_endpoints: false` (all debug endpoints disabled) by default.
 
 **Example project structure:**
 ```

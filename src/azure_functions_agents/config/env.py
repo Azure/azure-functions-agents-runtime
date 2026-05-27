@@ -19,15 +19,11 @@ _LITERAL_SENTINEL_SUFFIX = "\x00"
 
 
 def _escaped_dollar_replacer(match: re.Match[str]) -> str:
-    return (
-        f"{_LITERAL_DOLLAR_SENTINEL}{match.group(1)}{_LITERAL_SENTINEL_SUFFIX}"
-    )
+    return f"{_LITERAL_DOLLAR_SENTINEL}{match.group(1)}{_LITERAL_SENTINEL_SUFFIX}"
 
 
 def _escaped_percent_replacer(match: re.Match[str]) -> str:
-    return (
-        f"{_LITERAL_PERCENT_SENTINEL}{match.group(1)}{_LITERAL_SENTINEL_SUFFIX}"
-    )
+    return f"{_LITERAL_PERCENT_SENTINEL}{match.group(1)}{_LITERAL_SENTINEL_SUFFIX}"
 
 
 def _dollar_replacer(match: re.Match[str]) -> str:
@@ -86,6 +82,11 @@ def resolve_env_vars_in_data(value: Any) -> Any:
     if isinstance(value, dict):
         return {key: resolve_env_vars_in_data(item) for key, item in value.items()}
     return value
+
+
+def runtime_env_value(name: str) -> str:
+    """Return a stripped runtime env var value, or an empty string if unset."""
+    return (os.environ.get(name) or "").strip()
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

@@ -8,6 +8,7 @@ from azure_functions_agents.config.env import (
     _to_bool,
     has_unresolved_placeholders,
     resolve_env_vars_in_data,
+    runtime_env_value,
     substitute_env_vars_in_text,
     substitute_env_vars_in_value,
 )
@@ -28,7 +29,7 @@ from azure_functions_agents.config.paths import (
 from azure_functions_agents.config.schema import (
     AgentSpec,
     DebugConfig,
-    ExecuteInSessionsConfig,
+    DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
     ResolvedAgent,
@@ -48,7 +49,7 @@ __all__ = [
     "_INLINE_PERCENT_PATTERN",
     "AgentSpec",
     "DebugConfig",
-    "ExecuteInSessionsConfig",
+    "DynamicSessionsCodeInterpreterConfig",
     "GlobalConfig",
     "McpFilter",
     "ResolvedAgent",
@@ -69,6 +70,7 @@ __all__ = [
     "load_global_config",
     "resolve_config_dir",
     "resolve_env_vars_in_data",
+    "runtime_env_value",
     "set_app_root",
     "substitute_env_vars_in_text",
     "substitute_env_vars_in_value",

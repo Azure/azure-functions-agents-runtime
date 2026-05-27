@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class McpFilter(BaseModel):
@@ -32,13 +32,19 @@ class ToolsFilter(BaseModel):
 
 
 class DebugConfig(BaseModel):
-    """Concrete debug surface toggles for chat, HTTP, and MCP exposure."""
+    """Concrete debug endpoint toggles for chat UI, chat API, and MCP exposure."""
 
     model_config = ConfigDict(extra="forbid")
 
-    chat: bool = False
-    http: bool = False
+    chat_ui: bool = False
+    chat_api: bool = False
     mcp: bool = False
+
+    @model_validator(mode="after")
+    def chat_ui_requires_chat_api(self) -> DebugConfig:
+        if self.chat_ui:
+            self.chat_api = True
+        return self
 
 
 class TriggerSpec(BaseModel):
@@ -58,12 +64,13 @@ class TriggerSpec(BaseModel):
         return trimmed
 
 
-class ExecuteInSessionsConfig(BaseModel):
-    """Global sandbox execution configuration for execute-in-sessions tools."""
+class DynamicSessionsCodeInterpreterConfig(BaseModel):
+    """Configuration for the ACA Dynamic Sessions-backed code interpreter."""
 
     model_config = ConfigDict(extra="forbid")
 
-    session_pool_management_endpoint: str
+    endpoint: str
+    client_id: str | None = None
 
 
 class SystemToolsConfig(BaseModel):
@@ -71,7 +78,7 @@ class SystemToolsConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    execute_in_sessions: ExecuteInSessionsConfig | None = None
+    dynamic_sessions_code_interpreter: DynamicSessionsCodeInterpreterConfig | None = None
 
 
 class SystemToolsAgentOverride(BaseModel):
@@ -79,7 +86,7 @@ class SystemToolsAgentOverride(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    execute_in_sessions: bool | None = None
+    dynamic_sessions_code_interpreter: bool | None = None
 
 
 class GlobalConfig(BaseModel):
@@ -101,7 +108,7 @@ class AgentSpec(BaseModel):
     name: str
     description: str
     trigger: TriggerSpec | None = None
-    debug: bool | DebugConfig | None = None
+    debug_endpoints: bool | DebugConfig | None = None
     model: str | None = None
     timeout: float | None = None
     logger: bool | None = None
@@ -129,7 +136,7 @@ class ResolvedAgent(BaseModel):
     trigger: TriggerSpec | None
     instructions: str
     is_main: bool
-    debug: DebugConfig
+    debug_endpoints: DebugConfig
     model: str | None
     timeout: float
     enabled_mcp_names: list[str]
@@ -141,7 +148,7 @@ class ResolvedAgent(BaseModel):
     tools_disabled: bool = False
     skills_disabled: bool = False
     mcp_disabled: bool = False
-    sandbox_config: ExecuteInSessionsConfig | None
+    sandbox_config: DynamicSessionsCodeInterpreterConfig | None
     input_schema: dict[str, Any] | None
     response_schema: dict[str, Any] | None
     response_example: str | None

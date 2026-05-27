@@ -111,7 +111,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
    - **Input:** `AgentSpec`, `GlobalConfig`, `discovered_mcp_names: list[str]`, `discovered_skill_names: list[str]`
    - **Output:** `ResolvedAgent`
-   - **Notes:** this is where startup-level precedence rules are applied. Timeout resolves from agent front matter, global config, `AGENT_TIMEOUT`, and then the 900-second default. Model resolves from agent front matter, global config, or `MAF_MODEL`; if registration does not request a model, the active `ClientManager` later falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default. Capability filters turn the global/shared inventories into per-agent allow/deny decisions.
+   - **Notes:** this is where startup-level precedence rules are applied. Timeout resolves from agent front matter, global config, `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS`, and then the 900-second default. Model resolves from agent front matter, global config, or `AZURE_FUNCTIONS_AGENTS_MODEL`; if registration does not request a model, the active `ClientManager` later falls back to provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Microsoft Foundry) and then the provider default. Capability filters turn the global/shared inventories into per-agent allow/deny decisions.
 
 6. **Validate the merged configuration**
    - **Implemented by:** `src/azure_functions_agents/config/validation.py:validate_resolved_agent()`
@@ -152,7 +152,7 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 
 - MCP server definitions are read from `mcp.json`, translated into MAF MCP tool wrappers by `discover_mcp_servers()`, and filtered per agent through capability settings.
 - Connector actions are surfaced through connector-backed MCP servers. This keeps connector integration on the standard MCP discovery path and lets each server define its own transport, auth, and allowed tool set.
-- Sandbox configuration is read from `GlobalConfig.system_tools.execute_in_sessions`, carried into `ResolvedAgent.sandbox_config`, and turned into per-session tool closures by `build_sandbox_tools_for_session()` right before a request is executed.
+- Code interpreter configuration is read from `GlobalConfig.system_tools.dynamic_sessions_code_interpreter`, carried into `ResolvedAgent.sandbox_config`, and turned into per-session `execute_python` tool closures by `build_sandbox_tools_for_session()` right before a request is executed.
 - Sandbox tools are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
 
 ### What the runner receives from registration

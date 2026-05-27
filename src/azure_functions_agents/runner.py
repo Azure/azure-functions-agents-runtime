@@ -41,7 +41,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import os
 import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -51,6 +50,7 @@ from typing import Any
 from ._blob_history import build_blob_provider_from_environment
 from ._logger import logger
 from .client_manager import get_client_manager
+from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
@@ -59,10 +59,22 @@ from .discovery.tools import discover_user_tools
 # Constants
 # ---------------------------------------------------------------------------
 
-DEFAULT_TIMEOUT = float(os.environ.get("AGENT_TIMEOUT", "900"))
-DEFAULT_MODEL: str | None = os.environ.get("MAF_MODEL")
-DEFAULT_REASONING_EFFORT = "high"
-DEFAULT_REASONING_SUMMARY = "concise"
+
+def _runtime_timeout_default() -> float:
+    env_timeout = runtime_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
+    if env_timeout:
+        try:
+            return float(env_timeout)
+        except ValueError:
+            logger.warning(
+                "Ignoring invalid AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS value: %s",
+                env_timeout,
+            )
+    return 900.0
+
+
+DEFAULT_TIMEOUT = _runtime_timeout_default()
+DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory.
@@ -146,18 +158,18 @@ def _build_history_provider() -> Any:
     return FileHistoryProvider(storage_path=_resolve_sessions_dir())
 
 
-def _env_value(name: str) -> str:
-    return (os.environ.get(name) or "").strip()
-
-
 def _build_chat_options_from_environment() -> dict[str, Any] | None:
     """Build provider chat options from supported runtime environment variables."""
-    return {
-        "reasoning": {
-            "effort": _env_value("MAF_REASONING_EFFORT") or DEFAULT_REASONING_EFFORT,
-            "summary": _env_value("MAF_REASONING_SUMMARY") or DEFAULT_REASONING_SUMMARY,
-        }
-    }
+    reasoning: dict[str, str] = {}
+    effort = runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT")
+    if effort:
+        reasoning["effort"] = effort
+    summary = runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY")
+    if summary:
+        reasoning["summary"] = summary
+    if not reasoning:
+        return None
+    return {"reasoning": reasoning}
 
 
 # ---------------------------------------------------------------------------
@@ -531,7 +543,9 @@ async def run_agent_stream(
             )
             return call_id, pending
 
-        async def emit_tool_start_if_ready(call_id: str, event: dict[str, Any]) -> AsyncIterator[str]:
+        async def emit_tool_start_if_ready(
+            call_id: str, event: dict[str, Any]
+        ) -> AsyncIterator[str]:
             if call_id in emitted_tool_calls:
                 return
             if not _is_complete_json_argument(event.get("arguments")):
