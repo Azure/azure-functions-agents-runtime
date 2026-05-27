@@ -7,7 +7,7 @@ from pydantic import ValidationError
 
 from azure_functions_agents.config.schema import (
     AgentSpec,
-    DebugConfig,
+    BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
@@ -29,16 +29,18 @@ def test_agent_spec_extra_forbidden() -> None:
 
 @pytest.mark.parametrize(
     "value",
-    [True, False, None, DebugConfig(chat_api=True)],
+    [True, False, None, BuiltinEndpointsConfig(chat_api=True)],
 )
-def test_agent_spec_debug_variants(value: bool | None | DebugConfig) -> None:
-    spec = AgentSpec(name="X", description="Y", debug_endpoints=value)
-    assert spec.debug_endpoints == value
+def test_agent_spec_builtin_endpoints_variants(
+    value: bool | None | BuiltinEndpointsConfig,
+) -> None:
+    spec = AgentSpec(name="X", description="Y", builtin_endpoints=value)
+    assert spec.builtin_endpoints == value
 
 
-def test_debug_config_chat_ui_enables_chat_api() -> None:
-    config = DebugConfig(chat_ui=True)
-    assert config.chat_ui is True
+def test_builtin_endpoints_debug_chat_ui_enables_chat_api() -> None:
+    config = BuiltinEndpointsConfig(debug_chat_ui=True)
+    assert config.debug_chat_ui is True
     assert config.chat_api is True
 
 

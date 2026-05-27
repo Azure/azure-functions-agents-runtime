@@ -5,7 +5,7 @@ from __future__ import annotations
 from azure_functions_agents.config.env import runtime_env_value
 from azure_functions_agents.config.schema import (
     AgentSpec,
-    DebugConfig,
+    BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
@@ -17,19 +17,15 @@ from azure_functions_agents.config.schema import (
 DEFAULT_TIMEOUT = 900.0
 
 
-def _resolve_debug(spec: AgentSpec) -> DebugConfig:
-    debug_endpoints = spec.debug_endpoints
-    if isinstance(debug_endpoints, DebugConfig):
-        return debug_endpoints
-    if debug_endpoints is True:
-        if spec.is_main:
-            return DebugConfig(chat_ui=True, chat_api=True, mcp=True)
-        return DebugConfig(chat_ui=True, chat_api=True, mcp=False)
-    if debug_endpoints is False:
-        return DebugConfig(chat_ui=False, chat_api=False, mcp=False)
-    if spec.is_main:
-        return DebugConfig(chat_ui=True, chat_api=True, mcp=True)
-    return DebugConfig(chat_ui=False, chat_api=False, mcp=False)
+def _resolve_builtin_endpoints(spec: AgentSpec) -> BuiltinEndpointsConfig:
+    builtin_endpoints = spec.builtin_endpoints
+    if isinstance(builtin_endpoints, BuiltinEndpointsConfig):
+        return builtin_endpoints
+    if builtin_endpoints is True:
+        return BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False)
+    if builtin_endpoints is False:
+        return BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
+    return BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
 
 
 def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
@@ -126,7 +122,7 @@ def compose(
         trigger=spec.trigger,
         instructions=spec.instructions,
         is_main=spec.is_main,
-        debug_endpoints=_resolve_debug(spec),
+        builtin_endpoints=_resolve_builtin_endpoints(spec),
         model=_resolve_model(spec, global_config),
         timeout=_resolve_timeout(spec, global_config),
         enabled_mcp_names=enabled_mcp,

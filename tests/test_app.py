@@ -77,7 +77,7 @@ def test_create_function_app_auto_suffixes_duplicate_function_names(
     assert "daily_report.agent.md" in caplog.text
 
 
-def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names(
+def test_create_function_app_pairs_builtin_slugs_with_auto_suffixed_function_names(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
@@ -87,8 +87,8 @@ def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names
         """
         name: Daily Report Dash
         description: Desc
-        debug_endpoints:
-            chat_ui: true
+        builtin_endpoints:
+            debug_chat_ui: true
         trigger:
             type: timer_trigger
             args:
@@ -101,8 +101,8 @@ def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names
         """
         name: Daily Report Underscore
         description: Desc
-        debug_endpoints:
-            chat_ui: true
+        builtin_endpoints:
+            debug_chat_ui: true
         trigger:
             type: timer_trigger
             args:
@@ -117,13 +117,13 @@ def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names
 
     assert _function_names(functions) == [
         "daily_report",
-        "agent_daily_report_debug_chat_page",
-        "agent_daily_report_debug_chat",
-        "agent_daily_report_debug_chatstream",
+        "agent_daily_report_builtin_chat_page",
+        "agent_daily_report_builtin_chat",
+        "agent_daily_report_builtin_chatstream",
         "daily_report_2",
-        "agent_daily_report_2_debug_chat_page",
-        "agent_daily_report_2_debug_chat",
-        "agent_daily_report_2_debug_chatstream",
+        "agent_daily_report_2_builtin_chat_page",
+        "agent_daily_report_2_builtin_chat",
+        "agent_daily_report_2_builtin_chatstream",
     ]
     assert _http_routes(functions) == [
         "agents/daily_report/",
@@ -134,6 +134,37 @@ def test_create_function_app_pairs_debug_slugs_with_auto_suffixed_function_names
         "agents/daily_report_2/chatstream",
     ]
     assert "Function name collision" in caplog.text
+
+
+def test_create_function_app_allows_endpoint_agent_without_trigger(
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Main Chat
+        description: Desc
+        builtin_endpoints:
+            debug_chat_ui: true
+            mcp: true
+        """,
+    )
+
+    app = create_function_app(tmp_path)
+    functions = app.get_functions()
+
+    assert _function_names(functions) == [
+        "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat",
+        "agent_main_builtin_chatstream",
+        "agent_main_builtin_mcp",
+    ]
+    assert _http_routes(functions) == [
+        "agents/main/",
+        "agents/main/chat",
+        "agents/main/chatstream",
+    ]
 
 
 def test_create_function_app_raises_on_missing_http_route(tmp_path: Path) -> None:

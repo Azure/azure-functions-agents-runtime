@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from typing import Any
 
 from azure_functions_agents.config.schema import (
-    DebugConfig,
+    BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     ResolvedAgent,
     ToolsFilter,
@@ -48,7 +48,7 @@ def _resolved_agent(
         trigger=None,
         instructions="Return JSON",
         is_main=True,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],

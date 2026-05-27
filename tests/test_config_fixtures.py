@@ -15,7 +15,7 @@ import pytest
 import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.schema import (
-    DebugConfig,
+    BuiltinEndpointsConfig,
     McpFilter,
     SkillsFilter,
     ToolsFilter,
@@ -72,7 +72,7 @@ def test_minimal_main_only_agent() -> None:
     assert spec.name == "Minimal Assistant"
     assert spec.is_main is True
     assert spec.trigger is None
-    assert spec.debug_endpoints is None
+    assert spec.builtin_endpoints is None
     assert spec.model is None
     assert "helpful assistant" in spec.instructions
     assert spec.substitute_variables is True
@@ -274,38 +274,38 @@ def test_capability_filtering_fixture() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 07 — debug surface variants (none/true/false/object)
+# 07 — built-in endpoint variants (none/true/false/object)
 # ---------------------------------------------------------------------------
 
 
-def test_debug_endpoint_variants() -> None:
-    fixture = FIXTURES_ROOT / "07_debug_endpoints"
+def test_builtin_endpoint_variants() -> None:
+    fixture = FIXTURES_ROOT / "07_builtin_endpoints"
 
     specs = load_agent_specs(fixture, strict=True)
     by_name = _specs_by_name(specs)
     assert set(by_name) == {
-        "Debug Main",
-        "Debug Shorthand On",
-        "Debug Shorthand Off",
-        "Debug Mixed",
+        "Builtin Main",
+        "Builtin Shorthand On",
+        "Builtin Shorthand Off",
+        "Builtin Mixed",
     }
 
-    main = by_name["Debug Main"]
+    main = by_name["Builtin Main"]
     assert main.is_main is True
-    assert main.debug_endpoints is None  # resolver applies main-default later
+    assert main.builtin_endpoints is None
 
-    on = by_name["Debug Shorthand On"]
-    assert on.debug_endpoints is True
-    assert on.trigger is not None and on.trigger.args["route"] == "debug-on"
+    on = by_name["Builtin Shorthand On"]
+    assert on.builtin_endpoints is True
+    assert on.trigger is not None and on.trigger.args["route"] == "builtin-on"
 
-    off = by_name["Debug Shorthand Off"]
-    assert off.debug_endpoints is False
+    off = by_name["Builtin Shorthand Off"]
+    assert off.builtin_endpoints is False
 
-    mixed = by_name["Debug Mixed"]
-    assert isinstance(mixed.debug_endpoints, DebugConfig)
-    assert mixed.debug_endpoints.chat_ui is True
-    assert mixed.debug_endpoints.chat_api is True
-    assert mixed.debug_endpoints.mcp is False
+    mixed = by_name["Builtin Mixed"]
+    assert isinstance(mixed.builtin_endpoints, BuiltinEndpointsConfig)
+    assert mixed.builtin_endpoints.debug_chat_ui is True
+    assert mixed.builtin_endpoints.chat_api is True
+    assert mixed.builtin_endpoints.mcp is False
 
 
 # ---------------------------------------------------------------------------

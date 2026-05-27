@@ -13,9 +13,9 @@ _UNSUPPORTED_TRIGGER_TYPES: dict[str, str] = {
     "activity_trigger": "Durable Functions triggers are not supported as agent triggers.",
     "assistant_skill_trigger": "Assistant skill triggers are not supported as agent triggers; use agent tools or MCP surfaces instead.",
     "entity_trigger": "Durable Functions triggers are not supported as agent triggers.",
-    "mcp_prompt_trigger": "MCP prompt triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
-    "mcp_resource_trigger": "MCP resource triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
-    "mcp_tool_trigger": "MCP tool triggers are registered by runtime MCP/debug surfaces, not agent trigger front matter.",
+    "mcp_prompt_trigger": "MCP prompt triggers are registered by built-in endpoints, not agent trigger front matter.",
+    "mcp_resource_trigger": "MCP resource triggers are registered by built-in endpoints, not agent trigger front matter.",
+    "mcp_tool_trigger": "MCP tool triggers are registered by built-in endpoints, not agent trigger front matter.",
     "orchestration_trigger": "Durable Functions triggers are not supported as agent triggers.",
     "route": "Use `http_trigger` instead of the Azure Functions `route` decorator name.",
     "schedule": "Use `timer_trigger` instead of the Azure Functions `schedule` decorator alias.",
@@ -44,12 +44,16 @@ def validate_resolved_agent(
     """Run post-merge sanity checks for a resolved agent."""
     source_file = resolved.source_file or "<unknown>"
 
-    if not resolved.is_main and resolved.trigger is None:
+    builtin_endpoints = resolved.builtin_endpoints
+    has_builtin_endpoints = bool(
+        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
+    )
+    if resolved.trigger is None and not has_builtin_endpoints:
         raise ValueError(
             _format_error(
                 source_file,
                 "trigger",
-                "Required for non-main agents.",
+                "Required when no builtin_endpoints are enabled.",
                 "#trigger",
             )
         )

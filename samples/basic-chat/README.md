@@ -8,9 +8,9 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, M
 
 ## Features
 
-- **Chat UI** — built-in single-page interface at the app root
-- **HTTP API** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
-- **MCP server** — `/runtime/webhooks/mcp` for connecting from VS Code, Claude Desktop, etc.
+- **Chat UI** — built-in single-page interface at `/agents/main/`
+- **HTTP API** — `POST /agents/main/chat` (JSON) and `POST /agents/main/chatstream` (SSE)
+- **MCP tool** — exposed through `/runtime/webhooks/mcp` for connecting from VS Code, Claude Desktop, etc.
 - **Microsoft Foundry** — provisions an AI Services account, Foundry project, and `gpt-5.4` deployment
 - **Code execution** — sandboxed Python via ACA Dynamic Sessions with Playwright support
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage
@@ -41,7 +41,7 @@ An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, M
 
 3. **Open the chat UI:**
 
-   Navigate to the Function App URL shown in the deployment output (`https://<app-name>.azurewebsites.net/`).
+   Navigate to `https://<app-name>.azurewebsites.net/agents/main/`.
 
 ## Run Locally
 
@@ -58,14 +58,14 @@ Follow the [shared local development guide](../README.md#run-locally) in the sam
 
 Once `func start` is running:
 
-- **Chat UI:** `http://localhost:7071/`
-- **Chat API:** `POST http://localhost:7071/agent/chat` with JSON body `{"prompt": "..."}`
-- **Streaming API:** `POST http://localhost:7071/agent/chatstream` (Server-Sent Events)
+- **Chat UI:** `http://localhost:7071/agents/main/`
+- **Chat API:** `POST http://localhost:7071/agents/main/chat` with JSON body `{"prompt": "..."}`
+- **Streaming API:** `POST http://localhost:7071/agents/main/chatstream` (Server-Sent Events)
 - **MCP webhook:** `http://localhost:7071/runtime/webhooks/mcp` (for VS Code, Claude Desktop)
 
 ## How It Works
 
 - [`main.agent.md`](src/main.agent.md) defines the agent with code execution sandbox support
 - The Bicep template creates a Microsoft Foundry project and `gpt-5.4` deployment for cloud runs
-- The framework registers HTTP chat endpoints, an MCP server, and a built-in chat UI
+- The framework registers built-in HTTP chat endpoints, an MCP tool, and a built-in chat UI
 - The agent can answer questions and run Python code in a secure sandbox when needed

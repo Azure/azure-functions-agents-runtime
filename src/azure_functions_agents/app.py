@@ -17,12 +17,14 @@ from .discovery.skills import discover_skills
 from .discovery.tools import discover_user_tools
 from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
-from .registration.endpoints import register_debug_endpoints
+from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
 
 
-def _debug_enabled(app_debug: Any) -> bool:
-    return bool(app_debug.chat_ui or app_debug.chat_api or app_debug.mcp)
+def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
+    return bool(
+        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
+    )
 
 
 def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
@@ -37,7 +39,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
       6. Validate each ResolvedAgent (required fields, MCP exclude references, etc.).
       7. Build AgentCapabilities per agent (apply mcp/skills/tools filters).
       8. Create the FunctionApp.
-      9. Register each agent's trigger (if any) and debug endpoints (if any).
+    9. Register each agent's trigger (if any) and built-in endpoints (if any).
     """
     if app_root is not None:
         set_app_root(app_root)
@@ -73,9 +75,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_skills=skills,
         )
         allocated_name: str | None = None
-        if not resolved.is_main and (
-            resolved.trigger is not None or _debug_enabled(resolved.debug_endpoints)
-        ):
+        if resolved.trigger is not None or _builtin_endpoints_enabled(resolved.builtin_endpoints):
             allocated_name = allocate_unique_function_name(
                 resolved.source_file,
                 resolved.name,
@@ -89,8 +89,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 registered_names=registered_names if allocated_name is None else None,
                 function_name=allocated_name,
             )
-        if _debug_enabled(resolved.debug_endpoints):
-            register_debug_endpoints(app, resolved, capabilities, slug=allocated_name)
+        if _builtin_endpoints_enabled(resolved.builtin_endpoints):
+            register_builtin_endpoints(app, resolved, capabilities, slug=allocated_name)
 
     if not agent_specs:
         logger.info("No agent files found.")

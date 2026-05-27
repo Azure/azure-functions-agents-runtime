@@ -1,7 +1,7 @@
-"""Debug HTTP/UI/MCP endpoint registration for resolved agents.
+"""Built-in HTTP/UI/MCP endpoint registration for resolved agents.
 
-Per-app non-main debug route slugs are tracked on the ``FunctionApp`` instance
-via a private ``_afa_debug_slug_names`` set. Storing the registry on the app
+Per-app built-in endpoint slugs are tracked on the ``FunctionApp`` instance
+via a private ``_afa_builtin_slug_names`` set. Storing the registry on the app
 keeps tests isolated without relying on global module state.
 """
 
@@ -19,7 +19,7 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 from .._logger import logger
 from ..config import ResolvedAgent
 from ._handlers import build_sandbox_tools_for_session
-from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_debug_slug
+from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
 from .capabilities import AgentCapabilities
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
@@ -34,7 +34,7 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     ]
 )
 
-_DEBUG_SLUG_ATTR = "_afa_debug_slug_names"
+_BUILTIN_SLUG_ATTR = "_afa_builtin_slug_names"
 
 
 def _format_exception_message(exc: Exception) -> str:
@@ -63,29 +63,29 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     return None
 
 
-def _debug_slug_registry(app: func.FunctionApp) -> set[str]:
-    registry = getattr(app, _DEBUG_SLUG_ATTR, None)
+def _builtin_slug_registry(app: func.FunctionApp) -> set[str]:
+    registry = getattr(app, _BUILTIN_SLUG_ATTR, None)
     if registry is None:
         registry = set()
-        setattr(app, _DEBUG_SLUG_ATTR, registry)
+        setattr(app, _BUILTIN_SLUG_ATTR, registry)
     return registry
 
 
-def reset_debug_slug_registry(app: func.FunctionApp) -> None:
-    """Clear stored non-main debug slugs for ``app``.
+def reset_builtin_slug_registry(app: func.FunctionApp) -> None:
+    """Clear stored built-in endpoint slugs for ``app``.
 
     Tests can call this before registering a fresh set of agents on the same
     ``FunctionApp`` instance.
     """
 
-    setattr(app, _DEBUG_SLUG_ATTR, set())
+    setattr(app, _BUILTIN_SLUG_ATTR, set())
 
 
-def _ensure_unique_non_main_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
-    return allocate_unique_debug_slug(
+def _ensure_unique_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
+    return allocate_unique_builtin_slug(
         resolved.source_file,
         resolved.name,
-        _debug_slug_registry(app),
+        _builtin_slug_registry(app),
     )
 
 
@@ -93,18 +93,18 @@ def _index_path() -> Path:
     return Path(__file__).resolve().parent.parent / "public" / "index.html"
 
 
-def _resolve_debug_session_id(session_id: str | None) -> str:
+def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
 
-async def _run_debug_agent(
+async def _run_builtin_agent(
     prompt: str,
     *,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
 ) -> Any:
-    resolved_session_id = _resolve_debug_session_id(session_id)
+    resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return await _run_agent(
         prompt,
@@ -119,14 +119,14 @@ async def _run_debug_agent(
     )
 
 
-def _run_debug_agent_stream(
+def _run_builtin_agent_stream(
     prompt: str,
     *,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
 ) -> Any:
-    resolved_session_id = _resolve_debug_session_id(session_id)
+    resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
     return _run_agent_stream(
         prompt,
@@ -173,35 +173,6 @@ def _register_chat_page(
     function_name: str,
     route: str,
 ) -> None:
-    if resolved.is_main:
-
-        @app.route(
-            route=route,
-            methods=["GET"],
-            auth_level=func.AuthLevel.ANONYMOUS,
-        )
-        def root_chat_page(req: Request) -> Response:
-            """Serve the main chat UI catch-all at ``/`` only."""
-
-            ignored = (req.path_params or {}).get("ignored", "")
-            if ignored:
-                return Response("Not found", status_code=404)
-
-            index_path = _index_path()
-            if not index_path.exists():
-                return Response("index.html not found", status_code=404)
-
-            return Response(
-                index_path.read_text(encoding="utf-8"),
-                status_code=200,
-                media_type="text/html",
-            )
-
-        app.function_name(name=function_name)(root_chat_page)
-        return
-
-    # Azure Functions route matching is expected to prefer this literal route
-    # over the main agent's ``{*ignored}`` catch-all when both are present.
     @app.route(
         route=route,
         methods=["GET"],
@@ -235,7 +206,7 @@ def _register_http_chat(
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
-            result = await _run_debug_agent(
+            result = await _run_builtin_agent(
                 prompt,
                 resolved=resolved,
                 capabilities=capabilities,
@@ -256,7 +227,7 @@ def _register_http_chat(
             return _json_error(str(exc), status_code=400)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
-            logger.error("Debug chat error for '%s': %s", resolved.name, error_msg)
+            logger.error("Built-in chat API error for '%s': %s", resolved.name, error_msg)
             return _json_error(error_msg)
 
     app.function_name(name=function_name)(chat)
@@ -277,7 +248,7 @@ def _register_http_chat_stream(
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
             return StreamingResponse(
-                _run_debug_agent_stream(
+                _run_builtin_agent_stream(
                     prompt,
                     resolved=resolved,
                     capabilities=capabilities,
@@ -289,7 +260,7 @@ def _register_http_chat_stream(
             return _sse_error_response(str(exc), status_code=400)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
-            logger.error("Debug chat stream error for '%s': %s", resolved.name, error_msg)
+            logger.error("Built-in chat stream error for '%s': %s", resolved.name, error_msg)
             return _sse_error_response(error_msg, status_code=500)
 
     app.function_name(name=function_name)(chat_stream)
@@ -318,7 +289,7 @@ def _register_mcp_endpoint(
                 return json.dumps({"error": "Missing 'prompt'"})
 
             session_id = _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
-            result = await _run_debug_agent(
+            result = await _run_builtin_agent(
                 prompt.strip(),
                 resolved=resolved,
                 capabilities=capabilities,
@@ -333,47 +304,43 @@ def _register_mcp_endpoint(
             )
         except Exception as exc:
             error_msg = _format_exception_message(exc)
-            logger.error("Debug MCP error for '%s': %s", resolved.name, error_msg)
+            logger.error("Built-in MCP error for '%s': %s", resolved.name, error_msg)
             return json.dumps({"error": error_msg})
 
     app.function_name(name=function_name)(mcp_agent_chat)
 
 
-def register_debug_endpoints(
+def register_builtin_endpoints(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     slug: str | None = None,
 ) -> None:
-    """Register debug chat UI, REST chat, and MCP endpoints for one agent."""
+    """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
     slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
-    debug_endpoints = resolved.debug_endpoints
-    if not resolved.is_main and (
-        debug_endpoints.chat_ui or debug_endpoints.chat_api or debug_endpoints.mcp
-    ):
-        if slug in _debug_slug_registry(app):
-            slug = _ensure_unique_non_main_slug(app, resolved)
+    builtin_endpoints = resolved.builtin_endpoints
+    if builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp:
+        if slug in _builtin_slug_registry(app):
+            slug = _ensure_unique_slug(app, resolved)
         else:
-            _debug_slug_registry(app).add(slug)
+            _builtin_slug_registry(app).add(slug)
 
-    base_function_name = _safe_function_name(
-        ("main" if resolved.is_main else f"agent_{slug}") + "_debug"
-    )
+    base_function_name = _safe_function_name(f"agent_{slug}_builtin")
 
-    if debug_endpoints.chat_ui:
-        route = "{*ignored}" if resolved.is_main else f"agents/{slug}/"
+    if builtin_endpoints.debug_chat_ui:
+        route = f"agents/{slug}/"
         _register_chat_page(
             app,
             resolved,
             function_name=f"{base_function_name}_chat_page",
             route=route,
         )
-        logger.info("Registered debug chat page for '%s' at /%s", resolved.name, route)
+        logger.info("Registered debug chat UI for '%s' at /%s", resolved.name, route)
 
-    if debug_endpoints.chat_api:
-        chat_route = "agent/chat" if resolved.is_main else f"agents/{slug}/chat"
-        stream_route = "agent/chatstream" if resolved.is_main else f"agents/{slug}/chatstream"
+    if builtin_endpoints.chat_api:
+        chat_route = f"agents/{slug}/chat"
+        stream_route = f"agents/{slug}/chatstream"
         _register_http_chat(
             app,
             resolved,
@@ -389,13 +356,13 @@ def register_debug_endpoints(
             function_name=f"{base_function_name}_chatstream",
         )
         logger.info(
-            "Registered debug HTTP endpoints for '%s' at /%s and /%s",
+            "Registered built-in HTTP endpoints for '%s' at /%s and /%s",
             resolved.name,
             chat_route,
             stream_route,
         )
 
-    if debug_endpoints.mcp:
+    if builtin_endpoints.mcp:
         _register_mcp_endpoint(
             app,
             resolved,
@@ -403,4 +370,4 @@ def register_debug_endpoints(
             tool_name=slug,
             function_name=f"{base_function_name}_mcp",
         )
-        logger.info("Registered debug MCP tool '%s' for '%s'", slug, resolved.name)
+        logger.info("Registered built-in MCP tool '%s' for '%s'", slug, resolved.name)

@@ -74,10 +74,10 @@ YAML front matter at the top of each agent file.
 **Required properties:**
 - `name` — String, display name for the agent
 - `description` — String, brief description of the agent's purpose
-- `trigger` — Object defining how the agent is invoked (optional for `main.agent.md` only)
+- `trigger` — Object defining how the agent is invoked (optional only when at least one `builtin_endpoints` value is enabled)
 
 **Optional properties:**
-- `debug_endpoints` — Object or boolean for enabling debugging/testing endpoints
+- `builtin_endpoints` — Object or boolean for enabling built-in chat UI, chat API, and MCP tool endpoints
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
@@ -96,7 +96,7 @@ YAML front matter at the top of each agent file.
 ```
 /
   agents.config.yaml          # Optional: Global defaults
-  *.agent.md               # Agents (require trigger)
+  *.agent.md               # Agents (triggered and/or built-in endpoint-enabled)
   ...
 ```
 
@@ -121,8 +121,8 @@ Fields are organized into categories based on how they can be used:
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `trigger` — Invocation method (required for non-main agents)
-- `debug_endpoints` — Debugging and testing endpoints
+- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled)
+- `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `logger`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
 - `metadata` — Organizational metadata
@@ -131,7 +131,7 @@ Fields are organized into categories based on how they can be used:
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name`, `description`, and `trigger` (except `main.agent.md` where `trigger` is optional).
+**Summary:** Every `.agent.md` file must have `name` and `description`. It must also have either a `trigger` or at least one enabled `builtin_endpoints` value.
 
 #### `name`
 - **Type:** `string`
@@ -153,7 +153,7 @@ Fields are organized into categories based on how they can be used:
 - **Type:** `object`
 - **Typical location:** Agent only
 - **Can override:** N/A (agent-specific only)
-- **Description:** Defines how the agent is invoked. Required for all agents except `main.agent.md`. If `main.agent.md` omits `trigger`, the runtime registers the built-in chat UI, `/agent/chat`, `/agent/chatstream`, and MCP debug surfaces instead of a normal trigger.
+- **Description:** Defines how the agent is invoked. Required unless the agent enables at least one built-in endpoint. Endpoint-only agents can omit `trigger`.
 - **Structure:** `type` field specifies the trigger type, `args` contains type-specific configuration
 - **Important:** Only **one trigger per agent file** is allowed
 
@@ -239,34 +239,33 @@ trigger:
 
 ---
 
-#### `debug_endpoints`
+#### `builtin_endpoints`
 - **Type:** `object`
 - **Location:** Agent only (front matter)
 - **Can override:** N/A (agent-specific only)
-- **Default:** All disabled (`false`) for regular agents; chat UI, chat API, and MCP enabled for `main.agent.md`
-- **Description:** Enables debugging and testing endpoints for the agent. Useful for development, testing, and agent composition.
+- **Default:** All disabled (`false`) for every agent file, including `main.agent.md`
+- **Description:** Enables built-in endpoints for the agent. Useful for interactive testing, programmatic chat access, and agent composition.
 
 **Structure:**
 ```yaml
-debug_endpoints:
-  chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
+builtin_endpoints:
+  debug_chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
   chat_api: boolean  # Enable REST API endpoints even without the chat UI
   mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
 ```
 
-`chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `mcp` is enabled only when explicitly set on non-main agents.
+`debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `mcp` is enabled only when explicitly set. `builtin_endpoints: true` is shorthand for `debug_chat_ui: true` plus `chat_api: true`; it does not enable MCP.
 
 **Endpoint Details:**
 
-**`chat_ui: true`** — Interactive Chat UI
-- **Routes by agent type:** `{slug}` below is the sanitized filename-based value described in [Function name resolution](#function-name-resolution).
+**`debug_chat_ui: true`** — Interactive Chat UI
+- **Routes:** `{slug}` below is the sanitized filename-based value described in [Function name resolution](#function-name-resolution).
 
-  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `debug_endpoints.mcp: true` |
+  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `builtin_endpoints.mcp: true` |
   | --- | --- | --- | --- | --- |
-  | `main.agent.md` | `/` | `/agent/chat` | `/agent/chatstream` | Registers the `main` MCP tool through the shared runtime MCP webhook |
-  | Any other `.agent.md` with `debug_endpoints.chat_ui: true` | `/agents/{slug}/` | `/agents/{slug}/chat` | `/agents/{slug}/chatstream` | Registers an MCP tool named `{slug}` through the shared runtime MCP webhook |
+  | Any `.agent.md` with `builtin_endpoints.debug_chat_ui: true` | `/agents/{slug}/` | `/agents/{slug}/chat` | `/agents/{slug}/chatstream` | Registers an MCP tool named `{slug}` through the shared runtime MCP webhook |
 - **Purpose:** Browser-based chat interface for manual testing and interaction
-- **Behavior:** Also registers the backing REST endpoints the built-in page calls, so `debug_endpoints.chat_ui: true` is self-sufficient
+- **Behavior:** Also registers the backing REST endpoints the built-in page calls, so `builtin_endpoints.debug_chat_ui: true` is self-sufficient
 - **Use case:** Test any agent (timer, queue, HTTP) via a web UI during development
 
 **`chat_api: true`** — REST API Endpoints
@@ -287,15 +286,15 @@ debug_endpoints:
 
 **Examples:**
 
-**Enable all debug endpoints:**
+**Enable all built-in endpoints:**
 ```yaml
 trigger:
   type: timer_trigger
   args:
     schedule: "0 0 7 * * *"
 
-debug_endpoints:
-  chat_ui: true   # Enable UI for manual testing
+builtin_endpoints:
+  debug_chat_ui: true   # Enable UI for manual testing
   chat_api: true  # Enable REST API for integration tests
   mcp: true       # Expose as MCP tool for other agents
 ```
@@ -307,7 +306,7 @@ trigger:
   args:
     queue_name: "tasks"
 
-debug_endpoints:
+builtin_endpoints:
   chat_api: true   # Enable REST API only
 ```
 
@@ -318,18 +317,18 @@ trigger:
   args:
     schedule: "0 0 7 * * *"
 
-debug_endpoints:
+builtin_endpoints:
   mcp: true   # Expose as tool for other agents to call
 ```
 
-**Shorthand for enabling debug endpoints:**
+**Shorthand for enabling chat UI and chat API:**
 ```yaml
-debug_endpoints: true   # Main: chat_ui, chat_api, and mcp; non-main: chat_ui and chat_api only
+builtin_endpoints: true   # Equivalent to debug_chat_ui: true and chat_api: true; mcp remains false
 ```
 
 **Shorthand for disabling all:**
 ```yaml
-debug_endpoints: false  # Equivalent to chat_ui: false, chat_api: false, mcp: false
+builtin_endpoints: false  # Equivalent to debug_chat_ui: false, chat_api: false, mcp: false
 ```
 
 ---
@@ -779,8 +778,8 @@ trigger:
   args:
     schedule: "0 0 * * * *"  # Every hour
 
-debug_endpoints:
-  chat_ui: true   # Enable chat UI for manual testing
+builtin_endpoints:
+  debug_chat_ui: true   # Enable chat UI for manual testing
   chat_api: true  # Enable REST API endpoints for integration tests
   mcp: true       # Expose as MCP tool for other agents
 ---
@@ -811,6 +810,11 @@ timeout: 600
 ---
 name: Chat Assistant
 description: A helpful assistant with Python code execution capabilities
+
+builtin_endpoints:
+  debug_chat_ui: true
+  chat_api: true
+  mcp: true
 ---
 
 You are a helpful assistant. If you need to run Python code or perform calculations, use the code execution sandbox.
@@ -903,12 +907,16 @@ You are a basic agent with most capabilities but some exclusions for security.
 ---
 name: Azure Assistant
 description: An interactive assistant for exploring Azure resources
+
+builtin_endpoints:
+  debug_chat_ui: true
+  chat_api: true
 ---
 
 Help the user explore resources in subscription $SUBSCRIPTION_ID.
 ```
 
-This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug surface, inherited capabilities, and model resolution from environment/provider defaults.
+This uses explicit built-in chat UI and chat APIs, inherited capabilities, and model resolution from environment/provider defaults.
 
 ---
 
@@ -919,7 +927,7 @@ This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug s
 **Agent Front Matter (`.agent.md`):**
 1. **`name`** — Must always be present (string)
 2. **`description`** — Must always be present (string)
-3. **`trigger`** — Required for all agents except `main.agent.md` (object with `type` field)
+3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled
 
 **Global Configuration (`agents.config.yaml`):**
 - **No required properties** — The entire file is optional
@@ -957,13 +965,13 @@ This uses the `main.agent.md` defaults: built-in chat UI, chat APIs, MCP debug s
 ## File Naming Conventions
 
 - **Global configuration:** `agents.config.yaml` (in root directory)
-- **Main agent:** `main.agent.md` (optional) — Special agent with HTTP chat UI and MCP tool enabled by default
+- **Common chat agent filename:** `main.agent.md` (optional convention; no implicit endpoints)
 - **Named agents:** `{agent-name}.agent.md` (e.g., `daily_azure_report.agent.md`)
 - **Skills:** `skills/{skill-name}/SKILL.md`
 
 ### Function name resolution
 
-For non-main agents, two related identifiers are derived from the source filename. The frontmatter `name:` field remains display-only and is never used for either identifier.
+For agents, two related identifiers are derived from the source filename. The frontmatter `name:` field remains display-only and is never used for either identifier.
 
 - **Azure Function name** (used for host indexing and `admin/functions/{name}` URLs):
   - Start with the agent filename stem (remove `.agent.md`).
@@ -974,30 +982,24 @@ For non-main agents, two related identifiers are derived from the source filenam
   - If another agent in the same `create_function_app()` call already uses that sanitized name, append `_2`, `_3`, and so on until the name is unique.
   - Example: `daily-report.agent.md` → `daily_report`; if `daily_report.agent.md` also exists, the second Azure Function name becomes `daily_report_2`.
 
-- **Debug slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `debug_endpoints.mcp: true`):
+- **Built-in endpoint slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `builtin_endpoints.mcp: true`):
   - Uses the same filename sanitization rules.
   - Uses the same collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, append `_2`, `_3`, and so on until the slug is unique.
-  - In practice, the debug slug stays paired with the allocated Azure Function name for the same agent (for example, `daily_report_2` maps to `/agents/daily_report_2/`).
-  - Example: `daily-report.agent.md` → `/agents/daily_report/`; if `daily_report.agent.md` also exists, the second debug slug becomes `/agents/daily_report_2/`.
+  - In practice, the built-in endpoint slug stays paired with the allocated Azure Function name for the same agent (for example, `daily_report_2` maps to `/agents/daily_report_2/`).
+  - Example: `daily-report.agent.md` → `/agents/daily_report/`; if `daily_report.agent.md` also exists, the second built-in endpoint slug becomes `/agents/daily_report_2/`.
 
 In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
 
-**Main agent behavior:**
-The `main.agent.md` file is special:
-- **Debug endpoints enabled by default** (`debug_endpoints` omitted):
-  - `GET /` — Chat UI page
-  - `POST /agent/chat` — Non-streaming chat endpoint
-  - `POST /agent/chatstream` — Streaming chat endpoint (SSE)
-  - MCP tool registration — Tool name derived from the sanitized filename slug (`main` for `main.agent.md`), exposed as `mcpToolTrigger`
-- **No trigger required** — Registers built-in chat UI, chat APIs, and MCP debug surfaces by default; `trigger` can be omitted from front matter
+**Endpoint-only agents:**
+Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints.debug_chat_ui: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`. With `builtin_endpoints.mcp: true`, it also registers an MCP tool named `main` on the shared runtime MCP transport.
 
-Other agents require an explicit `trigger` definition and have `debug_endpoints: false` (all debug endpoints disabled) by default.
+Agents with neither `trigger` nor enabled `builtin_endpoints` are invalid.
 
 **Example project structure:**
 ```
 /
   agents.config.yaml           # Global configuration
-  main.agent.md             # Built-in chat UI, chat APIs, and MCP debug surfaces
+  main.agent.md             # Optional chat agent convention; enable builtin_endpoints explicitly
   daily_report.agent.md     # Timer-triggered agent
   resource_summary.agent.md # Custom HTTP agent
   function_app.py           # Python Functions entry point

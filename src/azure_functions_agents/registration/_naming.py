@@ -65,7 +65,7 @@ def allocate_unique_function_name(
     return function_name
 
 
-def allocate_unique_debug_slug(
+def allocate_unique_builtin_slug(
     source_file: str | Path | None, name: str, registered_names: set[str]
 ) -> str:
     base_slug = _function_name_from_source(source_file, name)
@@ -75,7 +75,7 @@ def allocate_unique_debug_slug(
 
     source_desc = Path(str(source_file)).name if source_file else f"agent {name!r}"
     logger.warning(
-        "Debug slug collision: %r would register at '/agents/%s/' but that route is already used. "
+        "Built-in endpoint slug collision: %r would register at '/agents/%s/' but that route is already used. "
         "Registering at '/agents/%s/'. Rename the source file to avoid the suffix.",
         source_desc,
         base_slug,

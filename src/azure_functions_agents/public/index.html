@@ -524,9 +524,9 @@
 
 		function getApiBasePath() {
 			// Examples:
-			// / -> /agent
+			// / -> /agents/main
 			// /agents/foo/ -> /agents/foo
-			// /api/ -> /api/agent
+			// /api/ -> /api/agents/main
 			// /api/agents/foo/ -> /api/agents/foo
 			// /api/agents/foo -> /api/agents/foo
 			// Match the trailing /agents/{slug} segment while preserving any path prefix
@@ -537,12 +537,12 @@
 			}
 
 			if (window.location.pathname === "/") {
-				return "/agent";
+				return "/agents/main";
 			}
 
 			return window.location.pathname.endsWith("/")
-				? `${window.location.pathname}agent`
-				: `${window.location.pathname}/agent`;
+				? `${window.location.pathname}agents/main`
+				: `${window.location.pathname}/agents/main`;
 		}
 
 		const state = {
