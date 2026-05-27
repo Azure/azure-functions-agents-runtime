@@ -52,10 +52,7 @@ Create `main.agent.md`:
 name: My Agent
 description: A helpful assistant
 
-builtin_endpoints:
-  debug_chat_ui: true
-  chat_api: true
-  mcp: true
+builtin_endpoints: true
 ---
 
 You are a helpful assistant. Answer questions concisely.
@@ -154,7 +151,7 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 - **MCP tool** — optional tool exposed through `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
-If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for debug chat UI plus chat API; set `mcp: true` explicitly when you want the agent exposed as an MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
 ### Event-driven agents (`<name>.agent.md`)
 
@@ -210,7 +207,7 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
-- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name and endpoint slug. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the built-in endpoint slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name and endpoint slug. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the built-in endpoint slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -349,7 +346,7 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 
 ### MCP Server
 
-When `builtin_endpoints.mcp: true`, the agent is exposed as an MCP tool named after its slug through the shared MCP-compatible endpoint at `/runtime/webhooks/mcp`. Requires the MCP extension system key in the `x-functions-key` header when deployed.
+When `builtin_endpoints: true` or `builtin_endpoints.mcp: true`, the agent is exposed as an MCP tool named after its slug through the shared MCP-compatible endpoint at `/runtime/webhooks/mcp`. Requires the MCP extension system key in the `x-functions-key` header when deployed.
 
 ### Without built-in endpoints
 

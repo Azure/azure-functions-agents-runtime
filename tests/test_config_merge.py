@@ -61,7 +61,7 @@ def test_resolve_builtin_endpoints() -> None:
     assert _resolve_builtin_endpoints(AgentSpec(name="A", description="B", is_main=False)) == BuiltinEndpointsConfig()
     assert _resolve_builtin_endpoints(
         AgentSpec(name="A", description="B", builtin_endpoints=True)
-    ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False)
+    ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
     assert _resolve_builtin_endpoints(
         AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True))
     ) == BuiltinEndpointsConfig(chat_api=True)
@@ -70,7 +70,7 @@ def test_resolve_builtin_endpoints() -> None:
 def test_resolve_builtin_endpoints_shorthand_is_not_main_special_cased() -> None:
     assert _resolve_builtin_endpoints(
         AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True)
-    ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=False)
+    ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
 
 
 def test_resolve_sandbox() -> None:

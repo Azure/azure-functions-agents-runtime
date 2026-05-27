@@ -1,10 +1,10 @@
 # Basic Chat
 
-An HTTP chat agent with a built-in web UI, streaming API, MCP server endpoint, Microsoft Foundry, and Python code execution via ACA Dynamic Sessions.
+An endpoint-first chat agent with a built-in web UI, streaming API, MCP tool, Microsoft Foundry, and Python code execution via ACA Dynamic Sessions.
 
-| Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
-|---|---|---|---|---|---|---|
-| HTTP | | | | | ✅ | ✅ |
+| Trigger | Built-in Endpoints | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
+|---|---|---|---|---|---|---|---|
+| | ✅ HTTP + MCP | | | | | ✅ | ✅ |
 
 ## Features
 
@@ -65,7 +65,7 @@ Once `func start` is running:
 
 ## How It Works
 
-- [`main.agent.md`](src/main.agent.md) defines the agent with code execution sandbox support
+- [`main.agent.md`](src/main.agent.md) defines the endpoint-only agent with `builtin_endpoints: true` and code execution sandbox support
 - The Bicep template creates a Microsoft Foundry project and `gpt-5.4` deployment for cloud runs
 - The framework registers built-in HTTP chat endpoints, an MCP tool, and a built-in chat UI
 - The agent can answer questions and run Python code in a secure sandbox when needed

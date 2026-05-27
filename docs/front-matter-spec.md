@@ -254,14 +254,14 @@ builtin_endpoints:
   mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
 ```
 
-`debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `mcp` is enabled only when explicitly set. `builtin_endpoints: true` is shorthand for `debug_chat_ui: true` plus `chat_api: true`; it does not enable MCP.
+`debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints: `debug_chat_ui`, `chat_api`, and `mcp`.
 
 **Endpoint Details:**
 
 **`debug_chat_ui: true`** — Interactive Chat UI
 - **Routes:** `{slug}` below is the sanitized filename-based value described in [Function name resolution](#function-name-resolution).
 
-  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `builtin_endpoints.mcp: true` |
+  | Agent file | UI (`GET`) | Chat (`POST`) | Streaming (`POST`) | MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true` |
   | --- | --- | --- | --- | --- |
   | Any `.agent.md` with `builtin_endpoints.debug_chat_ui: true` | `/agents/{slug}/` | `/agents/{slug}/chat` | `/agents/{slug}/chatstream` | Registers an MCP tool named `{slug}` through the shared runtime MCP webhook |
 - **Purpose:** Browser-based chat interface for manual testing and interaction
@@ -321,9 +321,9 @@ builtin_endpoints:
   mcp: true   # Expose as tool for other agents to call
 ```
 
-**Shorthand for enabling chat UI and chat API:**
+**Shorthand for enabling all built-in endpoints:**
 ```yaml
-builtin_endpoints: true   # Equivalent to debug_chat_ui: true and chat_api: true; mcp remains false
+builtin_endpoints: true   # Equivalent to debug_chat_ui: true, chat_api: true, and mcp: true
 ```
 
 **Shorthand for disabling all:**
@@ -811,10 +811,7 @@ timeout: 600
 name: Chat Assistant
 description: A helpful assistant with Python code execution capabilities
 
-builtin_endpoints:
-  debug_chat_ui: true
-  chat_api: true
-  mcp: true
+builtin_endpoints: true
 ---
 
 You are a helpful assistant. If you need to run Python code or perform calculations, use the code execution sandbox.
@@ -982,7 +979,7 @@ For agents, two related identifiers are derived from the source filename. The fr
   - If another agent in the same `create_function_app()` call already uses that sanitized name, append `_2`, `_3`, and so on until the name is unique.
   - Example: `daily-report.agent.md` → `daily_report`; if `daily_report.agent.md` also exists, the second Azure Function name becomes `daily_report_2`.
 
-- **Built-in endpoint slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `builtin_endpoints.mcp: true`):
+- **Built-in endpoint slug** (used for `/agents/{slug}/`, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and the MCP tool name exposed when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`):
   - Uses the same filename sanitization rules.
   - Uses the same collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, append `_2`, `_3`, and so on until the slug is unique.
   - In practice, the built-in endpoint slug stays paired with the allocated Azure Function name for the same agent (for example, `daily_report_2` maps to `/agents/daily_report_2/`).
@@ -991,7 +988,7 @@ For agents, two related identifiers are derived from the source filename. The fr
 In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
 
 **Endpoint-only agents:**
-Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints.debug_chat_ui: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`. With `builtin_endpoints.mcp: true`, it also registers an MCP tool named `main` on the shared runtime MCP transport.
+Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`, and registers an MCP tool named `main` on the shared runtime MCP transport.
 
 Agents with neither `trigger` nor enabled `builtin_endpoints` are invalid.
 

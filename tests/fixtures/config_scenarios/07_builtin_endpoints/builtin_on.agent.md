@@ -1,6 +1,6 @@
 ---
 name: Builtin Shorthand On
-description: Agent that uses the shorthand builtin_endpoints=true to enable chat surfaces.
+description: Agent that uses the shorthand builtin_endpoints=true to enable all built-in endpoints.
 trigger:
   type: http_trigger
   args:
@@ -8,4 +8,4 @@ trigger:
 builtin_endpoints: true
 ---
 
-You are an agent that has built-in chat surfaces enabled via shorthand.
+You are an agent that has all built-in endpoints enabled via shorthand.
