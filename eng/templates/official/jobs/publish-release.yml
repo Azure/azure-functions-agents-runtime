@@ -115,28 +115,107 @@ jobs:
         # Push tag to remote
         git push origin $newLibraryVersion
       displayName: 'Tag and push x.y.z'
+      
+    - download: current
+      artifact: ${{ parameters.artifactName }}
+      displayName: 'Download build artifacts'
+
     - pwsh: |
+        $ErrorActionPreference = 'Stop'
+        $ProgressPreference = 'SilentlyContinue'
+
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
 
-        # Create GitHub credential
-        $credential = [System.Convert]::ToBase64String([System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
+        $credential = [System.Convert]::ToBase64String(
+            [System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
 
-        # Create Release Note
-        Write-Host "Creating release note in GitHub"
-        $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
-        $response = Invoke-WebRequest -Headers @{"Cache-Control"="no-cache";"Content-Type"="application/json";"Authorization"="Basic $credential"} -Method Post -Body "$body" -Uri "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
-
-        # Return Value
-        if ($response.StatusCode -ne 201) {
-            Write-Host "Failed to create release note in GitHub"
-            exit -1
+        $apiHeaders = @{
+            "Accept"               = "application/vnd.github+json"
+            "Authorization"        = "Basic $credential"
+            "X-GitHub-Api-Version" = "2022-11-28"
+            "Content-Type"         = "application/json"
         }
 
-        $draftUrl = $response | ConvertFrom-Json | Select -expand url
-        Write-Host "Release draft created in $draftUrl"
-      displayName: 'Create GitHub release draft'
+        # ---- Locate and validate assets BEFORE creating the release ----
+        $distFolder = Join-Path '$(Pipeline.Workspace)' (Join-Path '${{ parameters.artifactName }}' 'dist')
+        if (-not (Test-Path -LiteralPath $distFolder)) {
+            throw "Distribution folder not found: $distFolder"
+        }
+
+        $assetsToUpload = @(
+            Get-ChildItem -LiteralPath $distFolder -File |
+                Where-Object { $_.Name -like '*.whl' -or $_.Name -like '*.tar.gz' } |
+                Sort-Object Name
+        )
+        if ($assetsToUpload.Count -eq 0) {
+            throw "No .whl or .tar.gz files found in $distFolder"
+        }
+        Write-Host "Assets to upload:"
+        $assetsToUpload | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Length) bytes)" }
+
+        # ---- Create draft release ----
+        Write-Host "Creating GitHub draft release for $newLibraryVersion"
+        $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
+        $createResponse = Invoke-WebRequest -Headers $apiHeaders -Method Post -Body "$body" `
+            -Uri "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
+        if ($createResponse.StatusCode -ne 201) {
+            throw "Failed to create release. HTTP $($createResponse.StatusCode)"
+        }
+        $release = $createResponse.Content | ConvertFrom-Json
+        Write-Host "Draft release created: $($release.html_url)"
+
+        # ---- Upload assets; fail hard on duplicate-name (PyPI-style) ----
+        $uploadUrlBase = $release.upload_url -replace '\{\?name,label\}$', ''
+        $uploadHeaders = @{
+            "Accept"               = "application/vnd.github+json"
+            "Authorization"        = "Basic $credential"
+            "X-GitHub-Api-Version" = "2022-11-28"
+        }
+
+        # Wrap upload loop so any failure deletes the incomplete draft release.
+        # This keeps the world clean for retries: an operator can rerun the job
+        # without manually purging a stranded empty/partial draft.
+        try {
+            foreach ($asset in $assetsToUpload) {
+                $assetUploadUrl = '{0}?name={1}' -f $uploadUrlBase, [System.Uri]::EscapeDataString($asset.Name)
+                Write-Host "Uploading $($asset.Name)..."
+                try {
+                    $uploadResponse = Invoke-WebRequest -Headers $uploadHeaders -Method Post `
+                        -Uri $assetUploadUrl -ContentType 'application/octet-stream' -InFile $asset.FullName
+                } catch {
+                    $status = $null
+                    if ($_.Exception.Response) {
+                        $status = [int]$_.Exception.Response.StatusCode
+                    }
+                    if ($status -eq 422) {
+                        throw "Asset '$($asset.Name)' already exists on release $newLibraryVersion. GitHub releases must be unique per filename (same policy as PyPI). If this is intentional, delete the asset from the GitHub release UI and rerun, or bump the version."
+                    }
+                    throw "Upload failed for $($asset.Name): HTTP $status - $($_.Exception.Message)"
+                }
+                if ($uploadResponse.StatusCode -ne 201) {
+                    throw "Upload failed for $($asset.Name). HTTP $($uploadResponse.StatusCode)"
+                }
+                Write-Host "  -> uploaded"
+            }
+        } catch {
+            $uploadError = $_
+            if ($release -and $release.id) {
+                $releaseDeleteUri = "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases/$($release.id)"
+                Write-Host "##[warning]Asset upload failed. Cleaning up incomplete draft release $($release.id)..."
+                try {
+                    Invoke-WebRequest -Headers $apiHeaders -Method Delete -Uri $releaseDeleteUri | Out-Null
+                    Write-Host "Draft release $($release.id) deleted."
+                } catch {
+                    Write-Host "##[warning]Failed to delete draft release $($release.id): $($_.Exception.Message). Manual cleanup required at https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
+                }
+            }
+            throw $uploadError
+        }
+
+        Write-Host "All assets attached to draft release: $($release.html_url)"
+      displayName: 'Create GitHub release draft and attach assets'
 
   - job: "CheckGitHubRelease"
     dependsOn: ['CreateReleaseTag']
