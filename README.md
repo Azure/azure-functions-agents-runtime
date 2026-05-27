@@ -29,21 +29,17 @@ azurefunctions-agents-runtime
 
 ## Model Provider Configuration
 
-The runtime uses Microsoft Agent Framework, which supports OpenAI, Azure OpenAI, and Microsoft Foundry as inference back-ends. Auto-detection picks the first provider whose env vars are set, in this order:
+The runtime uses Microsoft Agent Framework, which supports Microsoft Foundry, Azure OpenAI, and OpenAI as inference back-ends. The public preview quickstart and samples use **Microsoft Foundry** as the primary path, pinned with `MAF_PROVIDER=foundry`.
 
-1. `AZURE_OPENAI_ENDPOINT` → Azure OpenAI
-2. `FOUNDRY_PROJECT_ENDPOINT` → Microsoft Foundry
-3. `OPENAI_API_KEY` → OpenAI
+| Provider | `MAF_PROVIDER` | Required env vars | Notes |
+| --- | --- | --- | --- |
+| Microsoft Foundry | `foundry` | `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL` | Recommended quickstart/sample path. Uses `DefaultAzureCredential`; run `az login` locally and set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
+| Azure OpenAI | `azure_openai` | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION` | Alternative Azure-hosted provider. `AZURE_OPENAI_DEPLOYMENT` takes precedence over `MAF_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD). |
+| OpenAI | `openai` | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`) | Alternative non-Azure provider. `MAF_MODEL` applies directly for OpenAI. |
 
-You can pin the provider explicitly with `MAF_PROVIDER=openai|azure_openai|foundry`.
+If `MAF_PROVIDER` is unset, auto-detection picks the first provider whose env vars are set, in this order: `AZURE_OPENAI_ENDPOINT` → `FOUNDRY_PROJECT_ENDPOINT` → `OPENAI_API_KEY`. Set `MAF_PROVIDER` to make the provider choice intentional.
 
-| Provider          | Required env vars                                                                            | Notes                                                                                                                                 |
-| ----------------- | -------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
-| OpenAI            | `OPENAI_API_KEY`, optional `MAF_MODEL` (default `gpt-4o-mini`)                               | `MAF_MODEL` applies directly for OpenAI.                                                                                              |
-| Azure OpenAI      | `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`, optional `AZURE_OPENAI_API_VERSION`      | `AZURE_OPENAI_DEPLOYMENT` takes precedence over `MAF_MODEL`. If `AZURE_OPENAI_API_KEY` is omitted the SDK uses `DefaultAzureCredential` (AAD); set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
-| Microsoft Foundry | `FOUNDRY_PROJECT_ENDPOINT`, optional `FOUNDRY_MODEL`                                         | `FOUNDRY_MODEL` takes precedence over `MAF_MODEL`. Uses `DefaultAzureCredential`; set `AZURE_CLIENT_ID` in multi-identity Function Apps. |
-
-Model resolution precedence is: explicit requested model > provider-specific env (`AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI, `FOUNDRY_MODEL` for Foundry) > `MAF_MODEL` > provider default.
+Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `MAF_MODEL` > provider default.
 
 ## Quick Start
 
@@ -72,7 +68,15 @@ app = create_function_app()
 
 > The app root is auto-detected from `AzureWebJobsScriptRoot` (set by `func start` and the Azure Functions host). You can override it with `create_function_app(app_root=Path(__file__).parent)` or the `AZURE_FUNCTIONS_AGENTS_APP_ROOT` env var.
 
-### 3. Create `host.json`
+### 3. Create `agents.config.yaml`
+
+```yaml
+# Default runtime configuration
+model: $FOUNDRY_MODEL
+timeout: 900
+```
+
+### 4. Create `host.json`
 
 ```json
 {
@@ -89,7 +93,7 @@ app = create_function_app()
 }
 ```
 
-### 4. Create `requirements.txt`
+### 5. Create `requirements.txt`
 
 ```
 azurefunctions-agents-runtime
@@ -97,9 +101,9 @@ azurefunctions-agents-runtime
 
 Connector-backed tools are exposed through MCP servers in `mcp.json`, and connector-triggered apps use the Azure Functions Connector Extension through the Functions extension bundle. No package extra is required.
 
-### 5. Set the model provider
+### 6. Set the model provider
 
-For local development with OpenAI:
+For local development with Microsoft Foundry, sign in with `az login`, then create `local.settings.json`:
 
 ```json
 {
@@ -107,13 +111,14 @@ For local development with OpenAI:
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "OPENAI_API_KEY": "sk-...",
-    "MAF_MODEL": "gpt-4o-mini"
+    "MAF_PROVIDER": "foundry",
+    "FOUNDRY_PROJECT_ENDPOINT": "https://<project-name>.<region>.services.ai.azure.com/api/projects/<project-name>",
+    "FOUNDRY_MODEL": "gpt-5.4"
   }
 }
 ```
 
-### 6. Start Azurite (local storage emulator)
+### 7. Start Azurite (local storage emulator)
 
 The MCP server endpoint and non-HTTP triggers (timer, queue, blob, etc.) require a storage account. Locally, use [Azurite](https://learn.microsoft.com/azure/storage/common/storage-use-azurite) via Docker:
 
@@ -123,7 +128,7 @@ docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 \
   azurite --skipApiVersionCheck --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
 ```
 
-### 7. Run locally
+### 8. Run locally
 
 ```bash
 func start
@@ -436,7 +441,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 
 ### Required Azure App Settings
 
-Set the model provider env vars described above (e.g. `OPENAI_API_KEY` and `MAF_MODEL`, `AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`, or `FOUNDRY_PROJECT_ENDPOINT` + `FOUNDRY_MODEL`). For Azure OpenAI and Microsoft Foundry, the provider-specific deployment/model setting takes precedence over `MAF_MODEL`.
+Set the model provider env vars described above. The preview samples use Microsoft Foundry (`MAF_PROVIDER=foundry`, `FOUNDRY_PROJECT_ENDPOINT`, and `FOUNDRY_MODEL`). Azure OpenAI (`AZURE_OPENAI_ENDPOINT` + `AZURE_OPENAI_DEPLOYMENT`) and OpenAI (`OPENAI_API_KEY` and optionally `MAF_MODEL`) are supported alternatives. For Microsoft Foundry and Azure OpenAI, the provider-specific model/deployment setting takes precedence over `MAF_MODEL`.
 
 When the agent uses connector-backed MCP servers, connector triggers, or `execution_sandbox`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server.
 
