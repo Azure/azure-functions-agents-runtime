@@ -1,0 +1,185 @@
+# Sample E2E job template for eng/ci/samples-e2e.yml.
+# Purpose:
+# - Run one sample end-to-end on the 1ES Linux pool described in
+#   C:\Users\larohra\.copilot\session-state\08f9df32-18b1-432d-8609-e0adfa4913a5\plan.md
+#   (§3.2, §4.3, §7).
+# - Install Python + private feed auth + Functions Core Tools/Azurite, then invoke
+#   scripts/e2e/run_sample_e2e.py for exactly one sample.
+# - Publish $(Build.ArtifactStagingDirectory)/<sample> as pipeline artifact
+#   sample-e2e-<sample>.
+# Invocation pattern from eng/ci/samples-e2e.yml:
+# - Invoke this template once per sample with sampleName/samplePath/envVarNames set
+#   to that sample's expectation entry.
+# Parameter contract:
+# - sampleName: sample identifier used in logs/artifact names (for example basic-chat).
+# - samplePath: repo-relative sample source directory passed to the harness.
+# - artifactFeed: Azure Artifacts feed for PipAuthenticate@1.
+# - envVarNames: allow-list of pipeline variable names to map into the harness process.
+# - skipAzurite: when true, pass --no-azurite to the harness.
+# - requiresExperimentalBundle: when true, run the experimental bundle CDN preflight.
+# - jobTimeoutMinutes: ADO job timeout.
+# - invocationTimeoutSeconds: per-invocation timeout passed to the harness.
+# - adminCompletionTimeoutSeconds: async admin-function completion timeout passed to the harness.
+# - funcPort: local func host port passed to the harness.
+# - pythonVersion: Python version for UsePythonVersion@0.
+
+parameters:
+  - name: sampleName
+    type: string
+  - name: samplePath
+    type: string
+  - name: artifactFeed
+    type: string
+  - name: envVarNames
+    type: object
+  - name: skipAzurite
+    type: boolean
+    default: false
+  - name: requiresExperimentalBundle
+    type: boolean
+    default: false
+  - name: jobTimeoutMinutes
+    type: number
+    default: 90 # Worst-case sum of per-invocation + admin-completion timeouts for daily-azure-report (6 invocations) is ~65 min; 90 min gives a 25 min safety margin for setup/teardown/host startup.
+  - name: invocationTimeoutSeconds
+    type: number
+    default: 600
+  - name: adminCompletionTimeoutSeconds
+    type: number
+    default: 300
+  - name: funcPort
+    type: number
+    default: 7071
+  - name: pythonVersion
+    type: string
+    default: '3.13'
+
+jobs:
+  - job: sample_e2e_${{ replace(parameters.sampleName, '-', '_') }}
+    displayName: Sample E2E - ${{ parameters.sampleName }}
+    timeoutInMinutes: ${{ parameters.jobTimeoutMinutes }}
+
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    templateContext:
+      outputParentDirectory: $(Build.ArtifactStagingDirectory)
+      outputs:
+        - output: pipelineArtifact
+          targetPath: ${{ parameters.sampleName }}
+          artifactName: sample-e2e-${{ parameters.sampleName }}
+
+    steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: ${{ parameters.pythonVersion }}
+
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+
+      - bash: |
+          set -euo pipefail
+          set -x
+
+          sudo apt-get update
+          sudo apt-get install -y ca-certificates curl gnupg apt-transport-https
+
+          curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor > microsoft.gpg
+          sudo install -o root -g root -m 644 microsoft.gpg /usr/share/keyrings/microsoft-prod.gpg
+          rm -f microsoft.gpg
+
+          echo "deb [arch=amd64 signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/ubuntu/22.04/prod jammy main" | sudo tee /etc/apt/sources.list.d/microsoft-prod.list
+          sudo apt-get update
+
+          set +e
+          sudo apt-get install -y azure-functions-core-tools-4
+          apt_exit_code=$?
+          set -e
+
+          if [ "${apt_exit_code}" -eq 0 ]; then
+            echo "Installed Azure Functions Core Tools v4 from packages.microsoft.com."
+          else
+            echo "apt install for Azure Functions Core Tools v4 failed; falling back to npm."
+            sudo npm install -g azure-functions-core-tools@4 --unsafe-perm true
+            echo "Installed Azure Functions Core Tools v4 from npm."
+          fi
+
+          sudo npm install -g azurite
+          set +x
+
+          func --version
+          azurite --version
+          python --version
+        displayName: 'Install Functions Core Tools v4 and Azurite'
+
+      - ${{ if parameters.requiresExperimentalBundle }}:
+        - bash: |
+            set -euo pipefail
+
+            echo "Experimental bundle preflight: Microsoft.Azure.Functions.ExtensionBundle.Experimental [4.6.0, 5.0.0) is downloaded lazily during 'func start'."
+            echo "Probing https://cdn.functions.azure.com up front so the job fails clearly before host startup if the 1ES network cannot reach the bundle CDN."
+
+            if ! curl --fail --silent --show-error --head --location --max-time 30 https://cdn.functions.azure.com/ >/dev/null; then
+              echo "ERROR: experimental bundle preflight failed. Unable to reach https://cdn.functions.azure.com, so the required extension bundle would likely fail during 'func start'." >&2
+              exit 1
+            fi
+
+            echo "Experimental bundle CDN reachability preflight passed."
+          displayName: 'Preflight experimental extension bundle reachability'
+
+      - bash: |
+          set -euo pipefail
+          set -x
+
+          cd ${{ parameters.samplePath }}
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+        displayName: 'Install sample dependencies'
+
+      - bash: |
+          set -euo pipefail
+          set -x
+
+          python -m pip install -e .[dev]
+          python -m pip install requests pyyaml
+        displayName: 'Install harness dependencies'
+
+      # Map only the sample's approved variable-group entries into the harness step.
+      # This is cleaner than a setvariable round-trip and keeps envVarNames as the
+      # single allow-list for what the sample process can see.
+      - bash: |
+          set -euo pipefail
+
+          mkdir -p "$(Build.ArtifactStagingDirectory)/${{ parameters.sampleName }}"
+
+          args=(
+            python
+            scripts/e2e/run_sample_e2e.py
+            --sample-name
+            ${{ parameters.sampleName }}
+            --sample-path
+            ${{ parameters.samplePath }}
+            --artifacts-dir
+            "$(Build.ArtifactStagingDirectory)/${{ parameters.sampleName }}"
+            --func-port
+            ${{ parameters.funcPort }}
+            --invocation-timeout
+            ${{ parameters.invocationTimeoutSeconds }}
+            --admin-completion-timeout
+            ${{ parameters.adminCompletionTimeoutSeconds }}
+          )
+
+          if [ '${{ parameters.skipAzurite }}' = 'true' ]; then
+            args+=(--no-azurite)
+          fi
+
+          args+=(--ado-summary)
+          "${args[@]}"
+        displayName: 'Run E2E harness'
+        env:
+          ${{ each name in parameters.envVarNames }}:
+            ${{ name }}: $(${{ name }})

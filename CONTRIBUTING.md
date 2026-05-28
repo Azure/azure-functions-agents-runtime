@@ -83,3 +83,10 @@ pip install -e .
 pip install build
 python -m build --wheel
 ```
+
+## Samples E2E pipeline
+
+Samples are additionally covered by a manual-dispatch E2E pipeline that runs
+each `samples/<name>` app under `func start` and exercises its endpoints
+against shared Azure resources. See
+[docs/samples-e2e-pipeline.md](docs/samples-e2e-pipeline.md).

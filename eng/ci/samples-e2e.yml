@@ -1,0 +1,104 @@
+# Manual-dispatch only — operator queues this from Azure DevOps UI.
+# Secrets come from the ADO variable group `samples-e2e-secrets` (see plan §4).
+# All E2E jobs run on Linux 1es-pool-azfunc / 1es-ubuntu-22.04 and reach out
+# to shared long-lived Azure resources (Foundry, ACA session pool, O365 MCP).
+# v1 intentionally accepts the default 4-way job parallelism because the current
+# reusable template does not expose a simple maxParallel knob; serialize later if
+# Foundry or O365 quota pressure shows up in real runs.
+
+trigger: none
+pr: none
+# Intentionally no `schedules:` block.
+
+resources:
+  repositories:
+    - repository: 1es
+      type: git
+      name: 1ESPipelineTemplates/1ESPipelineTemplates
+      ref: refs/tags/release
+    - repository: eng
+      type: git
+      name: engineering
+      ref: refs/tags/release
+
+variables:
+  - template: ci/variables/cfs.yml@eng
+  - group: samples-e2e-secrets # operator-owned variable group (see plan §4.1)
+
+extends:
+  template: v1/1ES.Official.PipelineTemplate.yml@1es
+  parameters:
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    stages:
+      - stage: E2E
+        displayName: Sample E2E
+        jobs:
+          - template: /eng/templates/jobs/sample-e2e.yml@self
+            parameters:
+              sampleName: basic-chat
+              samplePath: samples/basic-chat/src
+              artifactFeed: internal/PythonSDK_Internal_PublicPackages
+              envVarNames:
+                - AZURE_TENANT_ID
+                - AZURE_CLIENT_ID
+                - AZURE_CLIENT_SECRET
+                - FOUNDRY_PROJECT_ENDPOINT
+                - FOUNDRY_MODEL
+                - ACA_SESSION_POOL_ENDPOINT
+
+          - template: /eng/templates/jobs/sample-e2e.yml@self
+            parameters:
+              sampleName: daily-azure-report
+              samplePath: samples/daily-azure-report/src
+              artifactFeed: internal/PythonSDK_Internal_PublicPackages
+              envVarNames:
+                - AZURE_TENANT_ID
+                - AZURE_CLIENT_ID
+                - AZURE_CLIENT_SECRET
+                - FOUNDRY_PROJECT_ENDPOINT
+                - FOUNDRY_MODEL
+                - SUBSCRIPTION_ID
+                - O365_MCP_SERVER_URL
+                - O365_MCP_CLIENT_ID
+                - TO_EMAIL
+                - MAF_REASONING_EFFORT
+                - MAF_REASONING_SUMMARY
+
+          - template: /eng/templates/jobs/sample-e2e.yml@self
+            parameters:
+              sampleName: daily-tech-news-email
+              samplePath: samples/daily-tech-news-email/src
+              artifactFeed: internal/PythonSDK_Internal_PublicPackages
+              envVarNames:
+                - AZURE_TENANT_ID
+                - AZURE_CLIENT_ID
+                - AZURE_CLIENT_SECRET
+                - FOUNDRY_PROJECT_ENDPOINT
+                - FOUNDRY_MODEL
+                - ACA_SESSION_POOL_ENDPOINT
+                - O365_MCP_SERVER_URL
+                - O365_MCP_CLIENT_ID
+                - TO_EMAIL
+                - MAF_REASONING_EFFORT
+                - MAF_REASONING_SUMMARY
+
+          - template: /eng/templates/jobs/sample-e2e.yml@self
+            parameters:
+              sampleName: outlook-reply-agent
+              samplePath: samples/outlook-reply-agent/src
+              artifactFeed: internal/PythonSDK_Internal_PublicPackages
+              requiresExperimentalBundle: true
+              envVarNames:
+                - AZURE_TENANT_ID
+                - AZURE_CLIENT_ID
+                - AZURE_CLIENT_SECRET
+                - FOUNDRY_PROJECT_ENDPOINT
+                - FOUNDRY_MODEL
+                - ACA_SESSION_POOL_ENDPOINT
+                - O365_MCP_SERVER_URL
+                - O365_MCP_CLIENT_ID
+                - WATCHED_SENDER_EMAIL

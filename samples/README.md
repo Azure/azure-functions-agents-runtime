@@ -119,6 +119,15 @@ The host will connect to Azurite (or your Azure Storage account) and register al
 
 Each sample exposes different endpoints. See the sample's README for testing details.
 
+## Continuous validation
+
+A manual-dispatch Azure DevOps pipeline (`eng/ci/samples-e2e.yml`) runs each
+sample under `func start` and exercises its endpoints against shared Foundry /
+ACA session pool / Office 365 MCP resources. Maintainers can queue it from the
+ADO UI when validating sample changes or runtime releases. See
+[docs/samples-e2e-pipeline.md](../docs/samples-e2e-pipeline.md) for full
+operator and developer instructions.
+
 ## Troubleshooting
 
 ### `func start` crashes with `Destination is too short`
