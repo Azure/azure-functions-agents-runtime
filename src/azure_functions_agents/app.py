@@ -39,7 +39,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
       6. Validate each ResolvedAgent (required fields, MCP exclude references, etc.).
       7. Build AgentCapabilities per agent (apply mcp/skills/tools filters).
       8. Create the FunctionApp.
-    9. Register each agent's trigger (if any) and built-in endpoints (if any).
+      9. Register each agent's trigger (if any) and built-in endpoints (if any).
     """
     if app_root is not None:
         set_app_root(app_root)
