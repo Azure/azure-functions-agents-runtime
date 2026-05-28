@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.config.schema import (
-    DebugConfig,
+    BuiltinEndpointsConfig,
     ResolvedAgent,
     ToolsFilter,
     TriggerSpec,
@@ -13,7 +13,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.config.validation import validate_resolved_agent
 
 
-def test_validate_resolved_agent_requires_trigger_for_non_main(
+def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(
     tmp_path: Path,
 ) -> None:
     source = tmp_path / "report.agent.md"
@@ -23,7 +23,7 @@ def test_validate_resolved_agent_requires_trigger_for_non_main(
         trigger=None,
         instructions="x",
         is_main=False,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -42,6 +42,42 @@ def test_validate_resolved_agent_requires_trigger_for_non_main(
     assert "field `trigger`" in message
     assert message.count("docs/front-matter-spec.md#trigger") == 1
     assert "docs/front-matter-spec.mddocs/front-matter-spec.md#trigger" not in message
+
+
+@pytest.mark.parametrize(
+    "builtin_endpoints",
+    [
+        BuiltinEndpointsConfig(debug_chat_ui=True),
+        BuiltinEndpointsConfig(chat_api=True),
+        BuiltinEndpointsConfig(mcp=True),
+    ],
+)
+def test_validate_resolved_agent_allows_missing_trigger_with_builtin_endpoints(
+    builtin_endpoints: BuiltinEndpointsConfig,
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "endpoint.agent.md"
+    resolved = ResolvedAgent(
+        name="Endpoint Agent",
+        description="desc",
+        trigger=None,
+        instructions="x",
+        is_main=False,
+        builtin_endpoints=builtin_endpoints,
+        model=None,
+        timeout=1.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(),
+        sandbox_config=None,
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file=str(source),
+    )
+
+    validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
 
 
 @pytest.mark.parametrize(
@@ -71,7 +107,7 @@ def test_validate_resolved_agent_rejects_unsupported_trigger_types(
         trigger=TriggerSpec(type=trigger_type, args={}),
         instructions="x",
         is_main=False,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -106,7 +142,7 @@ def test_validate_resolved_agent_rejects_dotted_connector_trigger_types(
         trigger=TriggerSpec(type=trigger_type, args={}),
         instructions="x",
         is_main=False,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -138,7 +174,7 @@ def test_validate_resolved_agent_allows_connector_trigger(tmp_path: Path) -> Non
         trigger=TriggerSpec(type="connector_trigger", args={}),
         instructions="x",
         is_main=False,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -165,7 +201,7 @@ def test_validate_resolved_agent_rejects_unknown_mcp_exclude(
         trigger=None,
         instructions="x",
         is_main=True,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         model=None,
         timeout=1.0,
         enabled_mcp_names=["known"],
@@ -201,7 +237,7 @@ def test_validate_resolved_agent_warns_on_unknown_skill_exclude(
         trigger=None,
         instructions="x",
         is_main=True,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -241,7 +277,7 @@ def test_validate_resolved_agent_warns_on_tool_exclude(
         trigger=None,
         instructions="x",
         is_main=True,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],

@@ -7,7 +7,7 @@ import pytest
 
 from azure_functions_agents.config.merge import (
     DEFAULT_TIMEOUT,
-    _resolve_debug,
+    _resolve_builtin_endpoints,
     _resolve_model,
     _resolve_sandbox,
     _resolve_timeout,
@@ -18,7 +18,7 @@ from azure_functions_agents.config.merge import (
 )
 from azure_functions_agents.config.schema import (
     AgentSpec,
-    DebugConfig,
+    BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
@@ -54,23 +54,23 @@ def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
     assert _resolve_timeout(AgentSpec(name="A", description="B"), GlobalConfig()) == DEFAULT_TIMEOUT
 
 
-def test_resolve_debug() -> None:
-    assert _resolve_debug(AgentSpec(name="A", description="B", is_main=True)) == DebugConfig(
-        chat_ui=True, chat_api=True, mcp=True
-    )
-    assert _resolve_debug(AgentSpec(name="A", description="B", is_main=False)) == DebugConfig()
-    assert _resolve_debug(
-        AgentSpec(name="A", description="B", debug_endpoints=True)
-    ) == DebugConfig(chat_ui=True, chat_api=True, mcp=False)
-    assert _resolve_debug(
-        AgentSpec(name="A", description="B", debug_endpoints=DebugConfig(chat_api=True))
-    ) == DebugConfig(chat_api=True)
+def test_resolve_builtin_endpoints() -> None:
+    assert _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", is_main=True)
+    ) == BuiltinEndpointsConfig()
+    assert _resolve_builtin_endpoints(AgentSpec(name="A", description="B", is_main=False)) == BuiltinEndpointsConfig()
+    assert _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True)
+    ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+    assert _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True))
+    ) == BuiltinEndpointsConfig(chat_api=True)
 
 
-def test_resolve_debug_main_shorthand_includes_mcp() -> None:
-    assert _resolve_debug(
-        AgentSpec(name="A", description="B", debug_endpoints=True, is_main=True)
-    ) == DebugConfig(chat_ui=True, chat_api=True, mcp=True)
+def test_resolve_builtin_endpoints_shorthand_is_not_main_special_cased() -> None:
+    assert _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True)
+    ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
 
 
 def test_resolve_sandbox() -> None:
@@ -192,6 +192,7 @@ def test_compose_defers_warning_only_validation(
         name="Agent",
         description="desc",
         is_main=True,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
         skills=SkillsFilter(exclude=["missing-skill"]),
         tools=ToolsFilter(exclude=["bash"]),
     )
@@ -218,12 +219,12 @@ def test_compose_defers_warning_only_validation(
     assert any("tools.exclude" in message for message in messages)
 
 
-def test_resolve_debug_explicit_false() -> None:
-    """Defensive: explicit debug_endpoints: false returns an all-disabled DebugConfig
-    (overrides the is_main default-true behavior)."""
-    spec = AgentSpec(name="Main", description="d", debug_endpoints=False, is_main=True)
-    debug = _resolve_debug(spec)
-    assert debug.chat_ui is False
+def test_resolve_builtin_endpoints_explicit_false() -> None:
+    """Defensive: explicit builtin_endpoints: false returns an all-disabled BuiltinEndpointsConfig
+    (keeps built-in endpoints disabled even for main.agent.md)."""
+    spec = AgentSpec(name="Main", description="d", builtin_endpoints=False, is_main=True)
+    debug = _resolve_builtin_endpoints(spec)
+    assert debug.debug_chat_ui is False
     assert debug.chat_api is False
     assert debug.mcp is False
 

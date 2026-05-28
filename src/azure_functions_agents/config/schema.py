@@ -31,18 +31,18 @@ class ToolsFilter(BaseModel):
     exclude: list[str] = Field(default_factory=list)
 
 
-class DebugConfig(BaseModel):
-    """Concrete debug endpoint toggles for chat UI, chat API, and MCP exposure."""
+class BuiltinEndpointsConfig(BaseModel):
+    """Concrete built-in endpoint toggles for debug chat UI, chat API, and MCP exposure."""
 
     model_config = ConfigDict(extra="forbid")
 
-    chat_ui: bool = False
+    debug_chat_ui: bool = False
     chat_api: bool = False
     mcp: bool = False
 
     @model_validator(mode="after")
-    def chat_ui_requires_chat_api(self) -> DebugConfig:
-        if self.chat_ui:
+    def debug_chat_ui_requires_chat_api(self) -> BuiltinEndpointsConfig:
+        if self.debug_chat_ui:
             self.chat_api = True
         return self
 
@@ -108,7 +108,7 @@ class AgentSpec(BaseModel):
     name: str
     description: str
     trigger: TriggerSpec | None = None
-    debug_endpoints: bool | DebugConfig | None = None
+    builtin_endpoints: bool | BuiltinEndpointsConfig | None = None
     model: str | None = None
     timeout: float | None = None
     logger: bool | None = None
@@ -136,7 +136,7 @@ class ResolvedAgent(BaseModel):
     trigger: TriggerSpec | None
     instructions: str
     is_main: bool
-    debug_endpoints: DebugConfig
+    builtin_endpoints: BuiltinEndpointsConfig
     model: str | None
     timeout: float
     enabled_mcp_names: list[str]

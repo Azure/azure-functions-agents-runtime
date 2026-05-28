@@ -11,7 +11,7 @@ import pytest
 from azure_functions_agents.config.loader import load_agent_specs
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
-    DebugConfig,
+    BuiltinEndpointsConfig,
     GlobalConfig,
     ResolvedAgent,
     ToolsFilter,
@@ -110,7 +110,7 @@ def _resolved_agent(*, trigger: TriggerSpec, is_main: bool = False) -> ResolvedA
         trigger=trigger,
         instructions="Run the timer workflow.",
         is_main=is_main,
-        debug_endpoints=DebugConfig(),
+        builtin_endpoints=BuiltinEndpointsConfig(),
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -561,7 +561,7 @@ def test_register_agent_registers_non_http_trigger_on_main_agent(
     ]
 
 
-def test_register_agent_skips_http_trigger_on_main_agent(
+def test_register_agent_registers_http_trigger_on_main_agent(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     resolved = _resolved_agent(
@@ -575,9 +575,19 @@ def test_register_agent_skips_http_trigger_on_main_agent(
         lambda *args: http_calls.append(args),
     )
 
-    register_agent(app, resolved, AgentCapabilities())
+    capabilities = AgentCapabilities()
 
-    assert http_calls == []
+    register_agent(app, resolved, capabilities)
+
+    assert http_calls == [
+        (
+            app,
+            resolved,
+            capabilities,
+            _function_name_from_source(resolved.source_file, resolved.name),
+            {"route": "reports"},
+        )
+    ]
     assert app.trigger_calls == []
 
 

@@ -10,12 +10,12 @@ from typing import Any
 import azure.functions as func
 import pytest
 
-from azure_functions_agents.config.schema import DebugConfig, ResolvedAgent, ToolsFilter
+from azure_functions_agents.config.schema import BuiltinEndpointsConfig, ResolvedAgent, ToolsFilter
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
-    _run_debug_agent,
-    _run_debug_agent_stream,
-    register_debug_endpoints,
+    _run_builtin_agent,
+    _run_builtin_agent_stream,
+    register_builtin_endpoints,
 )
 
 
@@ -54,7 +54,7 @@ def _resolved_agent(
     *,
     name: str,
     is_main: bool,
-    debug_endpoints: DebugConfig,
+    builtin_endpoints: BuiltinEndpointsConfig,
     source_file: str | Path | None = None,
     input_schema: dict[str, Any] | None = None,
 ) -> ResolvedAgent:
@@ -65,7 +65,7 @@ def _resolved_agent(
         trigger=None,
         instructions="Assist the user.",
         is_main=is_main,
-        debug_endpoints=debug_endpoints,
+        builtin_endpoints=builtin_endpoints,
         model=None,
         timeout=1.0,
         enabled_mcp_names=[],
@@ -85,7 +85,7 @@ def _response_text(response: func.HttpResponse) -> str:
     return body.decode("utf-8") if isinstance(body, bytes) else str(body)
 
 
-def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
+def test_register_builtin_endpoints_serves_agent_aware_debug_chat_ui(
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
@@ -94,11 +94,11 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug_endpoints=DebugConfig(chat_ui=True),
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
         source_file=source_file,
     )
 
-    register_debug_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
 
     chat_page_route = app.routes[0]
     assert chat_page_route["route"] == "agents/secondary_agent/"
@@ -109,17 +109,17 @@ def test_register_debug_endpoints_serves_agent_aware_chat_ui_for_non_main_agent(
 
     assert response.status_code == 200
     html = _response_text(response)
-    # Confirm the chat UI uses the prefix-preserving regex so non-main pages also
+    # Confirm the chat UI uses the prefix-preserving regex so agent pages also
     # work when served behind Azure Functions' default `api` route prefix or
     # any reverse-proxy prefix (matches the trailing `/agents/{slug}` segment).
     assert r"pathname.match(/^(.*)\/agents\/([^/]+)\/?$/)" in html
-    # Fallback when no /agents/{slug} segment matches preserves the page prefix
-    # while still resolving `/` to `/agent`.
+    # Fallback when no /agents/{slug} segment matches points at /agents/main.
     assert 'window.location.pathname === "/"' in html
     assert 'window.location.pathname.endsWith("/")' in html
+    assert 'return "/agents/main"' in html
 
 
-def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names(
+def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_names(
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
@@ -128,22 +128,22 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
     source_a.write_text("---\nname: Daily Report\n---\n", encoding="utf-8")
     source_b.write_text("---\nname: Daily Report\n---\n", encoding="utf-8")
 
-    register_debug_endpoints(
+    register_builtin_endpoints(
         app,
         _resolved_agent(
             name="Daily Report",
             is_main=False,
-            debug_endpoints=DebugConfig(chat_ui=True),
+            builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
             source_file=source_a,
         ),
         AgentCapabilities(),
     )
-    register_debug_endpoints(
+    register_builtin_endpoints(
         app,
         _resolved_agent(
             name="Daily Report",
             is_main=False,
-            debug_endpoints=DebugConfig(chat_ui=True),
+            builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
             source_file=source_b,
         ),
         AgentCapabilities(),
@@ -159,7 +159,7 @@ def test_register_debug_endpoints_uses_filename_slug_for_duplicate_display_names
     ]
 
 
-def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
+def test_register_builtin_endpoints_auto_suffixes_sanitized_slug_collisions(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
@@ -170,22 +170,22 @@ def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
     source_b.write_text("---\nname: Daily Report Underscore\n---\n", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
-        register_debug_endpoints(
+        register_builtin_endpoints(
             app,
             _resolved_agent(
                 name="Daily Report Dash",
                 is_main=False,
-                debug_endpoints=DebugConfig(chat_ui=True),
+                builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
                 source_file=source_a,
             ),
             AgentCapabilities(),
         )
-        register_debug_endpoints(
+        register_builtin_endpoints(
             app,
             _resolved_agent(
                 name="Daily Report Underscore",
                 is_main=False,
-                debug_endpoints=DebugConfig(chat_ui=True),
+                builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
                 source_file=source_b,
             ),
             AgentCapabilities(),
@@ -199,15 +199,15 @@ def test_register_debug_endpoints_auto_suffixes_sanitized_slug_collisions(
         "agents/daily_report_2/chat",
         "agents/daily_report_2/chatstream",
     ]
-    assert "Debug slug collision" in caplog.text
+    assert "Built-in endpoint slug collision" in caplog.text
     assert "'daily_report.agent.md' would register at '/agents/daily_report/'" in caplog.text
     assert "Registering at '/agents/daily_report_2/'" in caplog.text
 
 
-def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
+def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
-    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug_endpoints=DebugConfig(chat_ui=True))
+    resolved = _resolved_agent(name="Secondary Agent", is_main=False, builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True))
     calls: dict[str, Any] = {}
 
     class FakeUuid:
@@ -233,7 +233,7 @@ def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
     monkeypatch.setattr("azure_functions_agents.registration.endpoints._run_agent", fake_run_agent)
 
     result = asyncio.run(
-        _run_debug_agent(
+        _run_builtin_agent(
             "hello",
             resolved=resolved,
             capabilities=AgentCapabilities(),
@@ -247,10 +247,10 @@ def test_run_debug_agent_generates_session_id_before_building_sandbox_tools(
     assert result.session_id == "generated-session-id"
 
 
-def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_tools(
+def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_tools(
     monkeypatch: Any,
 ) -> None:
-    resolved = _resolved_agent(name="Secondary Agent", is_main=False, debug_endpoints=DebugConfig(chat_ui=True))
+    resolved = _resolved_agent(name="Secondary Agent", is_main=False, builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True))
     calls: dict[str, Any] = {}
 
     class FakeUuid:
@@ -278,7 +278,7 @@ def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_too
         fake_run_agent_stream,
     )
 
-    result = _run_debug_agent_stream(
+    result = _run_builtin_agent_stream(
         "hello",
         resolved=resolved,
         capabilities=AgentCapabilities(),
@@ -291,7 +291,7 @@ def test_run_debug_agent_stream_generates_session_id_before_building_sandbox_too
     assert result == "stream"
 
 
-def test_register_debug_endpoints_chat_also_registers_http_routes_for_non_main_agent(
+def test_register_builtin_endpoints_chat_also_registers_http_routes_for_non_main_agent(
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
@@ -300,11 +300,11 @@ def test_register_debug_endpoints_chat_also_registers_http_routes_for_non_main_a
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug_endpoints=DebugConfig(chat_ui=True),
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
         source_file=source_file,
     )
 
-    register_debug_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
 
     assert [route["route"] for route in app.routes] == [
         "agents/secondary_agent/",
@@ -313,7 +313,7 @@ def test_register_debug_endpoints_chat_also_registers_http_routes_for_non_main_a
     ]
 
 
-def test_register_debug_endpoints_chat_and_http_do_not_double_register_routes(
+def test_register_builtin_endpoints_chat_and_http_do_not_double_register_routes(
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
@@ -322,16 +322,43 @@ def test_register_debug_endpoints_chat_and_http_do_not_double_register_routes(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug_endpoints=DebugConfig(chat_ui=True, chat_api=True),
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True),
         source_file=source_file,
     )
 
-    register_debug_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
 
     assert [route["route"] for route in app.routes] == [
         "agents/secondary_agent/",
         "agents/secondary_agent/chat",
         "agents/secondary_agent/chatstream",
+    ]
+
+
+def test_register_builtin_endpoints_main_agent_uses_regular_agent_routes(
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    source_file = tmp_path / "main.agent.md"
+    source_file.write_text("---\nname: Main Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Main Agent",
+        is_main=True,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    assert [route["route"] for route in app.routes] == [
+        "agents/main/",
+        "agents/main/chat",
+        "agents/main/chatstream",
+    ]
+    assert [route["function_name"] for route in app.routes] == [
+        "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat",
+        "agent_main_builtin_chatstream",
     ]
 
 
@@ -344,23 +371,23 @@ def test_debug_chat_endpoint_skips_input_schema_validation(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug_endpoints=DebugConfig(chat_ui=True),
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
         source_file=source_file,
         input_schema={"type": "object", "required": ["subscription_id"]},
     )
     run_calls: dict[str, Any] = {}
 
-    async def fake_run_debug_agent(prompt: str, **kwargs: Any) -> Any:
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
         run_calls["prompt"] = prompt
         run_calls["kwargs"] = kwargs
         return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration.endpoints._run_debug_agent",
-        fake_run_debug_agent,
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
     )
 
-    register_debug_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
     chat_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
     )
@@ -385,7 +412,7 @@ def test_debug_chat_stream_endpoint_skips_input_schema_validation(
     resolved = _resolved_agent(
         name="Secondary Agent",
         is_main=False,
-        debug_endpoints=DebugConfig(chat_ui=True),
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
         source_file=source_file,
         input_schema={"type": "object", "required": ["subscription_id"]},
     )
@@ -394,17 +421,17 @@ def test_debug_chat_stream_endpoint_skips_input_schema_validation(
     async def fake_stream() -> Any:
         yield "data: hello\n\n"
 
-    def fake_run_debug_agent_stream(prompt: str, **kwargs: Any) -> Any:
+    def fake_run_builtin_agent_stream(prompt: str, **kwargs: Any) -> Any:
         run_calls["prompt"] = prompt
         run_calls["kwargs"] = kwargs
         return fake_stream()
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration.endpoints._run_debug_agent_stream",
-        fake_run_debug_agent_stream,
+        "azure_functions_agents.registration.endpoints._run_builtin_agent_stream",
+        fake_run_builtin_agent_stream,
     )
 
-    register_debug_endpoints(app, resolved, AgentCapabilities())
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
     stream_route = next(
         route for route in app.routes if route["route"] == "agents/secondary_agent/chatstream"
     )

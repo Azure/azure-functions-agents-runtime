@@ -28,7 +28,7 @@ from azure_functions_agents.config.paths import (
 )
 from azure_functions_agents.config.schema import (
     AgentSpec,
-    DebugConfig,
+    BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
@@ -48,7 +48,7 @@ __all__ = [
     "_INLINE_DOLLAR_PATTERN",
     "_INLINE_PERCENT_PATTERN",
     "AgentSpec",
-    "DebugConfig",
+    "BuiltinEndpointsConfig",
     "DynamicSessionsCodeInterpreterConfig",
     "GlobalConfig",
     "McpFilter",

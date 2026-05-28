@@ -18,6 +18,8 @@ type MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+
+
 def clear_mcp_cache() -> None:
     """Clear cached MCP server discovery results."""
     _DISCOVERED_MCP_SERVERS_CACHE.clear()
@@ -98,9 +100,6 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
         allowed_tools = [str(tool) for tool in raw_tools]
     else:
         allowed_tools = None
-    load_tools = bool(server.get("load_tools", True))
-    load_prompts = bool(server.get("load_prompts", True))
-
     if "command" in server or server_type in {"local", "stdio"}:
         logger.warning("MCP stdio transport is not supported; skipping server '%s'", name)
         return None
@@ -126,8 +125,8 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
             name=name,
             url=url,
             allowed_tools=allowed_tools,
-            load_tools=load_tools,
-            load_prompts=load_prompts,
+            load_tools=True,
+            load_prompts=False,
             header_provider=header_provider,
             http_client=_build_http_client(header_provider),
         )

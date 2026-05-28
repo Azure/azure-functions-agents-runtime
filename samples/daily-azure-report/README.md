@@ -2,9 +2,9 @@
 
 A multi-agent Azure Functions app that monitors your Azure subscription. Includes a timer-triggered agent that emails a daily resource change report and an HTTP-triggered agent that returns a structured resource summary as JSON.
 
-| Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
-|---|---|---|---|---|---|---|
-| Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
+| Trigger | Built-in Endpoints | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
+|---|---|---|---|---|---|---|---|
+| Timer + HTTP | ✅ main UI/API/MCP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 
 ## Features
 
@@ -14,7 +14,7 @@ A multi-agent Azure Functions app that monitors your Azure subscription. Include
 - **Office 365 Outlook connector** — provisions a v2 connection under a Connector Gateway and exposes the send-email operation through an MCP server
 - **Microsoft Learn MCP server** — gives the agent access to Azure documentation for looking up correct API paths and versions
 - **`azure-resources` skill** — packages ARM REST API knowledge (paths, api-versions, tips) so the agent instructions can focus on the job, not the technical details
-- **Interactive chat UI** — `main.agent.md` enables the built-in chat interface for ad-hoc Azure queries
+- **Interactive assistant endpoints** — `main.agent.md` explicitly enables the built-in chat UI/API/MCP tool at `/agents/main/` for ad-hoc Azure queries
 - **Variable substitution** — subscription ID and recipient email configured via environment variables. Substitution applies to all config string values (agent instructions, `agents.config.yaml`, `mcp.json`)
 
 ## Prerequisites
@@ -83,8 +83,8 @@ Required:
 
 Optional:
 
-- `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`: reasoning effort for supported Foundry reasoning models; defaults to `high`
-- `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`: reasoning summary mode for supported Foundry reasoning models; defaults to `concise`
+- `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT`: optional reasoning effort for supported Foundry reasoning models
+- `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY`: optional reasoning summary mode for supported Foundry reasoning models
 - `O365_MCP_CLIENT_ID`: managed identity client ID for the Office 365 Outlook MCP server; defaults to the app-wide identity selection
 - `ACA_SESSION_POOL_ENDPOINT`: if set, enables code execution features; if empty, agents work but lose advanced capabilities
 
@@ -145,7 +145,7 @@ Invoke-WebRequest -Uri "http://localhost:7071/resource-summary" `
 
 - [`daily_azure_report.agent.md`](src/daily_azure_report.agent.md) — timer-triggered agent that lists resources changed in the last 24 hours and emails a report
 - [`resource_summary.agent.md`](src/resource_summary.agent.md) — HTTP-triggered agent at `POST /resource-summary` that returns a structured JSON summary of resources by type and location
-- [`main.agent.md`](src/main.agent.md) — interactive chat agent for ad-hoc Azure queries via the built-in UI
+- [`main.agent.md`](src/main.agent.md) — interactive chat agent for ad-hoc Azure queries via `/agents/main/`, `/agents/main/chat`, and the built-in MCP tool
 
 ### Shared capabilities
 

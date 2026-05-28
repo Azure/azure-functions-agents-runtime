@@ -4,7 +4,7 @@ This document describes the trigger types that can be used in `.agent.md` front 
 
 ## How Triggers Work
 
-Each `*.agent.md` file except `main.agent.md` requires a `trigger` section. The `type` field selects the trigger, and `trigger.args` is passed to the underlying Azure Functions decorator.
+Each `*.agent.md` file requires either a `trigger` section or at least one enabled `builtin_endpoints` value. The `type` field selects the trigger, and `trigger.args` is passed to the underlying Azure Functions decorator.
 
 ```yaml
 ---
@@ -60,9 +60,9 @@ These Azure Functions Python decorators are intentionally not supported as `.age
 | `entity_trigger` | Durable entities require Durable-specific context handling. | Custom Durable Functions code outside `.agent.md`. |
 | `warm_up_trigger` | Warm-up triggers are host lifecycle hooks, not user/event payload triggers for agents. | Use `timer_trigger` or another event trigger for agent work. |
 | `assistant_skill_trigger` | Azure Functions assistant skill triggers overlap with agent tool/MCP concepts but use a different extension contract. | Project tools, skills, or MCP servers. |
-| `mcp_tool_trigger` | Runtime MCP tool endpoints are registered by `debug_endpoints.mcp`/main-agent debug surfaces. | `debug_endpoints.mcp: true` or `main.agent.md`. |
-| `mcp_resource_trigger` | Runtime MCP resources are not authored as `.agent.md` triggers. | Runtime MCP/debug surfaces. |
-| `mcp_prompt_trigger` | Runtime MCP prompts are not authored as `.agent.md` triggers. | Runtime MCP/debug surfaces. |
+| `mcp_tool_trigger` | Runtime MCP tool endpoints are registered by `builtin_endpoints.mcp`. | `builtin_endpoints.mcp: true`. |
+| `mcp_resource_trigger` | Runtime MCP resources are not authored as `.agent.md` triggers. | Built-in MCP surfaces. |
+| `mcp_prompt_trigger` | Runtime MCP prompts are not authored as `.agent.md` triggers. | Built-in MCP surfaces. |
 | Dotted connector trigger types such as `teams.new_channel_message_trigger` or `connectors.generic_trigger` | Dotted connector trigger resolution is not supported. | `connector_trigger` |
 
 ## HTTP Trigger

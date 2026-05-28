@@ -1,4 +1,4 @@
-"""Trigger registration for resolved non-main agents."""
+"""Trigger registration for resolved agents."""
 
 from __future__ import annotations
 
@@ -132,14 +132,6 @@ def register_agent(
             resolved.name,
             registered_names.copy(),
         )
-
-    if resolved.is_main and trigger_type == "http_trigger":
-        logger.debug(
-            "Skipping http_trigger registration for main agent '%s'; "
-            "HTTP routes are provided by the debug endpoints.",
-            resolved.name,
-        )
-        return
 
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)

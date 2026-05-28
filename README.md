@@ -51,6 +51,8 @@ Create `main.agent.md`:
 ---
 name: My Agent
 description: A helpful assistant
+
+builtin_endpoints: true
 ---
 
 You are a helpful assistant. Answer questions concisely.
@@ -134,22 +136,22 @@ docker run -d --name azurite -p 10000:10000 -p 10001:10001 -p 10002:10002 \
 func start
 ```
 
-Your agent is now running at `http://localhost:7071/` with a built-in chat UI, HTTP API (`/agent/chat`, `/agent/chatstream`), and MCP server (`/runtime/webhooks/mcp`).
+Your agent is now running at `http://localhost:7071/agents/main/` with a built-in chat UI, HTTP API (`/agents/main/chat`, `/agents/main/chatstream`), and MCP tool exposed through the Functions MCP endpoint (`/runtime/webhooks/mcp`).
 
 ## Features
 
 **Architecture overview:** see [`docs/architecture.md`](docs/architecture.md) for the module map and data flow pipeline.
 
-### `main.agent.md`
+### Built-in endpoints
 
-Define an agent with a markdown file. When `main.agent.md` is present, the runtime automatically registers:
+Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. The route slug comes from the `.agent.md` filename after sanitization, not from the display `name:` field.
 
-- **Chat UI** — built-in single-page web interface at the app root
-- **HTTP APIs** — `POST /agent/chat` (JSON) and `POST /agent/chatstream` (SSE)
-- **MCP server** — `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
+- **Debug chat UI** — built-in single-page web interface at `/agents/{slug}/`
+- **HTTP APIs** — `POST /agents/{slug}/chat` (JSON) and `POST /agents/{slug}/chatstream` (SSE)
+- **MCP tool** — optional tool exposed through `/runtime/webhooks/mcp` for VS Code, Claude Desktop, etc.
 - **Session persistence** — multi-turn conversations stored in Azure Blob Storage via the runtime's `BlobHistoryProvider`, reusing the function app's `AzureWebJobsStorage` account
 
-Non-main agents can also opt into their own chat UI and HTTP debug endpoints with `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`), served at `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`, where `{slug}` is derived from the `.agent.md` filename (not the display `name:` field). See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
+If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
 ### Event-driven agents (`<name>.agent.md`)
 
@@ -180,7 +182,7 @@ system_tools:
   dynamic_sessions_code_interpreter:
     endpoint: $ACA_SESSION_POOL_ENDPOINT
 
-# For triggered agents only (not `main.agent.md`):
+# Optional when builtin_endpoints is enabled; required otherwise:
 trigger:
   type: timer_trigger      # or queue_trigger, connector_trigger, etc.
   args:
@@ -204,8 +206,8 @@ Agent instructions in markdown...
 
 ### Multiple functions from markdown
 
-- **`main.agent.md`** — creates HTTP chat, MCP, and UI endpoints. No other triggers are supported in this file.
-- **`<name>.agent.md`** — creates an event-triggered Azure Function. Exactly one trigger per file. With `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`), it also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream`. The sanitized filename stem becomes the base Azure Function name. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the non-main debug slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#debug_endpoints`](docs/front-matter-spec.md#debug_endpoints).
+- **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
+- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name and endpoint slug. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the built-in endpoint slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -322,13 +324,13 @@ def reverse_string(text: str) -> str:
 
 `@tool` is re-exported from `agent_framework`. Functions can be sync or async; types in the signature feed MAF's automatic JSON-Schema generation. Tools that need richer schemas can be declared with `agent_framework.FunctionTool` directly.
 
-## What `main.agent.md` Enables
+## Built-in Endpoint Routes
 
-When a `main.agent.md` file exists in your app root, the runtime automatically registers:
+Built-in endpoints are explicit per agent. The filename stem determines `{slug}`; for example, `main.agent.md` uses `main` and `daily_azure_report.agent.md` uses `daily_azure_report`.
 
 ### Chat UI
 
-A built-in single-page chat interface served at `/` for the main agent, and at `/agents/{slug}/` for any non-main agent with `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`). For non-main agents, `{slug}` comes from the `.agent.md` filename after sanitization, not from the display `name:` field. No frontend code needed — just open `http://localhost:7071/` locally or `https://<your-app>.azurewebsites.net/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
+A built-in single-page chat interface served at `/agents/{slug}/` when `builtin_endpoints.debug_chat_ui: true` (or `builtin_endpoints: true`). No frontend code needed — just open `http://localhost:7071/agents/main/` locally for `main.agent.md`, or `https://<your-app>.azurewebsites.net/agents/{slug}/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
@@ -336,8 +338,7 @@ On first load, you'll be prompted for the base URL and a function key (for deplo
 
 POST endpoints for programmatic access:
 
-- **Main agent:** `POST /agent/chat` and `POST /agent/chatstream`
-- **Non-main agent with `debug_endpoints.chat_api: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream` (`{slug}` comes from the `.agent.md` filename after sanitization)
+- **Any agent with `builtin_endpoints.chat_api: true`:** `POST /agents/{slug}/chat` and `POST /agents/{slug}/chatstream`
 
 The JSON endpoint returns `session_id`, `response`, and `tool_calls`. The streaming endpoint uses Server-Sent Events (SSE) with `session`, `delta`, `intermediate`, `tool_start`, `tool_end`, `done`, and `error` events.
 
@@ -345,11 +346,11 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 
 ### MCP Server
 
-An MCP-compatible endpoint at `/runtime/webhooks/mcp` that any MCP client (VS Code, Claude Desktop, etc.) can connect to. Requires the MCP extension system key in the `x-functions-key` header when deployed.
+When `builtin_endpoints: true` or `builtin_endpoints.mcp: true`, the agent is exposed as an MCP tool named after its slug through the shared MCP-compatible endpoint at `/runtime/webhooks/mcp`. Requires the MCP extension system key in the `x-functions-key` header when deployed.
 
-### Without `main.agent.md`
+### Without built-in endpoints
 
-If there's no `main.agent.md`, the root (`/`) chat UI, `/agent/*` chat APIs, and `/runtime/webhooks/mcp` endpoint are disabled. The app still runs triggered functions, and non-main agents can still opt into per-agent chat surfaces with `debug_endpoints.chat_ui: true` (or `debug_endpoints: true`). See [`docs/front-matter-spec.md#debug_endpoints`](docs/front-matter-spec.md#debug_endpoints).
+If no agent enables built-in endpoints, no chat UI, chat API, chatstream, or agent MCP tool is registered. The app still runs triggered functions. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
 ## MCP Server Configuration
 
@@ -378,7 +379,6 @@ String values in `mcp.json` support inline environment-variable substitution wit
       "type": "http",
       "url": "$O365_MCP_SERVER_URL",
       "tools": ["office365_SendEmailV2"],
-      "load_prompts": false,
       "auth": {
         "scope": "https://apihub.azure.com/.default",
         "client_id": "$O365_MCP_CLIENT_ID"
@@ -394,9 +394,9 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
-- **`load_tools`** — optional boolean controlling whether tools are loaded from the MCP server (default: `true`)
-- **`load_prompts`** — optional boolean controlling whether prompts are loaded from the MCP server (default: `true`). Set this to `false` for MCP servers that do not implement `prompts/list`.
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
+
+The runtime loads MCP tools and skips MCP prompts. This avoids startup/runtime failures from connector-backed MCP servers that support tools but reject `prompts/list`.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
 

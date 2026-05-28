@@ -493,7 +493,7 @@ def test_discover_mcp_servers_ignores_unresolved_auth_client_id(
     assert tool.header_provider(None) == {"Authorization": "Bearer fallback-token"}
 
 
-def test_discover_mcp_servers_supports_load_flags(
+def test_discover_mcp_servers_ignores_load_flags(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
@@ -516,7 +516,7 @@ def test_discover_mcp_servers_supports_load_flags(
     tool = discover_mcp_servers(tmp_path)["demo"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
-    assert tool.load_tools is False
+    assert tool.load_tools is True
     assert tool.load_prompts is False
 
 
