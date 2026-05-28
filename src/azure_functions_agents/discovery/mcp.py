@@ -8,33 +8,11 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from agent_framework import MCPStreamableHTTPTool as _MCPStreamableHTTPTool
+from agent_framework import MCPStreamableHTTPTool
 
 from .._credential import build_credential, build_credential_with_client_id
 from .._logger import logger
 from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
-
-
-class MCPStreamableHTTPTool(_MCPStreamableHTTPTool):
-    """MCP Streamable HTTP tool with non-fatal prompt discovery.
-
-    Some connector-backed MCP servers support tools but return 400 for
-    ``prompts/list``. Agent Framework calls ``load_prompts()`` during connect
-    and on prompt-list change notifications, so make prompt discovery
-    best-effort while preserving normal tool discovery behavior.
-    """
-
-    async def load_prompts(self) -> None:
-        try:
-            await super().load_prompts()
-        except Exception as exc:
-            logger.warning(
-                "MCP server '%s': failed to load prompts; continuing without prompts. "
-                "Set load_prompts=false in mcp.json to skip prompt discovery. Error: %s",
-                self.name,
-                exc,
-            )
-
 
 type MCPTool = MCPStreamableHTTPTool
 
@@ -122,9 +100,6 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
         allowed_tools = [str(tool) for tool in raw_tools]
     else:
         allowed_tools = None
-    load_tools = bool(server.get("load_tools", True))
-    load_prompts = bool(server.get("load_prompts", True))
-
     if "command" in server or server_type in {"local", "stdio"}:
         logger.warning("MCP stdio transport is not supported; skipping server '%s'", name)
         return None
@@ -150,8 +125,8 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
             name=name,
             url=url,
             allowed_tools=allowed_tools,
-            load_tools=load_tools,
-            load_prompts=load_prompts,
+            load_tools=True,
+            load_prompts=False,
             header_provider=header_provider,
             http_client=_build_http_client(header_provider),
         )

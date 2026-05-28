@@ -379,7 +379,6 @@ String values in `mcp.json` support inline environment-variable substitution wit
       "type": "http",
       "url": "$O365_MCP_SERVER_URL",
       "tools": ["office365_SendEmailV2"],
-      "load_prompts": false,
       "auth": {
         "scope": "https://apihub.azure.com/.default",
         "client_id": "$O365_MCP_CLIENT_ID"
@@ -395,9 +394,9 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`url`** — the MCP server endpoint URL (required)
 - **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
-- **`load_tools`** — optional boolean controlling whether tools are loaded from the MCP server (default: `true`)
-- **`load_prompts`** — optional boolean controlling whether prompts are loaded from the MCP server (default: `true`). Prompt loading is best-effort; if a server rejects `prompts/list`, the runtime logs a warning and continues with tools. Set this to `false` to skip prompt discovery entirely.
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
+
+The runtime loads MCP tools and skips MCP prompts. This avoids startup/runtime failures from connector-backed MCP servers that support tools but reject `prompts/list`.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
 
