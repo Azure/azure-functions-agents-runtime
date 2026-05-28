@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from pathlib import Path
@@ -518,6 +519,30 @@ def test_discover_mcp_servers_supports_load_flags(
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.load_tools is False
     assert tool.load_prompts is False
+
+
+def test_mcp_prompt_loading_failures_are_non_fatal(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    async def fail_load_prompts(_self: object) -> None:
+        raise RuntimeError("HTTP 400 Bad Request")
+
+    monkeypatch.setattr(
+        mcp_discovery._MCPStreamableHTTPTool,
+        "load_prompts",
+        fail_load_prompts,
+    )
+    tool = mcp_discovery.MCPStreamableHTTPTool(
+        name="connector",
+        url="https://example.com/mcp",
+    )
+
+    with caplog.at_level(logging.WARNING):
+        asyncio.run(tool.load_prompts())
+
+    assert "MCP server 'connector': failed to load prompts" in caplog.text
+    assert "HTTP 400 Bad Request" in caplog.text
 
 
 def test_discover_does_not_substitute_server_name_keys(

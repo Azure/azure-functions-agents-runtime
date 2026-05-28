@@ -8,16 +8,40 @@ import time
 from pathlib import Path
 from typing import Any, cast
 
-from agent_framework import MCPStreamableHTTPTool
+from agent_framework import MCPStreamableHTTPTool as _MCPStreamableHTTPTool
 
 from .._credential import build_credential, build_credential_with_client_id
 from .._logger import logger
 from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
+
+class MCPStreamableHTTPTool(_MCPStreamableHTTPTool):
+    """MCP Streamable HTTP tool with non-fatal prompt discovery.
+
+    Some connector-backed MCP servers support tools but return 400 for
+    ``prompts/list``. Agent Framework calls ``load_prompts()`` during connect
+    and on prompt-list change notifications, so make prompt discovery
+    best-effort while preserving normal tool discovery behavior.
+    """
+
+    async def load_prompts(self) -> None:
+        try:
+            await super().load_prompts()
+        except Exception as exc:
+            logger.warning(
+                "MCP server '%s': failed to load prompts; continuing without prompts. "
+                "Set load_prompts=false in mcp.json to skip prompt discovery. Error: %s",
+                self.name,
+                exc,
+            )
+
+
 type MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+
+
 def clear_mcp_cache() -> None:
     """Clear cached MCP server discovery results."""
     _DISCOVERED_MCP_SERVERS_CACHE.clear()

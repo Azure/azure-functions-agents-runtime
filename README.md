@@ -396,7 +396,7 @@ Tools from configured MCP servers are automatically available to the agent at ru
 - **`headers`** — optional HTTP headers (e.g. for authentication)
 - **`tools`** — optional array of tool name patterns to allow (default: `["*"]`)
 - **`load_tools`** — optional boolean controlling whether tools are loaded from the MCP server (default: `true`)
-- **`load_prompts`** — optional boolean controlling whether prompts are loaded from the MCP server (default: `true`). Set this to `false` for MCP servers that do not implement `prompts/list`.
+- **`load_prompts`** — optional boolean controlling whether prompts are loaded from the MCP server (default: `true`). Prompt loading is best-effort; if a server rejects `prompts/list`, the runtime logs a warning and continues with tools. Set this to `false` to skip prompt discovery entirely.
 - **`auth`** — optional Azure Identity authentication configuration. Set `auth.scope` to the token scope required by the MCP server. The runtime uses `DefaultAzureCredential` to acquire the token.
 
 By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` when set, otherwise the system-assigned identity/default Azure credential chain. To choose a user-assigned managed identity for a single MCP server without changing the app-wide identity, set `auth.client_id` in that server's `mcp.json` entry. If the configured client ID is empty or an unresolved placeholder, the runtime falls back to the app-wide identity selection.
