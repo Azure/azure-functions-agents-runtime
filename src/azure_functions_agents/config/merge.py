@@ -23,8 +23,6 @@ def _resolve_builtin_endpoints(spec: AgentSpec) -> BuiltinEndpointsConfig:
         return builtin_endpoints
     if builtin_endpoints is True:
         return BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
-    if builtin_endpoints is False:
-        return BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
     return BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
 
 
