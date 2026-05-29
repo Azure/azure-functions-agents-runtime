@@ -33,11 +33,13 @@ jobs:
           artifactName: ${{ parameters.artifactName }}
 
     steps:
-      - checkout: none
-      - bash: |
-          git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
-            "https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
-        displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
+      - ${{ if ne(parameters.libraryVersion, '') }}:
+        - checkout: none
+        - bash: |
+            git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
+              "https://$(GithubUser):$(GithubPat)@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
+          displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
+
       - task: UsePythonVersion@0
         inputs:
           versionSpec: "3.13"
