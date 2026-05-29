@@ -33,18 +33,12 @@ jobs:
           artifactName: ${{ parameters.artifactName }}
 
     steps:
-      - checkout: none
-      - bash: |
-          $githubUser = "$(GithubUser)"
-          $githubToken = "$(GithubPat)"
-
-          # Create GitHub credential
-          git config --global user.name "AzureFunctions"
-          git config --global user.email "azurefunctions@microsoft.com"
-
-          git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
-            "https://$githubUser:$githubToken@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
-        displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
+      - ${{ if ne(parameters.libraryVersion, '') }}:
+        - checkout: none
+        - bash: |
+            git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
+              "https://$(GithubUser):$(GithubPat)@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
+          displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
 
       - task: UsePythonVersion@0
         inputs:
