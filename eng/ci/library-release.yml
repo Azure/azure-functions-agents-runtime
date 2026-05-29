@@ -39,12 +39,25 @@ extends:
       os: windows
 
     stages:
+      - stage: BumpVersion
+        displayName: 'Bump Version'
+        jobs:
+          - template: /eng/templates/official/jobs/bump-version.yml@self
+            parameters:
+              libraryVersion: ${{ parameters.libraryVersion }}
+              githubOrg: ${{ parameters.githubOrg }}
+              githubRepo: ${{ parameters.githubRepo }}
+
       - stage: Build
         displayName: 'Build Azure Functions Agent Runtime'
+        dependsOn: BumpVersion
         jobs:
           - template: /eng/templates/official/jobs/build-artifacts.yml@self
             parameters:
               artifactName: ${{ parameters.artifactName }}
+              libraryVersion: ${{ parameters.libraryVersion }}
+              githubOrg: ${{ parameters.githubOrg }}
+              githubRepo: ${{ parameters.githubRepo }}
 
       - stage: Release
         displayName: 'Release Azure Functions Agent Runtime'
