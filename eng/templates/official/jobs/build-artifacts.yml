@@ -3,6 +3,18 @@ parameters:
     type: string
     default: 'azurefunctions-agents-runtime'
     displayName: 'Pipeline artifact name produced by the Build stage'
+  - name: libraryVersion
+    type: string
+    default: ''
+    displayName: 'Library version to build (if set, checks out release/x.y.z branch)'
+  - name: githubOrg
+    type: string
+    default: 'Azure'
+    displayName: 'GitHub organization that owns the source repository'
+  - name: githubRepo
+    type: string
+    default: 'azure-functions-agents-runtime'
+    displayName: 'GitHub repository name'
 
 jobs:
   - job: "Build"
@@ -21,6 +33,11 @@ jobs:
           artifactName: ${{ parameters.artifactName }}
 
     steps:
+      - checkout: none
+      - bash: |
+          git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
+            "https://github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
+        displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
       - task: UsePythonVersion@0
         inputs:
           versionSpec: "3.13"
