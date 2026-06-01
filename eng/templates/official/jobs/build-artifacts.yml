@@ -10,7 +10,11 @@ parameters:
   - name: libraryVersion
     type: string
     default: ''
-    displayName: 'Library version to build (if set, checks out release/x.y.z branch)'
+    displayName: 'Library version to build (if set, checks out release branch)'
+  - name: releaseBranchPrefix
+    type: string
+    default: 'release'
+    displayName: 'Prefix for release branch (e.g., release or release-v2)'
   - name: githubOrg
     type: string
     default: 'Azure'
@@ -40,9 +44,9 @@ jobs:
       - ${{ if ne(parameters.libraryVersion, '') }}:
         - checkout: none
         - bash: |
-            git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
+            git clone --branch "${{ parameters.releaseBranchPrefix }}/${{ parameters.libraryVersion }}" --single-branch \
               "https://$(GithubUser):$(GithubPat)@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
-          displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
+          displayName: 'Checkout ${{ parameters.releaseBranchPrefix }}/${{ parameters.libraryVersion }} branch'
 
       - task: UsePythonVersion@0
         inputs:

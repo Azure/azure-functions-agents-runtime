@@ -1,6 +1,18 @@
 parameters:
   - name: libraryVersion
     type: string
+  - name: projectDisplayName
+    type: string
+    default: 'Azure Functions Agent Runtime'
+    displayName: 'Human-readable project name for release notes'
+  - name: releaseBranchPrefix
+    type: string
+    default: 'release'
+    displayName: 'Prefix for release branch (e.g., release or release-v2)'
+  - name: tagPrefix
+    type: string
+    default: ''
+    displayName: 'Optional prefix for git tags (e.g., runtimes/v2-)'
   - name: blobPath
     type: string
     default: 'azure-functions/python/azurefunctions-agents-runtime'
@@ -30,6 +42,9 @@ jobs:
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
+        $releaseBranchPrefix = "${{ parameters.releaseBranchPrefix }}"
+        $tagPrefix = "${{ parameters.tagPrefix }}"
+        $releaseTag = "${tagPrefix}${newLibraryVersion}"
 
         # Create GitHub credential
         git config --global user.name "AzureFunctions"
@@ -39,15 +54,15 @@ jobs:
         git clone "https://${githubUser}:${githubToken}@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}"
         Write-Host "Cloned ${{ parameters.githubRepo }} into local"
         Set-Location "${{ parameters.githubRepo }}"
-        git checkout "origin/release/$newLibraryVersion"
+        git checkout "origin/${releaseBranchPrefix}/$newLibraryVersion"
 
-        # Create release tag X.Y.Z
-        Write-Host "Creating release tag $newLibraryVersion"
-        git tag -a "$newLibraryVersion" -m "$newLibraryVersion"
+        # Create release tag
+        Write-Host "Creating release tag $releaseTag"
+        git tag -a "$releaseTag" -m "$newLibraryVersion"
 
         # Push tag to remote
-        git push origin $newLibraryVersion
-      displayName: 'Tag and push x.y.z'
+        git push origin $releaseTag
+      displayName: 'Tag and push ${{ parameters.tagPrefix }}x.y.z'
       
     - download: current
       artifact: ${{ parameters.artifactName }}
@@ -60,6 +75,9 @@ jobs:
         $githubUser = "$(GithubUser)"
         $githubToken = "$(GithubPat)"
         $newLibraryVersion = "${{ parameters.libraryVersion }}"
+        $tagPrefix = "${{ parameters.tagPrefix }}"
+        $releaseTag = "${tagPrefix}${newLibraryVersion}"
+        $projectDisplayName = "${{ parameters.projectDisplayName }}"
 
         $credential = [System.Convert]::ToBase64String(
             [System.Text.Encoding]::ASCII.GetBytes("${githubUser}:${githubToken}"))
@@ -89,8 +107,9 @@ jobs:
         $assetsToUpload | ForEach-Object { Write-Host "  - $($_.Name) ($($_.Length) bytes)" }
 
         # ---- Create draft release ----
-        Write-Host "Creating GitHub draft release for $newLibraryVersion"
-        $body = (@{tag_name="$newLibraryVersion";name="Release $newLibraryVersion";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
+        Write-Host "Creating GitHub draft release for $releaseTag"
+        $releaseName = "Release ${projectDisplayName} ${newLibraryVersion}"
+        $body = (@{tag_name="$releaseTag";name="$releaseName";body="- Fill in Release Note Here";draft=$true} | ConvertTo-Json -Compress)
         $createResponse = Invoke-WebRequest -Headers $apiHeaders -Method Post -Body "$body" `
             -Uri "https://api.github.com/repos/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}/releases"
         if ($createResponse.StatusCode -ne 201) {
