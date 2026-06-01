@@ -205,37 +205,55 @@ jobs:
             $partnerReleaseUrl = '${{ parameters.partnerReleasePipelineUrl }}'
 
             Write-Host ""
-            Write-Host "##[section]Upload complete. Manual step required to publish to PyPI."
-            Write-Host "  1. Open the partner-release pipeline:"
-            Write-Host "       $partnerReleaseUrl"
-            Write-Host "  2. Click 'Run pipeline'."
-            Write-Host "  3. Set BlobPath to (copy-paste):"
-            Write-Host "       $blobPathFull"
-            Write-Host "  4. Click 'Run'."
-            Write-Host "  5. Return to this run and approve the next manual gate to close out the release."
-            # Surface the manual step prominently in the run summary
-            Write-Host "##vso[task.logissue type=warning]Publish to PyPI: open $partnerReleaseUrl and run with BlobPath=$blobPathFull"
+            Write-Host "##[section]Upload complete. The partner-release pipeline will be triggered automatically in the next job."
+            Write-Host "  BlobPath: $blobPathFull"
+            Write-Host "  Partner pipeline: $partnerReleaseUrl"
         env:
           AZCOPY_AUTO_LOGIN_TYPE: 'PSCRED'
 
-  - job: "ConfirmPyPIPublishStarted"
+  - job: "TriggerPartnerRelease"
     dependsOn: ['PublishRelease']
-    displayName: '(Manual) Confirm partner-release pipeline started'
-    pool: server
+    displayName: 'Trigger partner-release pipeline'
+
+    pool:
+      name: 1es-pool-azfunc
+      image: 1es-ubuntu-22.04
+      os: linux
+
     steps:
-      - task: ManualValidation@1
-        displayName: 'Confirm PyPI publish triggered'
+      - checkout: none
+
+      - pwsh: |
+          Write-Host "Target folder: ${{ parameters.blobPath }}/${{ parameters.libraryVersion }}"
+          Write-Host "Storage container: https://ms.portal.azure.com/#blade/Microsoft_Azure_Storage/ContainerMenuBlade/overview/storageAccountId/%2Fsubscriptions%2Fa18897a6-7e44-457d-9260-f2854c0aca42%2FresourceGroups%2Fazuresdkpartnerdrops%2Fproviders%2FMicrosoft.Storage%2FstorageAccounts%2Fazuresdkpartnerdrops/path/drops"
+          Write-Host "Partner pipeline: ${{ parameters.partnerReleasePipelineUrl }}"
+        displayName: 'Log partner pipeline information'
+
+      - task: AzureCLI@2
+        displayName: 'Run partner pipeline for PyPI publish'
         inputs:
-          notifyUsers: ''
-          instructions: |
-            Version ${{ parameters.libraryVersion }} has been uploaded to the Azure SDK partner drops blob.
+          azureSubscription: 'azure-sdk-partner-drops'
+          scriptType: pscore
+          scriptLocation: inlineScript
+          inlineScript: |
+            $ErrorActionPreference = "Stop"
+            $blobPath = "${{ parameters.blobPath }}/${{ parameters.libraryVersion }}"
+            Write-Host "Running partner pipeline for blob path: $blobPath"
 
-            To complete the release, manually trigger the partner-release pipeline:
-              1. Open: ${{ parameters.partnerReleasePipelineUrl }}
-              2. Click "Run pipeline".
-              3. Set BlobPath to:
-                   ${{ parameters.blobPath }}/${{ parameters.libraryVersion }}
-              4. Click "Run".
+            $result = az pipelines run `
+              --project internal `
+              --organization https://dev.azure.com/azure-sdk `
+              --id 6991 `
+              --branch refs/heads/main `
+              --parameters "BlobPath=$blobPath"
 
-            Approve this gate once the partner-release pipeline has been started.
-            Reject if the blob upload looks wrong or you do not intend to publish.
+            if (!$result) {
+              Write-Host "##vso[task.LogIssue type=error;]Failed to start partner pipeline."
+              exit 1
+            }
+
+            $result = $result | ConvertFrom-Json
+            Write-Host "##[section]Partner pipeline started successfully."
+            Write-Host "Build ID: $($result.id)"
+            Write-Host "Partner pipeline may require manual approval to proceed."
+            Write-Host "Please check the pipeline at: https://dev.azure.com/azure-sdk/internal/_build/results?buildId=$($result.id)"

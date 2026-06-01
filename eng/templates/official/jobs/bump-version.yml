@@ -1,6 +1,12 @@
 parameters:
   - name: libraryVersion
     type: string
+  - name: projectDisplayName
+    type: string
+    displayName: 'Human-readable project name for commit messages and logs'
+  - name: initFilePath
+    type: string
+    displayName: 'Path to __init__.py file containing __version__ (e.g., src/azure_functions_agents/__init__.py)'
   - name: githubOrg
     type: string
     default: 'Azure'
@@ -50,12 +56,13 @@ jobs:
         Write-Host "Operating based on ${{ parameters.githubRepo }}"
         git checkout -b "release/$newLibraryVersion"
 
-        # Change pyproject.toml version
-        Write-Host "Change version number in pyproject.toml to $newLibraryVersion"
-        ((Get-Content pyproject.toml) -replace '^version = "(\d)+.(\d)+.*"', "version = `"$newLibraryVersion`"" -join "`n") + "`n" | Set-Content -NoNewline pyproject.toml
-        git add pyproject.toml
+        # Change __init__.py version
+        $initFilePath = "${{ parameters.initFilePath }}"
+        Write-Host "Change version number in $initFilePath to $newLibraryVersion"
+        ((Get-Content $initFilePath) -replace "__version__ = ['""](\d)+\.(\d)+.*['""]", "__version__ = `"$newLibraryVersion`"" -join "`n") + "`n" | Set-Content -NoNewline $initFilePath
+        git add $initFilePath
 
-        git commit -m "build: update Azure Functions Agent Runtime Version to $newLibraryVersion"
+        git commit -m "build: update ${{ parameters.projectDisplayName }} version to $newLibraryVersion"
 
         # Create release branch release/X.Y.Z
         Write-Host "Creating release branch release/$newLibraryVersion"

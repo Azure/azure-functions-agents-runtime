@@ -2,6 +2,14 @@ parameters:
   - name: libraryVersion
     type: string
     displayName: 'Library version to release (e.g., 0.1.0)'
+  - name: projectDisplayName
+    type: string
+    default: 'Azure Functions Agent Runtime'
+    displayName: 'Human-readable project name for stage titles and commit messages'
+  - name: initFilePath
+    type: string
+    default: 'src/azure_functions_agents/__init__.py'
+    displayName: 'Path to __init__.py file containing __version__'
   - name: blobPath
     type: string
     default: 'azure-functions/python/azurefunctions-agents-runtime'
@@ -45,22 +53,25 @@ extends:
           - template: /eng/templates/official/jobs/bump-version.yml@self
             parameters:
               libraryVersion: ${{ parameters.libraryVersion }}
+              projectDisplayName: ${{ parameters.projectDisplayName }}
+              initFilePath: ${{ parameters.initFilePath }}
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}
 
       - stage: Build
-        displayName: 'Build Azure Functions Agent Runtime'
+        displayName: 'Build ${{ parameters.projectDisplayName }}'
         dependsOn: BumpVersion
         jobs:
           - template: /eng/templates/official/jobs/build-artifacts.yml@self
             parameters:
               artifactName: ${{ parameters.artifactName }}
+              projectDisplayName: ${{ parameters.projectDisplayName }}
               libraryVersion: ${{ parameters.libraryVersion }}
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}
 
       - stage: Release
-        displayName: 'Release Azure Functions Agent Runtime'
+        displayName: 'Release ${{ parameters.projectDisplayName }}'
         dependsOn: Build
         jobs:
           - template: /eng/templates/official/jobs/publish-release.yml@self

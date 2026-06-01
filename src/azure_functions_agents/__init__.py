@@ -13,6 +13,8 @@ Framework. The most common entry points are:
   as agent tools.
 """
 
+__version__ = "0.0.0a2"
+
 from ._function_tool import tool
 from .app import create_function_app
 from .client_manager import (
@@ -33,6 +35,7 @@ from .runner import (
 from .system_tools.sandbox import create_sandbox_tools
 
 __all__ = [
+    "__version__",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
