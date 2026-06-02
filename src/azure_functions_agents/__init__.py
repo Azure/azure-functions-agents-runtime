@@ -35,12 +35,12 @@ from .runner import (
 from .system_tools.sandbox import create_sandbox_tools
 
 __all__ = [
-    "__version__",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
     "ClientManager",
     "MAFClientManager",
+    "__version__",
     "create_function_app",
     "create_sandbox_tools",
     "get_client_manager",
