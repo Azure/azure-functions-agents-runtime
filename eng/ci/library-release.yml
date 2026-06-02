@@ -2,6 +2,38 @@ parameters:
   - name: libraryVersion
     type: string
     displayName: 'Library version to release (e.g., 0.1.0)'
+  - name: projectDisplayName
+    type: string
+    default: 'Azure Functions Agent Runtime'
+    displayName: 'Human-readable project name for stage titles and commit messages'
+  - name: versionFilePath
+    type: string
+    default: 'src/azure_functions_agents/__init__.py'
+    displayName: 'Path to version file (e.g., __init__.py or version.py)'
+  - name: versionPattern
+    type: string
+    default: "__version__ = ['\"]([0-9])+\\.([0-9])+.*['\"]"
+    displayName: 'Regex pattern to match version string in version file'
+  - name: versionReplacement
+    type: string
+    default: '__version__ = "{{VERSION}}"'
+    displayName: 'Replacement pattern for version (use {{VERSION}} as placeholder)'
+  - name: releaseBranchPrefix
+    type: string
+    default: 'release'
+    displayName: 'Prefix for release branch (e.g., release or release-v2)'
+  - name: tagPrefix
+    type: string
+    default: ''
+    displayName: 'Optional prefix for git tags (e.g., runtimes/v2-)'
+  - name: createPullRequest
+    type: boolean
+    default: false
+    displayName: 'Create a draft PR to base branch after creating release branch'
+  - name: baseBranch
+    type: string
+    default: 'main'
+    displayName: 'Base branch for PR creation (e.g., main or dev)'
   - name: blobPath
     type: string
     default: 'azure-functions/python/azurefunctions-agents-runtime'
@@ -45,27 +77,39 @@ extends:
           - template: /eng/templates/official/jobs/bump-version.yml@self
             parameters:
               libraryVersion: ${{ parameters.libraryVersion }}
+              projectDisplayName: ${{ parameters.projectDisplayName }}
+              versionFilePath: ${{ parameters.versionFilePath }}
+              versionPattern: ${{ parameters.versionPattern }}
+              versionReplacement: ${{ parameters.versionReplacement }}
+              releaseBranchPrefix: ${{ parameters.releaseBranchPrefix }}
+              createPullRequest: ${{ parameters.createPullRequest }}
+              baseBranch: ${{ parameters.baseBranch }}
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}
 
       - stage: Build
-        displayName: 'Build Azure Functions Agent Runtime'
+        displayName: 'Build ${{ parameters.projectDisplayName }}'
         dependsOn: BumpVersion
         jobs:
           - template: /eng/templates/official/jobs/build-artifacts.yml@self
             parameters:
               artifactName: ${{ parameters.artifactName }}
+              projectDisplayName: ${{ parameters.projectDisplayName }}
               libraryVersion: ${{ parameters.libraryVersion }}
+              releaseBranchPrefix: ${{ parameters.releaseBranchPrefix }}
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}
 
       - stage: Release
-        displayName: 'Release Azure Functions Agent Runtime'
+        displayName: 'Release ${{ parameters.projectDisplayName }}'
         dependsOn: Build
         jobs:
           - template: /eng/templates/official/jobs/publish-release.yml@self
             parameters:
               libraryVersion: ${{ parameters.libraryVersion }}
+              projectDisplayName: ${{ parameters.projectDisplayName }}
+              releaseBranchPrefix: ${{ parameters.releaseBranchPrefix }}
+              tagPrefix: ${{ parameters.tagPrefix }}
               blobPath: ${{ parameters.blobPath }}
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}

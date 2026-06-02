@@ -3,10 +3,18 @@ parameters:
     type: string
     default: 'azurefunctions-agents-runtime'
     displayName: 'Pipeline artifact name produced by the Build stage'
+  - name: projectDisplayName
+    type: string
+    default: 'Azure Functions Agent Runtime'
+    displayName: 'Human-readable project name for job titles'
   - name: libraryVersion
     type: string
     default: ''
-    displayName: 'Library version to build (if set, checks out release/x.y.z branch)'
+    displayName: 'Library version to build (if set, checks out release branch)'
+  - name: releaseBranchPrefix
+    type: string
+    default: 'release'
+    displayName: 'Prefix for release branch (e.g., release or release-v2)'
   - name: githubOrg
     type: string
     default: 'Azure'
@@ -18,7 +26,7 @@ parameters:
 
 jobs:
   - job: "Build"
-    displayName: 'Build Azure Functions Agent Runtime'
+    displayName: 'Build ${{ parameters.projectDisplayName }}'
 
     pool:
       name: 1es-pool-azfunc
@@ -36,9 +44,9 @@ jobs:
       - ${{ if ne(parameters.libraryVersion, '') }}:
         - checkout: none
         - bash: |
-            git clone --branch "release/${{ parameters.libraryVersion }}" --single-branch \
+            git clone --branch "${{ parameters.releaseBranchPrefix }}/${{ parameters.libraryVersion }}" --single-branch \
               "https://$(GithubUser):$(GithubPat)@github.com/${{ parameters.githubOrg }}/${{ parameters.githubRepo }}.git" .
-          displayName: 'Checkout release/${{ parameters.libraryVersion }} branch'
+          displayName: 'Checkout ${{ parameters.releaseBranchPrefix }}/${{ parameters.libraryVersion }} branch'
 
       - task: UsePythonVersion@0
         inputs:
@@ -54,4 +62,4 @@ jobs:
           python -m pip install -U pip
           python -m pip install build
           python -m build
-        displayName: 'Build Azure Functions Agent Runtime'
+        displayName: 'Build ${{ parameters.projectDisplayName }}'

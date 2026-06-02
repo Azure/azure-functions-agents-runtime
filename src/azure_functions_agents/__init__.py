@@ -13,6 +13,8 @@ Framework. The most common entry points are:
   as agent tools.
 """
 
+__version__ = "0.0.0a2"
+
 from ._function_tool import tool
 from .app import create_function_app
 from .client_manager import (
@@ -38,6 +40,7 @@ __all__ = [
     "AgentResult",
     "ClientManager",
     "MAFClientManager",
+    "__version__",
     "create_function_app",
     "create_sandbox_tools",
     "get_client_manager",
