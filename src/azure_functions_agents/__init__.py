@@ -35,7 +35,6 @@ from .runner import (
 from .system_tools.sandbox import create_sandbox_tools
 
 __all__ = [
-    "__version__",
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
@@ -51,4 +50,5 @@ __all__ = [
     "set_client_manager",
     "shutdown_client_manager",
     "tool",
+    "__version__",
 ]
