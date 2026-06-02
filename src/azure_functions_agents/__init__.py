@@ -51,4 +51,5 @@ __all__ = [
     "set_client_manager",
     "shutdown_client_manager",
     "tool",
+    "__version__",
 ]
