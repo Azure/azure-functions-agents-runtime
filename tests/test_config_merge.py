@@ -174,6 +174,28 @@ def test_compose_copies_logger_into_metadata() -> None:
     assert resolved.metadata["logger"] is False
 
 
+def test_compose_copies_maf_debug_into_metadata() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", maf_debug=True, is_main=True),
+        GlobalConfig(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.metadata["maf_debug"] is True
+
+
+def test_compose_copies_maf_debug_false_into_metadata() -> None:
+    resolved = compose(
+        AgentSpec(name="Agent", description="desc", maf_debug=False, is_main=True),
+        GlobalConfig(),
+        discovered_mcp_names=[],
+        discovered_skill_names=[],
+    )
+
+    assert resolved.metadata["maf_debug"] is False
+
+
 def test_compose_preserves_substitute_variables_flag() -> None:
     resolved = compose(
         AgentSpec(name="Agent", description="desc", substitute_variables=False, is_main=True),

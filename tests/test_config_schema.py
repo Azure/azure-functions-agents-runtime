@@ -67,6 +67,17 @@ def test_agent_spec_accepts_logger_field() -> None:
     assert spec.logger is True
 
 
+@pytest.mark.parametrize("value", [True, False, None])
+def test_agent_spec_accepts_maf_debug_field(value: bool | None) -> None:
+    spec = AgentSpec.model_validate({"name": "X", "description": "Y", "maf_debug": value})
+    assert spec.maf_debug is value
+
+
+def test_agent_spec_maf_debug_defaults_to_none() -> None:
+    spec = AgentSpec(name="X", description="Y")
+    assert spec.maf_debug is None
+
+
 def test_trigger_spec_validates() -> None:
     trigger = TriggerSpec(type="timer_trigger", args={"schedule": "0 0 * * * *"})
     assert trigger.type == "timer_trigger"

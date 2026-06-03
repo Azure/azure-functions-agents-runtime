@@ -222,3 +222,190 @@ def test_create_function_app_skips_malformed_yaml_but_registers_valid(tmp_path: 
     app = create_function_app(tmp_path)
 
     assert _function_names(app.get_functions()) == ["good"]
+
+
+class TestStructuredIndexingLog:
+    """Tests for the structured JSON indexing log emitted by create_function_app."""
+
+    def test_emits_agent_runtime_indexed_log(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that create_function_app emits a structured indexing log."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "main.agent.md",
+            """
+            name: Main
+            description: Main agent
+            builtin_endpoints:
+                debug_chat_ui: true
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        # Find the indexing log message
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        assert len(indexing_logs) == 1
+
+        # Parse the JSON from the log message
+        log_message = indexing_logs[0].message
+        # Extract JSON portion after the colon
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        assert log_json["event"] == "agent_runtime_indexed"
+        assert log_json["agent_count"] == 1
+        assert len(log_json["agents"]) == 1
+        assert log_json["agents"][0]["name"] == "Main"
+        assert "discovered_capabilities" in log_json
+
+    def test_indexing_log_includes_trigger_type(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the indexing log includes trigger type for each agent."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "timer-agent.agent.md",
+            """
+            name: Timer Agent
+            description: Timer triggered agent
+            trigger:
+                type: timer_trigger
+                args:
+                    schedule: "0 0 * * * *"
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        log_message = indexing_logs[0].message
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        assert log_json["agents"][0]["trigger_type"] == "timer_trigger"
+
+    def test_indexing_log_includes_builtin_endpoints(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the indexing log includes builtin_endpoints for agents."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "chat-agent.agent.md",
+            """
+            name: Chat Agent
+            description: Chat agent with endpoints
+            builtin_endpoints:
+                debug_chat_ui: true
+                chat_api: true
+                mcp: true
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        log_message = indexing_logs[0].message
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        endpoints = log_json["agents"][0]["builtin_endpoints"]
+        assert "debug_chat_ui" in endpoints
+        assert "chat_api" in endpoints
+        assert "mcp" in endpoints
+
+    def test_indexing_log_counts_multiple_agents(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the indexing log correctly counts multiple agents."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "agent1.agent.md",
+            """
+            name: Agent One
+            description: First agent
+            builtin_endpoints:
+                debug_chat_ui: true
+            """,
+        )
+        _write_agent(
+            tmp_path,
+            "agent2.agent.md",
+            """
+            name: Agent Two
+            description: Second agent
+            trigger:
+                type: timer_trigger
+                args:
+                    schedule: "0 0 * * * *"
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        log_message = indexing_logs[0].message
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        assert log_json["agent_count"] == 2
+        assert len(log_json["agents"]) == 2
+        agent_names = {a["name"] for a in log_json["agents"]}
+        assert agent_names == {"Agent One", "Agent Two"}
+
+    def test_indexing_log_includes_discovered_capabilities(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the indexing log includes discovered capabilities counts."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "main.agent.md",
+            """
+            name: Main
+            description: Main agent
+            builtin_endpoints:
+                debug_chat_ui: true
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        log_message = indexing_logs[0].message
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        capabilities = log_json["discovered_capabilities"]
+        assert "mcp_servers" in capabilities
+        assert "skills" in capabilities
+        assert "user_tools" in capabilities
+        assert isinstance(capabilities["mcp_servers"], int)
+        assert isinstance(capabilities["skills"], int)
+        assert isinstance(capabilities["user_tools"], int)
+
