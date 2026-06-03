@@ -17,7 +17,7 @@ import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
-from ..config import ResolvedAgent, _to_bool
+from ..config import ResolvedAgent
 from ._handlers import build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
 from .capabilities import AgentCapabilities
