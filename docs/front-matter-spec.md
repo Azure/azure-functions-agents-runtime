@@ -45,7 +45,7 @@ For capabilities (MCP, skills, tools):
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
 | **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `maf_debug`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -81,6 +81,7 @@ YAML front matter at the top of each agent file.
 - `model` — String to override global default model
 - `timeout` — Number to override global default timeout
 - `logger` — Boolean to enable/disable response logging for triggered agents
+- `maf_debug` — Boolean to enable Microsoft Agent Framework experimental warnings for this agent
 - `substitute_variables` — Boolean to enable/disable environment-variable substitution for this agent
 - `system_tools` — Object to opt out of system tools
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
@@ -123,7 +124,7 @@ Fields are organized into categories based on how they can be used:
 - `name`, `description` — Agent identity (required)
 - `trigger` — Invocation method (required unless at least one built-in endpoint is enabled)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
-- `logger`, `substitute_variables` — Agent runtime behavior switches
+- `logger`, `maf_debug`, `substitute_variables` — Agent runtime behavior switches
 - `input_schema`, `response_schema`, `response_example` — HTTP validation
 - `metadata` — Organizational metadata
 
@@ -597,6 +598,20 @@ metadata:
 **Example:**
 ```yaml
 logger: false
+```
+
+---
+
+#### `maf_debug`
+- **Type:** `boolean`
+- **Typical location:** Agent only
+- **Can override:** N/A (agent-specific only)
+- **Default:** `false`
+- **Description:** Controls whether Microsoft Agent Framework `ExperimentalWarning` logs are emitted during this agent's execution. The runtime suppresses these warnings by default because they clutter cold-start logs without providing actionable guidance. Set to `true` to allow these warnings for debugging or development purposes.
+
+**Example:**
+```yaml
+maf_debug: true
 ```
 
 ---

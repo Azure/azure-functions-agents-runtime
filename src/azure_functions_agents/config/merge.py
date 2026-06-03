@@ -113,6 +113,8 @@ def compose(
     metadata = dict(spec.metadata or {})
     if spec.logger is not None:
         metadata["logger"] = spec.logger
+    if spec.maf_debug is not None:
+        metadata["maf_debug"] = spec.maf_debug
 
     resolved = ResolvedAgent(
         name=spec.name,

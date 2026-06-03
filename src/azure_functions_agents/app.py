@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 from typing import Any
 
@@ -55,6 +56,16 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     registered_names: set[str] = set()
+
+    # Collect indexing summary for structured logging
+    agents_summary: list[dict[str, Any]] = []
+    system_tools_used: set[str] = set()
+
+    # Track global system tools configuration
+    if global_config.system_tools:
+        if global_config.system_tools.dynamic_sessions_code_interpreter:
+            system_tools_used.add("dynamic_sessions_code_interpreter")
+
     for spec in agent_specs:
         resolved = compose(
             spec,
@@ -92,6 +103,46 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
             register_builtin_endpoints(app, resolved, capabilities, slug=allocated_name)
 
-    if not agent_specs:
-        logger.info("No agent files found.")
+        # Collect agent summary info
+        agent_info: dict[str, Any] = {
+            "name": resolved.name,
+            "source_file": resolved.source_file,
+        }
+        if resolved.trigger:
+            agent_info["trigger_type"] = resolved.trigger.type
+        else:
+            agent_info["trigger_type"] = None
+        if _builtin_endpoints_enabled(resolved.builtin_endpoints):
+            endpoints = []
+            if resolved.builtin_endpoints.debug_chat_ui:
+                endpoints.append("debug_chat_ui")
+            if resolved.builtin_endpoints.chat_api:
+                endpoints.append("chat_api")
+            if resolved.builtin_endpoints.mcp:
+                endpoints.append("mcp")
+            agent_info["builtin_endpoints"] = endpoints
+
+        # Track per-agent system tools (if not opted out)
+        if resolved.sandbox_config:
+            system_tools_used.add("dynamic_sessions_code_interpreter")
+
+        agents_summary.append(agent_info)
+
+    # Emit structured indexing summary log
+    indexing_summary = {
+        "event": "agent_runtime_indexed",
+        "agent_count": len(agent_specs),
+        "agents": agents_summary,
+        "system_tools": sorted(system_tools_used),
+        "discovered_capabilities": {
+            "mcp_servers": len(mcp_names),
+            "skills": len(skill_names),
+            "user_tools": len(user_tools),
+        },
+    }
+    logger.info(
+        "Agent runtime indexing completed: %s",
+        json.dumps(indexing_summary, ensure_ascii=False, default=str),
+    )
+
     return app

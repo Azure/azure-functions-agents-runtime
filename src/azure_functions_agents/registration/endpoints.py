@@ -17,7 +17,7 @@ import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
-from ..config import ResolvedAgent
+from ..config import ResolvedAgent, _to_bool
 from ._handlers import build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
 from .capabilities import AgentCapabilities
@@ -54,6 +54,11 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
 
     runner_module = import_module("azure_functions_agents.runner")
     return runner_module.run_agent_stream(*args, **kwargs)
+
+
+def _should_show_maf_warnings(resolved: ResolvedAgent) -> bool:
+    """Return True if MAF ExperimentalWarning should be shown for this agent."""
+    return _to_bool(resolved.metadata.get("maf_debug", False), default=False)
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -116,6 +121,7 @@ async def _run_builtin_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        maf_debug=_should_show_maf_warnings(resolved),
     )
 
 
@@ -138,6 +144,7 @@ def _run_builtin_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        maf_debug=_should_show_maf_warnings(resolved),
     )
 
 
@@ -336,7 +343,6 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_chat_page",
             route=route,
         )
-        logger.info("Registered debug chat UI for '%s' at /%s", resolved.name, route)
 
     if builtin_endpoints.chat_api:
         chat_route = f"agents/{slug}/chat"
@@ -355,12 +361,6 @@ def register_builtin_endpoints(
             route=stream_route,
             function_name=f"{base_function_name}_chatstream",
         )
-        logger.info(
-            "Registered built-in HTTP endpoints for '%s' at /%s and /%s",
-            resolved.name,
-            chat_route,
-            stream_route,
-        )
 
     if builtin_endpoints.mcp:
         _register_mcp_endpoint(
@@ -370,4 +370,3 @@ def register_builtin_endpoints(
             tool_name=slug,
             function_name=f"{base_function_name}_mcp",
         )
-        logger.info("Registered built-in MCP tool '%s' for '%s'", slug, resolved.name)

@@ -112,6 +112,7 @@ class AgentSpec(BaseModel):
     model: str | None = None
     timeout: float | None = None
     logger: bool | None = None
+    maf_debug: bool | None = None
     substitute_variables: bool = True
     system_tools: SystemToolsAgentOverride | None = None
     mcp: bool | McpFilter | None = None
