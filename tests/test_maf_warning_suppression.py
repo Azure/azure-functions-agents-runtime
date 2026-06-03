@@ -4,8 +4,6 @@ from __future__ import annotations
 
 import warnings
 
-import pytest
-
 
 class MockExperimentalWarning(UserWarning):
     """Mock MAF ExperimentalWarning for testing."""
