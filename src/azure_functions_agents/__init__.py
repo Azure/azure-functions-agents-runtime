@@ -13,6 +13,8 @@ Framework. The most common entry points are:
   as agent tools.
 """
 
+__version__ = "0.0.0a2"
+
 # ---------------------------------------------------------------------------
 # Global MAF ExperimentalWarning suppression
 # ---------------------------------------------------------------------------
@@ -124,6 +126,7 @@ __all__ = [
     "AgentResult",
     "ClientManager",
     "MAFClientManager",
+    "__version__",
     "create_function_app",
     "create_sandbox_tools",
     "get_client_manager",

@@ -27,6 +27,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "AgentResult",
         "ClientManager",
         "MAFClientManager",
+        "__version__",
         "create_function_app",
         "create_sandbox_tools",
         "get_client_manager",
