@@ -42,8 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator, Iterator
-from contextlib import contextmanager
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -97,36 +96,6 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
             lock = asyncio.Lock()
             _SESSION_LOCKS[session_id] = lock
         return lock
-
-
-# ---------------------------------------------------------------------------
-# MAF warning control
-# ---------------------------------------------------------------------------
-
-
-@contextmanager
-def _maf_warnings_context(maf_debug: bool) -> Iterator[None]:
-    """Context manager that temporarily allows MAF ExperimentalWarning when maf_debug is True.
-
-    By default, ExperimentalWarning is suppressed globally (see __init__.py)
-    via monkey-patched warnings functions. When an agent sets ``maf_debug: true``,
-    this context manager temporarily disables the suppression so warnings are
-    emitted during that agent's execution.
-    """
-    if not maf_debug:
-        # Default: keep warnings suppressed (no-op context)
-        yield
-        return
-
-    # Temporarily disable MAF warning suppression
-    import azure_functions_agents as _afa
-
-    original_suppress = _afa._suppress_maf_warnings
-    try:
-        _afa._suppress_maf_warnings = False
-        yield
-    finally:
-        _afa._suppress_maf_warnings = original_suppress
 
 
 # ---------------------------------------------------------------------------
@@ -368,7 +337,6 @@ async def run_agent(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
-    maf_debug: bool = False,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -406,10 +374,6 @@ async def run_agent(
         bound to a specific ACA session pool. ``None`` adds no sandbox tools;
         pass a list to enable them. Per-call because the ACA session id is
         baked into each tool's closure.
-    maf_debug:
-        When ``True``, allows Microsoft Agent Framework ``ExperimentalWarning``
-        logs to be emitted during agent execution. Defaults to ``False``
-        (warnings suppressed).
 
     Notes
     -----
@@ -418,30 +382,29 @@ async def run_agent(
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
-    with _maf_warnings_context(maf_debug):
-        agent, session, resolved_id = await _build_agent_session_history(
-            instructions=instructions,
-            session_id=session_id,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
-            model=model,
-            sandbox_tools=sandbox_tools,
-        )
+    agent, session, resolved_id = await _build_agent_session_history(
+        instructions=instructions,
+        session_id=session_id,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        model=model,
+        sandbox_tools=sandbox_tools,
+    )
 
-        lock = await _get_session_lock(resolved_id)
-        async with lock:
-            try:
-                response = await asyncio.wait_for(
-                    agent.run(
-                        prompt,
-                        session=session,
-                        options=_build_chat_options_from_environment(),
-                    ),
-                    timeout=timeout,
-                )
-            except TimeoutError:
-                raise RuntimeError(f"Agent run timed out after {timeout}s") from None
+    lock = await _get_session_lock(resolved_id)
+    async with lock:
+        try:
+            response = await asyncio.wait_for(
+                agent.run(
+                    prompt,
+                    session=session,
+                    options=_build_chat_options_from_environment(),
+                ),
+                timeout=timeout,
+            )
+        except TimeoutError:
+            raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
     # Extract assistant text from the final response.
     text = ""
@@ -502,7 +465,6 @@ async def run_agent_stream(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
-    maf_debug: bool = False,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -517,7 +479,6 @@ async def run_agent_stream(
       sandbox tools; pass a list to enable them.
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
-    * ``maf_debug`` allows MAF ``ExperimentalWarning`` logs when ``True``.
     * To fully disable all tools from a direct API call, pass
       ``tools=[], mcp_tools=[], sandbox_tools=None``.
 
@@ -535,21 +496,20 @@ async def run_agent_stream(
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
-    with _maf_warnings_context(maf_debug):
-        try:
-            agent, session, resolved_id = await _build_agent_session_history(
-                instructions=instructions,
-                session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
-                model=model,
-                sandbox_tools=sandbox_tools,
-            )
-        except Exception as exc:
-            logger.error("Failed to build agent session: %s", exc, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-            return
+    try:
+        agent, session, resolved_id = await _build_agent_session_history(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+        )
+    except Exception as exc:
+        logger.error("Failed to build agent session: %s", exc, exc_info=True)
+        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        return
 
     yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
 

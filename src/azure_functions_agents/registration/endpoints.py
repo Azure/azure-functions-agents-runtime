@@ -56,11 +56,6 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
     return runner_module.run_agent_stream(*args, **kwargs)
 
 
-def _should_show_maf_warnings(resolved: ResolvedAgent) -> bool:
-    """Return True if MAF ExperimentalWarning should be shown for this agent."""
-    return _to_bool(resolved.metadata.get("maf_debug", False), default=False)
-
-
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     value = payload.get("sessionId") or payload.get("sessionid")
     if isinstance(value, str) and value.strip():
@@ -121,7 +116,6 @@ async def _run_builtin_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
-        maf_debug=_should_show_maf_warnings(resolved),
     )
 
 
@@ -144,7 +138,6 @@ def _run_builtin_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
-        maf_debug=_should_show_maf_warnings(resolved),
     )
 
 

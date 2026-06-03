@@ -22,9 +22,8 @@ __version__ = "0.0.0a2"
 # features like MemoryStore, SkillResource, etc. These warnings are
 # informational — the runtime acknowledges the experimental status.
 #
-# Warnings are suppressed by default because they clutter cold-start logs
-# without providing actionable guidance. Set ``maf_debug: true`` in an
-# agent's front matter to allow warnings for that agent's execution.
+# Warnings are suppressed because they clutter cold-start logs without
+# providing actionable guidance.
 #
 # We suppress warnings by monkey-patching warnings.warn_explicit since that's
 # what MAF uses to emit warnings. This ensures warnings are caught regardless

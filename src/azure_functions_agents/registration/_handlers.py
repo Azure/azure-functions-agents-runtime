@@ -118,11 +118,6 @@ def _should_log(resolved: ResolvedAgent) -> bool:
     return _to_bool(resolved.metadata.get("logger", True), default=True)
 
 
-def _should_show_maf_warnings(resolved: ResolvedAgent) -> bool:
-    """Return True if MAF ExperimentalWarning should be shown for this agent."""
-    return _to_bool(resolved.metadata.get("maf_debug", False), default=False)
-
-
 def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
     if resolved.response_example:
         return [
@@ -270,7 +265,6 @@ def make_http_agent_handler(
                 tools=capabilities.filtered_user_tools,
                 mcp_tools=capabilities.filtered_mcp_tools,
                 skill_paths=capabilities.enabled_skill_paths,
-                maf_debug=_should_show_maf_warnings(resolved),
             )
 
             if _should_log(resolved):
