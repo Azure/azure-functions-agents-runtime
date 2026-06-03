@@ -42,7 +42,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,7 +105,7 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
 
 
 @contextmanager
-def _maf_warnings_context(maf_debug: bool):
+def _maf_warnings_context(maf_debug: bool) -> Iterator[None]:
     """Context manager that temporarily allows MAF ExperimentalWarning when maf_debug is True.
 
     By default, ExperimentalWarning is suppressed globally (see __init__.py)

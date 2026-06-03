@@ -32,6 +32,7 @@ __version__ = "0.0.0a2"
 # ---------------------------------------------------------------------------
 
 import warnings as _warnings
+from typing import Any
 
 # Global flag to control MAF warning suppression (can be temporarily disabled)
 _suppress_maf_warnings = True
@@ -42,15 +43,15 @@ _original_warn = _warnings.warn
 
 
 def _patched_warn_explicit(
-    message,
-    category,
-    filename,
-    lineno,
-    module=None,
-    registry=None,
-    module_globals=None,
-    source=None,
-):
+    message: str | Warning,
+    category: type[Warning],
+    filename: str,
+    lineno: int,
+    module: str | None = None,
+    registry: Any = None,
+    module_globals: Any = None,
+    source: Any = None,
+) -> None:
     """Patched warn_explicit that suppresses MAF ExperimentalWarning."""
     if _suppress_maf_warnings:
         # Check if this is a MAF experimental warning
@@ -69,7 +70,12 @@ def _patched_warn_explicit(
     )
 
 
-def _patched_warn(message, category=UserWarning, stacklevel=1, source=None):
+def _patched_warn(
+    message: str | Warning,
+    category: type[Warning] = UserWarning,
+    stacklevel: int = 1,
+    source: Any = None,
+) -> None:
     """Patched warn that suppresses MAF ExperimentalWarning."""
     if _suppress_maf_warnings:
         # Check if this is a MAF experimental warning
@@ -88,7 +94,7 @@ def _patched_warn(message, category=UserWarning, stacklevel=1, source=None):
 
 # Install patches immediately before any MAF imports
 _warnings.warn_explicit = _patched_warn_explicit
-_warnings.warn = _patched_warn
+_warnings.warn = _patched_warn  # type: ignore[assignment]
 
 # Also set standard warning filters as additional backup
 _warnings.filterwarnings("ignore", message=r".*experimental.*")
