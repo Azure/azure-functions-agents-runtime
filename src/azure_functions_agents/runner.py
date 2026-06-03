@@ -42,7 +42,6 @@ from __future__ import annotations
 import asyncio
 import json
 import re
-import warnings
 from collections.abc import AsyncIterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field

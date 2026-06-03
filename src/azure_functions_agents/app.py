@@ -62,9 +62,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     system_tools_used: set[str] = set()
 
     # Track global system tools configuration
-    if global_config.system_tools:
-        if global_config.system_tools.dynamic_sessions_code_interpreter:
-            system_tools_used.add("dynamic_sessions_code_interpreter")
+    if (
+        global_config.system_tools
+        and global_config.system_tools.dynamic_sessions_code_interpreter
+    ):
+        system_tools_used.add("dynamic_sessions_code_interpreter")
 
     for spec in agent_specs:
         resolved = compose(

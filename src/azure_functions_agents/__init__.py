@@ -101,24 +101,24 @@ except ImportError:
     pass
 
 
-from ._function_tool import tool
-from .app import create_function_app
-from .client_manager import (
+from ._function_tool import tool  # noqa: E402
+from .app import create_function_app  # noqa: E402
+from .client_manager import (  # noqa: E402
     ClientManager,
     MAFClientManager,
     get_client_manager,
     set_client_manager,
     shutdown_client_manager,
 )
-from .config.paths import resolve_config_dir, set_app_root
-from .runner import (
+from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
+from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
     AgentResult,
     run_agent,
     run_agent_stream,
 )
-from .system_tools.sandbox import create_sandbox_tools
+from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 
 __all__ = [
     "DEFAULT_MODEL",
