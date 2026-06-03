@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import warnings
-from typing import Any
-from unittest.mock import patch
 
 import pytest
 
@@ -226,10 +224,9 @@ class TestMafWarningsContext:
 
         afa._suppress_maf_warnings = True
 
-        with pytest.raises(ValueError):
-            with _maf_warnings_context(maf_debug=True):
-                assert afa._suppress_maf_warnings is False
-                raise ValueError("Test exception")
+        with pytest.raises(ValueError), _maf_warnings_context(maf_debug=True):
+            assert afa._suppress_maf_warnings is False
+            raise ValueError("Test exception")
 
         # Should still be restored
         assert afa._suppress_maf_warnings is True
@@ -241,16 +238,15 @@ class TestMafWarningsContext:
 
         afa._suppress_maf_warnings = True
 
-        with _maf_warnings_context(maf_debug=True):
-            with warnings.catch_warnings(record=True) as w:
-                warnings.simplefilter("always")
-                afa._patched_warn(
-                    "Test experimental warning",
-                    MockExperimentalWarning,
-                    stacklevel=1,
-                )
-                # Should be emitted because suppression is disabled
-                assert len(w) == 1
+        with _maf_warnings_context(maf_debug=True), warnings.catch_warnings(record=True) as w:
+            warnings.simplefilter("always")
+            afa._patched_warn(
+                "Test experimental warning",
+                MockExperimentalWarning,
+                stacklevel=1,
+            )
+            # Should be emitted because suppression is disabled
+            assert len(w) == 1
 
         # Restore original state
         afa._suppress_maf_warnings = True
