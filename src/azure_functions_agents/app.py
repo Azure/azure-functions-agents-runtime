@@ -135,7 +135,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         "event": "agent_runtime_indexed",
         "agent_count": len(agent_specs),
         "agents": agents_summary,
-        "system_tools": sorted(system_tools_used),
+        "system_tools": list(system_tools_used),
         "discovered_capabilities": {
             "mcp_servers": len(mcp_names),
             "skills": len(skill_names),
