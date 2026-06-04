@@ -304,7 +304,6 @@ wheels = [
 
 [[package]]
 name = "azurefunctions-agents-runtime"
-version = "0.0.0.dev3"
 source = { editable = "." }
 dependencies = [
     { name = "agent-framework-core" },

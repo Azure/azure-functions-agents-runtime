@@ -56,12 +56,6 @@ def _register_builtin_agent(
 
     decorated = decorator_fn(**trigger_params)(handler)
     decorated = app.function_name(name=function_name)(decorated)
-    logger.info(
-        "Registered '%s' (%s) — %s",
-        function_name,
-        trigger_type,
-        resolved.name,
-    )
 
 
 def _register_http_agent(
@@ -97,13 +91,6 @@ def _register_http_agent(
         auth_level=auth_level,
     )(handler)
     decorated = app.function_name(name=function_name)(decorated)
-    logger.info(
-        "Registered HTTP agent '%s' at /%s (%s) — %s",
-        function_name,
-        route,
-        methods,
-        resolved.name,
-    )
 
 
 def register_agent(

@@ -336,7 +336,6 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_chat_page",
             route=route,
         )
-        logger.info("Registered debug chat UI for '%s' at /%s", resolved.name, route)
 
     if builtin_endpoints.chat_api:
         chat_route = f"agents/{slug}/chat"
@@ -355,12 +354,6 @@ def register_builtin_endpoints(
             route=stream_route,
             function_name=f"{base_function_name}_chatstream",
         )
-        logger.info(
-            "Registered built-in HTTP endpoints for '%s' at /%s and /%s",
-            resolved.name,
-            chat_route,
-            stream_route,
-        )
 
     if builtin_endpoints.mcp:
         _register_mcp_endpoint(
@@ -370,4 +363,3 @@ def register_builtin_endpoints(
             tool_name=slug,
             function_name=f"{base_function_name}_mcp",
         )
-        logger.info("Registered built-in MCP tool '%s' for '%s'", slug, resolved.name)
