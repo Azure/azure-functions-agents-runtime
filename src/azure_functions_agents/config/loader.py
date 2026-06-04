@@ -6,7 +6,7 @@ from pathlib import Path
 from typing import Any, cast
 
 import frontmatter
-import yaml
+import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
