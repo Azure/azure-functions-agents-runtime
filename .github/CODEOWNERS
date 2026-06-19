@@ -1,0 +1,7 @@
+# CODEOWNERS for Azure/azure-functions-agents-runtime
+#
+# These owners are requested for review on every pull request.
+# See https://docs.github.com/articles/about-code-owners
+
+# Default owners for everything in the repo
+* @azure/azure-functions-agent-runtime-maintainers
