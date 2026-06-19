@@ -82,8 +82,8 @@ is what CI runs; drop it (or use the fast loop below) for everyday local runs.
 
 ```bash
 # One-time setup (editable install with dev extras)
+python -m pip install --upgrade pip
 python -m pip install -U -e .[dev]
-
 # Lint
 python -m ruff check src tests
 
