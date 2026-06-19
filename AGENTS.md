@@ -76,10 +76,9 @@ git worktree add \
 
 ## 3. Canonical commands (the gate)
 
-These mirror CI exactly (`eng/templates/jobs/ci-tests.yml`; Python **3.13** and
+These mirror CI's lint/type-check/test steps (`eng/templates/jobs/ci-tests.yml`; Python **3.13** and
 **3.14**). All three must pass before a PR is ready. The `--cov-report=xml` flag
 is what CI runs; drop it (or use the fast loop below) for everyday local runs.
-
 ```bash
 # One-time setup (editable install with dev extras)
 python -m pip install --upgrade pip
