@@ -2,9 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+
+# Supported SDK modes for agent execution
+SdkMode = Literal["maf", "copilot-sdk"]
 
 
 class McpFilter(BaseModel):
@@ -94,6 +98,7 @@ class GlobalConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    sdk_mode: SdkMode = "maf"
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None

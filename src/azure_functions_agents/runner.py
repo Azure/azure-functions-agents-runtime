@@ -52,8 +52,38 @@ from ._logger import logger
 from .client_manager import get_client_manager
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
+from .config.schema import SdkMode
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
+
+# ---------------------------------------------------------------------------
+# SDK Mode Selection
+# ---------------------------------------------------------------------------
+
+_CURRENT_SDK_MODE: SdkMode = "maf"
+
+
+def get_sdk_mode() -> SdkMode:
+    """Return the currently active SDK mode."""
+    return _CURRENT_SDK_MODE
+
+
+def set_sdk_mode(mode: SdkMode) -> None:
+    """Set the SDK mode for agent execution.
+
+    Valid modes:
+    - ``"maf"`` (default): Microsoft Agent Framework
+    - ``"copilot-sdk"``: GitHub Copilot SDK
+
+    This is typically set automatically by :func:`create_function_app` based
+    on the ``sdk_mode`` setting in ``agents.config.yaml``.
+    """
+    global _CURRENT_SDK_MODE
+    if mode not in ("maf", "copilot-sdk"):
+        raise ValueError(f"Invalid SDK mode: {mode}. Use 'maf' or 'copilot-sdk'.")
+    _CURRENT_SDK_MODE = mode
+    logger.info("SDK mode set to: %s", mode)
+
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -380,6 +410,22 @@ async def run_agent(
     To fully disable all tools from a direct API call, pass
     ``tools=[], mcp_tools=[], sandbox_tools=None``.
     """
+    # Delegate to Copilot SDK runner if sdk_mode is set to copilot-sdk
+    if get_sdk_mode() == "copilot-sdk":
+        from . import copilot_runner
+
+        return await copilot_runner.run_agent(
+            prompt,
+            instructions=instructions,
+            timeout=timeout,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+        )
+
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
     agent, session, resolved_id = await _build_agent_session_history(
@@ -494,6 +540,24 @@ async def run_agent_stream(
     * ``done``         — stream completed normally
     * ``error``        — terminal error message
     """
+    # Delegate to Copilot SDK runner if sdk_mode is set to copilot-sdk
+    if get_sdk_mode() == "copilot-sdk":
+        from . import copilot_runner
+
+        async for event in copilot_runner.run_agent_stream(
+            prompt,
+            instructions=instructions,
+            timeout=timeout,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            session_id=session_id,
+            sandbox_tools=sandbox_tools,
+        ):
+            yield event
+        return
+
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
     try:

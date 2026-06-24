@@ -20,6 +20,7 @@ from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
+from .runner import set_sdk_mode
 
 
 def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
@@ -47,6 +48,10 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     resolved_root = get_app_root()
 
     global_config = load_global_config(resolved_root)
+
+    # Initialize SDK mode from global config
+    set_sdk_mode(global_config.sdk_mode)
+
     agent_specs = load_agent_specs(resolved_root)
     user_tools = discover_user_tools(resolved_root)
     mcp_tools = discover_mcp_servers(resolved_root)

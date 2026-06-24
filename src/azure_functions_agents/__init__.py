@@ -120,8 +120,10 @@ from .runner import (  # noqa: E402
     DEFAULT_MODEL,
     DEFAULT_TIMEOUT,
     AgentResult,
+    get_sdk_mode,
     run_agent,
     run_agent_stream,
+    set_sdk_mode,
 )
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 
@@ -135,11 +137,13 @@ __all__ = [
     "create_function_app",
     "create_sandbox_tools",
     "get_client_manager",
+    "get_sdk_mode",
     "resolve_config_dir",
     "run_agent",
     "run_agent_stream",
     "set_app_root",
     "set_client_manager",
+    "set_sdk_mode",
     "shutdown_client_manager",
     "tool",
 ]

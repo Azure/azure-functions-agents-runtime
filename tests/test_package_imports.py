@@ -31,11 +31,13 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "create_function_app",
         "create_sandbox_tools",
         "get_client_manager",
+        "get_sdk_mode",
         "resolve_config_dir",
         "run_agent",
         "run_agent_stream",
         "set_app_root",
         "set_client_manager",
+        "set_sdk_mode",
         "shutdown_client_manager",
         "tool",
     ]

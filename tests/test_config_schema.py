@@ -90,3 +90,23 @@ def test_system_tools_config_parses() -> None:
     assert config.dynamic_sessions_code_interpreter == DynamicSessionsCodeInterpreterConfig(
         endpoint="https://example.test"
     )
+
+
+def test_global_config_sdk_mode_default() -> None:
+    config = GlobalConfig()
+    assert config.sdk_mode == "maf"
+
+
+def test_global_config_sdk_mode_maf() -> None:
+    config = GlobalConfig.model_validate({"sdk_mode": "maf"})
+    assert config.sdk_mode == "maf"
+
+
+def test_global_config_sdk_mode_copilot_sdk() -> None:
+    config = GlobalConfig.model_validate({"sdk_mode": "copilot-sdk"})
+    assert config.sdk_mode == "copilot-sdk"
+
+
+def test_global_config_sdk_mode_invalid() -> None:
+    with pytest.raises(ValidationError):
+        GlobalConfig.model_validate({"sdk_mode": "invalid-mode"})

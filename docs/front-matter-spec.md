@@ -44,7 +44,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `sdk_mode`, `system_tools`, `model`, `timeout`, `tools` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -58,6 +58,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Required properties:** None (entire file is optional)
 
 **Supported properties:**
+- `sdk_mode` — String specifying which SDK to use for agent execution: `"maf"` (default, Microsoft Agent Framework) or `"copilot-sdk"` (GitHub Copilot SDK)
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
 - `model` — String specifying default LLM model identifier
@@ -330,6 +331,27 @@ builtin_endpoints: true   # Equivalent to debug_chat_ui: true, chat_api: true, a
 ```yaml
 builtin_endpoints: false  # Equivalent to debug_chat_ui: false, chat_api: false, mcp: false
 ```
+
+---
+
+#### `sdk_mode`
+- **Type:** `string`
+- **Location:** Global (`agents.config.yaml`) only
+- **Valid values:** `"maf"` (default), `"copilot-sdk"`
+- **Description:** Specifies which SDK to use for agent execution. This is a global setting that applies to all agents.
+  - `"maf"` — Microsoft Agent Framework (default). Supports Azure OpenAI, OpenAI, and Microsoft Foundry providers. Includes managed identity support.
+  - `"copilot-sdk"` — GitHub Copilot SDK. Requires separate installation: `pip install azurefunctions-agents-runtime[copilot-sdk]`. Supports Azure OpenAI and OpenAI providers (with API key). Does not support Foundry or managed identity.
+
+**Example:**
+```yaml
+sdk_mode: copilot-sdk  # Use GitHub Copilot SDK instead of MAF
+```
+
+**Note:** When using `copilot-sdk` mode:
+- MCP tools are exposed as proxy tools that make HTTP calls to MCP servers
+- Skills are loaded and injected into the system message
+- Azure OpenAI requires `AZURE_OPENAI_API_KEY` (managed identity is not supported)
+- Foundry provider is not supported
 
 ---
 
