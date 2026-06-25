@@ -29,7 +29,7 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 
 | FRD | Title | Status |
 | --- | ----- | ------ |
-| _(none yet)_ | | |
+| [0001](0001-agents-folder-indexing.md) | agents/ folder indexing | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.

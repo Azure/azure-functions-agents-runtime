@@ -96,9 +96,16 @@ YAML front matter at the top of each agent file.
 ```
 /
   agents.config.yaml          # Optional: Global defaults
-  *.agent.md               # Agents (triggered and/or built-in endpoint-enabled)
+  *.agent.md                  # Agents at top-level
+  agents/                     # Optional: folder for organizing agents
+    *.agent.md                # Agents in folder (same format as top-level)
+  tools/                      # Custom tools (auto-discovered)
+  skills/                     # Skills (auto-discovered)
+  mcp.json                    # MCP server definitions
   ...
 ```
+
+Agent markdown files (`*.agent.md`) can be placed at the app root or in an `agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`). Files from both locations are combined and sorted by path for deterministic ordering. `main.agent.md` in either location is marked as the main agent.
 
 ---
 

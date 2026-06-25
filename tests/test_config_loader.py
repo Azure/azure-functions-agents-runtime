@@ -416,3 +416,198 @@ def test_load_agent_specs_resolves_strings_passes_through_non_string_scalars(
     assert spec.trigger.args["run_on_start"] is True  # bool passthrough
     assert spec.trigger.args["priority"] == 5  # int passthrough
     assert spec.trigger.args["schedule"] == "0 0 * * * *"  # str preserved
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# agents/ folder discovery tests (FRD-0001)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_agent_specs_from_agents_folder_only(tmp_path: Path) -> None:
+    """Agents can be placed exclusively in an agents/ folder."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "chat.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Chat
+            description: Chat agent in agents folder
+            ---
+            You are a chat agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Chat"
+    assert "agents" in specs[0].source_file
+
+
+def test_load_agent_specs_hybrid_top_level_and_agents_folder(tmp_path: Path) -> None:
+    """Agents from both top-level and agents/ folder are discovered."""
+    # Top-level agent
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Top-level main agent
+            ---
+            You are the main agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    # agents/ folder agent
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "helper.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Helper
+            description: Helper agent in agents folder
+            ---
+            You are a helper agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    names = {spec.name for spec in specs}
+    assert names == {"Main", "Helper"}
+
+
+def test_load_agent_specs_main_in_agents_folder_is_marked_is_main(tmp_path: Path) -> None:
+    """main.agent.md in agents/ folder is correctly marked as is_main=True."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent in agents folder
+            ---
+            You are the main agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Main"
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_case_insensitive_agents_folder(tmp_path: Path) -> None:
+    """Agents/ (capitalized) folder is also recognized."""
+    agents_dir = tmp_path / "Agents"
+    agents_dir.mkdir()
+    (agents_dir / "chat.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Chat
+            description: Chat agent
+            ---
+            You are a chat agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Chat"
+
+
+def test_load_agent_specs_empty_agents_folder_with_top_level(tmp_path: Path) -> None:
+    """Empty agents/ folder doesn't affect top-level agent discovery."""
+    # Create empty agents folder
+    (tmp_path / "agents").mkdir()
+
+    # Top-level agent
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main
+            description: Main agent
+            ---
+            Hello
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Main"
+
+
+def test_load_agent_specs_no_agents_anywhere_returns_empty(tmp_path: Path) -> None:
+    """No agents at top-level or in agents/ folder returns empty list."""
+    # Create empty agents folder
+    (tmp_path / "agents").mkdir()
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 0
+
+
+def test_load_agent_specs_sorting_across_locations(tmp_path: Path) -> None:
+    """Agents from both locations are sorted deterministically by path."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+
+    # Create agents with names that would sort differently
+    (tmp_path / "zebra.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Zebra
+            description: Top-level zebra agent
+            ---
+            Z
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (agents_dir / "alpha.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Alpha
+            description: Alpha agent in folder
+            ---
+            A
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "beta.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Beta
+            description: Top-level beta agent
+            ---
+            B
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 3
+    # Sorted by full path - agents/ folder comes before top-level alphabetically
+    names = [spec.name for spec in specs]
+    # agents/alpha.agent.md < beta.agent.md < zebra.agent.md (lexicographic by path)
+    assert names == ["Alpha", "Beta", "Zebra"]
