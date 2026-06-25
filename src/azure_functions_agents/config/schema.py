@@ -6,7 +6,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-
 # Supported SDK modes for agent execution
 SdkMode = Literal["maf", "copilot-sdk"]
 

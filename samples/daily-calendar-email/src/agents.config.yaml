@@ -1,0 +1,8 @@
+# Global configuration for all agents in this function app
+
+# Use GitHub Copilot SDK instead of Microsoft Agent Framework
+sdk_mode: copilot-sdk
+
+# Default runtime configuration
+model: $FOUNDRY_MODEL
+timeout: 900
