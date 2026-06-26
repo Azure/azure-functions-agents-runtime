@@ -1,3 +1,3 @@
-azure-functions-agents[connectors] @ https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl
+azure-functions-agents[connectors] @ https://github.com/anthonychu/azure-functions-agents/releases/download/v0.8.0/azure_functions_agents-0.8.0-py3-none-any.whl
 azure-identity
 jmespath

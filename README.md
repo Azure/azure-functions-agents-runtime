@@ -9,6 +9,7 @@ A markdown-first programming model for building AI agents on Azure Functions wit
 - **Connect to 1,400+ services** — Azure API Connections let agents trigger on and perform actions across Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors — no custom code required
 - **Extend with MCP servers** — plug in remote HTTP MCP servers for additional capabilities
 - **Build custom tools in plain Python** — when connectors and MCP aren't enough, drop a `.py` file in `tools/` and pull in any package you need
+- **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations across instances on Azure Files
 
@@ -19,7 +20,7 @@ A markdown-first programming model for building AI agents on Azure Functions wit
 Install directly from the release URL:
 
 ```bash
-pip install https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl
+pip install https://github.com/anthonychu/azure-functions-agents/releases/download/v0.8.0/azure_functions_agents-0.8.0-py3-none-any.whl
 ```
 
 ### From the GitHub repo
@@ -34,7 +35,7 @@ Connector tools (Teams, Office 365, SQL, Salesforce, etc.) require an optional e
 
 ```bash
 # From release URL
-pip install "azure-functions-agents[connectors] @ https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl"
+pip install "azure-functions-agents[connectors] @ https://github.com/anthonychu/azure-functions-agents/releases/download/v0.8.0/azure_functions_agents-0.8.0-py3-none-any.whl"
 
 # From repo
 pip install "azure-functions-agents[connectors] @ git+https://github.com/anthonychu/azure-functions-agents.git"
@@ -98,7 +99,7 @@ app = create_function_app()
 ### 4. Create `requirements.txt`
 
 ```
-https://github.com/anthonychu/azure-functions-agents/releases/download/v0.7.1/azure_functions_agents-0.7.1-py3-none-any.whl
+https://github.com/anthonychu/azure-functions-agents/releases/download/v0.8.0/azure_functions_agents-0.8.0-py3-none-any.whl
 ```
 
 Or use any other install method from the [Installation](#installation) section.
@@ -357,7 +358,7 @@ pip install -e ".[connectors]"
 # Build a wheel
 pip install build
 python -m build --wheel
-# Output: dist/azure_functions_agents-0.7.1-py3-none-any.whl
+# Output: dist/azure_functions_agents-0.8.0-py3-none-any.whl
 ```
 
 ## Contributing

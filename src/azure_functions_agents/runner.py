@@ -98,6 +98,7 @@ def _build_base_kwargs(
     model: str = DEFAULT_MODEL,
     streaming: bool = False,
     extra_tools: Optional[list] = None,
+    system_addendum: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Build kwargs shared by both session creation and resume."""
     all_tools = list(_REGISTERED_TOOLS_CACHE)
@@ -105,6 +106,8 @@ def _build_base_kwargs(
         all_tools.extend(extra_tools)
 
     system_content = _TOOL_RESTRICTION_PREFIX + _AGENTS_MD_CONTENT_CACHE
+    if system_addendum:
+        system_content = system_content + system_addendum
 
     kwargs: Dict[str, Any] = {
         "model": model,
@@ -143,8 +146,14 @@ def _build_session_kwargs(
     session_id: Optional[str] = None,
     streaming: bool = False,
     extra_tools: Optional[list] = None,
+    system_addendum: Optional[str] = None,
 ) -> Dict[str, Any]:
-    kwargs = _build_base_kwargs(model=model, streaming=streaming, extra_tools=extra_tools)
+    kwargs = _build_base_kwargs(
+        model=model,
+        streaming=streaming,
+        extra_tools=extra_tools,
+        system_addendum=system_addendum,
+    )
 
     if session_id:
         kwargs["session_id"] = session_id
@@ -161,8 +170,14 @@ def _build_resume_kwargs(
     model: str = DEFAULT_MODEL,
     streaming: bool = False,
     extra_tools: Optional[list] = None,
+    system_addendum: Optional[str] = None,
 ) -> Dict[str, Any]:
-    return _build_base_kwargs(model=model, streaming=streaming, extra_tools=extra_tools)
+    return _build_base_kwargs(
+        model=model,
+        streaming=streaming,
+        extra_tools=extra_tools,
+        system_addendum=system_addendum,
+    )
 
 
 async def _disable_non_project_skills(session) -> None:
@@ -198,6 +213,9 @@ async def run_copilot_agent(
     model: str = DEFAULT_MODEL,
     session_id: Optional[str] = None,
     sandbox_tools: Optional[list] = None,
+    system_addendum: Optional[str] = None,
+    agent_name: str = "main",
+    durable_client: Any = None,
 ) -> AgentResult:
     config_dir = resolve_config_dir()
     client = await CopilotClientManager.get_client()
@@ -209,7 +227,9 @@ async def run_copilot_agent(
     # Resume existing session or create a new one
     if session_id and session_exists(config_dir, session_id):
         logging.info(f"Resuming existing session: {session_id}")
-        resume_kwargs = _build_resume_kwargs(model=model, extra_tools=extra_tools)
+        resume_kwargs = _build_resume_kwargs(
+            model=model, extra_tools=extra_tools, system_addendum=system_addendum
+        )
         try:
             session = await client.resume_session(session_id, **resume_kwargs)
             logging.info(f"Successfully resumed session: {session_id}")
@@ -220,11 +240,33 @@ async def run_copilot_agent(
         if session_id:
             logging.info(f"Creating new session with provided ID: {session_id}")
         session_kwargs = _build_session_kwargs(
-            model=model, session_id=session_id, extra_tools=extra_tools
+            model=model,
+            session_id=session_id,
+            extra_tools=extra_tools,
+            system_addendum=system_addendum,
         )
         session = await client.create_session(**session_kwargs)
         logging.info(f"Created new session: {session.session_id}")
         await _disable_non_project_skills(session)
+
+    # Workflow tools need the Durable client + owner metadata. The copilot
+    # SDK runs tool handlers on a separate asyncio task (via
+    # asyncio.ensure_future in the RPC reader), so ContextVars set here
+    # do not propagate — we keep a session-keyed registry instead and the
+    # tool handlers look up their row via ToolInvocation.session_id.
+    registered_session_id: Optional[str] = None
+    registration_token: Optional[str] = None
+    if durable_client is not None:
+        from .workflows.context import (
+            register_workflow_session,
+            unregister_workflow_session,
+        )
+        registration_token = register_workflow_session(
+            session_id=session.session_id,
+            agent_name=agent_name,
+            durable_client=durable_client,
+        )
+        registered_session_id = session.session_id
 
     response_content: List[str] = []
     tool_calls: List[Dict[str, Any]] = []
@@ -274,6 +316,8 @@ async def run_copilot_agent(
             logging.info(f"Disconnected session: {session.session_id}")
         except Exception as e:
             logging.warning(f"Failed to disconnect session {session.session_id}: {e}")
+        if registered_session_id is not None and registration_token is not None:
+            unregister_workflow_session(registered_session_id, registration_token)
 
 
 _STREAM_SENTINEL = object()
@@ -285,6 +329,9 @@ async def run_copilot_agent_stream(
     model: str = DEFAULT_MODEL,
     session_id: Optional[str] = None,
     sandbox_tools: Optional[list] = None,
+    system_addendum: Optional[str] = None,
+    agent_name: str = "main",
+    durable_client: Any = None,
 ):
     """Async generator that yields SSE-formatted events as the agent streams a response.
 
@@ -357,7 +404,12 @@ async def run_copilot_agent_stream(
 
     if session_id and session_exists(config_dir, session_id):
         logging.info(f"[stream] Resuming existing session: {session_id}")
-        resume_kwargs = _build_resume_kwargs(model=model, streaming=True, extra_tools=extra_tools)
+        resume_kwargs = _build_resume_kwargs(
+            model=model,
+            streaming=True,
+            extra_tools=extra_tools,
+            system_addendum=system_addendum,
+        )
         try:
             session = await client.resume_session(session_id, **resume_kwargs, on_event=on_event)
             logging.info(f"[stream] Successfully resumed session: {session_id}")
@@ -368,35 +420,59 @@ async def run_copilot_agent_stream(
         if session_id:
             logging.info(f"[stream] Creating new session with provided ID: {session_id}")
         session_kwargs = _build_session_kwargs(
-            model=model, session_id=session_id, streaming=True, extra_tools=extra_tools
+            model=model,
+            session_id=session_id,
+            streaming=True,
+            extra_tools=extra_tools,
+            system_addendum=system_addendum,
         )
         session = await client.create_session(**session_kwargs, on_event=on_event)
         logging.info(f"[stream] Created new session: {session.session_id}")
         await _disable_non_project_skills(session)
 
-    # Yield the session ID first so the client knows it immediately
-    yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id})}\n\n"
+    # Workflow tools: see note on run_copilot_agent above.
+    registered_session_id: Optional[str] = None
+    registration_token: Optional[str] = None
+    if durable_client is not None:
+        from .workflows.context import (
+            register_workflow_session,
+            unregister_workflow_session,
+        )
+        registration_token = register_workflow_session(
+            session_id=session.session_id,
+            agent_name=agent_name,
+            durable_client=durable_client,
+        )
+        registered_session_id = session.session_id
 
-    # Send the prompt, events arrive via on_event callback
-    await session.send(prompt)
-
-    # Drain the queue until session.idle sentinel arrives or timeout
+    # Everything from here on — including the first yield and `session.send` —
+    # must be inside the try so cleanup always runs. In particular a
+    # ``GeneratorExit`` thrown by the client disconnecting between the first
+    # yield and the drain loop would otherwise leak the registry row.
     try:
-        deadline = asyncio.get_event_loop().time() + timeout
-        while True:
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout waiting for response'})}\n\n"
-                break
+        # Yield the session ID first so the client knows it immediately
+        yield f"data: {json.dumps({'type': 'session', 'session_id': session.session_id})}\n\n"
 
-            item = await asyncio.wait_for(queue.get(), timeout=remaining)
-            if item is _STREAM_SENTINEL:
-                yield f"data: {json.dumps({'type': 'done'})}\n\n"
-                break
+        # Send the prompt, events arrive via on_event callback
+        await session.send(prompt)
 
-            yield f"data: {json.dumps(item)}\n\n"
-    except asyncio.TimeoutError:
-        yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout waiting for response'})}\n\n"
+        # Drain the queue until session.idle sentinel arrives or timeout
+        try:
+            deadline = asyncio.get_event_loop().time() + timeout
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout waiting for response'})}\n\n"
+                    break
+
+                item = await asyncio.wait_for(queue.get(), timeout=remaining)
+                if item is _STREAM_SENTINEL:
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    break
+
+                yield f"data: {json.dumps(item)}\n\n"
+        except asyncio.TimeoutError:
+            yield f"data: {json.dumps({'type': 'error', 'content': 'Timeout waiting for response'})}\n\n"
     finally:
         # Disconnect the session to release the in-memory lock and flush state to disk.
         try:
@@ -404,3 +480,5 @@ async def run_copilot_agent_stream(
             logging.info(f"[stream] Disconnected session: {session.session_id}")
         except Exception as e:
             logging.warning(f"[stream] Failed to disconnect session {session.session_id}: {e}")
+        if registered_session_id is not None and registration_token is not None:
+            unregister_workflow_session(registered_session_id, registration_token)

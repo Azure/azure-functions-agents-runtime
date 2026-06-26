@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import azure.functions as func
+import azure.durable_functions as df
 import frontmatter
 
 from .config import get_app_root, set_app_root, resolve_env_var, substitute_env_vars_in_text, _to_bool
@@ -524,13 +525,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     resolved_root = get_app_root()
 
-    app = func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-
     # ---- Load main agent (main.agent.md) ----
     main_agent = _load_agent_file(resolved_root / "main.agent.md")
-
-    # ---- Register triggered agents from *.agent.md ----
-    _register_triggered_agents(app, resolved_root)
 
     # ---- Configure main agent (if present) ----
     metadata: Dict[str, Any] = {}
@@ -560,6 +556,30 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     else:
         logging.info("No main.agent.md found — HTTP chat, MCP, and UI endpoints will return 404.")
 
+    workflows_block = metadata.get("workflows")
+    workflows_requested = (
+        isinstance(workflows_block, dict) and workflows_block.get("enabled") is True
+    )
+    app = (
+        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+        if workflows_requested
+        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+    )
+
+    # ---- Register triggered agents from *.agent.md ----
+    _register_triggered_agents(app, resolved_root)
+
+    # ---- Configure dynamic workflows (main agent only, M1) ----
+    from .workflows import build_workflow_integration
+    workflow_tools, workflow_system_addendum = build_workflow_integration(app, metadata)
+    main_extra_tools = main_sandbox_tools + workflow_tools
+    workflows_enabled = bool(workflow_tools)
+
+    def durable_client_if_workflows(handler):
+        if workflows_enabled:
+            return app.durable_client_input(client_name="client")(handler)
+        return handler
+
     # ---- HTTP routes (always registered) ----
 
     @app.route(
@@ -587,7 +607,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
 
     @app.route(route="agent/chat", methods=["POST"])
-    async def chat(req: Request) -> Response:
+    @durable_client_if_workflows
+    async def chat(req: Request, client=None) -> Response:
         """
         Chat endpoint - send a prompt, get a response.
 
@@ -603,6 +624,20 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             body = await req.json()
             prompt = body.get("prompt")
 
+            if not main_agent:
+                return Response(
+                    json.dumps(
+                        {
+                            "error": (
+                                "No main.agent.md found. Create a main.agent.md "
+                                "file in the app root to enable this endpoint."
+                            )
+                        }
+                    ),
+                    status_code=404,
+                    media_type="application/json",
+                )
+
             if not prompt:
                 return Response(
                     json.dumps({"error": "Missing 'prompt'"}),
@@ -611,7 +646,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 )
 
             session_id = req.headers.get("x-ms-session-id")
-            result = await run_copilot_agent(prompt, session_id=session_id, sandbox_tools=main_sandbox_tools)
+            result = await run_copilot_agent(
+                prompt,
+                session_id=session_id,
+                sandbox_tools=main_extra_tools,
+                system_addendum=workflow_system_addendum,
+                durable_client=client if workflows_enabled else None,
+            )
 
             response = Response(
                 json.dumps(
@@ -635,7 +676,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             )
 
     @app.route(route="agent/chatstream", methods=["POST"])
-    async def chat_stream(req: Request) -> StreamingResponse:
+    @durable_client_if_workflows
+    async def chat_stream(req: Request, client=None) -> StreamingResponse:
         """
         Streaming chat endpoint - send a prompt, receive SSE events.
 
@@ -670,7 +712,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
             session_id = req.headers.get("x-ms-session-id")
             return StreamingResponse(
-                run_copilot_agent_stream(prompt, session_id=session_id, sandbox_tools=main_sandbox_tools),
+                run_copilot_agent_stream(
+                    prompt,
+                    session_id=session_id,
+                    sandbox_tools=main_extra_tools,
+                    system_addendum=workflow_system_addendum,
+                    durable_client=client if workflows_enabled else None,
+                ),
                 media_type="text/event-stream",
             )
 
@@ -681,6 +729,90 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 yield f"data: {json.dumps({'type': 'error', 'content': error_msg})}\n\n"
             return StreamingResponse(error_gen(), media_type="text/event-stream")
 
+    # ---- Workflow polling endpoint (only when workflows enabled) ----
+
+    if workflows_enabled:
+        from .workflows.tools import (
+            fetch_session_workflow_status,
+            fetch_session_workflows,
+        )
+
+        @app.route(route="agent/workflows", methods=["GET"])
+        @app.durable_client_input(client_name="client")
+        async def list_session_workflows(req: Request, client) -> Response:
+            """Return all workflows owned by the calling session.
+
+            The built-in chat UI polls this while the tab is visible so
+            the user sees live workflow progress without having to prompt
+            the LLM for status. Ownership is enforced by instance-ID
+            prefix (``sha256(session_id)[:12]``); a missing or
+            non-matching ``x-ms-session-id`` header yields an empty list
+            (same shape as "no workflows") rather than probing-friendly
+            errors.
+            """
+            session_id = req.headers.get("x-ms-session-id") or ""
+            if not session_id:
+                return Response(
+                    json.dumps({"workflows": []}),
+                    media_type="application/json",
+                )
+            try:
+                envelopes = await fetch_session_workflows(client, session_id)
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("workflows list endpoint failed")
+                return Response(
+                    json.dumps({"error": "failed to list workflows"}),
+                    status_code=500,
+                    media_type="application/json",
+                )
+            return Response(
+                json.dumps({"workflows": envelopes}),
+                media_type="application/json",
+            )
+
+        @app.route(route="agent/workflow-status", methods=["GET"])
+        @app.durable_client_input(client_name="client")
+        async def get_session_workflow_status(req: Request, client) -> Response:
+            """Return the status envelope for a single workflow.
+
+            Included alongside the list endpoint as a lower-cost poll
+            path for clients that already know which workflow they are
+            watching. 404s when the session does not own the workflow
+            (same shape as a true not-found) to avoid leaking existence
+            of other sessions' workflows.
+            """
+            session_id = req.headers.get("x-ms-session-id") or ""
+            workflow_id = (req.query_params or {}).get("workflow_id", "") or ""
+            if not session_id or not workflow_id:
+                return Response(
+                    json.dumps(
+                        {"error": "missing session or workflow_id"}
+                    ),
+                    status_code=400,
+                    media_type="application/json",
+                )
+            try:
+                envelope = await fetch_session_workflow_status(
+                    client, session_id, workflow_id
+                )
+            except Exception as exc:  # noqa: BLE001
+                logging.exception("workflow status endpoint failed")
+                return Response(
+                    json.dumps({"error": "failed to fetch workflow status"}),
+                    status_code=500,
+                    media_type="application/json",
+                )
+            if envelope is None:
+                return Response(
+                    json.dumps({"error": "workflow not found"}),
+                    status_code=404,
+                    media_type="application/json",
+                )
+            return Response(
+                json.dumps(envelope),
+                media_type="application/json",
+            )
+
     # ---- MCP tool (only when main agent exists) ----
 
     if main_agent:
@@ -690,7 +822,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             description=mcp_tool_description,
             tool_properties=_MCP_AGENT_TOOL_PROPERTIES,
         )
-        async def mcp_agent_chat(context: str) -> str:
+        @durable_client_if_workflows
+        async def mcp_agent_chat(context: str, client=None) -> str:
             """MCP tool endpoint that runs the same agent workflow as /agent/chat."""
             try:
                 payload = json.loads(context) if context else {}
@@ -702,7 +835,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
                 session_id = _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
 
-                result = await run_copilot_agent(prompt.strip(), session_id=session_id, sandbox_tools=main_sandbox_tools)
+                result = await run_copilot_agent(
+                    prompt.strip(),
+                    session_id=session_id,
+                    sandbox_tools=main_extra_tools,
+                    system_addendum=workflow_system_addendum,
+                    durable_client=client if workflows_enabled else None,
+                )
 
                 return json.dumps(
                     {

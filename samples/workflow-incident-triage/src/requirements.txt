@@ -1,1 +1,2 @@
 https://github.com/anthonychu/azure-functions-agents/releases/download/v0.8.0/azure_functions_agents-0.8.0-py3-none-any.whl
+azure-functions-durable>=1.2.9

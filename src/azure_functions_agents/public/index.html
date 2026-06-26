@@ -233,6 +233,183 @@
 			background: #dce7ff;
 		}
 
+		/* Auto-notification bubble (chat-client-injected workflow completion).
+		 * Deliberately subtler than the user/copilot bubbles: this is an
+		 * out-of-band, system-injected turn, not part of the user's typed
+		 * conversation, so it should fade into the page rather than compete
+		 * with surrounding chat content. */
+		.bubble-wrap.auto { justify-content: center; }
+		.bubble.auto {
+			max-width: 70%;
+			padding: 4px 10px;
+			border-radius: 8px;
+			background: #faf8ff;
+			border: 1px solid #ebe5f7;
+			color: #6b5e8a;
+			font-size: 12px;
+			line-height: 1.35;
+			box-shadow: none;
+			/* Override base .bubble's `pre-wrap`: this bubble's children are
+			 * structured (span + inline <details>), so we don't want the
+			 * template literal's indentation rendering as visible whitespace. */
+			white-space: normal;
+		}
+		.auto-notification-body {
+			color: inherit;
+		}
+		.auto-notification-body code {
+			font-size: 11px;
+			padding: 1px 4px;
+			background: #f1ecf9;
+			border-radius: 3px;
+			color: #5a4d80;
+		}
+		.auto-notification-raw {
+			display: inline;
+			font-size: 11px;
+		}
+		.auto-notification-raw summary {
+			display: inline;
+			cursor: pointer;
+			color: #8674b0;
+			user-select: none;
+			margin-left: 6px;
+		}
+		.auto-notification-raw summary::-webkit-details-marker { display: none; }
+		.auto-notification-raw summary::marker { content: ""; }
+		.auto-notification-raw summary::before {
+			content: "▸ ";
+			font-size: 9px;
+			vertical-align: 1px;
+		}
+		.auto-notification-raw[open] summary::before {
+			content: "▾ ";
+		}
+		.auto-notification-raw pre {
+			display: block;
+			margin: 4px 0 0;
+			padding: 6px 8px;
+			background: #f3eefa;
+			border-radius: 4px;
+			white-space: pre-wrap;
+			word-break: break-word;
+			color: #4c3d6e;
+			font-size: 11px;
+		}
+
+		.workflow-card {
+			max-width: 85%;
+			padding: 10px 12px;
+			border-radius: 12px;
+			border-bottom-left-radius: 4px;
+			background: #f3f5fb;
+			border: 1px solid var(--border);
+			font-size: 13px;
+			line-height: 1.45;
+			color: var(--text);
+		}
+
+		.workflow-card.terminal-Completed { background: #e8f5ec; border-color: #b7dcc2; }
+		.workflow-card.terminal-Failed { background: #fbe9e9; border-color: #e7b2b2; }
+		.workflow-card.terminal-Terminated,
+		.workflow-card.terminal-Canceled { background: #f1eee4; border-color: #ddd4b6; }
+
+		.workflow-card-header {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			font-weight: 600;
+			margin-bottom: 4px;
+		}
+
+		.workflow-card-chip {
+			display: inline-flex;
+			align-items: center;
+			gap: 6px;
+			padding: 2px 8px;
+			border-radius: 999px;
+			font-size: 11px;
+			font-weight: 600;
+			background: #dbe4f6;
+			color: #1e3a8a;
+		}
+
+		.workflow-card.terminal-Completed .workflow-card-chip { background: #c6e7d1; color: #14532d; }
+		.workflow-card.terminal-Failed .workflow-card-chip { background: #f3c6c6; color: #7f1d1d; }
+		.workflow-card.terminal-Terminated .workflow-card-chip,
+		.workflow-card.terminal-Canceled .workflow-card-chip { background: #e3dabb; color: #5b4a1a; }
+
+		.workflow-card-spinner {
+			width: 10px;
+			height: 10px;
+			border: 2px solid currentColor;
+			border-right-color: transparent;
+			border-radius: 50%;
+			animation: wf-spin 0.9s linear infinite;
+		}
+
+		@keyframes wf-spin { to { transform: rotate(360deg); } }
+
+		.workflow-card-id {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			color: var(--muted);
+			font-weight: 400;
+		}
+
+		.workflow-card-custom-status {
+			color: var(--muted);
+			margin-bottom: 4px;
+		}
+
+		.workflow-card-output {
+			margin: 6px 0 0 0;
+			padding: 8px;
+			background: #fff;
+			border: 1px solid var(--border);
+			border-radius: 8px;
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			white-space: pre-wrap;
+			overflow-x: auto;
+			max-height: 240px;
+		}
+
+		.workflow-card-tasks {
+			list-style: none;
+			margin: 6px 0 0 0;
+			padding: 0;
+			display: flex;
+			flex-direction: column;
+			gap: 4px;
+		}
+
+		.workflow-card-tasks li {
+			display: flex;
+			align-items: baseline;
+			gap: 8px;
+			padding: 4px 8px;
+			background: #fff;
+			border: 1px solid var(--border);
+			border-radius: 6px;
+			font-size: 12px;
+		}
+
+		.workflow-task-id {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			font-weight: 600;
+			color: #1e3a8a;
+			flex: 0 0 auto;
+		}
+
+		.workflow-task-result {
+			color: var(--text);
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 11px;
+			overflow-wrap: anywhere;
+		}
+
 		.meta {
 			margin-top: 4px;
 			font-size: 11px;
@@ -499,7 +676,8 @@
 	<script>
 		const STORAGE_KEYS = {
 			baseUrl: "chat.baseUrl",
-			key: "chat.key"
+			key: "chat.key",
+			sessionId: "chat.sessionId"
 		};
 
 		const chatEl = document.getElementById("chat");
@@ -530,6 +708,585 @@
 			loadingTimer: null,
 			loadingSeconds: 0
 		};
+
+		const TERMINAL_WORKFLOW_STATES = new Set(["Completed", "Failed", "Canceled", "Terminated"]);
+		const WORKFLOW_POLL_INTERVAL_MS = 3000;
+		const WORKFLOW_POLL_FAILURE_WARN_AT = 3;
+		const workflowCards = new Map();
+		let workflowPollTimer = null;
+		let workflowPollInFlight = false;
+		let workflowProbeInFlight = false;
+		let workflowPollFailureCount = 0;
+		// "unknown" until probed; once "unsupported" we never poll, persist, or
+		// claim reconnect for this base URL. Set by either the explicit probe
+		// at boot or the first 404/501 from the polling endpoint.
+		let workflowsCapability = "unknown";
+		// Bumped every time the user changes base URL via Settings. Each
+		// in-flight fetch captures the current epoch and discards its
+		// response if the epoch has moved on, so a slow probe/poll for app
+		// A can't mutate state belonging to app B.
+		let workflowEpoch = 0;
+
+		// --- Workflow auto-notification (terminal-state -> synthetic
+		// `<workflow-notification>` user message into the chat). The
+		// queue carries enough identity for drain-time checks to drop
+		// items belonging to a session/app the user has since moved away
+		// from. The drain is single-flight and waits for `state.loading`
+		// to fall to false so it never races the user's own turn or a
+		// previous auto-notification still streaming.
+		const pendingCompletionQueue = [];   // Array<{epoch, baseUrl, sessionId, workflowId, status}>
+		let completionDrainInFlight = false;
+		// Restored sessionStorage value held separately from state.sessionId
+		// so it doesn't ride along on chat requests for non-workflow apps
+		// (where the probe will eventually return 404 and we drop it). Only
+		// promoted into state.sessionId after the probe confirms support.
+		let restoredSessionIdCandidate = null;
+		// Tracks whether the current state.sessionId came from a fresh
+		// chatstream `session` event vs. being restored from sessionStorage.
+		// The "Reconnected" greeting / persistence guards branch on this.
+		let sessionWasFromServer = false;
+		let restoredGreetingContent = null;
+
+		function buildAuthQuery() {
+			return state.key ? `?code=${encodeURIComponent(state.key)}` : "";
+		}
+
+		function workflowsAreSupported() {
+			return workflowsCapability === "supported";
+		}
+
+		function markWorkflowsUnsupported() {
+			if (workflowsCapability === "unsupported") return;
+			workflowsCapability = "unsupported";
+			stopWorkflowPolling();
+			restoredSessionIdCandidate = null;
+			// Drop any speculatively-restored session id from storage so we
+			// don't claim reconnect on the next reload of an app that has
+			// no workflow endpoint.
+			try { sessionStorage.removeItem(sessionStorageKeyForSessionId()); } catch (_e) {}
+		}
+
+		function markWorkflowsSupported() {
+			if (workflowsCapability === "supported") return;
+			workflowsCapability = "supported";
+			// Promote the restored candidate (if any) only now that we
+			// know it's safe to attribute to this app.
+			if (!state.sessionId && restoredSessionIdCandidate) {
+				state.sessionId = restoredSessionIdCandidate;
+				sessionWasFromServer = false;
+			}
+			restoredSessionIdCandidate = null;
+			persistSessionId();
+			startWorkflowPolling();
+		}
+
+		// Hash the base URL into the storage key so multiple deployments
+		// served from the same browser don't collide on `chat.sessionId`.
+		// Cheap non-cryptographic hash is fine — this is just a namespace.
+		function hashString(str) {
+			let h = 0;
+			for (let i = 0; i < str.length; i++) {
+				h = ((h << 5) - h + str.charCodeAt(i)) | 0;
+			}
+			return (h >>> 0).toString(36);
+		}
+
+		function sessionStorageKeyForSessionId() {
+			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
+			return `${STORAGE_KEYS.sessionId}.${ns}`;
+		}
+
+		function loadRestoredSessionCandidate() {
+			// Called after BOTH loadSettings() and loadSettingsFromHash()
+			// have finalized state.baseUrl, so the namespace key matches
+			// the app we're actually about to talk to.
+			try {
+				const stored = (sessionStorage.getItem(sessionStorageKeyForSessionId()) || "").trim();
+				restoredSessionIdCandidate = stored || null;
+			} catch (_e) {
+				restoredSessionIdCandidate = null;
+			}
+		}
+
+		// Per-{baseUrl, sessionId} record of workflow ids we've already
+		// notified the agent about. Persisted in sessionStorage so a page
+		// refresh after a workflow completed (and the agent already
+		// summarized) does not re-fire the synthetic notification turn.
+		// `notifiedWorkflowsStorageKey()` returns null until both
+		// state.baseUrl and state.sessionId are set; callers tolerate that
+		// (no-op load returns empty, no-op persist drops the write).
+		function notifiedWorkflowsStorageKey() {
+			if (!state.baseUrl || !state.sessionId) return null;
+			return `chat.notifiedWorkflows.${hashString(state.baseUrl)}.${state.sessionId}`;
+		}
+
+		function loadNotifiedWorkflowIds() {
+			const key = notifiedWorkflowsStorageKey();
+			if (!key) return new Set();
+			try {
+				const raw = sessionStorage.getItem(key);
+				if (!raw) return new Set();
+				const arr = JSON.parse(raw);
+				return new Set(Array.isArray(arr) ? arr : []);
+			} catch (_e) {
+				return new Set();
+			}
+		}
+
+		function persistNotifiedWorkflowId(workflowId) {
+			const key = notifiedWorkflowsStorageKey();
+			if (!key) return;
+			try {
+				const set = loadNotifiedWorkflowIds();
+				set.add(workflowId);
+				// Cap to bound storage growth across long-lived sessions.
+				const arr = Array.from(set).slice(-200);
+				sessionStorage.setItem(key, JSON.stringify(arr));
+			} catch (_e) { /* quota exceeded — non-fatal */ }
+		}
+
+		function truncateId(id) {
+			if (!id) return "";
+			return id.length > 14 ? `${id.slice(0, 6)}…${id.slice(-4)}` : id;
+		}
+
+		function renderTaskResults(results) {
+			if (!results || typeof results !== "object") return "";
+			const entries = Object.entries(results);
+			if (!entries.length) return "";
+			const rows = entries.map(([taskId, result]) => {
+				const summary = typeof result === "string"
+					? result
+					: JSON.stringify(result);
+				const truncated = summary.length > 120 ? `${summary.slice(0, 117)}…` : summary;
+				return `<li><span class="workflow-task-id">${escapeHtml(taskId)}</span> <span class="workflow-task-result">${escapeHtml(truncated)}</span></li>`;
+			}).join("");
+			return `<ul class="workflow-card-tasks">${rows}</ul>`;
+		}
+
+		function renderWorkflowCard(entry, envelope) {
+			const status = String(envelope.runtime_status || "Pending");
+			const terminal = TERMINAL_WORKFLOW_STATES.has(status);
+			const card = entry.card;
+
+			// Whitelist class suffixes so a stray runtime_status from a
+			// future Durable version can't poison our class name.
+			const knownStatuses = new Set([
+				"Pending", "Running", "Completed", "Failed",
+				"Canceled", "Terminated", "ContinuedAsNew", "Suspended"
+			]);
+			const statusClass = knownStatuses.has(status) ? status : "Unknown";
+			card.className = `workflow-card terminal-${statusClass}`;
+
+			const custom = String(envelope.custom_status ?? "");
+			const taskResults = envelope.output && typeof envelope.output === "object"
+				? envelope.output.results
+				: null;
+			const tasksHtml = renderTaskResults(taskResults);
+			const rawOutputText = !tasksHtml && envelope.output !== undefined && envelope.output !== null
+				? JSON.stringify(envelope.output, null, 2)
+				: "";
+
+			const chipIcon = terminal
+				? (status === "Completed" ? "✓" : status === "Failed" ? "✕" : "⏹")
+				: '<span class="workflow-card-spinner" aria-hidden="true"></span>';
+
+			card.innerHTML = `
+				<div class="workflow-card-header">
+					<span class="workflow-card-chip">${chipIcon} ${escapeHtml(status)}</span>
+					<span>Workflow</span>
+					<span class="workflow-card-id">${escapeHtml(truncateId(envelope.workflow_id))}</span>
+				</div>
+				${custom ? `<div class="workflow-card-custom-status">${escapeHtml(custom)}</div>` : ""}
+				${tasksHtml}
+				${rawOutputText ? `<pre class="workflow-card-output">${escapeHtml(rawOutputText)}</pre>` : ""}
+			`;
+
+			entry.status = status;
+			entry.terminal = terminal;
+		}
+
+		function upsertWorkflowCard(envelope) {
+			const wid = envelope.workflow_id;
+			if (!wid) return;
+			let entry = workflowCards.get(wid);
+			if (!entry) {
+				const wrap = document.createElement("div");
+				wrap.className = "bubble-wrap copilot";
+				const card = document.createElement("div");
+				card.className = "workflow-card";
+				card.setAttribute("role", "status");
+				card.setAttribute("aria-live", "polite");
+				wrap.appendChild(card);
+				chatEl.appendChild(wrap);
+				entry = { wrap, card, status: null, terminal: false, lastUpdated: null, notifyState: "unseen" };
+				workflowCards.set(wid, entry);
+				// If this workflow is in our persisted notified-set
+				// (e.g. user refreshed after the summary turn already
+				// landed), pre-mark as 'sent' so we don't re-fire the
+				// notification. A fast workflow that started+finished
+				// within one 3s poll will NOT be in the set yet, so it
+				// still gets a notification — that's the case we care
+				// about.
+				if (loadNotifiedWorkflowIds().has(wid)) {
+					entry.notifyState = "sent";
+				}
+			}
+			const status = String(envelope.runtime_status || "Pending");
+			const terminal = TERMINAL_WORKFLOW_STATES.has(status);
+			// Idempotent render: skip when nothing visibly changed AND
+			// we've already settled the notify state for this entry.
+			if (
+				entry.terminal &&
+				entry.lastUpdated === envelope.last_updated_time &&
+				entry.notifyState !== "unseen"
+			) {
+				return;
+			}
+			entry.lastUpdated = envelope.last_updated_time;
+			renderWorkflowCard(entry, envelope);
+
+			// Auto-notification: enqueue once per workflow, the first time
+			// we see it in a terminal state. The persisted notified-set
+			// (above) guards against re-firing on page refresh; the
+			// `unseen` -> `queued` transition guards against re-enqueueing
+			// across multiple poll cycles within a single page lifetime.
+			if (terminal && entry.notifyState === "unseen") {
+				entry.notifyState = "queued";
+				pendingCompletionQueue.push({
+					epoch: workflowEpoch,
+					baseUrl: state.baseUrl,
+					sessionId: state.sessionId,
+					workflowId: wid,
+					status
+				});
+				drainCompletionQueueIfIdle();
+			}
+		}
+
+		async function pollWorkflowsOnce() {
+			if (workflowPollInFlight) return;
+			if (workflowsCapability !== "supported") return;
+			if (!state.sessionId || !state.baseUrl) return;
+			if (document.visibilityState !== "visible") return;
+			workflowPollInFlight = true;
+			const epoch = workflowEpoch;
+			const baseUrl = state.baseUrl;
+			const sessionId = state.sessionId;
+			try {
+				const headers = { "x-ms-session-id": sessionId };
+				const resp = await fetch(`${baseUrl}/agent/workflows${buildAuthQuery()}`, { headers });
+				// Discard stale responses from a prior baseUrl/settings.
+				if (epoch !== workflowEpoch) return;
+				// 404 / 405 / 501 → endpoint genuinely not present. Stop forever.
+				if (resp.status === 404 || resp.status === 405 || resp.status === 501) {
+					markWorkflowsUnsupported();
+					return;
+				}
+				if (!resp.ok) {
+					workflowPollFailureCount += 1;
+					if (workflowPollFailureCount === WORKFLOW_POLL_FAILURE_WARN_AT) {
+						console.warn(`workflow polling: ${workflowPollFailureCount} consecutive non-OK responses (last status ${resp.status})`);
+					}
+					return;
+				}
+				workflowPollFailureCount = 0;
+				const body = await resp.json();
+				if (epoch !== workflowEpoch) return;
+				const workflows = Array.isArray(body?.workflows) ? body.workflows : [];
+				for (const wf of workflows) {
+					upsertWorkflowCard(wf);
+				}
+			} catch (err) {
+				if (epoch !== workflowEpoch) return;
+				workflowPollFailureCount += 1;
+				if (workflowPollFailureCount === WORKFLOW_POLL_FAILURE_WARN_AT) {
+					console.warn(`workflow polling: ${workflowPollFailureCount} consecutive failures`, err);
+				}
+			} finally {
+				workflowPollInFlight = false;
+			}
+		}
+
+		function startWorkflowPolling() {
+			// Hard gates: don't run a useless timer for non-workflow apps,
+			// don't run before capability is confirmed, don't run without a
+			// session, and don't run on a hidden tab.
+			if (workflowsCapability !== "supported") return;
+			if (!state.sessionId) return;
+			if (workflowPollTimer !== null) return;
+			if (document.visibilityState !== "visible") return;
+			pollWorkflowsOnce();
+			workflowPollTimer = setInterval(pollWorkflowsOnce, WORKFLOW_POLL_INTERVAL_MS);
+		}
+
+		function stopWorkflowPolling() {
+			if (workflowPollTimer !== null) {
+				clearInterval(workflowPollTimer);
+				workflowPollTimer = null;
+			}
+		}
+
+		function resetWorkflowCards() {
+			// Remove DOM nodes alongside the map entries; a bare clear()
+			// would leave stale workflow cards visible after a session
+			// reset / base-URL change.
+			for (const entry of workflowCards.values()) {
+				if (entry.wrap && entry.wrap.parentNode) {
+					entry.wrap.parentNode.removeChild(entry.wrap);
+				}
+			}
+			workflowCards.clear();
+			// Drop any queued auto-notifications. If a notification was
+			// in-flight, the drain function's epoch/identity guards
+			// already prevent it from mutating the new session's state.
+			pendingCompletionQueue.length = 0;
+			completionDrainInFlight = false;
+		}
+
+		// --- Auto-notification: drain & send ---
+		// When a workflow we're tracking transitions to a terminal state,
+		// `upsertWorkflowCard` enqueues a notification record.
+		// `drainCompletionQueueIfIdle` waits for the chat to be idle
+		// (no in-flight user turn or earlier auto-notification turn) and
+		// then synthesizes a `<workflow-notification>` user turn against
+		// `/agent/chatstream`, batching all currently-queued completions
+		// for the active session into one prompt. Identity (epoch,
+		// baseUrl, sessionId) is checked at drain time so a queued item
+		// from a previous session/app is dropped silently — never sent.
+
+		function dropStaleQueueEntries() {
+			for (let i = pendingCompletionQueue.length - 1; i >= 0; i--) {
+				const it = pendingCompletionQueue[i];
+				if (
+					it.epoch !== workflowEpoch ||
+					it.baseUrl !== state.baseUrl ||
+					it.sessionId !== state.sessionId
+				) {
+					pendingCompletionQueue.splice(i, 1);
+				}
+			}
+		}
+
+		function drainCompletionQueueIfIdle() {
+			if (completionDrainInFlight) return;
+			if (state.loading) return;
+			if (!state.sessionId || !state.baseUrl) return;
+			if (workflowsCapability !== "supported") return;
+			dropStaleQueueEntries();
+			if (pendingCompletionQueue.length === 0) return;
+
+			// Batch all currently-queued items into one synthetic turn.
+			const batch = pendingCompletionQueue.splice(0, pendingCompletionQueue.length);
+			for (const it of batch) {
+				const entry = workflowCards.get(it.workflowId);
+				if (entry) entry.notifyState = "inflight";
+			}
+			completionDrainInFlight = true;
+			sendCompletionNotification(batch).finally(() => {
+				completionDrainInFlight = false;
+				// If more landed during the turn, drain them too.
+				drainCompletionQueueIfIdle();
+			});
+		}
+
+		function buildCompletionNotificationPrompt(batch) {
+			// Informational, not instructional. The system-prompt addendum
+			// owns the contract (summary-only, race handling, etc.). Per
+			// turn we just hand the model the data — matching the claurst
+			// project's `<task-notification>` shape
+			// (https://github.com/Kuberwastaken/claurst) — and one short
+			// reminder of how to fetch the result.
+			const envelopes = batch.map(it => (
+				"<workflow-notification>\n" +
+				`  <workflow-id>${escapeXml(it.workflowId)}</workflow-id>\n` +
+				`  <status>${escapeXml(it.status)}</status>\n` +
+				`  <summary>Workflow ${escapeXml(it.workflowId)} finished with status ${escapeXml(it.status)}.</summary>\n` +
+				"</workflow-notification>"
+			));
+			const reminder = batch.length === 1
+				? "Call `get_workflow_status` to retrieve the final result."
+				: "Call `get_workflow_status` for each `<workflow-id>` to retrieve the final result(s).";
+			return envelopes.join("\n") + "\n\n" + reminder;
+		}
+
+		function escapeXml(value) {
+			return String(value)
+				.replace(/&/g, "&amp;")
+				.replace(/</g, "&lt;")
+				.replace(/>/g, "&gt;");
+		}
+
+		function renderAutoNotificationBubble(batch, rawPrompt) {
+			const wrap = document.createElement("div");
+			wrap.className = "bubble-wrap auto";
+			const bubble = document.createElement("div");
+			bubble.className = "bubble auto";
+			const summary = batch.length === 1
+				? `⚙ Workflow <code>${escapeHtml(truncateId(batch[0].workflowId))}</code> finished (${escapeHtml(batch[0].status)}) — notifying the assistant`
+				: `⚙ ${batch.length} workflows finished — notifying the assistant`;
+			// Single-line layout: body text + inline disclosure trigger.
+			// The <pre> only appears (as a block) when the user opens it.
+			bubble.innerHTML = `<span class="auto-notification-body">${summary}</span><details class="auto-notification-raw"><summary>show prompt</summary><pre>${escapeHtml(rawPrompt)}</pre></details>`;
+			wrap.appendChild(bubble);
+			chatEl.appendChild(wrap);
+			scrollChatToBottom();
+			return { wrap, bubble };
+		}
+
+		async function sendCompletionNotification(batch) {
+			// Capture identity at send time. If anything moves under us
+			// while the synthetic turn streams, the response handlers
+			// will still complete normally — we just won't persist into
+			// stale namespaces (notifiedWorkflowsStorageKey() reads the
+			// current state, so a session-flip mid-flight would write
+			// to the new namespace; that's tolerable since the only
+			// observable effect is one extra notification on the
+			// previous app, which we already dropped from the DOM).
+			const prompt = buildCompletionNotificationPrompt(batch);
+			renderAutoNotificationBubble(batch, prompt);
+
+			setLoading(true, { showWaitingBubble: false });
+			const streamingBubble = renderBubble("copilot", "", "Copilot • streaming...");
+			const liveDetails = { responseIntermediate: [], toolCalls: [] };
+
+			try {
+				let currentToolCount = 0;
+				let currentIntermediateCount = 0;
+				const updateStreamingMeta = () => {
+					const segments = ["Copilot", "streaming..."];
+					if (currentToolCount > 0) {
+						segments.push(`${currentToolCount} tool call${currentToolCount === 1 ? "" : "s"}`);
+					}
+					if (currentIntermediateCount > 0) {
+						segments.push(`${currentIntermediateCount} intermediate${currentIntermediateCount === 1 ? "" : "s"}`);
+					}
+					setBubbleMeta(streamingBubble.bubble, segments.join(" • "));
+				};
+
+				const result = await sendMessage(prompt, {
+					onDelta: (text) => {
+						setBubbleText(streamingBubble.bubble, "copilot", text);
+						scrollChatToBottom();
+					},
+					onToolCount: (count) => {
+						currentToolCount = count;
+						updateStreamingMeta();
+					},
+					onIntermediate: (count, responses) => {
+						currentIntermediateCount = count;
+						updateStreamingMeta();
+						setBubbleIntermediates(streamingBubble.bubble, responses);
+						scrollChatToBottom();
+					},
+					onDetailsUpdate: (snap) => {
+						const normalizedLive = normalizeDetails(snap);
+						liveDetails.responseIntermediate = normalizedLive.responseIntermediate;
+						liveDetails.toolCalls = normalizedLive.toolCalls;
+						attachBubbleDetails(streamingBubble.bubble, liveDetails);
+						refreshOpenDetails(liveDetails);
+					}
+				});
+				const copilotMeta = hasDetails(result.details)
+					? "Copilot • click bubble for details"
+					: "Copilot";
+				setBubbleText(streamingBubble.bubble, "copilot", result.text);
+				setBubbleIntermediates(streamingBubble.bubble, []);
+				setBubbleMeta(streamingBubble.bubble, copilotMeta);
+				liveDetails.responseIntermediate = result.details.responseIntermediate;
+				liveDetails.toolCalls = result.details.toolCalls;
+				attachBubbleDetails(streamingBubble.bubble, liveDetails);
+				refreshOpenDetails(liveDetails);
+
+				// Persist + mark each batch item as 'sent'. Persist is
+				// keyed on the *current* {baseUrl, sessionId}; if those
+				// changed mid-stream the write either fails (no key) or
+				// writes into the new namespace, which is fine — we
+				// already dropped the cards from the DOM.
+				for (const it of batch) {
+					const entry = workflowCards.get(it.workflowId);
+					if (entry) entry.notifyState = "sent";
+					persistNotifiedWorkflowId(it.workflowId);
+				}
+				if (result.sessionId) {
+					setStatus(`Connected • Session ${result.sessionId}`);
+				} else {
+					setStatus("Connected");
+				}
+			} catch (error) {
+				setBubbleText(streamingBubble.bubble, "copilot", `Auto-notification failed. ${error.message}`);
+				setBubbleIntermediates(streamingBubble.bubble, []);
+				setBubbleMeta(streamingBubble.bubble, "Copilot");
+				attachBubbleDetails(streamingBubble.bubble, null);
+				for (const it of batch) {
+					const entry = workflowCards.get(it.workflowId);
+					if (entry) entry.notifyState = "failed";
+				}
+				setStatus(error.message, true);
+			} finally {
+				setLoading(false);
+				promptInputEl.focus();
+			}
+		}
+
+		// One-shot capability probe: tries the workflows endpoint to learn
+		// whether the server registered the route. Status code distinguishes
+		// "endpoint exists" (200) from "feature off" (404/405/501). We
+		// deliberately don't drain the response body here — we just settle
+		// the capability flag and let the immediately-following call to
+		// pollWorkflowsOnce() do the drain using whichever session id is
+		// authoritative by then. That removes a race where a server-fresh
+		// session arrives during the probe and the probe's response body
+		// would otherwise paint cards for the now-discarded candidate.
+		// Single-flight via workflowProbeInFlight.
+		async function probeWorkflowsCapability() {
+			if (!state.baseUrl) return;
+			if (workflowsCapability !== "unknown") return;
+			if (workflowProbeInFlight) return;
+			workflowProbeInFlight = true;
+			const epoch = workflowEpoch;
+			const baseUrl = state.baseUrl;
+			// Send the candidate header so the server can short-circuit
+			// auth checks identically to a real poll. The body is ignored.
+			const probeSessionId = state.sessionId || restoredSessionIdCandidate;
+			try {
+				const headers = probeSessionId ? { "x-ms-session-id": probeSessionId } : {};
+				const resp = await fetch(`${baseUrl}/agent/workflows${buildAuthQuery()}`, { headers });
+				if (epoch !== workflowEpoch) return;
+				if (resp.status === 404 || resp.status === 405 || resp.status === 501) {
+					markWorkflowsUnsupported();
+					return;
+				}
+				if (!resp.ok) {
+					// Ambiguous (auth, 500, etc.) — leave capability "unknown"
+					// so the next user action can re-trigger probing.
+					return;
+				}
+				const hadCandidateButNoServerSession =
+					!state.sessionId && Boolean(restoredSessionIdCandidate);
+				markWorkflowsSupported();
+				if (hadCandidateButNoServerSession && state.sessionId && !sessionWasFromServer) {
+					setStatus("Reconnected to existing session.");
+					if (restoredGreetingContent) {
+						restoredGreetingContent.textContent =
+							"Welcome back — reconnected to your previous session. Active workflows will appear below within a few seconds.";
+					}
+				}
+			} catch (_err) {
+				// Network error during probe — leave capability "unknown" so
+				// the next user action can re-trigger it.
+			} finally {
+				workflowProbeInFlight = false;
+			}
+		}
+
+		document.addEventListener("visibilitychange", () => {
+			if (document.visibilityState === "visible") {
+				startWorkflowPolling();
+			} else {
+				stopWorkflowPolling();
+			}
+		});
 
 		function escapeHtml(value) {
 			return value
@@ -1006,6 +1763,29 @@
 		function loadSettings() {
 			state.baseUrl = (localStorage.getItem(STORAGE_KEYS.baseUrl) || "").trim();
 			state.key = (localStorage.getItem(STORAGE_KEYS.key) || "").trim();
+			// IMPORTANT: do NOT restore state.sessionId here. We can't read
+			// the right namespaced key until loadSettingsFromHash() has had
+			// a chance to override baseUrl, and we must not let a restored
+			// id ride along on chat requests for an app whose workflow
+			// support hasn't been confirmed yet (would break the "non-
+			// workflow apps unchanged" invariant). The candidate is loaded
+			// later via loadRestoredSessionCandidate().
+		}
+
+		function persistSessionId() {
+			// Only persist when workflow support has been confirmed for
+			// this base URL; otherwise we'd be silently introducing
+			// session continuity for plain (non-workflow) chat apps.
+			if (!workflowsAreSupported()) return;
+			try {
+				if (state.sessionId) {
+					sessionStorage.setItem(sessionStorageKeyForSessionId(), state.sessionId);
+				} else {
+					sessionStorage.removeItem(sessionStorageKeyForSessionId());
+				}
+			} catch (_e) {
+				// Storage quota or disabled — non-fatal.
+			}
 		}
 
 		function loadSettingsFromHash() {
@@ -1058,6 +1838,7 @@
 		}
 
 		function saveSettings() {
+			const previousBaseUrl = state.baseUrl;
 			state.baseUrl = baseUrlInputEl.value.trim().replace(/\/+$/, "");
 			state.key = keyInputEl.value.trim();
 
@@ -1075,6 +1856,26 @@
 
 			localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
 			localStorage.setItem(STORAGE_KEYS.key, state.key);
+
+			// If the user pointed the UI at a different deployment, drop
+			// all session/workflow state — the previous session id is
+			// scoped to the previous app and would be misleading at best,
+			// silently authenticated against the new app at worst. The
+			// epoch bump invalidates any in-flight probe/poll responses
+			// that haven't resolved yet so they can't mutate new-app state.
+			if (previousBaseUrl && previousBaseUrl !== state.baseUrl) {
+				workflowEpoch += 1;
+				state.sessionId = null;
+				sessionWasFromServer = false;
+				restoredSessionIdCandidate = null;
+				stopWorkflowPolling();
+				resetWorkflowCards();
+				workflowsCapability = "unknown";
+				workflowPollFailureCount = 0;
+				loadRestoredSessionCandidate();
+				probeWorkflowsCapability();
+			}
+
 			setStatus("Settings saved.");
 			hideSettings();
 			promptInputEl.focus();
@@ -1195,6 +1996,21 @@
 
 				if (type === "session" && typeof event.session_id === "string" && event.session_id.trim()) {
 					state.sessionId = event.session_id;
+					sessionWasFromServer = true;
+					// Drop any restore-candidate now that we have a real
+					// server session — they may not match.
+					restoredSessionIdCandidate = null;
+					persistSessionId();
+					// If we already know workflows are supported, start
+					// polling now. If still "unknown", trigger the probe
+					// instead — never blindly fire polling against an
+					// endpoint we haven't confirmed exists. If "unsupported",
+					// neither call has any effect.
+					if (workflowsCapability === "supported") {
+						startWorkflowPolling();
+					} else if (workflowsCapability === "unknown") {
+						probeWorkflowsCapability();
+					}
 					return;
 				}
 
@@ -1434,6 +2250,9 @@
 			} finally {
 				setLoading(false);
 				promptInputEl.focus();
+				// If a workflow completed while the user's turn was
+				// streaming, drain the queue now that we're idle.
+				drainCompletionQueueIfIdle();
 			}
 		});
 
@@ -1446,6 +2265,12 @@
 
 		newSessionBtnEl.addEventListener("click", () => {
 			state.sessionId = null;
+			sessionWasFromServer = false;
+			restoredSessionIdCandidate = null;
+			// Always clear stored session id, regardless of capability.
+			try { sessionStorage.removeItem(sessionStorageKeyForSessionId()); } catch (_e) {}
+			stopWorkflowPolling();
+			resetWorkflowCards();
 			chatEl.innerHTML = "";
 			hideDetails();
 			setStatus("Started a new session. Next message will not send a session id.");
@@ -1490,13 +2315,22 @@
 
 		loadSettings();
 		loadSettingsFromHash();
+		// Read the per-baseUrl namespaced session candidate AFTER both
+		// settings sources have had their say.
+		loadRestoredSessionCandidate();
 		if (!state.baseUrl || (requiresFunctionKey(state.baseUrl) && !state.key)) {
 			state.baseUrl = state.baseUrl || defaultBaseUrl;
 			showSettings(true);
 			setStatus("Enter your base URL and key to begin.");
 		} else {
+			// Always show the baseline greeting. probeWorkflowsCapability
+			// upgrades it in place if (a) workflows are supported AND
+			// (b) we had a session candidate to reconnect with.
 			setStatus("Ready.");
-			renderBubble("copilot", "Hi! Send a message to start chatting.", "Copilot");
+			const greeting = renderBubble("copilot", "Hi! Send a message to start chatting.", "Copilot");
+			restoredGreetingContent = greeting?.contentEl || null;
+			// Probe asynchronously; this is the gate on persistence + polling.
+			probeWorkflowsCapability();
 			promptInputEl.focus();
 		}
 	</script>
