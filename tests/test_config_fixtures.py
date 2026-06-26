@@ -498,15 +498,16 @@ def test_agents_folder_hybrid_discovery() -> None:
     # Top-level main.agent.md is marked is_main
     main = by_name["Main Agent"]
     assert main.is_main is True
-    assert "agents" not in main.source_file.lower().replace("\\", "/").split("/")[-2]
+    # Verify main is NOT in the agents/ subdirectory (parent folder is not "agents")
+    assert main.source_file.lower().replace("\\", "/").split("/")[-2] != "agents"
 
-    # Agents in folder have correct source_file paths
+    # Agents in folder have correct source_file paths (parent folder IS "agents")
     chat = by_name["Chat Agent"]
-    assert "agents" in chat.source_file.lower().replace("\\", "/")
+    assert chat.source_file.lower().replace("\\", "/").split("/")[-2] == "agents"
     assert chat.trigger is not None
     assert chat.trigger.type == "http_trigger"
 
     report = by_name["Report Agent"]
-    assert "agents" in report.source_file.lower().replace("\\", "/")
+    assert report.source_file.lower().replace("\\", "/").split("/")[-2] == "agents"
     assert report.trigger is not None
     assert report.trigger.type == "timer_trigger"
