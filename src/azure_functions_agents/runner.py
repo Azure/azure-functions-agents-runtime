@@ -204,6 +204,10 @@ async def _build_agent_session_history(
     skill_paths: list[Path] | None,
     model: str | None,
     sandbox_tools: list[Any] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    agent_name: str | None,
 ) -> tuple[Any, Any, str]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
@@ -232,8 +236,7 @@ async def _build_agent_session_history(
 
     history_provider = _build_history_provider()
 
-    # Tool list: resolved user tools + per-call sandbox tools + resolved MCP
-    # tools.
+    # Tool list: resolved user tools + per-call sandbox/workflow tools + resolved MCP tools.
     app_root = get_app_root()
     resolved_tools: list[Any] = (
         list(discover_user_tools(app_root)) if tools is None else list(tools)
@@ -241,6 +244,17 @@ async def _build_agent_session_history(
 
     if sandbox_tools:
         resolved_tools.extend(sandbox_tools)
+
+    if workflow_enabled:
+        from .workflows.tools import build_workflow_tools
+
+        resolved_tools.extend(
+            build_workflow_tools(
+                session_id=resolved_id,
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+            )
+        )
 
     resolved_mcp_tools = (
         list(discover_mcp_servers(app_root).values()) if mcp_tools is None else list(mcp_tools)
@@ -254,9 +268,13 @@ async def _build_agent_session_history(
     if skills_provider is not None:
         context_providers.append(skills_provider)
 
+    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective_instructions = (effective_instructions or "") + system_addendum
+
     agent = Agent(
         chat_client,
-        instructions=instructions.strip() if instructions and instructions.strip() else None,
+        instructions=effective_instructions,
         tools=resolved_tools,
         context_providers=context_providers,
     )
@@ -337,6 +355,10 @@ async def run_agent(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    agent_name: str | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -390,6 +412,10 @@ async def run_agent(
         skill_paths=skill_paths,
         model=model,
         sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        agent_name=agent_name,
     )
 
     lock = await _get_session_lock(resolved_id)
@@ -465,6 +491,10 @@ async def run_agent_stream(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    agent_name: str | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -505,6 +535,10 @@ async def run_agent_stream(
             skill_paths=skill_paths,
             model=model,
             sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            agent_name=agent_name,
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)

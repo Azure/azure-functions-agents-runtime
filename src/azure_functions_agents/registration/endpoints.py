@@ -103,6 +103,9 @@ async def _run_builtin_agent(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
+    durable_client: Any | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -116,6 +119,10 @@ async def _run_builtin_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        system_addendum=workflow_system_addendum,
+        workflow_enabled=workflows_enabled,
+        workflow_durable_client=durable_client,
+        agent_name=resolved.name,
     )
 
 
@@ -125,6 +132,9 @@ def _run_builtin_agent_stream(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
+    durable_client: Any | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -138,6 +148,10 @@ def _run_builtin_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        system_addendum=workflow_system_addendum,
+        workflow_enabled=workflows_enabled,
+        workflow_durable_client=durable_client,
+        agent_name=resolved.name,
     )
 
 
@@ -173,11 +187,6 @@ def _register_chat_page(
     function_name: str,
     route: str,
 ) -> None:
-    @app.route(
-        route=route,
-        methods=["GET"],
-        auth_level=func.AuthLevel.ANONYMOUS,
-    )
     def agent_chat_page(req: Request) -> Response:
         index_path = _index_path()
         if not index_path.exists():
@@ -189,7 +198,12 @@ def _register_chat_page(
             media_type="text/html",
         )
 
-    app.function_name(name=function_name)(agent_chat_page)
+    decorated = app.route(
+        route=route,
+        methods=["GET"],
+        auth_level=func.AuthLevel.ANONYMOUS,
+    )(agent_chat_page)
+    app.function_name(name=function_name)(decorated)
 
 
 def _register_http_chat(
@@ -199,9 +213,10 @@ def _register_http_chat(
     *,
     route: str,
     function_name: str,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
-    @app.route(route=route, methods=["POST"])
-    async def chat(req: Request) -> Response:
+    async def chat(req: Request, client: Any | None = None) -> Response:
         try:
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
@@ -211,6 +226,9 @@ def _register_http_chat(
                 resolved=resolved,
                 capabilities=capabilities,
                 session_id=session_id,
+                workflows_enabled=workflows_enabled,
+                workflow_system_addendum=workflow_system_addendum,
+                durable_client=client if workflows_enabled else None,
             )
             return Response(
                 json.dumps(
@@ -230,7 +248,11 @@ def _register_http_chat(
             logger.error("Built-in chat API error for '%s': %s", resolved.name, error_msg)
             return _json_error(error_msg)
 
-    app.function_name(name=function_name)(chat)
+    decorated = chat
+    if workflows_enabled:
+        decorated = app.durable_client_input(client_name="client")(decorated)
+    decorated = app.route(route=route, methods=["POST"])(decorated)
+    app.function_name(name=function_name)(decorated)
 
 
 def _register_http_chat_stream(
@@ -240,9 +262,10 @@ def _register_http_chat_stream(
     *,
     route: str,
     function_name: str,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
-    @app.route(route=route, methods=["POST"])
-    async def chat_stream(req: Request) -> StreamingResponse:
+    async def chat_stream(req: Request, client: Any | None = None) -> StreamingResponse:
         try:
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
@@ -253,6 +276,9 @@ def _register_http_chat_stream(
                     resolved=resolved,
                     capabilities=capabilities,
                     session_id=session_id,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    durable_client=client if workflows_enabled else None,
                 ),
                 media_type="text/event-stream",
             )
@@ -263,7 +289,11 @@ def _register_http_chat_stream(
             logger.error("Built-in chat stream error for '%s': %s", resolved.name, error_msg)
             return _sse_error_response(error_msg, status_code=500)
 
-    app.function_name(name=function_name)(chat_stream)
+    decorated = chat_stream
+    if workflows_enabled:
+        decorated = app.durable_client_input(client_name="client")(decorated)
+    decorated = app.route(route=route, methods=["POST"])(decorated)
+    app.function_name(name=function_name)(decorated)
 
 
 def _register_mcp_endpoint(
@@ -273,14 +303,10 @@ def _register_mcp_endpoint(
     *,
     tool_name: str,
     function_name: str,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
-    @app.mcp_tool_trigger(
-        arg_name="context",
-        tool_name=tool_name,
-        description=resolved.description,
-        tool_properties=_MCP_AGENT_TOOL_PROPERTIES,
-    )
-    async def mcp_agent_chat(context: str) -> str:
+    async def mcp_agent_chat(context: str, client: Any | None = None) -> str:
         try:
             payload = json.loads(context) if context else {}
             arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
@@ -294,6 +320,9 @@ def _register_mcp_endpoint(
                 resolved=resolved,
                 capabilities=capabilities,
                 session_id=session_id,
+                workflows_enabled=workflows_enabled,
+                workflow_system_addendum=workflow_system_addendum,
+                durable_client=client if workflows_enabled else None,
             )
             return json.dumps(
                 {
@@ -307,7 +336,86 @@ def _register_mcp_endpoint(
             logger.error("Built-in MCP error for '%s': %s", resolved.name, error_msg)
             return json.dumps({"error": error_msg})
 
-    app.function_name(name=function_name)(mcp_agent_chat)
+    decorated = app.function_name(name=function_name)(mcp_agent_chat)
+    if workflows_enabled:
+        decorated = app.durable_client_input(client_name="client")(decorated)
+    app.mcp_tool_trigger(
+        arg_name="context",
+        tool_name=tool_name,
+        description=resolved.description,
+        tool_properties=_MCP_AGENT_TOOL_PROPERTIES,
+    )(decorated)
+
+
+def _register_workflow_status_endpoints(
+    app: func.FunctionApp,
+    *,
+    slug: str,
+    base_function_name: str,
+) -> None:
+    from ..workflows.tools import (
+        fetch_session_workflow_status,
+        fetch_session_workflows,
+    )
+
+    async def list_session_workflows(req: Request, client: Any) -> Response:
+        session_id = req.headers.get("x-ms-session-id") or ""
+        if not session_id:
+            return Response(
+                json.dumps({"workflows": []}),
+                media_type="application/json",
+            )
+        try:
+            envelopes = await fetch_session_workflows(client, session_id)
+        except Exception:
+            logger.exception("workflows list endpoint failed")
+            return Response(
+                json.dumps({"error": "failed to list workflows"}),
+                status_code=500,
+                media_type="application/json",
+            )
+        return Response(
+            json.dumps({"workflows": envelopes}),
+            media_type="application/json",
+        )
+
+    decorated_list = app.function_name(name=f"{base_function_name}_workflows")(
+        list_session_workflows
+    )
+    decorated_list = app.durable_client_input(client_name="client")(decorated_list)
+    app.route(route=f"agents/{slug}/workflows", methods=["GET"])(decorated_list)
+
+    async def get_session_workflow_status(req: Request, client: Any) -> Response:
+        session_id = req.headers.get("x-ms-session-id") or ""
+        workflow_id = (req.query_params or {}).get("workflow_id", "") or ""
+        if not session_id or not workflow_id:
+            return Response(
+                json.dumps({"error": "missing session or workflow_id"}),
+                status_code=400,
+                media_type="application/json",
+            )
+        try:
+            envelope = await fetch_session_workflow_status(client, session_id, workflow_id)
+        except Exception:
+            logger.exception("workflow status endpoint failed")
+            return Response(
+                json.dumps({"error": "failed to fetch workflow status"}),
+                status_code=500,
+                media_type="application/json",
+            )
+        if envelope is None:
+            return Response(
+                json.dumps({"error": "workflow not found"}),
+                status_code=404,
+                media_type="application/json",
+            )
+        return Response(json.dumps(envelope), media_type="application/json")
+
+    decorated_status = app.function_name(name=f"{base_function_name}_workflow_status")(
+        get_session_workflow_status
+    )
+    decorated_status = app.durable_client_input(client_name="client")(decorated_status)
+    app.route(route=f"agents/{slug}/workflow-status", methods=["GET"])(decorated_status)
 
 
 def register_builtin_endpoints(
@@ -315,6 +423,9 @@ def register_builtin_endpoints(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     slug: str | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
@@ -346,6 +457,8 @@ def register_builtin_endpoints(
             capabilities,
             route=chat_route,
             function_name=f"{base_function_name}_chat",
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
         )
         _register_http_chat_stream(
             app,
@@ -353,7 +466,15 @@ def register_builtin_endpoints(
             capabilities,
             route=stream_route,
             function_name=f"{base_function_name}_chatstream",
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
         )
+        if workflows_enabled:
+            _register_workflow_status_endpoints(
+                app,
+                slug=slug,
+                base_function_name=base_function_name,
+            )
 
     if builtin_endpoints.mcp:
         _register_mcp_endpoint(
@@ -362,4 +483,6 @@ def register_builtin_endpoints(
             capabilities,
             tool_name=slug,
             function_name=f"{base_function_name}_mcp",
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
         )

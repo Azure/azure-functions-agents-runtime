@@ -1,0 +1,6 @@
+# Keep Functions runtime config files using LF line endings on all
+# platforms. Without this, Windows checkouts with `core.autocrlf=true`
+# can return `host.json` / `local.settings.json` files with CRLF that
+# some tooling chokes on.
+host*.json   text eol=lf
+local.settings*.json* text eol=lf
