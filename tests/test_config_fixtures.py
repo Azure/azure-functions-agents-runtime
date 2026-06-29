@@ -477,3 +477,37 @@ def test_escaped_placeholders_preserve_literal_sigils(
     assert "Still resolve normal placeholders: model gpt-4o-mini, contact ops@contoso.test." in body
     assert "leaked-token" not in body
     assert "tenant-live" not in body
+
+
+# ---------------------------------------------------------------------------
+# 13 — agents/ folder discovery (FRD-0001)
+# ---------------------------------------------------------------------------
+
+
+def test_agents_folder_hybrid_discovery() -> None:
+    """Agents from both top-level and agents/ folder are discovered."""
+    fixture = FIXTURES_ROOT / "13_agents_folder"
+
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    # Expect 3 agents: 1 top-level (main) + 2 in agents/ folder
+    assert len(specs) == 3
+    assert set(by_name) == {"Main Agent", "Chat Agent", "Report Agent"}
+
+    # Top-level main.agent.md is marked is_main
+    main = by_name["Main Agent"]
+    assert main.is_main is True
+    # Verify main is NOT in the agents/ subdirectory (parent folder is not "agents")
+    assert main.source_file.lower().replace("\\", "/").split("/")[-2] != "agents"
+
+    # Agents in folder have correct source_file paths (parent folder IS "agents")
+    chat = by_name["Chat Agent"]
+    assert chat.source_file.lower().replace("\\", "/").split("/")[-2] == "agents"
+    assert chat.trigger is not None
+    assert chat.trigger.type == "http_trigger"
+
+    report = by_name["Report Agent"]
+    assert report.source_file.lower().replace("\\", "/").split("/")[-2] == "agents"
+    assert report.trigger is not None
+    assert report.trigger.type == "timer_trigger"
