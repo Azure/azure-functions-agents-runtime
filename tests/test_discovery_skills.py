@@ -382,3 +382,212 @@ def test_prepare_resolved_skills_mixed_skills(tmp_path: Path) -> None:
     assert resolved["complex"] != complex_dir
     content = (resolved["complex"] / "SKILL.md").read_text(encoding="utf-8")
     assert "Referenced content" in content
+
+
+# ---------------------------------------------------------------------------
+# Temp directory lifecycle tests
+# ---------------------------------------------------------------------------
+
+
+def test_temp_dir_created_only_when_needed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Temp directory is only created when a skill has includes."""
+    from azure_functions_agents.discovery import skills as skills_module
+
+    # Reset the global temp dir
+    monkeypatch.setattr(skills_module, "_RESOLVED_SKILLS_TEMP_DIR", None)
+
+    # Skill without includes
+    simple_dir = _write_skill(tmp_path, "no-includes", "no-includes")
+    skills = {"no-includes": simple_dir}
+
+    resolved = prepare_resolved_skills(skills)
+
+    # Should return original path and not create temp dir
+    assert resolved["no-includes"] == simple_dir
+    assert skills_module._RESOLVED_SKILLS_TEMP_DIR is None
+
+
+def test_temp_dir_created_when_includes_present(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Temp directory is created when a skill has includes."""
+    from azure_functions_agents.discovery import skills as skills_module
+
+    # Reset the global temp dir
+    monkeypatch.setattr(skills_module, "_RESOLVED_SKILLS_TEMP_DIR", None)
+
+    # Skill with includes
+    skill_dir = tmp_path / "skills" / "with-includes"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "ref.md").write_text("Reference content", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: with-includes\ndescription: Test\n---\n\n[ref](./ref.md)\n",
+        encoding="utf-8",
+    )
+    skills = {"with-includes": skill_dir}
+
+    resolved = prepare_resolved_skills(skills)
+
+    # Should create temp dir
+    assert resolved["with-includes"] != skill_dir
+    assert skills_module._RESOLVED_SKILLS_TEMP_DIR is not None
+    assert skills_module._RESOLVED_SKILLS_TEMP_DIR.exists()
+
+    # Clean up
+    skills_module._cleanup_resolved_skills_temp_dir()
+
+
+def test_temp_dir_cleanup_removes_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cleanup function removes the temp directory."""
+    from azure_functions_agents.discovery import skills as skills_module
+
+    # Reset and create temp dir
+    monkeypatch.setattr(skills_module, "_RESOLVED_SKILLS_TEMP_DIR", None)
+
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "ref.md").write_text("Content", encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: test\ndescription: Test\n---\n\n[ref](./ref.md)\n",
+        encoding="utf-8",
+    )
+
+    prepare_resolved_skills({"test": skill_dir})
+
+    temp_dir = skills_module._RESOLVED_SKILLS_TEMP_DIR
+    assert temp_dir is not None
+    assert temp_dir.exists()
+
+    # Cleanup
+    skills_module._cleanup_resolved_skills_temp_dir()
+
+    assert not temp_dir.exists()
+    assert skills_module._RESOLVED_SKILLS_TEMP_DIR is None
+
+
+# ---------------------------------------------------------------------------
+# Additional edge case tests for include syntax
+# ---------------------------------------------------------------------------
+
+
+def test_standalone_link_with_prefix_is_resolved(tmp_path: Path) -> None:
+    """Markdown links on their own line with ./ prefix are resolved as includes."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "api.md").write_text("API Documentation", encoding="utf-8")
+
+    # Link on its own line with ./ prefix should be resolved
+    content = "[api.md](./api.md)"
+    result = _resolve_includes(content, skill_dir)
+
+    assert result == "API Documentation"
+    assert "[api.md](./api.md)" not in result
+
+
+def test_standalone_link_with_whitespace_is_resolved(tmp_path: Path) -> None:
+    """Links with leading/trailing whitespace on the line are still resolved."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "api.md").write_text("API Documentation", encoding="utf-8")
+
+    content = "  [api.md](./api.md)  "
+    result = _resolve_includes(content, skill_dir)
+
+    assert "API Documentation" in result
+
+
+def test_inline_link_preserved_not_included(tmp_path: Path) -> None:
+    """Inline links (within text) are preserved and not treated as includes."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+    # Create the file - but it should NOT be included since link is inline
+    (skill_dir / "ref.md").write_text("REF CONTENT SHOULD NOT APPEAR", encoding="utf-8")
+
+    # Link inline with other text - should NOT be resolved
+    content = "See [this documentation](./ref.md) for more details."
+    result = _resolve_includes(content, skill_dir)
+
+    # Original link should remain unchanged
+    assert result == content
+    assert "REF CONTENT SHOULD NOT APPEAR" not in result
+
+
+def test_link_without_dot_slash_prefix_preserved(tmp_path: Path) -> None:
+    """Links without ./ prefix are not treated as includes."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "ref.md").write_text("SHOULD NOT BE INCLUDED", encoding="utf-8")
+
+    # Link without ./ prefix on its own line - should NOT be resolved
+    content = "[ref](ref.md)"
+    result = _resolve_includes(content, skill_dir)
+
+    assert result == content
+    assert "SHOULD NOT BE INCLUDED" not in result
+
+
+def test_external_link_preserved(tmp_path: Path) -> None:
+    """External URLs are never treated as includes."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+
+    content = "[docs](https://example.com/docs.md)"
+    result = _resolve_includes(content, skill_dir)
+
+    assert result == content
+
+
+def test_deeply_nested_includes(tmp_path: Path) -> None:
+    """Three levels of nesting: A includes B, B includes C."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+
+    (skill_dir / "level1.md").write_text(
+        "LEVEL 1 START\n[level2](./level2.md)\nLEVEL 1 END", encoding="utf-8"
+    )
+    (skill_dir / "level2.md").write_text(
+        "LEVEL 2 START\n[level3](./level3.md)\nLEVEL 2 END", encoding="utf-8"
+    )
+    (skill_dir / "level3.md").write_text("LEVEL 3 CONTENT", encoding="utf-8")
+
+    content = "MAIN START\n[level1](./level1.md)\nMAIN END"
+    result = _resolve_includes(content, skill_dir)
+
+    assert "MAIN START" in result
+    assert "LEVEL 1 START" in result
+    assert "LEVEL 2 START" in result
+    assert "LEVEL 3 CONTENT" in result
+    assert "LEVEL 2 END" in result
+    assert "LEVEL 1 END" in result
+    assert "MAIN END" in result
+
+
+def test_path_traversal_with_dots_rejected(tmp_path: Path) -> None:
+    """Path traversal attempts using .. are rejected."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+    # Create a file outside skill directory
+    (tmp_path / "outside.md").write_text("OUTSIDE CONTENT", encoding="utf-8")
+
+    # Try various traversal patterns
+    for path in [
+        "./../outside.md",
+        "./../../outside.md",
+        "./sub/../../outside.md",
+        "./sub/../../../outside.md",
+    ]:
+        content = f"[file]({path})"
+        with pytest.raises(ValueError, match="escapes the skill directory"):
+            _resolve_includes(content, skill_dir)
+
+
+def test_missing_file_error_includes_filename(tmp_path: Path) -> None:
+    """Error for missing file includes the filename for debugging."""
+    skill_dir = tmp_path / "skills" / "test"
+    skill_dir.mkdir(parents=True)
+
+    content = "[missing](./nonexistent-file.md)"
+    with pytest.raises(ValueError, match=r"nonexistent-file\.md"):
+        _resolve_includes(content, skill_dir)
