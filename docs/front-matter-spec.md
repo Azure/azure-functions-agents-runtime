@@ -495,6 +495,45 @@ description: One sentence the LLM uses to decide whether to load this skill.
 Skill body — instructions, examples, references to in-directory resources.
 ```
 
+**Include directives:**
+
+Skills support `{{include:path}}` directives to inline content from files within the skill directory. This allows organizing large skills with separate reference files:
+
+```
+my-skill/
+├── SKILL.md              # Main skill file
+├── references/
+│   └── api-spec.md       # Referenced via {{include:references/api-spec.md}}
+└── assets/
+    └── example.py        # Referenced via {{include:assets/example.py}}
+```
+
+In the `SKILL.md` body:
+```markdown
+---
+name: my-skill
+description: Skill for interacting with Foo API
+---
+
+# Foo API Skill
+
+## API Reference
+
+{{include:references/api-spec.md}}
+
+## Example Usage
+
+{{include:assets/example.py}}
+```
+
+Include directives:
+- Must be on their own line (whitespace around is allowed)
+- Use paths relative to the skill directory
+- Are resolved at discovery time (content is inlined before MAF loads the skill)
+- Support nested includes (included files can themselves include other files)
+- Reject paths that escape the skill directory (e.g., `../../secret.txt`)
+- Fail at startup if the referenced file doesn't exist
+
 **Agent filtering - Use exclude lists:**
 ```yaml
 # Exclude specific skills (matched against the SKILL.md `name` field)

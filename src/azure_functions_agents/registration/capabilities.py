@@ -8,6 +8,7 @@ from typing import Any
 
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPTool
+from ..discovery.skills import prepare_resolved_skills
 
 
 @dataclass
@@ -57,11 +58,14 @@ def build_capabilities(
     if resolved.skills_disabled:
         enabled_skill_paths: list[Path] = []
     else:
-        enabled_skill_paths = [
-            discovered_skills[name]
+        # Filter to enabled skills, then resolve any {{include:...}} directives
+        enabled_skills = {
+            name: discovered_skills[name]
             for name in resolved.enabled_skills_names
             if name in discovered_skills
-        ]
+        }
+        resolved_skills = prepare_resolved_skills(enabled_skills)
+        enabled_skill_paths = list(resolved_skills.values())
 
     return AgentCapabilities(
         filtered_user_tools=filtered_user_tools,
