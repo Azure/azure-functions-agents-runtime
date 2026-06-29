@@ -9,15 +9,15 @@ This skill provides complete documentation for working with the Widget API.
 
 ## API Endpoints
 
-{{include:references/endpoints.md}}
+[endpoints.md](./references/endpoints.md)
 
 ## Error Handling
 
-{{include:references/error-codes.md}}
+[error-codes.md](./references/error-codes.md)
 
 ## Example Requests
 
-{{include:examples/requests.md}}
+[requests.md](./examples/requests.md)
 
 ## Best Practices
 

@@ -157,11 +157,12 @@ def test_discover_skills_skips_unparseable_frontmatter(
 
 
 def test_has_includes_detects_include_directive() -> None:
-    assert _has_includes("{{include:foo.md}}")
-    assert _has_includes("  {{include:path/to/file.md}}  ")
-    assert _has_includes("before\n{{include:ref.md}}\nafter")
+    assert _has_includes("[file](./foo.md)")
+    assert _has_includes("  [file](./path/to/file.md)  ")
+    assert _has_includes("before\n[ref](./ref.md)\nafter")
     assert not _has_includes("no includes here")
-    assert not _has_includes("{{ include:foo.md }}")  # space after opening braces
+    assert not _has_includes("[link](https://example.com)")  # external link
+    assert not _has_includes("[link](other.md)")  # no ./ prefix
 
 
 def test_resolve_includes_basic(tmp_path: Path) -> None:
@@ -171,12 +172,12 @@ def test_resolve_includes_basic(tmp_path: Path) -> None:
     refs_dir.mkdir()
     (refs_dir / "api.md").write_text("# API Reference\nSome API docs.", encoding="utf-8")
 
-    content = "# Skill\n\n{{include:references/api.md}}\n\nMore content."
+    content = "# Skill\n\n[api.md](./references/api.md)\n\nMore content."
     result = _resolve_includes(content, skill_dir)
 
     assert "# API Reference" in result
     assert "Some API docs." in result
-    assert "{{include:" not in result
+    assert "[api.md](./references/api.md)" not in result
     assert "More content." in result
 
 
@@ -186,7 +187,7 @@ def test_resolve_includes_multiple(tmp_path: Path) -> None:
     (skill_dir / "part1.md").write_text("Part 1 content", encoding="utf-8")
     (skill_dir / "part2.md").write_text("Part 2 content", encoding="utf-8")
 
-    content = "Header\n{{include:part1.md}}\nMiddle\n{{include:part2.md}}\nFooter"
+    content = "Header\n[part1](./part1.md)\nMiddle\n[part2](./part2.md)\nFooter"
     result = _resolve_includes(content, skill_dir)
 
     assert "Part 1 content" in result
@@ -199,10 +200,10 @@ def test_resolve_includes_multiple(tmp_path: Path) -> None:
 def test_resolve_includes_nested(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "test-skill"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "outer.md").write_text("Outer start\n{{include:inner.md}}\nOuter end", encoding="utf-8")
+    (skill_dir / "outer.md").write_text("Outer start\n[inner](./inner.md)\nOuter end", encoding="utf-8")
     (skill_dir / "inner.md").write_text("Inner content", encoding="utf-8")
 
-    content = "Main\n{{include:outer.md}}\nDone"
+    content = "Main\n[outer](./outer.md)\nDone"
     result = _resolve_includes(content, skill_dir)
 
     assert "Main" in result
@@ -215,10 +216,10 @@ def test_resolve_includes_nested(tmp_path: Path) -> None:
 def test_resolve_includes_circular_detection(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "test-skill"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "a.md").write_text("A includes B\n{{include:b.md}}", encoding="utf-8")
-    (skill_dir / "b.md").write_text("B includes A\n{{include:a.md}}", encoding="utf-8")
+    (skill_dir / "a.md").write_text("A includes B\n[b](./b.md)", encoding="utf-8")
+    (skill_dir / "b.md").write_text("B includes A\n[a](./a.md)", encoding="utf-8")
 
-    content = "Start\n{{include:a.md}}"
+    content = "Start\n[a](./a.md)"
     with pytest.raises(ValueError, match="Circular include"):
         _resolve_includes(content, skill_dir)
 
@@ -226,9 +227,9 @@ def test_resolve_includes_circular_detection(tmp_path: Path) -> None:
 def test_resolve_includes_self_reference(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "test-skill"
     skill_dir.mkdir(parents=True)
-    (skill_dir / "self.md").write_text("Self\n{{include:self.md}}", encoding="utf-8")
+    (skill_dir / "self.md").write_text("Self\n[self](./self.md)", encoding="utf-8")
 
-    content = "{{include:self.md}}"
+    content = "[self](./self.md)"
     with pytest.raises(ValueError, match="Circular include"):
         _resolve_includes(content, skill_dir)
 
@@ -239,17 +240,8 @@ def test_resolve_includes_path_escape_rejected(tmp_path: Path) -> None:
     # Create a file outside the skill directory
     (tmp_path / "secret.md").write_text("secret content", encoding="utf-8")
 
-    content = "{{include:../../secret.md}}"
+    content = "[secret](./../../secret.md)"
     with pytest.raises(ValueError, match="escapes the skill directory"):
-        _resolve_includes(content, skill_dir)
-
-
-def test_resolve_includes_absolute_path_rejected(tmp_path: Path) -> None:
-    skill_dir = tmp_path / "skills" / "test-skill"
-    skill_dir.mkdir(parents=True)
-
-    content = "{{include:/etc/passwd}}"
-    with pytest.raises(ValueError, match="must be relative"):
         _resolve_includes(content, skill_dir)
 
 
@@ -257,7 +249,7 @@ def test_resolve_includes_file_not_found(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "test-skill"
     skill_dir.mkdir(parents=True)
 
-    content = "{{include:nonexistent.md}}"
+    content = "[missing](./nonexistent.md)"
     with pytest.raises(ValueError, match="Include file not found"):
         _resolve_includes(content, skill_dir)
 
@@ -266,7 +258,7 @@ def test_resolve_includes_empty_path_rejected(tmp_path: Path) -> None:
     skill_dir = tmp_path / "skills" / "test-skill"
     skill_dir.mkdir(parents=True)
 
-    content = "{{include:}}"
+    content = "[empty](./)"
     with pytest.raises(ValueError, match="Empty include path"):
         _resolve_includes(content, skill_dir)
 
@@ -279,6 +271,18 @@ def test_resolve_includes_preserves_non_include_content(tmp_path: Path) -> None:
     content = "# Title\n\nSome content with ${ENV_VAR} and other stuff.\n"
     result = _resolve_includes(content, skill_dir)
 
+    assert result == content
+
+
+def test_resolve_includes_preserves_inline_links(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "skills" / "test-skill"
+    skill_dir.mkdir(parents=True)
+
+    # Inline links (not on their own line) should not be treated as includes
+    content = "Check out [this file](./ref.md) for more info."
+    result = _resolve_includes(content, skill_dir)
+
+    # Link should be preserved since it's inline, not on its own line
     assert result == content
 
 
@@ -316,7 +320,7 @@ def test_prepare_resolved_skills_with_includes_returns_temp_path(tmp_path: Path)
     refs_dir.mkdir()
     (refs_dir / "api.md").write_text("API content", encoding="utf-8")
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: with-includes\ndescription: Test\n---\n\n# Skill\n{{include:references/api.md}}\n",
+        "---\nname: with-includes\ndescription: Test\n---\n\n# Skill\n[api.md](./references/api.md)\n",
         encoding="utf-8",
     )
     skills = {"with-includes": skill_dir}
@@ -329,7 +333,7 @@ def test_prepare_resolved_skills_with_includes_returns_temp_path(tmp_path: Path)
     resolved_skill_file = resolved["with-includes"] / "SKILL.md"
     content = resolved_skill_file.read_text(encoding="utf-8")
     assert "API content" in content
-    assert "{{include:" not in content
+    assert "[api.md](./references/api.md)" not in content
 
 
 def test_prepare_resolved_skills_copies_other_files(tmp_path: Path) -> None:
@@ -340,7 +344,7 @@ def test_prepare_resolved_skills_copies_other_files(tmp_path: Path) -> None:
     (assets_dir / "example.py").write_text("print('hello')", encoding="utf-8")
     (skill_dir / "refs.md").write_text("Reference doc", encoding="utf-8")
     (skill_dir / "SKILL.md").write_text(
-        "---\nname: with-assets\ndescription: Test\n---\n\n{{include:refs.md}}\n",
+        "---\nname: with-assets\ndescription: Test\n---\n\n[refs](./refs.md)\n",
         encoding="utf-8",
     )
     skills = {"with-assets": skill_dir}
@@ -365,7 +369,7 @@ def test_prepare_resolved_skills_mixed_skills(tmp_path: Path) -> None:
     complex_dir.mkdir(parents=True)
     (complex_dir / "ref.md").write_text("Referenced content", encoding="utf-8")
     (complex_dir / "SKILL.md").write_text(
-        "---\nname: complex\ndescription: Test\n---\n\n{{include:ref.md}}\n",
+        "---\nname: complex\ndescription: Test\n---\n\n[ref](./ref.md)\n",
         encoding="utf-8",
     )
 

@@ -497,15 +497,15 @@ Skill body — instructions, examples, references to in-directory resources.
 
 **Include directives:**
 
-Skills support `{{include:path}}` directives to inline content from files within the skill directory. This allows organizing large skills with separate reference files:
+Skills support markdown link includes to inline content from files within the skill directory. A markdown link on its own line with a relative path starting with `./` will be replaced with the file's content at discovery time:
 
 ```
 my-skill/
 ├── SKILL.md              # Main skill file
 ├── references/
-│   └── api-spec.md       # Referenced via {{include:references/api-spec.md}}
+│   └── api-spec.md       # Referenced via [api-spec.md](./references/api-spec.md)
 └── assets/
-    └── example.py        # Referenced via {{include:assets/example.py}}
+    └── example.py        # Referenced via [example.py](./assets/example.py)
 ```
 
 In the `SKILL.md` body:
@@ -519,20 +519,20 @@ description: Skill for interacting with Foo API
 
 ## API Reference
 
-{{include:references/api-spec.md}}
+[api-spec.md](./references/api-spec.md)
 
 ## Example Usage
 
-{{include:assets/example.py}}
+[example.py](./assets/example.py)
 ```
 
-Include directives:
-- Must be on their own line (whitespace around is allowed)
-- Use paths relative to the skill directory
-- Are resolved at discovery time (content is inlined before MAF loads the skill)
-- Support nested includes (included files can themselves include other files)
-- Reject paths that escape the skill directory (e.g., `../../secret.txt`)
-- Fail at startup if the referenced file doesn't exist
+Include behavior:
+- Links must be on their own line (not inline with other text)
+- Paths must start with `./` to distinguish includes from regular links
+- Content is inlined at discovery time (before MAF loads the skill)
+- Nested includes are supported (included files can themselves include other files)
+- Path traversal is blocked (e.g., `./../../secret.txt` is rejected)
+- Missing files cause a startup error with a clear message
 
 **Agent filtering - Use exclude lists:**
 ```yaml

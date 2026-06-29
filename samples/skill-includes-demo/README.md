@@ -1,6 +1,6 @@
 # Skill Includes Demo
 
-Demonstrates the `{{include:path}}` directive for organizing skills with modular reference files.
+Demonstrates markdown link includes for organizing skills with modular reference files.
 
 | Trigger | Built-in Endpoints | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
@@ -8,19 +8,19 @@ Demonstrates the `{{include:path}}` directive for organizing skills with modular
 
 ## Features
 
-- **Skill Include Directives** — `{{include:path}}` syntax to inline content from separate files
+- **Markdown Link Includes** — `[file](./path)` syntax to inline content from separate files
 - **Modular Skill Organization** — split large skills into maintainable reference files
 - **Nested Directory Support** — organize assets and references in subdirectories
 - **Chat UI** — built-in interface at `/agents/main/`
 
 ## Skill Structure
 
-This sample showcases a skill organized with include directives:
+This sample showcases a skill organized with markdown link includes:
 
 ```
 skills/
 └── api-assistant/
-    ├── SKILL.md              # Main skill with {{include:...}} directives
+    ├── SKILL.md              # Main skill with [file](./path) includes
     ├── references/
     │   ├── endpoints.md      # API endpoint documentation
     │   └── error-codes.md    # Error handling reference
@@ -28,16 +28,16 @@ skills/
         └── requests.md       # Example API requests
 ```
 
-The `SKILL.md` file uses include directives to pull in content:
+The `SKILL.md` file uses markdown links on their own lines to pull in content:
 
 ```markdown
 ## API Endpoints
 
-{{include:references/endpoints.md}}
+[endpoints.md](./references/endpoints.md)
 
 ## Error Handling
 
-{{include:references/error-codes.md}}
+[error-codes.md](./references/error-codes.md)
 ```
 
 At startup, the runtime resolves all includes and provides the fully-assembled skill content to the agent.
@@ -48,6 +48,7 @@ At startup, the runtime resolves all includes and provides the fully-assembled s
 - **Reusability** — share reference files across multiple skills (copy or symlink)
 - **Clarity** — keep the main SKILL.md focused on structure while details live in dedicated files
 - **Version Control** — track changes to individual reference files separately
+- **Native Markdown** — includes use standard markdown link syntax, so files render correctly in GitHub/VS Code
 
 ## Prerequisites
 
@@ -88,9 +89,9 @@ At startup, the runtime resolves all includes and provides the fully-assembled s
 ## How It Works
 
 1. The runtime discovers `skills/api-assistant/SKILL.md`
-2. During startup, `{{include:...}}` directives are resolved:
-   - `{{include:references/endpoints.md}}` → inlines endpoint documentation
-   - `{{include:references/error-codes.md}}` → inlines error code reference
-   - `{{include:examples/requests.md}}` → inlines example requests
+2. During startup, markdown link includes are resolved:
+   - `[endpoints.md](./references/endpoints.md)` → inlines endpoint documentation
+   - `[error-codes.md](./references/error-codes.md)` → inlines error code reference
+   - `[requests.md](./examples/requests.md)` → inlines example requests
 3. The fully-resolved skill content is provided to MAF's `SkillsProvider`
 4. The agent can load and use the skill with all reference content available

@@ -14,11 +14,11 @@ branch: victoriahall/skill-includes
 
 ## 1. Summary
 
-Add an `{{include:path}}` directive to SKILL.md files that inlines content from
-referenced files (relative to the skill directory) during discovery. This
-enables skills to reference external assets and documentation without manually
-copying content, keeping SKILL.md files maintainable while allowing rich,
-modular instruction sets.
+Add markdown link include support to SKILL.md files: a standalone line containing
+a markdown link with a relative path (e.g., `[api.md](./references/api.md)`)
+will inline the referenced file's content during discovery. This enables skills
+to reference external assets and documentation without manually copying content,
+keeping SKILL.md files maintainable while allowing rich, modular instruction sets.
 
 ## 2. Motivation / problem
 
@@ -48,32 +48,33 @@ skill directory at runtime. However, authors cannot pre-populate instructions
 with reference content — they must either inline everything or rely on the agent
 to discover and read resources dynamically.
 
-The `{{include:path}}` directive bridges this gap by resolving includes at
-discovery time, so the skill's full instructions (including referenced content)
-are available when the skill loads.
+Markdown link includes bridge this gap by resolving includes at discovery time,
+so the skill's full instructions (including referenced content) are available
+when the skill loads.
 
 ## 3. Goals / Non-goals
 
 **Goals**
-- Support `{{include:relative/path}}` syntax in SKILL.md body content
+- Support `[text](./relative/path)` syntax in SKILL.md body content
 - Resolve includes relative to the skill directory (not app root)
 - Process includes recursively (included files can themselves include)
 - Detect and fail on circular includes
 - Preserve existing `${ENV_VAR}` substitution (includes processed first)
 - Keep discovery read-only (no side effects beyond reading files)
+- Use standard markdown syntax that renders correctly in GitHub/VS Code
 
 **Non-goals**
 - Front matter includes (only body content is processed)
-- Glob patterns or wildcards (`{{include:references/*.md}}`)
+- Glob patterns or wildcards
 - Conditional includes or templating logic
 - Binary file embedding (text files only)
-- Cross-skill includes (`{{include:../other-skill/file.md}}` rejected)
+- Cross-skill includes (`[x](./../../other-skill/file.md)` rejected)
 
 ## 4. Proposed design
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
-| discover | `discovery/skills.py` | Add `_resolve_includes()` to process `{{include:path}}` in skill content |
+| discover | `discovery/skills.py` | Add `_resolve_includes()` to process markdown link includes in skill content |
 | discover | `discovery/skills.py` | Add `prepare_resolved_skills()` to write resolved skills to temp directory |
 | translate | — | No change |
 | register | `registration/capabilities.py` | Call `prepare_resolved_skills()` to get temp paths for skills with includes |
@@ -91,7 +92,7 @@ original file. The solution is to write resolved skills to a temp directory.
    directories (original paths).
 
 2. `_resolve_includes(content, skill_dir)` — new helper that:
-   - Regex matches `{{include:path}}` patterns in skill body content
+   - Regex matches markdown links on their own line with `./` prefix
    - Resolves each path relative to the skill directory
    - Rejects paths that escape the skill directory (security)
    - Reads referenced files as UTF-8 text
@@ -99,7 +100,7 @@ original file. The solution is to write resolved skills to a temp directory.
    - Returns the fully resolved content
 
 3. `prepare_resolved_skills(skills)` — new function that:
-   - For each skill, checks if `SKILL.md` contains `{{include:}}` directives
+   - For each skill, checks if `SKILL.md` contains markdown link includes
    - If yes: creates a temp directory, copies the skill directory, writes
      resolved `SKILL.md`, returns the temp path
    - If no: returns the original path (no copy overhead)
@@ -110,14 +111,16 @@ original file. The solution is to write resolved skills to a temp directory.
 
 ### Include syntax
 
-```
-{{include:relative/path/to/file.md}}
+```markdown
+[descriptive text](./relative/path/to/file.md)
 ```
 
+- Link must be on its own line (not inline with other text)
+- Path must start with `./` to distinguish includes from regular links
 - Path is relative to the skill directory (where SKILL.md lives)
-- No leading `/` (rejected as absolute path)
-- Whitespace around path is trimmed: `{{include: path }}` works
+- Whitespace around the link is allowed
 - File extension is preserved (not assumed to be `.md`)
+- Standard markdown syntax — renders as a link in GitHub/VS Code
 
 ### Error handling
 
@@ -144,11 +147,11 @@ Use this skill when working with Foo API endpoints.
 
 ## API Reference
 
-{{include:references/api-spec.md}}
+[api-spec.md](./references/api-spec.md)
 
 ## Examples
 
-{{include:references/examples.md}}
+[examples.md](./references/examples.md)
 ```
 
 **Supported directory structure:**
@@ -165,7 +168,7 @@ skills/
 
 ### Compatibility
 
-- **Backward compatible:** Skills without `{{include:}}` directives work unchanged.
+- **Backward compatible:** Skills without markdown link includes work unchanged.
 - **No breaking changes:** Existing discovery API returns the same types, just
   with includes resolved in the content passed to MAF.
 
@@ -173,12 +176,13 @@ skills/
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
-| 1 | Include syntax | `{{include:path}}`, `{!path!}`, `{% include %}` | `{{include:path}}` | Human | 2026-06-29 |
+| 1 | Include syntax | `{{include:path}}`, `{!path!}`, `{% include %}`, `[text](./path)` | `[text](./path)` — standard markdown, renders in GitHub/VS Code | Human | 2026-06-29 |
 | 2 | Processing stage | Discovery (eager), runtime (lazy via MAF) | Discovery (eager) | Agent | 2026-06-29 |
 | 3 | Path resolution base | App root, skill directory | Skill directory | Agent | 2026-06-29 |
 | 4 | Circular include handling | Warn and skip, error and fail | Error and fail | Agent | 2026-06-29 |
 | 5 | MAF integration | In-memory injection, temp directory with resolved files | Temp directory — MAF's SkillsProvider reads from disk | Agent | 2026-06-29 |
 | 6 | Temp directory cleanup | Manual, atexit, context manager | atexit — process-lifetime management | Agent | 2026-06-29 |
+| 7 | Distinguish includes from links | All links, only standalone lines, `./` prefix required | Standalone lines with `./` prefix — clear intent, no accidental includes | Human | 2026-06-29 |
 
 ## 6. Test plan
 
@@ -189,7 +193,7 @@ skills/
 ## 7. Docs impact
 
 - [ ] `docs/architecture.md` — Update skills.py description to mention include resolution
-- [ ] `docs/front-matter-spec.md` — Document `{{include:path}}` syntax in skills section
+- [ ] `docs/front-matter-spec.md` — Document markdown link include syntax in skills section
 - [ ] `README.md` — Add example of skill with includes in the skills section
 
 ## 8. Status & sign-off

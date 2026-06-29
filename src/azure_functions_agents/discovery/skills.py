@@ -6,9 +6,9 @@ The runtime hands the resolved skill directories to
 :class:`agent_framework.SkillsProvider`, which exposes per-skill load /
 resource / script tooling to the agent.
 
-Skills support ``{{include:path}}`` directives to inline content from files
-within the skill directory. Includes are resolved at discovery time and the
-resolved content is written to a temp directory for MAF to read.
+Skills support markdown link includes: a standalone line containing only a
+markdown link with a relative path (e.g., ``[api.md](./references/api.md)``)
+will inline the referenced file's content at discovery time.
 """
 
 from __future__ import annotations
@@ -35,10 +35,11 @@ _MAX_SKILL_NAME_LENGTH = 64
 _SKILL_FILE_NAME = "SKILL.md"
 _DISCOVERED_SKILLS_CACHE: dict[Path, dict[str, Path]] = {}
 
-# Include directive pattern: {{include:relative/path/to/file}}
-# Matches the full directive including whitespace-only prefix/suffix on the line.
-# Uses .*? to also match empty paths (which will be rejected with a clear error).
-_INCLUDE_PATTERN = re.compile(r"^\s*\{\{include:\s*(.*?)\s*\}\}\s*$", re.MULTILINE)
+# Include directive pattern: markdown links on their own line with relative paths.
+# Matches [any text](./relative/path) where the line contains only the link.
+# The path must start with ./ to distinguish includes from regular links.
+# Captures the path after ./ (e.g., "references/api.md" from "./references/api.md").
+_INCLUDE_PATTERN = re.compile(r"^\s*\[.*?\]\(\.\/(.*?)\)\s*$", re.MULTILINE)
 
 # Global temp directory for resolved skills (cleaned up on process exit).
 _RESOLVED_SKILLS_TEMP_DIR: Path | None = None
@@ -67,7 +68,7 @@ def _cleanup_resolved_skills_temp_dir() -> None:
 
 
 def _has_includes(content: str) -> bool:
-    """Return True if the content contains any ``{{include:...}}`` directives."""
+    """Return True if the content contains any markdown link includes."""
     return _INCLUDE_PATTERN.search(content) is not None
 
 
@@ -77,7 +78,11 @@ def _resolve_includes(
     *,
     visited: set[Path] | None = None,
 ) -> str:
-    """Resolve all ``{{include:path}}`` directives in the content.
+    """Resolve all markdown link includes in the content.
+
+    Markdown links on their own line with paths starting with ``./`` are treated
+    as includes. For example, ``[api.md](./references/api.md)`` will inline the
+    content of ``references/api.md``.
 
     Args:
         content: The skill file content (body, not frontmatter).
@@ -97,7 +102,7 @@ def _resolve_includes(
     def replace_include(match: re.Match[str]) -> str:
         rel_path = match.group(1).strip()
         if not rel_path:
-            raise ValueError("Empty include path in {{include:}}")
+            raise ValueError("Empty include path in markdown link")
 
         # Reject absolute paths
         if rel_path.startswith("/") or (len(rel_path) > 1 and rel_path[1] == ":"):
