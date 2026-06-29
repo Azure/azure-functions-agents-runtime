@@ -1,1 +1,1 @@
-azurefunctions_agents_runtime-0.1.0b3-py3-none-any.whl
+-e ../../..
