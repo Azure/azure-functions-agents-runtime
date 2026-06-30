@@ -495,6 +495,38 @@ description: One sentence the LLM uses to decide whether to load this skill.
 Skill body — instructions, examples, references to in-directory resources.
 ```
 
+**Organizing skill content:**
+
+Skills can include reference material in `references/` and `assets/` subdirectories. MAF's `read_skill_resource` tool allows the agent to read these files on demand at runtime (progressive disclosure):
+
+```
+my-skill/
+├── SKILL.md              # Main skill file (keep <500 lines)
+├── references/
+│   └── api-spec.md       # Agent reads via read_skill_resource when needed
+└── assets/
+    └── example.py        # Agent reads via read_skill_resource when needed
+```
+
+In the `SKILL.md` body, reference the available resources so the agent knows they exist:
+```markdown
+---
+name: my-skill
+description: Skill for interacting with Foo API
+---
+
+# Foo API Skill
+
+When you need detailed API information, use the read_skill_resource tool to read
+files from the references/ directory.
+
+## Available Resources
+- `references/api-spec.md` - Full API specification
+- `assets/example.py` - Example usage code
+```
+
+This progressive disclosure pattern keeps the agent's context window lean while giving it access to detailed reference material on demand. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for more details.
+
 **Agent filtering - Use exclude lists:**
 ```yaml
 # Exclude specific skills (matched against the SKILL.md `name` field)
