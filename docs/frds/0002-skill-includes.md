@@ -1,0 +1,207 @@
+---
+frd: 0002
+title: Skill file includes
+status: Finalized
+author: victoriahall
+created: 2026-06-29
+updated: 2026-06-29
+issues: []
+pull_requests: []
+branch: victoriahall/skill-includes
+---
+
+# FRD 0002 — Skill file includes
+
+## 1. Summary
+
+Add markdown link include support to SKILL.md files: a standalone line containing
+a markdown link with a relative path (e.g., `[api.md](./references/api.md)`)
+will inline the referenced file's content during discovery. This enables skills
+to reference external assets and documentation without manually copying content,
+keeping SKILL.md files maintainable while allowing rich, modular instruction sets.
+
+## 2. Motivation / problem
+
+Today, a skill's instructions must be entirely self-contained within the
+SKILL.md file. For skills with extensive reference material (API specs, code
+examples, diagrams descriptions), this leads to either:
+
+1. **Bloated SKILL.md files** — thousands of lines mixing core instructions with
+   reference material, making maintenance difficult.
+2. **Incomplete skills** — authors omit useful reference material to keep files
+   manageable, reducing skill effectiveness.
+
+Authors want to organize skills with supporting files:
+
+```
+my-skill/
+├── SKILL.md              # Core instructions
+├── assets/               # Images, diagrams, data files
+│   └── workflow.png
+└── references/           # Extended documentation
+    ├── api-spec.md
+    └── examples.md
+```
+
+MAF's `read_skill_resource` tool already allows agents to read files within the
+skill directory at runtime. However, authors cannot pre-populate instructions
+with reference content — they must either inline everything or rely on the agent
+to discover and read resources dynamically.
+
+Markdown link includes bridge this gap by resolving includes at discovery time,
+so the skill's full instructions (including referenced content) are available
+when the skill loads.
+
+## 3. Goals / Non-goals
+
+**Goals**
+- Support `[text](./relative/path)` syntax in SKILL.md body content
+- Resolve includes relative to the skill directory (not app root)
+- Process includes recursively (included files can themselves include)
+- Detect and fail on circular includes
+- Preserve existing `${ENV_VAR}` substitution (includes processed first)
+- Keep discovery read-only (no side effects beyond reading files)
+- Use standard markdown syntax that renders correctly in GitHub/VS Code
+
+**Non-goals**
+- Front matter includes (only body content is processed)
+- Glob patterns or wildcards
+- Conditional includes or templating logic
+- Binary file embedding (text files only)
+- Cross-skill includes (`[x](./../../other-skill/file.md)` rejected)
+
+## 4. Proposed design
+
+| Pipeline stage | Module(s) | Change |
+| --- | --- | --- |
+| discover | `discovery/skills.py` | Add `_resolve_includes()` to process markdown link includes in skill content |
+| discover | `discovery/skills.py` | Add `prepare_resolved_skills()` to write resolved skills to temp directory |
+| translate | — | No change |
+| register | `registration/capabilities.py` | Call `prepare_resolved_skills()` to get temp paths for skills with includes |
+| execute | — | No change (MAF reads resolved content from temp paths) |
+
+### Detailed design
+
+**Challenge:** MAF's `SkillsProvider.from_paths()` reads `SKILL.md` files from
+disk. We cannot inject resolved content in memory — MAF will re-read the
+original file. The solution is to write resolved skills to a temp directory.
+
+**Resolution flow:**
+
+1. `discover_skills()` — unchanged, returns `dict[str, Path]` of skill
+   directories (original paths).
+
+2. `_resolve_includes(content, skill_dir)` — new helper that:
+   - Regex matches markdown links on their own line with `./` prefix
+   - Resolves each path relative to the skill directory
+   - Rejects paths that escape the skill directory (security)
+   - Reads referenced files as UTF-8 text
+   - Recursively resolves nested includes (tracking visited paths for cycles)
+   - Returns the fully resolved content
+
+3. `prepare_resolved_skills(skills)` — new function that:
+   - For each skill, checks if `SKILL.md` contains markdown link includes
+   - If yes: creates a temp directory, copies the skill directory, writes
+     resolved `SKILL.md`, returns the temp path
+   - If no: returns the original path (no copy overhead)
+   - Registers cleanup via `atexit` for the temp directory
+   - Returns `dict[str, Path]` with temp paths where needed
+
+4. Registration calls `prepare_resolved_skills()` before passing paths to MAF.
+
+### Include syntax
+
+```markdown
+[descriptive text](./relative/path/to/file.md)
+```
+
+- Link must be on its own line (not inline with other text)
+- Path must start with `./` to distinguish includes from regular links
+- Path is relative to the skill directory (where SKILL.md lives)
+- Whitespace around the link is allowed
+- File extension is preserved (not assumed to be `.md`)
+- Standard markdown syntax — renders as a link in GitHub/VS Code
+
+### Error handling
+
+| Condition | Behavior |
+| --- | --- |
+| File not found | `ValueError` at startup (fail fast) |
+| Path escapes skill directory | `ValueError` at startup |
+| Circular include | `ValueError` at startup |
+| Non-UTF-8 file | `ValueError` at startup |
+| Empty path | `ValueError` at startup |
+
+### Authoring / API surface
+
+**New SKILL.md syntax (body only):**
+```markdown
+---
+name: my-api-skill
+description: Skill for interacting with the Foo API
+---
+
+# Foo API Skill
+
+Use this skill when working with Foo API endpoints.
+
+## API Reference
+
+[api-spec.md](./references/api-spec.md)
+
+## Examples
+
+[examples.md](./references/examples.md)
+```
+
+**Supported directory structure:**
+```
+skills/
+└── my-api-skill/
+    ├── SKILL.md
+    ├── assets/
+    │   └── diagram.png       # Accessible via read_skill_resource
+    └── references/
+        ├── api-spec.md       # Can be included
+        └── examples.md       # Can be included
+```
+
+### Compatibility
+
+- **Backward compatible:** Skills without markdown link includes work unchanged.
+- **No breaking changes:** Existing discovery API returns the same types, just
+  with includes resolved in the content passed to MAF.
+
+## 5. Decisions log
+
+| # | Decision | Options considered | Choice | Decided by | Date |
+| - | -------- | ------------------ | ------ | ---------- | ---- |
+| 1 | Include syntax | `{{include:path}}`, `{!path!}`, `{% include %}`, `[text](./path)` | `[text](./path)` — standard markdown, renders in GitHub/VS Code | Human | 2026-06-29 |
+| 2 | Processing stage | Discovery (eager), runtime (lazy via MAF) | Discovery (eager) | Agent | 2026-06-29 |
+| 3 | Path resolution base | App root, skill directory | Skill directory | Agent | 2026-06-29 |
+| 4 | Circular include handling | Warn and skip, error and fail | Error and fail | Agent | 2026-06-29 |
+| 5 | MAF integration | In-memory injection, temp directory with resolved files | Temp directory — MAF's SkillsProvider reads from disk | Agent | 2026-06-29 |
+| 6 | Temp directory cleanup | Manual, atexit, context manager | atexit — process-lifetime management | Agent | 2026-06-29 |
+| 7 | Distinguish includes from links | All links, only standalone lines, `./` prefix required | Standalone lines with `./` prefix — clear intent, no accidental includes | Human | 2026-06-29 |
+| 8 | **Feature scope** | Implement custom includes, use MAF-native `read_skill_resource` | **Use MAF-native** — avoids extra I/O, aligns with progressive disclosure pattern | Human | 2026-06-30 |
+
+## 6. Test plan
+
+N/A — feature not implemented.
+
+## 7. Docs impact
+
+- [x] `docs/architecture.md` — Updated skills.py description (removed include resolution)
+- [x] `docs/front-matter-spec.md` — Documented MAF-native `read_skill_resource` pattern instead of includes
+- [x] `samples/skill-includes-demo/` — Renamed conceptually to "skill resources demo", shows MAF-native pattern
+
+## 8. Status & sign-off
+
+- **Architecture review (phase 2):** Design updated to use temp directory approach for MAF integration (Agent, 2026-06-29)
+- **Human sign-off:** User requested implementation (2026-06-29) → `status: Finalized`
+- **Closure (2026-06-30):** After implementation, user reconsidered the design:
+  - Concern: Extra I/O overhead (parsing SKILL.md for includes, writing to temp directory)
+  - Goal: Allow agents to access reference content in nested directories
+  - Resolution: MAF's native `read_skill_resource` already provides this via progressive disclosure
+  - Decision: **Remove custom include feature, document MAF-native pattern instead**
+  - Status: **Closed — not implemented**

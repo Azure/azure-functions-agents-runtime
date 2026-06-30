@@ -1,0 +1,37 @@
+### Chat with the API Assistant
+POST http://localhost:7071/agents/main/chat
+Content-Type: application/json
+
+{
+  "prompt": "What endpoints are available in the Widget API?"
+}
+
+###
+
+### Ask about error handling
+POST http://localhost:7071/agents/main/chat
+Content-Type: application/json
+
+{
+  "prompt": "What does error code 429 mean and how should I handle it?"
+}
+
+###
+
+### Request example code
+POST http://localhost:7071/agents/main/chat
+Content-Type: application/json
+
+{
+  "prompt": "Show me how to create a premium widget using Python"
+}
+
+###
+
+### Streaming response
+POST http://localhost:7071/agents/main/chatstream
+Content-Type: application/json
+
+{
+  "prompt": "Explain all the Widget API endpoints"
+}

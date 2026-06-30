@@ -5,6 +5,10 @@ with YAML frontmatter providing at least a ``name`` and a ``description``.
 The runtime hands the resolved skill directories to
 :class:`agent_framework.SkillsProvider`, which exposes per-skill load /
 resource / script tooling to the agent.
+
+Skills can include reference material in ``references/`` and ``assets/``
+subdirectories. MAF's ``read_skill_resource`` tool allows the agent to
+read these files on demand at runtime (progressive disclosure).
 """
 
 from __future__ import annotations
