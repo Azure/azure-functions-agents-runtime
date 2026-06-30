@@ -106,7 +106,7 @@ def register_workflows(app: func.FunctionApp) -> None:
     bp = df.Blueprint()
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
-    def agents_workflow_run_tool(task: dict[str, Any]) -> dict[str, Any]:
+    def agents_workflow_run_tool(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
         task_id = task["id"]
         tool_name = task["tool"]
         args = task.get("args") or {}

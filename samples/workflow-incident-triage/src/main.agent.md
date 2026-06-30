@@ -1,6 +1,7 @@
 ---
 name: Incident Triage Assistant
 description: Investigates production incidents by gathering evidence from multiple sources in parallel, correlating findings, and producing a written report.
+builtin_endpoints: true
 workflows:
   enabled: true
   allowed_tools:
