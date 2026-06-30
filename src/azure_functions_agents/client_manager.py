@@ -188,6 +188,8 @@ class MAFClientManager(ClientManager):
     @classmethod
     def _build_foundry(cls, model: str) -> Any:
         from agent_framework.foundry import FoundryChatClient
+        from azure.ai.projects.aio import AIProjectClient
+        from azure.core.pipeline.transport import AioHttpTransport
 
         endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
         if not endpoint:
@@ -195,10 +197,24 @@ class MAFClientManager(ClientManager):
                 "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "
                 "FOUNDRY_PROJECT_ENDPOINT to be set."
             )
-        return FoundryChatClient(
-            project_endpoint=endpoint,
-            model=model,
+        # Configure explicit HTTP timeouts on the underlying Azure SDK transport
+        # so transient Foundry latency surfaces as a raised exception instead of
+        # an indefinite hang on receive_response_headers.started.
+        # See: https://github.com/Azure/azure-functions-agents-runtime/issues/65
+        read_timeout = float(cls._env("FOUNDRY_HTTP_READ_TIMEOUT") or 180)
+        connect_timeout = float(cls._env("FOUNDRY_HTTP_CONNECT_TIMEOUT") or 10)
+        transport = AioHttpTransport(
+            connection_timeout=connect_timeout,
+            read_timeout=read_timeout,
+        )
+        project_client = AIProjectClient(
+            endpoint=endpoint,
             credential=build_async_credential(),
+            transport=transport,
+        )
+        return FoundryChatClient(
+            project_client=project_client,
+            model=model,
         )
 
 

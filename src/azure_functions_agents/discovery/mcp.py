@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -76,18 +77,37 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
     return default_credential_header_provider
 
 
-def _build_http_client(header_provider: Any) -> Any:
-    if header_provider is None:
-        return None
+def _build_http_client(
+    header_provider: Any, timeout_config: dict[str, Any] | int | float | None = None
+) -> Any:
+    from httpx import AsyncClient, Timeout
 
-    from httpx import AsyncClient
+    default_timeout = float(os.environ.get("MCP_REQUEST_TIMEOUT") or 120)
+    if isinstance(timeout_config, dict):
+        timeout = Timeout(
+            connect=float(timeout_config.get("connect", 10)),
+            read=float(timeout_config.get("read", default_timeout)),
+            write=float(timeout_config.get("write", 30)),
+            pool=float(timeout_config.get("pool", default_timeout)),
+        )
+    elif isinstance(timeout_config, (int, float)):
+        timeout = Timeout(float(timeout_config))
+    else:
+        timeout = Timeout(default_timeout)
+
+    if header_provider is None:
+        return AsyncClient(follow_redirects=True, timeout=timeout)
 
     async def inject_headers(request: Any) -> None:
         headers = await asyncio.to_thread(header_provider, {})
         for key, value in headers.items():
             request.headers[key] = value
 
-    return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
+    return AsyncClient(
+        follow_redirects=True,
+        timeout=timeout,
+        event_hooks={"request": [inject_headers]},
+    )
 
 
 def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
@@ -119,17 +139,30 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
         if has_unresolved_placeholders(url):
             logger.warning("MCP server '%s': could not resolve url '%s', skipping", name, url)
             return None
+        timeout_config = server.get("timeout")
+        default_timeout = float(os.environ.get("MCP_REQUEST_TIMEOUT") or 120)
+        if isinstance(timeout_config, dict):
+            request_timeout = float(timeout_config.get("read", default_timeout))
+        elif isinstance(timeout_config, (int, float)):
+            request_timeout = float(timeout_config)
+        else:
+            request_timeout = default_timeout
+        timeout_log_value: float | str = request_timeout if timeout_config is not None else "default"
+        logger.info("MCP server '%s': timeout configured (read=%ss)", name, timeout_log_value)
         header_provider = _build_header_provider(server)
+        http_client = _build_http_client(header_provider, timeout_config)
+        tool_kwargs: dict[str, Any] = {
+            "name": name,
+            "url": url,
+            "allowed_tools": allowed_tools,
+            "load_tools": True,
+            "load_prompts": False,
+            "header_provider": header_provider,
+            "http_client": http_client,
+            "request_timeout": request_timeout,
+        }
 
-        return MCPStreamableHTTPTool(
-            name=name,
-            url=url,
-            allowed_tools=allowed_tools,
-            load_tools=True,
-            load_prompts=False,
-            header_provider=header_provider,
-            http_client=_build_http_client(header_provider),
-        )
+        return MCPStreamableHTTPTool(**tool_kwargs)
 
     if server_type:
         logger.warning(
