@@ -7,17 +7,23 @@ description: Comprehensive documentation for the Widget API including endpoints,
 
 This skill provides complete documentation for working with the Widget API.
 
-## API Endpoints
+When you need detailed information about the API, use the `read_skill_resource` tool
+to read files from the `references/` and `examples/` directories.
 
-[endpoints.md](./references/endpoints.md)
+## Available Resources
 
-## Error Handling
+- `references/endpoints.md` - Full API endpoint documentation
+- `references/error-codes.md` - Error code reference and troubleshooting
+- `examples/requests.md` - Example API requests with curl commands
 
-[error-codes.md](./references/error-codes.md)
+## Quick Reference
 
-## Example Requests
+**Base URL:** `https://api.example.com/v2`
 
-[requests.md](./examples/requests.md)
+**Common Endpoints:**
+- `GET /widgets` - List all widgets
+- `GET /widgets/{id}` - Get widget by ID
+- `POST /widgets` - Create a new widget
 
 ## Best Practices
 
@@ -25,3 +31,6 @@ This skill provides complete documentation for working with the Widget API.
 - Use pagination parameters (`page`, `limit`) for list endpoints
 - Handle rate limiting by implementing exponential backoff
 - Cache GET responses when appropriate to reduce API calls
+
+For detailed endpoint documentation, read `references/endpoints.md`.
+For error handling, read `references/error-codes.md`.

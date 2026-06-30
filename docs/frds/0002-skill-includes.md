@@ -183,20 +183,25 @@ skills/
 | 5 | MAF integration | In-memory injection, temp directory with resolved files | Temp directory — MAF's SkillsProvider reads from disk | Agent | 2026-06-29 |
 | 6 | Temp directory cleanup | Manual, atexit, context manager | atexit — process-lifetime management | Agent | 2026-06-29 |
 | 7 | Distinguish includes from links | All links, only standalone lines, `./` prefix required | Standalone lines with `./` prefix — clear intent, no accidental includes | Human | 2026-06-29 |
+| 8 | **Feature scope** | Implement custom includes, use MAF-native `read_skill_resource` | **Use MAF-native** — avoids extra I/O, aligns with progressive disclosure pattern | Human | 2026-06-30 |
 
 ## 6. Test plan
 
-- [ ] Unit: `test_discovery_skills.py` — `test_resolve_includes_*` (basic, nested, circular, path escape, file not found)
-- [ ] Unit: `test_discovery_skills.py` — `test_prepare_resolved_skills_*` (with/without includes, temp paths)
-- [ ] Fixture scenario: `tests/fixtures/config_scenarios/14_skill_includes/`
+N/A — feature not implemented.
 
 ## 7. Docs impact
 
-- [ ] `docs/architecture.md` — Update skills.py description to mention include resolution
-- [ ] `docs/front-matter-spec.md` — Document markdown link include syntax in skills section
-- [ ] `README.md` — Add example of skill with includes in the skills section
+- [x] `docs/architecture.md` — Updated skills.py description (removed include resolution)
+- [x] `docs/front-matter-spec.md` — Documented MAF-native `read_skill_resource` pattern instead of includes
+- [x] `samples/skill-includes-demo/` — Renamed conceptually to "skill resources demo", shows MAF-native pattern
 
 ## 8. Status & sign-off
 
 - **Architecture review (phase 2):** Design updated to use temp directory approach for MAF integration (Agent, 2026-06-29)
 - **Human sign-off:** User requested implementation (2026-06-29) → `status: Finalized`
+- **Closure (2026-06-30):** After implementation, user reconsidered the design:
+  - Concern: Extra I/O overhead (parsing SKILL.md for includes, writing to temp directory)
+  - Goal: Allow agents to access reference content in nested directories
+  - Resolution: MAF's native `read_skill_resource` already provides this via progressive disclosure
+  - Decision: **Remove custom include feature, document MAF-native pattern instead**
+  - Status: **Closed — not implemented**

@@ -1,6 +1,6 @@
-# Skill Includes Demo
+# Skill Resources Demo
 
-Demonstrates markdown link includes for organizing skills with modular reference files.
+Demonstrates MAF's progressive disclosure pattern for organizing skills with modular reference files.
 
 | Trigger | Built-in Endpoints | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
@@ -8,19 +8,20 @@ Demonstrates markdown link includes for organizing skills with modular reference
 
 ## Features
 
-- **Markdown Link Includes** — `[file](./path)` syntax to inline content from separate files
+- **Progressive Disclosure** — agent loads reference content on demand via `read_skill_resource`
 - **Modular Skill Organization** — split large skills into maintainable reference files
 - **Nested Directory Support** — organize assets and references in subdirectories
+- **Token Efficient** — agent only loads what it needs, when it needs it
 - **Chat UI** — built-in interface at `/agents/main/`
 
 ## Skill Structure
 
-This sample showcases a skill organized with markdown link includes:
+This sample showcases a skill organized with MAF's resource pattern:
 
 ```
 skills/
 └── api-assistant/
-    ├── SKILL.md              # Main skill with [file](./path) includes
+    ├── SKILL.md              # Main skill instructions (keep <500 lines)
     ├── references/
     │   ├── endpoints.md      # API endpoint documentation
     │   └── error-codes.md    # Error handling reference
@@ -28,27 +29,27 @@ skills/
         └── requests.md       # Example API requests
 ```
 
-The `SKILL.md` file uses markdown links on their own lines to pull in content:
+The `SKILL.md` file lists available resources so the agent knows they exist:
 
 ```markdown
-## API Endpoints
+## Available Resources
 
-[endpoints.md](./references/endpoints.md)
+- `references/endpoints.md` - Full API endpoint documentation
+- `references/error-codes.md` - Error code reference and troubleshooting
+- `examples/requests.md` - Example API requests with curl commands
 
-## Error Handling
-
-[error-codes.md](./references/error-codes.md)
+For detailed endpoint documentation, read `references/endpoints.md`.
 ```
 
-At startup, the runtime resolves all includes and provides the fully-assembled skill content to the agent.
+When the agent needs details, it calls `read_skill_resource` to fetch the relevant file.
 
 ## Benefits
 
+- **Token Efficient** — agent only loads resources it actually needs
 - **Maintainability** — edit reference docs independently without touching the main skill file
-- **Reusability** — share reference files across multiple skills (copy or symlink)
-- **Clarity** — keep the main SKILL.md focused on structure while details live in dedicated files
+- **Clarity** — keep the main SKILL.md focused on high-level guidance
 - **Version Control** — track changes to individual reference files separately
-- **Native Markdown** — includes use standard markdown link syntax, so files render correctly in GitHub/VS Code
+- **MAF Standard** — uses MAF's built-in progressive disclosure pattern
 
 ## Prerequisites
 
@@ -89,9 +90,11 @@ At startup, the runtime resolves all includes and provides the fully-assembled s
 ## How It Works
 
 1. The runtime discovers `skills/api-assistant/SKILL.md`
-2. During startup, markdown link includes are resolved:
-   - `[endpoints.md](./references/endpoints.md)` → inlines endpoint documentation
-   - `[error-codes.md](./references/error-codes.md)` → inlines error code reference
-   - `[requests.md](./examples/requests.md)` → inlines example requests
-3. The fully-resolved skill content is provided to MAF's `SkillsProvider`
-4. The agent can load and use the skill with all reference content available
+2. MAF advertises the skill name and description to the agent (~100 tokens)
+3. When a task matches, the agent calls `load_skill` to get the full SKILL.md body
+4. The agent sees the available resources listed and calls `read_skill_resource` as needed:
+   - `read_skill_resource("api-assistant", "references/endpoints.md")` → endpoint details
+   - `read_skill_resource("api-assistant", "references/error-codes.md")` → error reference
+5. Only the resources actually needed are loaded into context
+
+This progressive disclosure pattern keeps the agent's context window lean while giving it access to detailed reference material on demand.
