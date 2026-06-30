@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,7 @@ from typing import Any
 import azure.functions as func
 
 from ._logger import logger
+from ._obo import OboTokenProvider, reset_obo_provider
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -16,6 +18,7 @@ from .config.validation import validate_resolved_agent
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_user_tools
+from .registration._handlers import set_obo_provider
 from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_builtin_endpoints
@@ -47,6 +50,23 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     resolved_root = get_app_root()
 
     global_config = load_global_config(resolved_root)
+    
+    # Initialize OBO provider if auth.obo is configured
+    obo_provider = None
+    if global_config.auth and global_config.auth.obo and global_config.auth.obo.enabled:
+        obo_config = global_config.auth.obo
+        obo_provider = OboTokenProvider(obo_config)
+        set_obo_provider(obo_provider)
+        logger.info(
+            "OBO authentication enabled with client_id=%s, tenant_id=%s",
+            obo_config.client_id[:8] + "..." if len(obo_config.client_id) > 8 else obo_config.client_id,
+            obo_config.tenant_id,
+        )
+    else:
+        # Ensure OBO provider is cleared if not configured
+        reset_obo_provider()
+        set_obo_provider(None)
+
     agent_specs = load_agent_specs(resolved_root)
     user_tools = discover_user_tools(resolved_root)
     mcp_tools = discover_mcp_servers(resolved_root)

@@ -22,6 +22,7 @@ dependencies = [
     "azure-storage-blob==12.28.*",
     "jsonschema==4.26.*",
     "mcp==1.27.*",
+    "msal==1.31.*",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +31,7 @@ dev = [
     "mypy==2.1.*",
     "pydantic==2.13.*",
     "pytest==9.0.*",
+    "pytest-asyncio==1.4.*",
     "types-jsonschema==4.26.*",
     "pytest-cov==7.1.*",
 ]
@@ -42,6 +44,10 @@ version = {attr = "azure_functions_agents.__version__"}
 
 [tool.setuptools.package-data]
 azure_functions_agents = ["public/**"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
 
 [tool.ruff]
 target-version = "py313"

@@ -45,15 +45,22 @@ import re
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from ._blob_history import build_blob_provider_from_environment
 from ._logger import logger
 from .client_manager import get_client_manager
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
-from .discovery.mcp import discover_mcp_servers
+from .discovery.mcp import (
+    discover_mcp_servers,
+    reset_current_user_context,
+    set_current_user_context,
+)
 from .discovery.tools import discover_user_tools
+
+if TYPE_CHECKING:
+    from ._obo import UserContext
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -337,6 +344,7 @@ async def run_agent(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
+    user_context: UserContext | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -374,6 +382,10 @@ async def run_agent(
         bound to a specific ACA session pool. ``None`` adds no sandbox tools;
         pass a list to enable them. Per-call because the ACA session id is
         baked into each tool's closure.
+    user_context:
+        Optional user context carrying the authenticated user's identity.
+        When provided with OBO configuration, enables downstream API calls
+        to be made on behalf of the user rather than using managed identity.
 
     Notes
     -----
@@ -392,19 +404,26 @@ async def run_agent(
         sandbox_tools=sandbox_tools,
     )
 
+    # Set user context for OBO-enabled MCP servers
+    context_token = set_current_user_context(user_context)
+
     lock = await _get_session_lock(resolved_id)
-    async with lock:
-        try:
-            response = await asyncio.wait_for(
-                agent.run(
-                    prompt,
-                    session=session,
-                    options=_build_chat_options_from_environment(),
-                ),
-                timeout=timeout,
-            )
-        except TimeoutError:
-            raise RuntimeError(f"Agent run timed out after {timeout}s") from None
+    try:
+        async with lock:
+            try:
+                response = await asyncio.wait_for(
+                    agent.run(
+                        prompt,
+                        session=session,
+                        options=_build_chat_options_from_environment(),
+                    ),
+                    timeout=timeout,
+                )
+            except TimeoutError:
+                raise RuntimeError(f"Agent run timed out after {timeout}s") from None
+    finally:
+        # Reset user context after agent run
+        reset_current_user_context(context_token)
 
     # Extract assistant text from the final response.
     text = ""
@@ -465,6 +484,7 @@ async def run_agent_stream(
     model: str | None = None,
     session_id: str | None = None,
     sandbox_tools: list[Any] | None = None,
+    user_context: UserContext | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -479,6 +499,8 @@ async def run_agent_stream(
       sandbox tools; pass a list to enable them.
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
+    * ``user_context`` carries the authenticated user's identity for OBO
+      token flow to downstream APIs.
     * To fully disable all tools from a direct API call, pass
       ``tools=[], mcp_tools=[], sandbox_tools=None``.
 
@@ -496,116 +518,123 @@ async def run_agent_stream(
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
+    # Set user context for OBO-enabled MCP servers
+    context_token = set_current_user_context(user_context)
+
     try:
-        agent, session, resolved_id = await _build_agent_session_history(
-            instructions=instructions,
-            session_id=session_id,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
-            model=model,
-            sandbox_tools=sandbox_tools,
-        )
-    except Exception as exc:
-        logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
-        return
-
-    yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
-
-    lock = await _get_session_lock(resolved_id)
-    async with lock:
-        loop = asyncio.get_event_loop()
-        deadline = loop.time() + timeout
-        pending_tool_calls: dict[str, dict[str, Any]] = {}
-        emitted_tool_calls: set[str] = set()
-
-        def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
-            event = _function_call_event(item)
-            call_id = event.get("tool_call_id")
-            if not isinstance(call_id, str) or not call_id:
-                return None, event
-
-            pending = pending_tool_calls.setdefault(
-                call_id,
-                {
-                    "type": "tool_start",
-                    "tool_call_id": call_id,
-                    "tool_name": event.get("tool_name"),
-                    "arguments": None,
-                },
-            )
-            if event.get("tool_name"):
-                pending["tool_name"] = event["tool_name"]
-            pending["arguments"] = _merge_tool_arguments(
-                pending.get("arguments"),
-                event.get("arguments"),
-            )
-            return call_id, pending
-
-        async def emit_tool_start_if_ready(
-            call_id: str, event: dict[str, Any]
-        ) -> AsyncIterator[str]:
-            if call_id in emitted_tool_calls:
-                return
-            if not _is_complete_json_argument(event.get("arguments")):
-                return
-            emitted_tool_calls.add(call_id)
-            yield f"data: {json.dumps(event)}\n\n"
-
-        async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
-            if call_id is None or call_id in emitted_tool_calls:
-                return
-            event = pending_tool_calls.get(call_id)
-            if event is None:
-                return
-            emitted_tool_calls.add(call_id)
-            yield f"data: {json.dumps(event)}\n\n"
-
         try:
-            stream = agent.run(
-                prompt,
-                stream=True,
-                session=session,
-                options=_build_chat_options_from_environment(),
+            agent, session, resolved_id = await _build_agent_session_history(
+                instructions=instructions,
+                session_id=session_id,
+                tools=tools,
+                mcp_tools=mcp_tools,
+                skill_paths=skill_paths,
+                model=model,
+                sandbox_tools=sandbox_tools,
             )
-            async for update in stream:
-                if loop.time() > deadline:
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
-                    return
-                for item in getattr(update, "contents", None) or []:
-                    ctype = _content_type(item)
-                    if ctype == "text":
-                        text = _content_text(item)
-                        if text:
-                            yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
-                    elif ctype == "text_reasoning":
-                        text = _content_text(item)
-                        if text:
-                            yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
-                    elif ctype == "function_call":
-                        call_id, event = buffer_function_call(item)
-                        if call_id is None:
-                            yield f"data: {json.dumps(event)}\n\n"
-                        else:
-                            async for output in emit_tool_start_if_ready(call_id, event):
-                                yield output
-                    elif ctype == "function_result":
-                        call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
-                        async for output in emit_tool_start_before_result(
-                            call_id if isinstance(call_id, str) else None
-                        ):
-                            yield output
-                        yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
-                    # Unknown content types are intentionally ignored — the
-                    # SSE vocabulary is fixed and the UI doesn't render them.
-            for call_id, event in pending_tool_calls.items():
-                if call_id not in emitted_tool_calls:
-                    emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        except TimeoutError:
-            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
         except Exception as exc:
-            logger.error("Agent stream failed: %s", exc, exc_info=True)
+            logger.error("Failed to build agent session: %s", exc, exc_info=True)
             yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+            return
+
+        yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
+
+        lock = await _get_session_lock(resolved_id)
+        async with lock:
+            loop = asyncio.get_event_loop()
+            deadline = loop.time() + timeout
+            pending_tool_calls: dict[str, dict[str, Any]] = {}
+            emitted_tool_calls: set[str] = set()
+
+            def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+                event = _function_call_event(item)
+                call_id = event.get("tool_call_id")
+                if not isinstance(call_id, str) or not call_id:
+                    return None, event
+
+                pending = pending_tool_calls.setdefault(
+                    call_id,
+                    {
+                        "type": "tool_start",
+                        "tool_call_id": call_id,
+                        "tool_name": event.get("tool_name"),
+                        "arguments": None,
+                    },
+                )
+                if event.get("tool_name"):
+                    pending["tool_name"] = event["tool_name"]
+                pending["arguments"] = _merge_tool_arguments(
+                    pending.get("arguments"),
+                    event.get("arguments"),
+                )
+                return call_id, pending
+
+            async def emit_tool_start_if_ready(
+                call_id: str, event: dict[str, Any]
+            ) -> AsyncIterator[str]:
+                if call_id in emitted_tool_calls:
+                    return
+                if not _is_complete_json_argument(event.get("arguments")):
+                    return
+                emitted_tool_calls.add(call_id)
+                yield f"data: {json.dumps(event)}\n\n"
+
+            async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                if call_id is None or call_id in emitted_tool_calls:
+                    return
+                event = pending_tool_calls.get(call_id)
+                if event is None:
+                    return
+                emitted_tool_calls.add(call_id)
+                yield f"data: {json.dumps(event)}\n\n"
+
+            try:
+                stream = agent.run(
+                    prompt,
+                    stream=True,
+                    session=session,
+                    options=_build_chat_options_from_environment(),
+                )
+                async for update in stream:
+                    if loop.time() > deadline:
+                        yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                        return
+                    for item in getattr(update, "contents", None) or []:
+                        ctype = _content_type(item)
+                        if ctype == "text":
+                            text = _content_text(item)
+                            if text:
+                                yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                        elif ctype == "text_reasoning":
+                            text = _content_text(item)
+                            if text:
+                                yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
+                        elif ctype == "function_call":
+                            call_id, event = buffer_function_call(item)
+                            if call_id is None:
+                                yield f"data: {json.dumps(event)}\n\n"
+                            else:
+                                async for output in emit_tool_start_if_ready(call_id, event):
+                                    yield output
+                        elif ctype == "function_result":
+                            call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                            async for output in emit_tool_start_before_result(
+                                call_id if isinstance(call_id, str) else None
+                            ):
+                                yield output
+                            yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
+                        # Unknown content types are intentionally ignored — the
+                        # SSE vocabulary is fixed and the UI doesn't render them.
+                for call_id, event in pending_tool_calls.items():
+                    if call_id not in emitted_tool_calls:
+                        emitted_tool_calls.add(call_id)
+                        yield f"data: {json.dumps(event)}\n\n"
+                yield f"data: {json.dumps({'type': 'done'})}\n\n"
+            except TimeoutError:
+                yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+            except Exception as exc:
+                logger.error("Agent stream failed: %s", exc, exc_info=True)
+                yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+    finally:
+        # Reset user context after streaming completes
+        reset_current_user_context(context_token)

@@ -11,16 +11,26 @@ import json
 import uuid
 from collections.abc import AsyncIterator
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
+from .._obo import (
+    InteractionRequiredError,
+    UserContext,
+    create_user_context,
+    extract_user_id_from_headers,
+    extract_user_token_from_headers,
+)
 from ..config import ResolvedAgent
-from ._handlers import build_sandbox_tools_for_session
+from ._handlers import build_sandbox_tools_for_session, get_handler_obo_provider
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
 from .capabilities import AgentCapabilities
+
+if TYPE_CHECKING:
+    pass
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     [
@@ -97,12 +107,26 @@ def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
 
+async def _build_user_context_from_request(req: Request) -> UserContext:
+    """Extract user context from HTTP request headers."""
+    headers = getattr(req, "headers", {})
+    access_token = extract_user_token_from_headers(headers)
+    user_id = extract_user_id_from_headers(headers)
+
+    return create_user_context(
+        access_token=access_token,
+        user_id=user_id,
+        obo_provider=get_handler_obo_provider(),
+    )
+
+
 async def _run_builtin_agent(
     prompt: str,
     *,
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
+    user_context: UserContext | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -116,6 +140,7 @@ async def _run_builtin_agent(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        user_context=user_context,
     )
 
 
@@ -125,6 +150,7 @@ def _run_builtin_agent_stream(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
     session_id: str | None,
+    user_context: UserContext | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -138,6 +164,7 @@ def _run_builtin_agent_stream(
         tools=capabilities.filtered_user_tools,
         mcp_tools=capabilities.filtered_mcp_tools,
         skill_paths=capabilities.enabled_skill_paths,
+        user_context=user_context,
     )
 
 
@@ -153,6 +180,41 @@ def _json_error(message: str, status_code: int = 500) -> Response:
         content=json.dumps({"error": message}),
         status_code=status_code,
         media_type="application/json",
+    )
+
+
+def _interaction_required_error(exc: InteractionRequiredError) -> Response:
+    """Build HTTP 401 response for OBO interaction required errors.
+
+    When downstream APIs require user interaction (MFA, consent, etc.),
+    we return HTTP 401 with WWW-Authenticate header containing the claims
+    challenge. The client must re-authenticate with these claims.
+    """
+    headers: dict[str, str] = {}
+
+    # Build WWW-Authenticate header with error info and claims
+    www_auth_parts = [f'Bearer error="{exc.error}"']
+    if exc.error_description:
+        # Escape quotes in description
+        desc = exc.error_description.replace('"', '\\"')
+        www_auth_parts.append(f'error_description="{desc}"')
+    if exc.claims:
+        # Claims should be base64-encoded for the header
+        import base64
+        claims_b64 = base64.b64encode(exc.claims.encode()).decode()
+        www_auth_parts.append(f'claims="{claims_b64}"')
+
+    headers["WWW-Authenticate"] = ", ".join(www_auth_parts)
+
+    return Response(
+        content=json.dumps({
+            "error": exc.error,
+            "error_description": exc.error_description,
+            "claims": exc.claims,
+        }),
+        status_code=401,
+        media_type="application/json",
+        headers=headers,
     )
 
 
@@ -206,11 +268,13 @@ def _register_http_chat(
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
+            user_context = await _build_user_context_from_request(req)
             result = await _run_builtin_agent(
                 prompt,
                 resolved=resolved,
                 capabilities=capabilities,
                 session_id=session_id,
+                user_context=user_context,
             )
             return Response(
                 json.dumps(
@@ -225,6 +289,13 @@ def _register_http_chat(
             )
         except ValueError as exc:
             return _json_error(str(exc), status_code=400)
+        except InteractionRequiredError as exc:
+            logger.warning(
+                "Built-in chat API OBO interaction required for '%s': %s",
+                resolved.name,
+                exc.error_description,
+            )
+            return _interaction_required_error(exc)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
             logger.error("Built-in chat API error for '%s': %s", resolved.name, error_msg)
@@ -247,17 +318,26 @@ def _register_http_chat_stream(
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
+            user_context = await _build_user_context_from_request(req)
             return StreamingResponse(
                 _run_builtin_agent_stream(
                     prompt,
                     resolved=resolved,
                     capabilities=capabilities,
                     session_id=session_id,
+                    user_context=user_context,
                 ),
                 media_type="text/event-stream",
             )
         except ValueError as exc:
             return _sse_error_response(str(exc), status_code=400)
+        except InteractionRequiredError as exc:
+            logger.warning(
+                "Built-in chat stream OBO interaction required for '%s': %s",
+                resolved.name,
+                exc.error_description,
+            )
+            return _interaction_required_error(exc)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
             logger.error("Built-in chat stream error for '%s': %s", resolved.name, error_msg)
