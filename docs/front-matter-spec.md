@@ -17,6 +17,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - System tools (`system_tools`)
   - Code execution sandbox configuration
 - Default runtime settings (model, timeout)
+- Observability (`observability`) — OpenTelemetry traces + metrics to Application Insights
 
 **MCP server discovery:**
 - MCP servers (defined in `mcp.json`), including connector-backed MCP servers
@@ -44,7 +45,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `observability` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -63,6 +64,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
+- `observability` — Object controlling OpenTelemetry emission (traces + metrics to Application Insights)
 
 **Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
@@ -125,6 +127,9 @@ Fields are organized into categories based on how they can be used:
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
 - `timeout` — Execution time limit
+
+**Observability (Global only):**
+- `observability` — OpenTelemetry traces + metrics to Application Insights (no app code required)
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
@@ -377,6 +382,31 @@ timeout: 900  # 15 minutes
 ```yaml
 timeout: 60  # 1 minute for fast agent
 ```
+
+---
+
+#### `observability`
+- **Type:** `object`
+- **Location:** Global (`agents.config.yaml`) only
+- **Can override:** No (applies app-wide)
+- **Description:** Controls OpenTelemetry emission from the runtime — traces (the `agent.run` and `dynamic_session.execute` spans, plus MAF `gen_ai` spans) and metrics — to Application Insights, which the runtime auto-configures. (Exporting to another OTLP endpoint requires separate OpenTelemetry configuration.) Enabled by configuration only; no app code changes. See `docs/observability.md` for the full span/attribute reference.
+
+**Properties:**
+- `enabled` — `boolean | null`. When `null` (default), observability turns on automatically if an Application Insights connection string is present; set `true`/`false` to force it.
+- `capture_sensitive_data` — `boolean` (default `false`). When `true`, attaches content (prompts, trigger payloads, tool arguments, code, stdout/stderr, and model output) to telemetry. Secrets (auth headers, connection strings, system keys) are never captured regardless.
+
+**Precedence (`enabled`):** `AZURE_FUNCTIONS_AGENTS_OBSERVABILITY_ENABLED` env var → `observability.enabled` → auto (on when `APPLICATIONINSIGHTS_CONNECTION_STRING` is set).
+
+**Precedence (`capture_sensitive_data`):** `AZURE_FUNCTIONS_AGENTS_CAPTURE_SENSITIVE_DATA` / `ENABLE_SENSITIVE_DATA` env var → `observability.capture_sensitive_data` → `false`.
+
+**Global configuration:**
+```yaml
+observability:
+  enabled: true                  # default: on when App Insights connection string is set
+  capture_sensitive_data: false
+```
+
+**Note:** The runtime configures the Python worker exporter automatically when the `azure-monitor-opentelemetry` package is installed, so only `APPLICATIONINSIGHTS_CONNECTION_STRING` is required to get telemetry. Setting `telemetryMode: OpenTelemetry` in `host.json` is optional and adds unified host + worker correlation; it is not required for the agent/tool spans.
 
 ---
 
@@ -740,6 +770,11 @@ timeout: 900
 # Global tool configuration
 tools:
   exclude: ["bash", "execute_shell"]
+
+# Observability (OpenTelemetry → Application Insights)
+observability:
+  enabled: true
+  capture_sensitive_data: false
 ```
 
 **Chat Agent (`chat.agent.md`):**

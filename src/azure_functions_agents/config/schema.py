@@ -81,6 +81,20 @@ class SystemToolsConfig(BaseModel):
     dynamic_sessions_code_interpreter: DynamicSessionsCodeInterpreterConfig | None = None
 
 
+class ObservabilityConfig(BaseModel):
+    """Global observability configuration (agents.config.yaml `observability` block).
+
+    ``enabled`` is tri-state: ``None`` means "auto" — on when an Application Insights connection
+    string is present. ``capture_sensitive_data`` gates whether prompts, payloads, tool arguments,
+    code, and model output are attached to telemetry; it defaults to off.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool | None = None
+    capture_sensitive_data: bool = False
+
+
 class SystemToolsAgentOverride(BaseModel):
     """Agent-level system tool overrides, primarily sandbox opt-out."""
 
@@ -98,6 +112,7 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
+    observability: ObservabilityConfig | None = None
 
 
 class AgentSpec(BaseModel):
