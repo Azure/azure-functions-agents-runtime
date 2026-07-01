@@ -133,6 +133,7 @@ explicit, documented extension to the discover → translate → register → ex
 | 11 | Observability vs pipeline stages | new stage / cross-cutting | Cross-cutting app-factory concern outside the four stages; documented in `architecture.md` | Agent (after review) | 2026-07-01 |
 | 12 | `af.operation_id` scope | all spans / sandbox only | Scoped to the `dynamic_session.execute` span (the value sent to ACA); not on `agent.run` | Agent (after review) | 2026-07-01 |
 | 13 | Noise-control guarantee wording | broad "explicit level" / precise `NOTSET` | Narrowed docs to "no level set directly on that logger"; parent/root not consulted | Agent (after review) | 2026-07-01 |
+| 14 | Gating runtime telemetry on `enabled` | rely on tracer/meter presence / gate on resolved state | Gate `start_span` + `record_sandbox_execution` on the resolved `_enabled` flag, so `observability.enabled: false` suppresses runtime spans/metrics even under a host OTel provider | Agent (PR #79 review) | 2026-07-01 |
 
 ## 6. Test plan
 

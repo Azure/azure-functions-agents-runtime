@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import types
+
 import azure_functions_agents._observability as obs
 from azure_functions_agents.config.schema import GlobalConfig, ObservabilityConfig
 
@@ -52,6 +54,7 @@ def test_configure_observability_sets_capture_flag(monkeypatch) -> None:  # type
     _clear_env(monkeypatch)
     monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
     monkeypatch.setattr(obs, "_configured", False, raising=False)
+    monkeypatch.setattr(obs, "_enabled", False, raising=False)
     monkeypatch.setattr(obs, "_enable_agent_framework_instrumentation", lambda capture: None)
     monkeypatch.setattr(obs, "_configure_azure_monitor", lambda connection: None)
 
@@ -62,10 +65,12 @@ def test_configure_observability_sets_capture_flag(monkeypatch) -> None:  # type
     assert resolved.enabled is True
     assert resolved.capture_sensitive_data is True
     assert obs.capture_sensitive_data() is True
+    assert obs.is_observability_enabled() is True
 
 
 def test_configure_observability_disabled_is_noop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _clear_env(monkeypatch)
+    monkeypatch.setattr(obs, "_enabled", False, raising=False)
     called = {"enable": False}
 
     def _fail_enable(capture: bool) -> None:
@@ -75,10 +80,12 @@ def test_configure_observability_disabled_is_noop(monkeypatch) -> None:  # type:
     resolved = obs.configure_observability(GlobalConfig())
     assert resolved.enabled is False
     assert called["enable"] is False
+    assert obs.is_observability_enabled() is False
 
 
 def test_start_span_is_safe_and_records(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    # Even with no exporter configured, the helpers must never raise.
+    # With observability enabled, the helpers exercise the real tracer path and must never raise.
+    monkeypatch.setattr(obs, "_enabled", True)
     with obs.start_span(
         "unit.test.span",
         fault_domain=obs.FaultDomain.RUNTIME,
@@ -89,6 +96,32 @@ def test_start_span_is_safe_and_records(monkeypatch) -> None:  # type: ignore[no
         span.set_content("secret", "value")
         span.set_error("boom", fault_domain=obs.FaultDomain.APP)
         span.record_exception(ValueError("nope"), fault_domain=obs.FaultDomain.SANDBOX)
+
+
+def test_start_span_gated_when_observability_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # When disabled, no underlying OTel span is created even if a provider exists.
+    monkeypatch.setattr(obs, "_enabled", False)
+    with obs.start_span("gated.span", lifecycle_stage=obs.LifecycleStage.AGENT_RUN) as span:
+        assert span._span is None
+
+
+def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs, "_sandbox_execution_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("x"))
+    )
+    monkeypatch.setattr(
+        obs, "_sandbox_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
+    )
+
+    monkeypatch.setattr(obs, "_enabled", False)
+    obs.record_sandbox_execution(error=True)
+    assert calls == []  # gated when disabled
+
+    monkeypatch.setattr(obs, "_enabled", True)
+    obs.record_sandbox_execution(error=True)
+    assert calls == ["x", "e"]  # emitted when enabled
 
 
 def test_bounded_content_truncates() -> None:

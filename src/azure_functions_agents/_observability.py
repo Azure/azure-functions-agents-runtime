@@ -104,7 +104,13 @@ _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 _CONTENT_ATTR_MAX_CHARS = 2048
 
 _configured = False
+_enabled = False
 _capture_sensitive_data = False
+
+
+def is_observability_enabled() -> bool:
+    """Return whether runtime-owned telemetry (spans/metrics) should be emitted."""
+    return _enabled
 
 
 def capture_sensitive_data() -> bool:
@@ -142,9 +148,10 @@ def configure_observability(global_config: GlobalConfig) -> ResolvedObservabilit
     Called from :func:`azure_functions_agents.app.create_function_app`. Idempotent: the actual
     instrumentation/exporter bootstrap runs at most once per process. Always safe to call.
     """
-    global _configured, _capture_sensitive_data
+    global _configured, _enabled, _capture_sensitive_data
 
     resolved = _resolve(global_config)
+    _enabled = resolved.enabled
     _capture_sensitive_data = resolved.capture_sensitive_data
 
     if not resolved.enabled:
@@ -316,12 +323,15 @@ def start_span(
     lifecycle_stage: str | None = None,
     attributes: Mapping[str, Any] | None = None,
 ) -> Iterator[RuntimeSpan]:
-    """Start a current span, degrading to a no-op when tracing is unavailable.
+    """Start a current span, degrading to a no-op when observability is disabled or tracing is unavailable.
 
     ``fault_domain`` is the domain attributed if the span exits with an exception. It is not set on
     success — only failing spans carry :data:`ATTR_FAULT_DOMAIN`.
     """
-    tracer = get_tracer()
+    # Gate on the runtime's resolved state so `observability.enabled: false` (or no connection
+    # string) truly suppresses runtime-owned spans, even when another OTel provider is present
+    # (e.g. the Functions host under `telemetryMode: OpenTelemetry`).
+    tracer = get_tracer() if _enabled else None
     manager: Any = None
     raw_span: Any = None
     if tracer is not None:
@@ -398,6 +408,8 @@ def _ensure_metrics() -> None:
 
 def record_sandbox_execution(*, error: bool) -> None:
     """Record one dynamic-session execution and, when ``error``, one failure."""
+    if not _enabled:
+        return
     _ensure_metrics()
     try:
         if _sandbox_execution_counter is not None:
