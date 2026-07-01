@@ -196,8 +196,9 @@ def _configure_azure_monitor(connection_string: str) -> None:
 # Third-party loggers that flood Application Insights with low-signal HTTP request/response dumps,
 # exporter self-logs ("Transmission succeeded…"), and credential chatter once a worker exporter is
 # attached. Measured on a real app these dominated ingestion (>60% of trace bytes) while carrying
-# almost no business signal. When observability is enabled we raise their threshold, but only if
-# the app hasn't set an explicit level, so a user debugging one of them is never overridden.
+# almost no business signal. When observability is enabled we raise their threshold, but only when
+# a level is not set directly on that logger (its level is NOTSET); a level set directly on the
+# logger is preserved. A level set on a parent/root logger is intentionally not consulted.
 _NOISY_LOGGERS: dict[str, int] = {
     "azure.core.pipeline.policies.http_logging_policy": logging.WARNING,
     "azure.monitor.opentelemetry.exporter": logging.WARNING,
@@ -213,7 +214,7 @@ _NOISY_LOGGERS: dict[str, int] = {
 
 
 def _quiet_noisy_loggers() -> None:
-    """Raise the level of known-noisy third-party loggers (only if not explicitly set)."""
+    """Raise the level of known-noisy third-party loggers (only when a level is not set directly on that logger)."""
     for name, level in _NOISY_LOGGERS.items():
         try:
             noisy = logging.getLogger(name)

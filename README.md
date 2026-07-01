@@ -456,6 +456,18 @@ Set the model provider env vars described above. The preview samples use Microso
 
 When the agent uses connector-backed MCP servers, connector triggers, or `dynamic_sessions_code_interpreter`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server. For an individual code interpreter pool, set `system_tools.dynamic_sessions_code_interpreter.client_id`.
 
+### Observability
+
+Observability is enabled by configuration only — your `function_app.py` stays two lines. When `APPLICATIONINSIGHTS_CONNECTION_STRING` is present, the runtime auto-configures Azure Monitor / Application Insights by default, and you can force it on or off in `agents.config.yaml` with `observability.enabled`.
+
+```yaml
+observability:
+  enabled: true                  # default: on when App Insights connection string is present
+  capture_sensitive_data: false
+```
+
+The runtime bootstraps Microsoft Agent Framework `gen_ai` instrumentation plus the Azure Monitor exporter, and the `azure-monitor-opentelemetry` dependency is bundled, so your app's `requirements.txt` only needs `azurefunctions-agents-runtime`. It emits an `agent.run` span for each invocation and a `dynamic_session.execute` span for sandbox calls, adds `af.*` attributes, marks failures with `af.fault_domain`, keeps sensitive content off by default, and quiets noisy third-party loggers. For full setup and the span/attribute reference, see [`docs/observability.md`](docs/observability.md). If you also want host↔worker correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive.
+
 ### Optional config overrides
 
 | Setting | Purpose |

@@ -22,6 +22,7 @@ dependencies = [
     "azure-storage-blob==12.28.*",
     "jsonschema==4.26.*",
     "mcp==1.27.*",
+    "azure-monitor-opentelemetry==1.8.*",
 ]
 
 [project.optional-dependencies]

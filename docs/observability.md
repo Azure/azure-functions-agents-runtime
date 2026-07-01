@@ -52,13 +52,13 @@ The prefix:
 - keeps our attributes from colliding with MAF's `gen_ai.*` or OpenTelemetry semantic conventions,
 - makes them trivial to query — *everything we add starts with `af.`*.
 
-Two sub-namespaces group the detail, plus three cross-cutting attributes:
+Two sub-namespaces group the detail, plus two cross-cutting attributes:
 
 | Namespace | Used for |
 | --- | --- |
 | `af.agent.*` | attributes on the per-run `agent.run {name}` span |
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
-| `af.fault_domain`, `af.lifecycle_stage`, `af.operation_id` | cross-cutting; may appear on any runtime span |
+| `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on any runtime span |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
 name — for example `server.address` for the session-pool host. MAF keeps emitting its own
@@ -72,7 +72,6 @@ name — for example `server.address` for the session-pool host. MAF keeps emitt
 | --- | --- |
 | `af.fault_domain` | Whose fault a failure is: `app`, `runtime`, `platform`, `model`, `connector`, `sandbox`, `unknown`. Set **only on failing spans**. |
 | `af.lifecycle_stage` | Which run stage the span represents, e.g. `agent_run`, `tool_execution`. |
-| `af.operation_id` | The active trace id, also sent to ACA so its telemetry correlates with the run. |
 
 ### Span `agent.run {name}`
 
@@ -148,8 +147,9 @@ logs, credential chatter, and Functions host startup dumps.
 
 **Worker-side noise — handled for you.** When observability is enabled, the runtime raises the log
 level of known-noisy third-party loggers (Azure SDK HTTP logging, the Azure Monitor exporter,
-`azure.identity`, `httpx`, and OpenTelemetry internals) — but only if the app hasn't set an explicit
-level, so debugging one of them is never overridden. See `_NOISY_LOGGERS` in `_observability.py`.
+`azure.identity`, `httpx`, and OpenTelemetry internals) — but only when no level is set directly on
+that logger, so a level you set directly on it is never overridden (a level set on a parent/root
+logger is not consulted). See `_NOISY_LOGGERS` in `_observability.py`.
 
 **Host-side noise — set it in `host.json`.** Host startup/options logging is emitted by the
 Functions host, so quiet it with log-level overrides (or the equivalent

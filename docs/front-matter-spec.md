@@ -389,7 +389,7 @@ timeout: 60  # 1 minute for fast agent
 - **Type:** `object`
 - **Location:** Global (`agents.config.yaml`) only
 - **Can override:** No (applies app-wide)
-- **Description:** Controls OpenTelemetry emission from the runtime — traces (the `agent.run` and `dynamic_session.execute` spans, plus MAF `gen_ai` spans) and metrics — to Application Insights or any OTLP endpoint. Enabled by configuration only; no app code changes. See `docs/observability.md` for the full span/attribute reference.
+- **Description:** Controls OpenTelemetry emission from the runtime — traces (the `agent.run` and `dynamic_session.execute` spans, plus MAF `gen_ai` spans) and metrics — to Application Insights, which the runtime auto-configures. (Exporting to another OTLP endpoint requires separate OpenTelemetry configuration.) Enabled by configuration only; no app code changes. See `docs/observability.md` for the full span/attribute reference.
 
 **Properties:**
 - `enabled` — `boolean | null`. When `null` (default), observability turns on automatically if an Application Insights connection string is present; set `true`/`false` to force it.
