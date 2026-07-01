@@ -101,3 +101,27 @@ def test_bounded_content_truncates() -> None:
 def test_record_sandbox_execution_is_safe() -> None:
     obs.record_sandbox_execution(error=False)
     obs.record_sandbox_execution(error=True)
+
+
+def test_quiet_noisy_loggers_raises_unset_levels() -> None:
+    import logging
+
+    name = "azure.core.pipeline.policies.http_logging_policy"
+    logging.getLogger(name).setLevel(logging.NOTSET)
+
+    obs._quiet_noisy_loggers()
+
+    assert logging.getLogger(name).level == logging.WARNING
+
+
+def test_quiet_noisy_loggers_respects_explicit_level() -> None:
+    import logging
+
+    # Pick a noisy logger and set it explicitly to DEBUG; quieting must not override it.
+    name = "httpx"
+    logging.getLogger(name).setLevel(logging.DEBUG)
+
+    obs._quiet_noisy_loggers()
+
+    assert logging.getLogger(name).level == logging.DEBUG
+    logging.getLogger(name).setLevel(logging.NOTSET)  # reset for other tests

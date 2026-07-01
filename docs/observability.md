@@ -139,6 +139,41 @@ Namespace `azure_functions_agents.*`:
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
   connection strings, and the ACA system key. Endpoints are reduced to host only.
 
+## Noise & cost control
+
+Most Application Insights volume from a function app is **not** the runtime's spans — on a real app,
+runtime + MAF spans were only a few KB/run, while over 90% of ingestion was low-signal traces:
+Azure SDK HTTP request/response dumps, the Azure Monitor exporter's own "Transmission succeeded…"
+logs, credential chatter, and Functions host startup dumps.
+
+**Worker-side noise — handled for you.** When observability is enabled, the runtime raises the log
+level of known-noisy third-party loggers (Azure SDK HTTP logging, the Azure Monitor exporter,
+`azure.identity`, `httpx`, and OpenTelemetry internals) — but only if the app hasn't set an explicit
+level, so debugging one of them is never overridden. See `_NOISY_LOGGERS` in `_observability.py`.
+
+**Host-side noise — set it in `host.json`.** Host startup/options logging is emitted by the
+Functions host, so quiet it with log-level overrides (or the equivalent
+`AzureFunctionsJobHost__logging__logLevel__<category>` app settings):
+
+```json
+{
+  "logging": {
+    "logLevel": {
+      "default": "Warning",
+      "Host.Startup": "Warning",
+      "Host.Function.Console": "Warning",
+      "Microsoft.Azure.WebJobs.Hosting.OptionsLoggingService": "Warning"
+    }
+  }
+}
+```
+
+**Other levers:** keep `capture_sensitive_data` off (default); sample with
+`OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG=0.1`; set a daily cap /
+retention on the workspace; and **avoid double export** — don't run both the worker exporter and
+host worker-streaming (`PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY` + `telemetryMode`) for the same
+telemetry.
+
 ## Quick KQL
 
 ```kql
@@ -156,6 +191,48 @@ AppDependencies
 | extend stderr_present = tostring(Properties["af.dynamic_session.stderr_present"])
 | where Success == false or stderr_present == "true"
 | project TimeGenerated, OperationId, DurationMs, Properties
+```
+
+### Measuring telemetry volume (billed bytes per run)
+
+Use these to size ingestion/cost before and after enabling observability. `_BilledSize` is the
+billed bytes per item.
+
+```kql
+// Average billed volume per agent run, broken down by table.
+// A "run" = an operation that contains an invoke_agent span for this app role.
+let runs = AppDependencies
+| where TimeGenerated > ago(30d)
+| where AppRoleName == "func-agents-6q2arnxahkobm"        // <-- your function app role name
+| where Name startswith "invoke_agent "
+| distinct OperationId;
+union withsource=TableName AppRequests, AppDependencies, AppTraces, AppExceptions, AppMetrics
+| where TimeGenerated > ago(30d)
+| where OperationId in (runs)
+| summarize items = count(), billedBytes = sum(_BilledSize) by OperationId, TableName
+| summarize avgItemsPerRun = avg(items), avgBytesPerRun = avg(billedBytes) by TableName
+| order by avgBytesPerRun desc
+```
+
+```kql
+// Isolate THIS runtime's spans (agent.run + dynamic_session.execute) vs MAF gen_ai spans.
+// Rerun after deploying an observability change to confirm the real before/after.
+let runs = AppDependencies
+| where TimeGenerated > ago(7d)
+| where AppRoleName == "func-agents-6q2arnxahkobm"
+| where Name startswith "invoke_agent "
+| distinct OperationId;
+AppDependencies
+| where TimeGenerated > ago(7d)
+| where OperationId in (runs)
+| summarize
+    runtimeSpanItems = countif(Name == "dynamic_session.execute" or Name startswith "agent.run "),
+    runtimeSpanBytes = sumif(_BilledSize, Name == "dynamic_session.execute" or Name startswith "agent.run "),
+    mafItems = countif(Name startswith "invoke_agent " or Name startswith "chat " or Name startswith "execute_tool "),
+    mafBytes = sumif(_BilledSize, Name startswith "invoke_agent " or Name startswith "chat " or Name startswith "execute_tool ")
+  by OperationId
+| summarize avgRuntimeSpanItems = avg(runtimeSpanItems), avgRuntimeSpanBytes = avg(runtimeSpanBytes),
+            avgMafItems = avg(mafItems), avgMafBytes = avg(mafBytes)
 ```
 
 ---

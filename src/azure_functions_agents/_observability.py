@@ -18,6 +18,7 @@ importing this module and calling its helpers is always safe.
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
@@ -159,6 +160,7 @@ def configure_observability(global_config: GlobalConfig) -> ResolvedObservabilit
     connection = runtime_env_value(_CONNECTION_ENV)
     if connection:
         _configure_azure_monitor(connection)
+    _quiet_noisy_loggers()
 
     _configured = True
     logger.info(
@@ -189,6 +191,36 @@ def _configure_azure_monitor(connection_string: str) -> None:
         configure_azure_monitor(connection_string=connection_string)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Could not configure the Azure Monitor exporter: %s", exc)
+
+
+# Third-party loggers that flood Application Insights with low-signal HTTP request/response dumps,
+# exporter self-logs ("Transmission succeeded…"), and credential chatter once a worker exporter is
+# attached. Measured on a real app these dominated ingestion (>60% of trace bytes) while carrying
+# almost no business signal. When observability is enabled we raise their threshold, but only if
+# the app hasn't set an explicit level, so a user debugging one of them is never overridden.
+_NOISY_LOGGERS: dict[str, int] = {
+    "azure.core.pipeline.policies.http_logging_policy": logging.WARNING,
+    "azure.monitor.opentelemetry.exporter": logging.WARNING,
+    "azure.identity": logging.WARNING,
+    "httpx": logging.WARNING,
+    "urllib3": logging.WARNING,
+    "opentelemetry.attributes": logging.ERROR,
+    "opentelemetry.trace": logging.ERROR,
+    "opentelemetry.metrics._internal": logging.ERROR,
+    "opentelemetry._logs._internal": logging.ERROR,
+    "opentelemetry.instrumentation.instrumentor": logging.ERROR,
+}
+
+
+def _quiet_noisy_loggers() -> None:
+    """Raise the level of known-noisy third-party loggers (only if not explicitly set)."""
+    for name, level in _NOISY_LOGGERS.items():
+        try:
+            noisy = logging.getLogger(name)
+            if noisy.level == logging.NOTSET:
+                noisy.setLevel(level)
+        except Exception:  # pragma: no cover - defensive
+            pass
 
 
 # ---------------------------------------------------------------------------
