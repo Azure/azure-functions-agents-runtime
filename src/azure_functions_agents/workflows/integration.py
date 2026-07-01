@@ -19,17 +19,15 @@ through to the agent loop.
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 import azure.functions as func
 
+from azure_functions_agents._logger import logger
+
 from . import registry
 from .engine import register_workflows
 from .tools import build_workflow_tools
-
-log = logging.getLogger(__name__)
-
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
 # other key is rejected at app start so typos (``enabld``, ``allow_tools``)
@@ -228,8 +226,7 @@ def _compute_effective_allowlist(
         # allowed to call zero workflow tools. Allowed (the agent could
         # still author wait-only plans) but worth a warning since it's
         # almost always a typo.
-        log.warning("workflows.allowed_tools is an empty list — no tool "
-                    "tasks will validate.")
+        logger.warning("workflows.allowed_tools is an empty list — no tool tasks will validate.")
         return frozenset()
     reserved = [n for n in requested if n in registry.RESERVED_TOOL_NAMES]
     if reserved:
@@ -304,7 +301,7 @@ def build_workflow_integration(
     requested = _read_allowed_tools(metadata)
     effective = _compute_effective_allowlist(requested)
     registry.set_app_config(effective)
-    log.info(
+    logger.info(
         "workflows enabled for main agent: %d tool(s) allowed (%s)",
         len(effective),
         ", ".join(sorted(effective)) or "<none>",

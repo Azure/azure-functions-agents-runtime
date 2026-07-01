@@ -19,12 +19,12 @@ workflows.
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 from pydantic import BaseModel, Field
 
 from azure_functions_agents._function_tool import tool as define_tool
+from azure_functions_agents._logger import logger
 
 from . import registry
 from .context import (
@@ -34,8 +34,6 @@ from .context import (
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
 from .schema import PlanValidationError, plan_to_activity_inputs, validate_plan
-
-log = logging.getLogger(__name__)
 
 MAX_ACTIVE_WORKFLOWS_PER_SESSION = 10
 MAX_WORKFLOW_STATUS_RESULTS = 25
@@ -335,7 +333,7 @@ async def start_workflow(
             session.durable_client, session.session_id
         )
     except Exception:
-        log.exception("start_workflow: client.get_status_all failed")
+        logger.exception("start_workflow: client.get_status_all failed")
         return _error("failed to start workflow")
     if active_count >= MAX_ACTIVE_WORKFLOWS_PER_SESSION:
         return _error(
@@ -354,18 +352,18 @@ async def start_workflow(
             },
         )
     except Exception:
-        log.exception("start_workflow: client.start_new failed")
+        logger.exception("start_workflow: client.start_new failed")
         return _error("failed to start workflow")
 
     # Durable echoes back the instance ID we supplied; defend against SDK
     # drift by logging a mismatch but trusting our own value.
     if returned_id != instance_id:
-        log.warning(
+        logger.warning(
             "start_workflow: Durable returned instance_id=%r but we supplied %r",
             returned_id,
             instance_id,
         )
-    log.info("workflow started: id=%s owner=%s", instance_id, owner["session_id"])
+    logger.info("workflow started: id=%s owner=%s", instance_id, owner["session_id"])
     return json.dumps({"workflow_id": instance_id})
 
 
@@ -388,7 +386,7 @@ async def get_workflow_status(
     try:
         status = await session.durable_client.get_status(params.workflow_id)
     except Exception:
-        log.exception("get_workflow_status: client.get_status failed")
+        logger.exception("get_workflow_status: client.get_status failed")
         return _error("failed to fetch workflow status")
 
     envelope = _status_envelope(status)
@@ -412,7 +410,7 @@ async def list_workflows(
             session.durable_client, session.session_id
         )
     except Exception:
-        log.exception("list_workflows: fetch_session_workflows failed")
+        logger.exception("list_workflows: fetch_session_workflows failed")
         return _error("failed to list workflows")
 
     return json.dumps({"workflows": envelopes})
@@ -434,10 +432,10 @@ async def terminate_workflow(
     try:
         await session.durable_client.terminate(params.workflow_id, params.reason)
     except Exception:
-        log.exception("terminate_workflow: client.terminate failed")
+        logger.exception("terminate_workflow: client.terminate failed")
         return _error("failed to terminate workflow")
 
-    log.info(
+    logger.info(
         "workflow terminated: id=%s reason=%r", params.workflow_id, params.reason
     )
     return json.dumps({"workflow_id": params.workflow_id, "terminated": True})
@@ -461,10 +459,10 @@ async def cancel_workflow(
             params.workflow_id, CANCEL_EVENT_NAME, params.reason
         )
     except Exception:
-        log.exception("cancel_workflow: client.raise_event failed")
+        logger.exception("cancel_workflow: client.raise_event failed")
         return _error("failed to cancel workflow")
 
-    log.info(
+    logger.info(
         "workflow cancel requested: id=%s reason=%r",
         params.workflow_id,
         params.reason,

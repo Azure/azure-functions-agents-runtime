@@ -336,15 +336,16 @@ def _register_mcp_endpoint(
             logger.error("Built-in MCP error for '%s': %s", resolved.name, error_msg)
             return json.dumps({"error": error_msg})
 
-    decorated = app.function_name(name=function_name)(mcp_agent_chat)
+    decorated = mcp_agent_chat
     if workflows_enabled:
         decorated = app.durable_client_input(client_name="client")(decorated)
-    app.mcp_tool_trigger(
+    decorated = app.mcp_tool_trigger(
         arg_name="context",
         tool_name=tool_name,
         description=resolved.description,
         tool_properties=_MCP_AGENT_TOOL_PROPERTIES,
     )(decorated)
+    app.function_name(name=function_name)(decorated)
 
 
 def _register_workflow_status_endpoints(

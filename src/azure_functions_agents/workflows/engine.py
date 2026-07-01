@@ -22,11 +22,12 @@ a per-agent workflow-safe tool registry (M3).
 from __future__ import annotations
 
 import json
-import logging
 from typing import Any
 
 import azure.durable_functions as df
 import azure.functions as func
+
+from azure_functions_agents._logger import logger
 
 from . import registry
 from .schema import (
@@ -46,8 +47,6 @@ CANCEL_EVENT_NAME = "cancel"
 _ACTIVITY_NAME = "agents_workflow_run_tool"
 
 WORKFLOW_SAFE_ECHO_TOOL = ECHO_TOOL_NAME
-
-log = logging.getLogger(__name__)
 
 
 def _run_echo(args: dict[str, Any]) -> dict[str, Any]:
@@ -116,11 +115,11 @@ def register_workflows(app: func.FunctionApp) -> None:
                 f"task {task_id!r}: tool {tool_name!r} is not registered "
                 "in the workflow-safe tool registry"
             )
-        log.info("workflow activity running: id=%s tool=%s", task_id, tool_name)
+        logger.info("workflow activity running: id=%s tool=%s", task_id, tool_name)
         try:
             result = handler(args)
         except Exception:
-            log.exception(
+            logger.exception(
                 "workflow activity failed: id=%s tool=%s", task_id, tool_name
             )
             raise RuntimeError(
@@ -244,8 +243,11 @@ def register_workflows(app: func.FunctionApp) -> None:
                 context.set_custom_status(
                     f"canceled at {len(results)}/{total} tasks done"
                 )
-                log.info("workflow canceled: instance=%s reason=%r",
-                         context.instance_id, reason)
+                logger.info(
+                    "workflow canceled: instance=%s reason=%r",
+                    context.instance_id,
+                    reason,
+                )
                 return {
                     "results": results,
                     "canceled": True,
