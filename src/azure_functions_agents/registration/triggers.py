@@ -122,6 +122,13 @@ def register_agent(
 
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
+        logger.info(
+            "Registered trigger: agent=%s function=%s trigger_type=http_trigger route=%s methods=%s",
+            resolved.name,
+            function_name,
+            trigger_params.get("route"),
+            trigger_params.get("methods", ["POST"]),
+        )
         if registered_names is not None:
             registered_names.add(function_name)
         return
@@ -132,6 +139,12 @@ def register_agent(
         capabilities,
         function_name,
         trigger_params,
+        trigger_type,
+    )
+    logger.info(
+        "Registered trigger: agent=%s function=%s trigger_type=%s",
+        resolved.name,
+        function_name,
         trigger_type,
     )
     if registered_names is not None:
