@@ -98,6 +98,10 @@ module = [
     "azure.functions_connectors.*",
     "frontmatter",
     "aiohttp",
+    "opentelemetry",
+    "opentelemetry.*",
+    "azure.monitor",
+    "azure.monitor.*",
 ]
 ignore_missing_imports = true
 
