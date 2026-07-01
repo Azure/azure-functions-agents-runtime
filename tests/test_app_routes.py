@@ -51,6 +51,14 @@ def _binding_types(function_app, name):
     raise AssertionError(f"function {name!r} was not registered")
 
 
+def _bindings(function_app, name):
+    for builder in function_app._function_builders:
+        function = builder._function
+        if function._name == name:
+            return [binding.get_dict_repr() for binding in function._bindings]
+    raise AssertionError(f"function {name!r} was not registered")
+
+
 def test_non_workflow_app_does_not_use_durable_function_app(tmp_path: Path):
     _write_main_agent(tmp_path)
 
@@ -93,6 +101,19 @@ def test_workflow_routes_register_durable_client_binding(tmp_path: Path):
         "get_session_workflow_status",
     ]:
         assert "durableClient" in _binding_types(function_app, function_name)
+
+
+def test_workflow_mcp_endpoint_keeps_function_name_and_trigger_binding(tmp_path: Path):
+    _write_main_agent(tmp_path, workflows=True)
+
+    function_app = app_module.create_function_app(app_root=tmp_path)
+
+    bindings = _bindings(function_app, "mcp_agent_chat")
+    assert [binding["type"] for binding in bindings] == [
+        "durableClient",
+        "mcpToolTrigger",
+    ]
+    assert bindings[1]["toolName"] == "main"
 
 
 @pytest.mark.asyncio
