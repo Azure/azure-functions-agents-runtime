@@ -11,6 +11,7 @@ license = {text = "MIT"}
 requires-python = ">=3.13"
 dependencies = [
     "azure-functions==2.1.*",
+    "azure-functions-durable==1.2.*",
     "agent-framework-core==1.3.*",
     "agent-framework-openai==1.3.*",
     "agent-framework-foundry==1.3.*",
@@ -32,6 +33,7 @@ dev = [
     "pytest==9.0.*",
     "types-jsonschema==4.26.*",
     "pytest-cov==7.1.*",
+    "pytest-asyncio==1.3.*",
 ]
 
 [tool.setuptools.packages.find]
@@ -94,6 +96,7 @@ module = [
     "agent_framework_foundry",
     "agent_framework_foundry.*",
     "azurefunctions.*",
+    "azure.durable_functions",
     "azure.functions_connectors",
     "azure.functions_connectors.*",
     "frontmatter",

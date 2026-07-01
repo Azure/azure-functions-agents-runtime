@@ -9,6 +9,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Connect to 1,400+ services** — use connector-backed MCP servers to let agents act through Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors
 - **Extend with MCP servers** — plug in remote HTTP MCP servers, including MCP servers backed by connectors
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
+- **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
