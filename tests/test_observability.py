@@ -105,6 +105,24 @@ def test_start_span_gated_when_observability_disabled(monkeypatch) -> None:  # t
         assert span._span is None
 
 
+def test_runtime_span_add_event_noops_without_span() -> None:
+    span = obs.RuntimeSpan(None)
+    span.add_event("unit.test.event", {"ignored": "value"})
+
+
+def test_runtime_span_add_event_forwards_name_and_non_none_attributes() -> None:
+    events: list[tuple[str, dict[str, object] | None]] = []
+
+    class _FakeSpan:
+        def add_event(self, name: str, attributes: dict[str, object] | None = None) -> None:
+            events.append((name, attributes))
+
+    span = obs.RuntimeSpan(_FakeSpan())
+    span.add_event("unit.test.event", {"kept": "value", "count": 2, "dropped": None})
+
+    assert events == [("unit.test.event", {"kept": "value", "count": 2})]
+
+
 def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls: list[str] = []
     monkeypatch.setattr(obs, "_metrics_ready", True)

@@ -15,6 +15,7 @@ from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger
 from .._observability import (
+    ATTR_FAULT_DOMAIN,
     FaultDomain,
     LifecycleStage,
     capture_sensitive_data,
@@ -269,6 +270,7 @@ def make_agent_handler(
                 )
 
                 _set_run_result_attributes(span, result)
+                span.add_event("af.agent.invoke.completed")
                 span.set_attribute("af.agent.outcome", "success")
 
                 if _should_log(resolved):
@@ -333,6 +335,13 @@ def make_http_agent_handler(
                         )
                     span.set_attribute("af.agent.outcome", "error")
                     span.set_error("input validation failed", fault_domain=FaultDomain.APP)
+                    span.add_event(
+                        "af.input.validation_failed",
+                        {
+                            ATTR_FAULT_DOMAIN: FaultDomain.APP,
+                            "af.http.status_code": validation_error.status_code,
+                        },
+                    )
                     validation_error.headers["x-ms-session-id"] = session_id
                     return validation_error
 
@@ -354,6 +363,7 @@ def make_http_agent_handler(
                 )
 
                 _set_run_result_attributes(span, result)
+                span.add_event("af.agent.invoke.completed")
                 span.set_attribute("af.agent.outcome", "success")
 
                 if _should_log(resolved):
@@ -379,6 +389,10 @@ def make_http_agent_handler(
                         )
                         span.set_attribute("af.agent.outcome", "error")
                         span.set_error("agent returned invalid JSON", fault_domain=FaultDomain.APP)
+                        span.add_event(
+                            "af.response.invalid_json",
+                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+                        )
                         return Response(
                             content=json.dumps(
                                 {
@@ -405,6 +419,10 @@ def make_http_agent_handler(
                             span.set_attribute("af.agent.outcome", "error")
                             span.set_error(
                                 "response schema validation failed", fault_domain=FaultDomain.APP
+                            )
+                            span.add_event(
+                                "af.response.schema_validation_failed",
+                                {ATTR_FAULT_DOMAIN: FaultDomain.APP},
                             )
                             return Response(
                                 content=json.dumps(

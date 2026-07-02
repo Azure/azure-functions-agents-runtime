@@ -96,14 +96,41 @@ explicit, documented extension to the discover → translate → register → ex
   - Cross-cutting (any runtime span): `af.fault_domain`, `af.lifecycle_stage`.
   - Span `agent.run {name}`: `af.agent.{name,trigger_type,model,session_id,outcome,
     tool_call_count,tool_error_count,input_bytes,response_bytes}`; gated content `af.agent.input`,
-    `af.agent.response`.
+    `af.agent.response`; runtime lifecycle span events
+    `af.{input.validation_failed,response.invalid_json,response.schema_validation_failed,agent.invoke.completed}`.
   - Span `dynamic_session.execute`: `server.address` (OTel semconv), `af.operation_id` (the trace
     id, also sent to ACA in the `operation-id` header for correlation) + `af.dynamic_session.{session_id,
     code_bytes,stdout_bytes,stderr_bytes,stderr_present,session_reused,setup_ran}`; gated content
     `af.dynamic_session.{code,stdout,stderr}`.
   - Metrics: `azure_functions_agents.dynamic_session.executions` / `.errors`.
-- **New dependency**: `azure-monitor-opentelemetry==1.8.*` (so the exporter is transitive and the
-  app needs only `azurefunctions-agents-runtime`).
+- **New dependency (packaging rationale)**: `azure-monitor-opentelemetry==1.8.8` — bundled as a
+  **hard dependency** (Option 1), not an optional `[monitor]` extra, so the exporter is transitive and
+  the app needs only `azurefunctions-agents-runtime`. (Pinned to 1.8.8 rather than a range — see
+  Decisions log #15 for the exporter gen_ai crash this avoids.) *Why bundle:* Azure Monitor is the
+  only first-class exporter today, and on Azure Functions App Insights is the default telemetry sink
+  with `APPLICATIONINSIGHTS_CONNECTION_STRING` typically already present, so nearly all target users
+  want export on. There is **no host-only path** for the runtime's custom worker spans —
+  `host.json` `telemetryMode: OpenTelemetry` exports only **host** telemetry and propagates trace
+  context into the worker, but does **not** export worker-emitted spans/metrics (verified against the
+  Functions host + Python-worker source) — so dropping the dependency would break the zero-code
+  promise: the runtime's own `agent.run` / `dynamic_session.execute` spans would silently go nowhere.
+  An optional `[monitor]` extra would add a **second manual gate** and a **silent-failure mode** for
+  exactly the users we target (observability enabled + connection string present, but the extra not
+  installed ⇒ spans emitted but never exported, surfaced only as a log line), so bundling avoids that
+  trap. The bundle-vs-extra choice addresses only the *dependency-weight* objection; the separate
+  "a library should not configure the global OTel SDK" concern is a different axis, already mitigated
+  by Decision #14 (enable-gating fully suppresses runtime telemetry when `observability.enabled:
+  false`). The `[monitor]` extra is recorded as the **migration path** to adopt if/when another
+  exporter (e.g. OTLP) becomes first-class — not a rejected idea; Option 3 (the bare
+  `azure-monitor-opentelemetry-exporter`) is rejected because it is still a **Beta / pre-release**
+  package (PyPI *Development Status :: 4 - Beta*), unsuitable as a hard runtime dependency.
+  **Follow-ups (not yet implemented):** (a) trim the Azure Monitor Distro's forced footprint via
+  `configure_azure_monitor(enable_live_metrics=False, instrumentation_options=…)` to disable the
+  auto-instrumentations the runtime never uses (django, flask, fastapi, psycopg2), which also trims
+  the overlapping/duplicate telemetry those can produce; and (b) correct the inaccurate "falls back to
+  the Functions host exporter" wording in `_observability.py` (the `ImportError` branch of
+  `_configure_azure_monitor`) and in `docs/observability.md`, since the host does not export the
+  runtime's worker custom spans. See Decisions log #18.
 
 ### Compatibility
 
@@ -134,13 +161,18 @@ explicit, documented extension to the discover → translate → register → ex
 | 12 | `af.operation_id` scope | all spans / sandbox only | Scoped to the `dynamic_session.execute` span (the value sent to ACA); not on `agent.run` | Agent (after review) | 2026-07-01 |
 | 13 | Noise-control guarantee wording | broad "explicit level" / precise `NOTSET` | Narrowed docs to "no level set directly on that logger"; parent/root not consulted | Agent (after review) | 2026-07-01 |
 | 14 | Gating runtime telemetry on `enabled` | rely on tracer/meter presence / gate on resolved state | Gate `start_span` + `record_sandbox_execution` on the resolved `_enabled` flag, so `observability.enabled: false` suppresses runtime spans/metrics even under a host OTel provider | Agent (PR #79 review) | 2026-07-01 |
+| 15 | Mitigating the exporter gen_ai `TypeError` crash | pin distro to last-good `==1.8.8` / monkeypatch the exporter's gen_ai processor / wait for the fixed release | Narrow #8 to `azure-monitor-opentelemetry==1.8.8` (opentelemetry-sdk 1.40, mutable span attrs), so the exporter's gen_ai main-agent processor stays crash-free and deploys stop floating to 1.8.9 (sdk 1.43 freezes attrs on end → the processor's `on_end` write raises `TypeError`, failing the invocation). Known upstream bug fixed in exporter b55 (Azure/azure-sdk-for-python#47796, not yet on PyPI); revert to a range once it ships | Agent (Human approved) | 2026-07-01 |
+| 16 | Span events for runtime lifecycle milestones | attributes only / add span events / duplicate MAF tool spans | Add `af.*` span events at runtime input/output-contract boundaries on `agent.run`; do NOT duplicate MAF `gen_ai.*` tool/model spans | Agent (Human approved) | 2026-07-02 |
+| 17 | Surfacing the runtime's own logs in user App Insights | rename logger off `azure.functions.*` / keep + document / worker-provided logger | Keep the logger under `azure.functions.*` — the Functions Python worker classifies it as a **system log** (`customer_app_insight=false`), so it does not appear in the app's `traces`; **document** that spans (not logs) are the debugging surface and that failures are captured as span exceptions. Rename deferred (would change the App Insights `Category` and the samples' `host.json` keys) | Human | 2026-07-02 |
+| 18 | Exporter packaging: bundle vs. optional extra | bundle `azure-monitor-opentelemetry` as a hard dep (Opt 1) / optional `[monitor]` extra (Opt 2) / bundle the bare `azure-monitor-opentelemetry-exporter` (Opt 3) | Keep bundled (Opt 1): there is no host-only export path for the runtime's worker spans, and an extra would add a silent-failure gate for our target users; trim the Distro's forced footprint as a follow-up. The `[monitor]` extra is the migration path once another exporter (e.g. OTLP) is first-class; Opt 3 rejected (exporter still Beta / pre-release). Rationale + follow-ups in §4 | Human (larohra) — PR #79 review | 2026-07-02 |
 
 ## 6. Test plan
 
 - [x] Unit: `tests/test_observability.py` — enabled/sensitive resolution (config + env precedence),
   `configure_observability` sets the flag and is idempotent, `start_span` / `RuntimeSpan` no-op
-  safety, `bounded_content` truncation, `record_sandbox_execution` safety, `_quiet_noisy_loggers`
-  raises unset levels and respects explicit levels.
+  safety (including `RuntimeSpan.add_event`), `bounded_content` truncation,
+  `record_sandbox_execution` safety, `_quiet_noisy_loggers` raises unset levels and respects
+  explicit levels.
 - [x] Unit: `tests/test_system_tools_sandbox.py` — a clean run records success; a non-empty stderr
   is surfaced as an error while the tool still returns the payload string.
 - [x] Regression: `tests/test_config_loader.py` — empty `GlobalConfig` dump includes the new

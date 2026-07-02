@@ -291,6 +291,14 @@ class RuntimeSpan:
             return
         self.set_attribute(key, bounded_content(value))
 
+    def add_event(self, name: str, attributes: Mapping[str, Any] | None = None) -> None:
+        """Add a span event (a timestamped milestone) — no-op when tracing is unavailable."""
+        if self._span is None:
+            return
+        with suppress(Exception):  # pragma: no cover - defensive
+            attrs = {k: v for k, v in (attributes or {}).items() if v is not None}
+            self._span.add_event(name, attributes=attrs or None)
+
     def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
         if self._span is None:
             return

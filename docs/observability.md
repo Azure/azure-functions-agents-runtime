@@ -44,6 +44,30 @@ The runtime bootstraps everything from `create_function_app()`
 instrumentation and, when the `azure-monitor-opentelemetry` package is installed, the Azure Monitor
 exporter. When disabled or unconfigured it is a no-op.
 
+## Where the runtime's output shows up (traces, not logs)
+
+The runtime is instrumented **span-first**, so its telemetry surfaces as **spans** — look in
+**Transaction Search** / the end-to-end transaction view, **not** the "Logs" (`AppTraces`) list.
+
+The runtime's own log lines are **intentionally not in your Application Insights `traces`**: its
+internal logger sits under the `azure.functions.*` namespace, which the Functions Python worker
+classifies as **system logs** (emitted with `customer_app_insight = false`), so they never reach your
+app's `traces`. `host.json` `logLevel` does **not** surface them, and worker-side `DEBUG` would
+require the `PYTHON_ENABLE_DEBUG_LOGGING` app setting. This is by design.
+
+**So to debug a run, use the spans — not the log list:**
+
+- `agent.run {name}` and `dynamic_session.execute`, with all the `af.*` attributes below.
+- Runtime **span events** on `agent.run` (input/response-contract milestones — see that span's
+  section) and MAF's `gen_ai.*` child spans (per model/tool call).
+- **Failures are captured on the span**, not just in logs: a failing run is marked error with
+  `record_exception` + `af.fault_domain`, so it is fully visible in the transaction view and the
+  `AppExceptions` table.
+
+The host lifecycle lines you *do* see in the logs list (`Executing…`, `Executed… (Succeeded)`,
+`Function duration…`) come from the Functions **host** — a separate telemetry plane from the
+runtime's worker spans. Use the [Quick KQL](#quick-kql) below to pull a whole run together.
+
 ## Attribute naming: what `af.` means
 
 Every attribute the runtime adds is prefixed **`af.`** — short for **Azure Functions agents**.
@@ -93,6 +117,22 @@ spans and the sandbox span together.
 | `af.agent.response` | The final response text. **Content — only when `capture_sensitive_data` is on.** |
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
+
+#### Span events (runtime lifecycle milestones)
+
+These `agent.run {name}` span events mark runtime-owned input/output-contract boundaries. They carry
+only non-sensitive metadata (names/status/counts — never request/response/model content). MAF's
+`gen_ai.*` child spans already cover per-model/per-tool detail, so these events intentionally track
+runtime milestones rather than duplicating tool/model spans.
+
+- `af.input.validation_failed` — HTTP input-schema validation failed before agent execution; includes
+  `af.fault_domain=app` and `af.http.status_code`.
+- `af.response.invalid_json` — the agent completed, but its HTTP response could not be parsed as the
+  required JSON contract; includes `af.fault_domain=app`.
+- `af.response.schema_validation_failed` — the agent completed, but the parsed HTTP JSON response
+  failed schema validation; includes `af.fault_domain=app`.
+- `af.agent.invoke.completed` — `_run_agent(...)` returned successfully and the runtime is handling
+  the final response contract.
 
 ### Span `dynamic_session.execute`
 
