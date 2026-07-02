@@ -4,6 +4,10 @@
 
 `azure-functions-agents-runtime` turns a markdown-first agent project into an `azure.functions.FunctionApp`. The design goal is that you write `.agent.md` files plus a small amount of supporting configuration, and the runtime translates that authoring format into Azure Functions triggers, HTTP routes, MCP surfaces, and tool wiring. At startup, the runtime follows a three-stage pipeline: **discover** project files and inventories, **translate** them into typed runtime objects, and **register** the resulting agents on a Function App. The authoritative implementation of that pipeline lives in `src/azure_functions_agents/app.py:create_function_app()`.
 
+> New to the project? Start with the high-level, presentation-friendly
+> [`docs/architecture-overview.md`](architecture-overview.md), then return here for
+> the authoritative module-level detail.
+
 ## 2. High-level data flow
 
 ```mermaid
@@ -244,5 +248,6 @@ This design keeps global config declarative: shared config says what exists, whi
 - If you are debugging a missing tool, read Sections 3-6 here first, then check the front-matter spec for filters or opt-outs.
 - If you are debugging a missing route or binding, compare Section 4 here with `docs/triggers.md`.
 
+- [`docs/architecture-overview.md`](architecture-overview.md) — high-level, presentation-friendly tour of the runtime
 - [`docs/front-matter-spec.md`](front-matter-spec.md) — agent file format and configuration reference
 - [`docs/triggers.md`](triggers.md) — supported trigger types and examples
