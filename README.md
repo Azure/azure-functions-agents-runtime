@@ -140,7 +140,7 @@ Your agent is now running at `http://localhost:7071/agents/main/` with a built-i
 
 ## Features
 
-**Architecture overview:** see [`docs/architecture.md`](docs/architecture.md) for the module map and data flow pipeline.
+**Architecture:** start with [`docs/architecture-overview.md`](docs/architecture-overview.md) for a high-level tour, then see [`docs/architecture.md`](docs/architecture.md) for the full module map and data flow pipeline.
 
 ### Built-in endpoints
 
