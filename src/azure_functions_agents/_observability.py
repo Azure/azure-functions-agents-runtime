@@ -185,7 +185,46 @@ def _enable_agent_framework_instrumentation(capture: bool) -> None:
         logger.warning("Could not enable Agent Framework instrumentation: %s", exc)
 
 
+def _otel_provider_already_configured() -> bool:
+    """True when a real OpenTelemetry SDK TracerProvider is already installed in this process.
+
+    The Functions Python worker configures Azure Monitor during worker init (before our
+    create_function_app() runs) when PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY /
+    PYTHON_ENABLE_OPENTELEMETRY is set. In that case the runtime must NOT call
+    configure_azure_monitor() again, or traces/metrics/logs double-export. On any error we
+    return False so the runtime falls back to its normal setup (status quo).
+    """
+    try:
+        from opentelemetry import trace
+
+        provider = trace.get_tracer_provider()
+    except Exception:  # pragma: no cover - defensive
+        return False
+    # A real SDK TracerProvider means OTel is already set up; the opentelemetry-api default
+    # before configuration is a ProxyTracerProvider (older versions: DefaultTracerProvider).
+    try:
+        from opentelemetry.sdk.trace import TracerProvider as _SdkTracerProvider
+
+        if isinstance(provider, _SdkTracerProvider):
+            return True
+    except Exception:  # pragma: no cover - defensive
+        pass
+    return type(provider).__name__ not in (
+        "ProxyTracerProvider",
+        "DefaultTracerProvider",
+        "NoOpTracerProvider",
+    )
+
+
 def _configure_azure_monitor(connection_string: str) -> None:
+    if _otel_provider_already_configured():
+        logger.info(
+            "OpenTelemetry is already configured in this worker process (likely the Functions "
+            "worker via PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY / PYTHON_ENABLE_OPENTELEMETRY); "
+            "skipping the runtime's Azure Monitor setup to avoid duplicate export. Runtime spans "
+            "and Agent Framework gen_ai instrumentation will use the existing provider."
+        )
+        return
     try:
         from azure.monitor.opentelemetry import configure_azure_monitor
     except ImportError:

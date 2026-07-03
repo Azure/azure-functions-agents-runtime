@@ -83,6 +83,70 @@ def test_configure_observability_disabled_is_noop(monkeypatch) -> None:  # type:
     assert obs.is_observability_enabled() is False
 
 
+def test_otel_provider_already_configured_true_for_sdk_provider(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: TracerProvider())
+
+    assert obs._otel_provider_already_configured() is True
+
+
+def test_otel_provider_already_configured_false_for_proxy_provider(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from opentelemetry import trace
+
+    proxy_tracer_provider = type("ProxyTracerProvider", (), {})
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: proxy_tracer_provider())
+
+    assert obs._otel_provider_already_configured() is False
+
+
+def test_configure_azure_monitor_skips_when_provider_already_configured(  # type: ignore[no-untyped-def]
+    monkeypatch, caplog
+) -> None:
+    import logging
+
+    from azure.monitor import opentelemetry as azure_monitor_opentelemetry
+
+    called = {"count": 0}
+
+    def _fake_configure_azure_monitor(*, connection_string: str) -> None:
+        called["count"] += 1
+
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
+    monkeypatch.setattr(
+        azure_monitor_opentelemetry,
+        "configure_azure_monitor",
+        _fake_configure_azure_monitor,
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        obs._configure_azure_monitor("InstrumentationKey=abc")
+
+    assert called["count"] == 0
+    assert "skipping the runtime's Azure Monitor setup to avoid duplicate export" in caplog.text
+
+
+def test_configure_azure_monitor_calls_when_provider_not_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from azure.monitor import opentelemetry as azure_monitor_opentelemetry
+
+    called = {"connection_string": None}
+
+    def _fake_configure_azure_monitor(*, connection_string: str) -> None:
+        called["connection_string"] = connection_string
+
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    monkeypatch.setattr(
+        azure_monitor_opentelemetry,
+        "configure_azure_monitor",
+        _fake_configure_azure_monitor,
+    )
+
+    obs._configure_azure_monitor("InstrumentationKey=abc")
+
+    assert called["connection_string"] == "InstrumentationKey=abc"
+
+
 def test_start_span_is_safe_and_records(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     # With observability enabled, the helpers exercise the real tracer path and must never raise.
     monkeypatch.setattr(obs, "_enabled", True)

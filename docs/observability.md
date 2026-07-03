@@ -30,6 +30,9 @@ export in OpenTelemetry format, so host request telemetry and the runtime's work
 end-to-end operation. This is **additive** — it is **not required** for the agent/tool spans
 themselves. Avoid turning on both a worker exporter and host worker-streaming
 (`PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY`) for the same data, which can double telemetry volume.
+The runtime now auto-detects an already-configured OpenTelemetry provider and skips its own Azure
+Monitor setup, so the worker path will not double-export — though it is still unnecessary when the
+runtime is already configuring the exporter.
 
 **Optional — tune behavior in `agents.config.yaml`:**
 
@@ -212,7 +215,9 @@ Functions host, so quiet it with log-level overrides (or the equivalent
 `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG=0.1`; set a daily cap /
 retention on the workspace; and **avoid double export** — don't run both the worker exporter and
 host worker-streaming (`PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY` + `telemetryMode`) for the same
-telemetry.
+telemetry. The runtime now detects an existing OpenTelemetry provider and skips its own Azure
+Monitor setup, so enabling the worker exporter path will not double-export — it is simply
+unnecessary when the runtime is already handling exporter configuration.
 
 ## Quick KQL
 
