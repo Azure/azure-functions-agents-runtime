@@ -9,7 +9,11 @@ import pytest
 from agent_framework import FunctionTool
 
 from azure_functions_agents._function_tool import tool
-from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
+from azure_functions_agents.discovery.tools import (
+    clear_tool_discovery_cache,
+    discover_project_tools,
+    discover_user_tools,
+)
 
 
 def _write_tool_file(app_root: Path, name: str, body: str) -> None:
@@ -119,3 +123,94 @@ def test_clear_tool_discovery_cache_reruns_discovery(
 
 def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path) -> None:
     assert discover_user_tools(tmp_path) == []
+
+
+def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "mixed_tools",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool(description="Workflow only")
+        def fetch_logs(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+
+        def plain_tool() -> str:
+            return "normal"
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert _tool_names(discovered.user_tools) == ["plain_tool"]
+    assert [tool.name for tool in discovered.workflow_tools] == ["fetch_logs"]
+
+
+def test_dual_decorator_tool_then_workflow_tool_is_both(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "shared_tool",
+        """
+        from azure_functions_agents import tool, workflow_tool
+
+        @tool
+        @workflow_tool(description="Shared")
+        def shared(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert _tool_names(discovered.user_tools) == ["shared"]
+    assert [tool.name for tool in discovered.workflow_tools] == ["shared"]
+
+
+def test_dual_decorator_workflow_tool_then_tool_is_both(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "shared_tool",
+        """
+        from azure_functions_agents import tool, workflow_tool
+
+        @workflow_tool(description="Shared")
+        @tool
+        def shared(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert _tool_names(discovered.user_tools) == ["shared"]
+    assert [tool.name for tool in discovered.workflow_tools] == ["shared"]
+
+
+def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "workflow_tools",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool
+        def fetch_logs(args: dict[str, object]) -> dict[str, object]:
+            return {"logs": args}
+
+        @workflow_tool
+        def fetch_metrics(args: dict[str, object]) -> dict[str, object]:
+            return {"metrics": args}
+
+        def _helper() -> str:
+            return "not a tool"
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert discovered.user_tools == []
+    assert [tool.name for tool in discovered.workflow_tools] == [
+        "fetch_logs",
+        "fetch_metrics",
+    ]

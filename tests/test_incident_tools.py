@@ -14,10 +14,15 @@ from pathlib import Path
 
 import pytest
 
+from azure_functions_agents.discovery.tools import (
+    clear_tool_discovery_cache,
+    discover_project_tools,
+)
+
 _SAMPLE_SRC = Path(__file__).resolve().parents[1] / "samples" / "workflow-incident-triage" / "src"
 _SPEC = importlib.util.spec_from_file_location(
     "incident_tools_sample",
-    _SAMPLE_SRC / "incident_tools.py",
+    _SAMPLE_SRC / "tools" / "incident_tools.py",
 )
 assert _SPEC is not None and _SPEC.loader is not None
 
@@ -83,11 +88,13 @@ def test_summarize_findings_rejects_embedded_template_ref():
         )
 
 
-def test_register_with_engine_is_idempotent():
-    from azure_functions_agents.workflows import registry
-
-    incident_tools.register_with_engine()
-    before = registry.get_entry("fetch_logs")
-    incident_tools.register_with_engine()
-    after = registry.get_entry("fetch_logs")
-    assert before is after
+def test_sample_workflow_tools_are_auto_discovered():
+    clear_tool_discovery_cache()
+    discovered = discover_project_tools(_SAMPLE_SRC)
+    assert discovered.user_tools == []
+    assert {tool.name for tool in discovered.workflow_tools} == {
+        "fetch_logs",
+        "fetch_metrics",
+        "fetch_deploys",
+        "summarize_findings",
+    }

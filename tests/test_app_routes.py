@@ -9,20 +9,32 @@ from azure_functions_agents.workflows import context as workflow_context
 from azure_functions_agents.workflows import tools as workflow_tools
 
 
-def _write_main_agent(tmp_path: Path, *, workflows: bool = False) -> None:
+def _write_agent(
+    root: Path,
+    filename: str,
+    *,
+    name: str,
+    workflows: bool = False,
+    builtin_endpoints: bool = True,
+) -> None:
     workflows_block = "workflows:\n  enabled: true\n" if workflows else ""
-    (tmp_path / "main.agent.md").write_text(
+    builtin = "builtin_endpoints: true\n" if builtin_endpoints else "trigger:\n  type: timer_trigger\n  args:\n    schedule: '0 */5 * * * *'\n"
+    (root / filename).write_text(
         (
             "---\n"
-            "name: Main\n"
-            "description: Main agent\n"
-            "builtin_endpoints: true\n"
+            f"name: {name}\n"
+            f"description: {name} agent\n"
+            f"{builtin}"
             f"{workflows_block}"
             "---\n"
             "Test agent\n"
         ),
         encoding="utf-8",
     )
+
+
+def _write_main_agent(tmp_path: Path, *, workflows: bool = False) -> None:
+    _write_agent(tmp_path, "main.agent.md", name="Main", workflows=workflows)
 
 
 class _WorkflowRequest:
@@ -73,6 +85,29 @@ def test_workflow_app_uses_durable_function_app(tmp_path: Path):
     function_app = app_module.create_function_app(app_root=tmp_path)
 
     assert isinstance(function_app, df.DFApp)
+
+
+def test_non_main_workflows_enabled_warns_and_does_not_enable_durable(
+    tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
+    _write_main_agent(tmp_path)
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    _write_agent(
+        agents_dir,
+        "worker.agent.md",
+        name="Worker",
+        workflows=True,
+        builtin_endpoints=False,
+    )
+
+    function_app = app_module.create_function_app(app_root=tmp_path)
+
+    assert not isinstance(function_app, df.DFApp)
+    assert any(
+        "workflows.enabled is only honored on main.agent.md" in record.message
+        for record in caplog.records
+    )
 
 
 def test_non_workflow_routes_do_not_register_durable_client_binding(tmp_path: Path):

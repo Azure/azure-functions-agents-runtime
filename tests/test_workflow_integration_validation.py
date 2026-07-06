@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import pytest
 
+from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.workflows import integration, registry
 
 
@@ -145,6 +146,19 @@ def test_workflows_block_lists_supported_keys_in_error():
         )
     msg = str(excinfo.value)
     assert "enabled" in msg
+    assert "exclude" in msg
+    assert "allowed_tools" not in msg
+
+
+def test_workflows_block_rejects_allowed_tools():
+    with pytest.raises(RuntimeError) as excinfo:
+        integration.build_workflow_integration(
+            _FakeApp(),
+            {"workflows": {"enabled": True, "allowed_tools": ["fetch_url"]}},
+            workflow_tools=[],
+        )
+    msg = str(excinfo.value)
+    assert "unknown key" in msg
     assert "allowed_tools" in msg
 
 
@@ -212,53 +226,50 @@ def test_validation_runs_on_disabled_path_non_bool_enabled():
         )
 
 
-def test_validation_runs_on_disabled_path_malformed_allowed_tools():
-    """``allowed_tools`` shape must surface even when ``enabled: false``
-    — otherwise a user authoring an allowlist while keeping workflows
-    off temporarily wouldn't see typos until later.
-    """
+def test_validation_runs_on_disabled_path_malformed_exclude():
+    """``exclude`` shape must surface even when ``enabled: false``."""
     with pytest.raises(
-        RuntimeError, match="allowed_tools must be a list of non-empty strings"
+        RuntimeError, match=r"workflows\.exclude must be a list of non-empty strings"
     ):
         integration.build_workflow_integration(
             _FakeApp(),
-            {"workflows": {"enabled": False, "allowed_tools": "fetch_url"}},
+            {"workflows": {"enabled": False, "exclude": "fetch_url"}},
         )
 
 
 # ---------------------------------------------------------------------------
-# allowed_tools shape (moved from registry tests so it lives next to
+# exclude shape (moved from registry tests so it lives next to
 # the other validators)
 # ---------------------------------------------------------------------------
 
 
-def test_allowed_tools_rejects_non_list():
+def test_exclude_rejects_non_list():
     with pytest.raises(
-        RuntimeError, match="allowed_tools must be a list of non-empty strings"
+        RuntimeError, match=r"workflows\.exclude must be a list of non-empty strings"
     ):
         integration.build_workflow_integration(
             _FakeApp(),
-            {"workflows": {"enabled": True, "allowed_tools": "not-a-list"}},
+            {"workflows": {"enabled": True, "exclude": "not-a-list"}},
         )
 
 
-def test_allowed_tools_rejects_empty_string_in_list():
+def test_exclude_rejects_empty_string_in_list():
     with pytest.raises(
-        RuntimeError, match="allowed_tools must be a list of non-empty strings"
+        RuntimeError, match=r"workflows\.exclude must be a list of non-empty strings"
     ):
         integration.build_workflow_integration(
             _FakeApp(),
-            {"workflows": {"enabled": True, "allowed_tools": ["fetch_url", ""]}},
+            {"workflows": {"enabled": True, "exclude": ["fetch_url", ""]}},
         )
 
 
-def test_allowed_tools_rejects_non_string_in_list():
+def test_exclude_rejects_non_string_in_list():
     with pytest.raises(
-        RuntimeError, match="allowed_tools must be a list of non-empty strings"
+        RuntimeError, match=r"workflows\.exclude must be a list of non-empty strings"
     ):
         integration.build_workflow_integration(
             _FakeApp(),
-            {"workflows": {"enabled": True, "allowed_tools": ["fetch_url", 42]}},
+            {"workflows": {"enabled": True, "exclude": ["fetch_url", 42]}},
         )
 
 
@@ -282,15 +293,22 @@ def test_disabled_explicitly_is_a_noop():
 
 def test_enabled_with_no_other_keys_works():
     tools, addendum = integration.build_workflow_integration(
-        _FakeApp(), {"workflows": {"enabled": True}}
+        _FakeApp(), {"workflows": {"enabled": True}}, workflow_tools=[]
     )
     assert tools and addendum is not None
 
 
-def test_enabled_with_allowed_tools_works():
+def test_enabled_with_exclude_filters_workflow_tools():
+    workflow_tools = [
+        WorkflowTool("keep", "Keep tool", lambda args: {"args": args}),
+        WorkflowTool("skip", "Skip tool", lambda args: {"args": args}),
+    ]
+
     tools, addendum = integration.build_workflow_integration(
         _FakeApp(),
-        {"workflows": {"enabled": True, "allowed_tools": ["__echo"]}},
+        {"workflows": {"enabled": True, "exclude": ["skip"]}},
+        workflow_tools=workflow_tools,
     )
     assert tools and addendum is not None
-    assert "__echo" in addendum
+    assert "`keep`" in addendum
+    assert "`skip`" not in addendum

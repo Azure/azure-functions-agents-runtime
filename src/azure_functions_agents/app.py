@@ -16,7 +16,7 @@ from .config.paths import get_app_root, set_app_root
 from .config.validation import validate_resolved_agent
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
-from .discovery.tools import discover_user_tools
+from .discovery.tools import discover_project_tools
 from .registration._naming import allocate_unique_function_name
 from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_builtin_endpoints
@@ -54,7 +54,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     global_config = load_global_config(resolved_root)
     agent_specs = load_agent_specs(resolved_root)
-    user_tools = discover_user_tools(resolved_root)
+    discovered_tools = discover_project_tools(resolved_root)
+    user_tools = discovered_tools.user_tools
+    workflow_tools = discovered_tools.workflow_tools
     mcp_tools = discover_mcp_servers(resolved_root)
     skills = discover_skills(resolved_root)
     skill_names = list(skills)
@@ -101,6 +103,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         capabilities = build_capabilities(
             resolved,
             discovered_user_tools=user_tools,
+            discovered_workflow_tools=workflow_tools,
             discovered_mcp_tools=mcp_tools,
             discovered_skills=skills,
         )
@@ -111,8 +114,15 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             _, workflow_system_addendum = build_workflow_integration(
                 app,
                 resolved.metadata,
+                workflow_tools=capabilities.filtered_workflow_tools,
             )
             workflows_enabled = workflow_system_addendum is not None
+        elif _workflows_requested(resolved.workflows):
+            logger.warning(
+                "workflows.enabled is only honored on main.agent.md; ignoring "
+                "workflows for agent %s",
+                resolved.name,
+            )
 
         allocated_name: str | None = None
         if resolved.trigger is not None or _builtin_endpoints_enabled(resolved.builtin_endpoints):

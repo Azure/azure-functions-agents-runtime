@@ -2,9 +2,9 @@
 
 These are the tools the LLM gets to compose into a workflow when the
 agent decides an incident warrants more than a single chat turn of
-work. They are intentionally **not** used outside workflow plans —
-registration happens inside ``function_app.py`` immediately before
-``create_function_app()``.
+work. They are intentionally **not** used outside workflow plans:
+``@workflow_tool`` opts them into Dynamic Workflow Activity execution,
+and no plain public normal tool is exported from this module.
 
 Design notes:
 
@@ -41,6 +41,8 @@ from __future__ import annotations
 import hashlib
 from typing import Any, Dict, List
 
+from azure_functions_agents import workflow_tool
+
 
 def _seeded_int(seed: str, lo: int, hi: int) -> int:
     """Return a stable int in [lo, hi] derived from ``seed``.
@@ -66,6 +68,13 @@ def _require_service(args: Dict[str, Any], tool: str) -> str:
     return service
 
 
+@workflow_tool(
+    description=(
+        "Fetch recent log lines for a service. Args: "
+        "{service: str, window_minutes?: int = 30}. "
+        "Returns {service, window_minutes, lines: [str], errors: int, warnings: int}."
+    )
+)
 def fetch_logs(args: Dict[str, Any]) -> Dict[str, Any]:
     service = _require_service(args, "fetch_logs")
     window_minutes = int(args.get("window_minutes") or 30)
@@ -90,6 +99,14 @@ def fetch_logs(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@workflow_tool(
+    description=(
+        "Fetch p99 CPU, memory, and latency metrics for a service. Args: "
+        "{service: str, window_minutes?: int = 30}. "
+        "Returns {service, window_minutes, cpu_p99, memory_p99, "
+        "latency_p99_ms, saturation: 'moderate'|'high'}."
+    )
+)
 def fetch_metrics(args: Dict[str, Any]) -> Dict[str, Any]:
     service = _require_service(args, "fetch_metrics")
     window_minutes = int(args.get("window_minutes") or 30)
@@ -110,6 +127,14 @@ def fetch_metrics(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@workflow_tool(
+    description=(
+        "Fetch recent deploys for a service. Args: "
+        "{service: str, lookback_hours?: int = 24}. "
+        "Returns {service, lookback_hours, "
+        "deploys: [{id, actor, summary, minutes_ago}]}."
+    )
+)
 def fetch_deploys(args: Dict[str, Any]) -> Dict[str, Any]:
     service = _require_service(args, "fetch_deploys")
     lookback_hours = int(args.get("lookback_hours") or 24)
@@ -137,6 +162,16 @@ def fetch_deploys(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+@workflow_tool(
+    description=(
+        "Correlate prior fetch results into a structured incident summary. "
+        "Args: {logs: <fetch_logs result>, metrics: <fetch_metrics result>, "
+        "deploys: <fetch_deploys result>, service?: str}. Pass the whole "
+        "upstream result via ${node.result} — do not pre-extract fields. "
+        "Returns {service, likely_cause, confidence: 'low'|'medium'|'high', "
+        "evidence: [str], recommended_action}."
+    )
+)
 def summarize_findings(args: Dict[str, Any]) -> Dict[str, Any]:
     """Correlate the three fetch results into a structured incident summary.
 
@@ -231,67 +266,9 @@ def summarize_findings(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
-# Engine-owned tool descriptions surfaced to the LLM via the system
-# addendum. Kept here next to the handlers so they can't drift apart.
-TOOL_DESCRIPTIONS: Dict[str, str] = {
-    "fetch_logs": (
-        "Fetch recent log lines for a service. Args: "
-        "{service: str, window_minutes?: int = 30}. "
-        "Returns {service, window_minutes, lines: [str], errors: int, warnings: int}."
-    ),
-    "fetch_metrics": (
-        "Fetch p99 CPU, memory, and latency metrics for a service. Args: "
-        "{service: str, window_minutes?: int = 30}. "
-        "Returns {service, window_minutes, cpu_p99, memory_p99, "
-        "latency_p99_ms, saturation: 'moderate'|'high'}."
-    ),
-    "fetch_deploys": (
-        "Fetch recent deploys for a service. Args: "
-        "{service: str, lookback_hours?: int = 24}. "
-        "Returns {service, lookback_hours, "
-        "deploys: [{id, actor, summary, minutes_ago}]}."
-    ),
-    "summarize_findings": (
-        "Correlate prior fetch results into a structured incident summary. "
-        "Args: {logs: <fetch_logs result>, metrics: <fetch_metrics result>, "
-        "deploys: <fetch_deploys result>, service?: str}. Pass the whole "
-        "upstream result via ${node.result} — do not pre-extract fields. "
-        "Returns {service, likely_cause, confidence: 'low'|'medium'|'high', "
-        "evidence: [str], recommended_action}."
-    ),
-}
-
-
-def register_with_engine() -> None:
-    """Register all incident-triage tools with the workflow registry.
-
-    Idempotent against duplicate calls / re-imports of the module
-    (skips entries already present), but does **not** swap out an
-    existing handler for an updated one — a same-process hot reload
-    will keep the previously-registered function objects until the
-    worker is restarted.
-    """
-    from azure_functions_agents.workflows import registry
-
-    handlers = {
-        "fetch_logs": fetch_logs,
-        "fetch_metrics": fetch_metrics,
-        "fetch_deploys": fetch_deploys,
-        "summarize_findings": summarize_findings,
-    }
-    for name, handler in handlers.items():
-        if registry.get_entry(name) is not None:
-            continue
-        registry.register_workflow_tool(
-            name, TOOL_DESCRIPTIONS[name], handler, public=True
-        )
-
-
 __all__ = [
-    "TOOL_DESCRIPTIONS",
     "fetch_deploys",
     "fetch_logs",
     "fetch_metrics",
-    "register_with_engine",
     "summarize_findings",
 ]

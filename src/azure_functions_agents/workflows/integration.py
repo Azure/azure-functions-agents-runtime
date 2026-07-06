@@ -10,19 +10,21 @@ author having to copy-paste prose into every agent file.
 
 ``build_workflow_integration`` is the one call the app factory makes
 to turn on workflows for the main agent: it registers the Durable
-engine on the app, computes the effective tool allowlist for this app
-from the optional ``workflows.allowed_tools`` frontmatter list, stashes
-it on the workflows registry for ``start_workflow`` to read, and
-returns the tool list + addendum the chat handlers should thread
-through to the agent loop.
+engine on the app, registers the discovered ``@workflow_tool`` inventory,
+applies the optional ``workflows.exclude`` filter, stashes the effective
+tool set on the workflows registry for ``start_workflow`` to read, and
+returns the tool list + addendum the chat handlers should thread through
+to the agent loop.
 """
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 import azure.functions as func
 
+from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents._logger import logger
 
 from . import registry
@@ -41,7 +43,7 @@ from .tools import build_workflow_tools
 # here because a frontmatter declaration would just be a parallel
 # assertion that can drift from the truth.
 _ALLOWED_WORKFLOWS_KEYS: frozenset[str] = frozenset({
-    "enabled", "allowed_tools",
+    "enabled", "exclude",
 })
 
 
@@ -126,9 +128,9 @@ def _validate_workflows_block(metadata: dict[str, Any]) -> None:
     - non-boolean ``enabled`` (``enabled: "false"`` is a YAML
       foot-gun — without this guard it would parse as truthy and
       enable workflows).
-    - malformed ``allowed_tools`` (e.g. a string instead of a list,
-      or a list with an empty string). Validated here so a
-      ``allowed_tools`` typo surfaces even when the agent currently
+    - malformed ``exclude`` (e.g. a string instead of a list,
+      or a list with an empty string). Validated here so an
+      ``exclude`` typo surfaces even when the agent currently
       has ``enabled: false``.
 
     Returning silently is the success path; raises ``RuntimeError``
@@ -174,13 +176,13 @@ def _validate_workflows_block(metadata: dict[str, Any]) -> None:
             "workflows.enabled must be a boolean (true/false); got "
             f"{block['enabled']!r}"
         )
-    if "allowed_tools" in block:
-        raw = block["allowed_tools"]
+    if "exclude" in block:
+        raw = block["exclude"]
         if not isinstance(raw, list) or not all(
             isinstance(x, str) and x for x in raw
         ):
             raise RuntimeError(
-                "workflows.allowed_tools must be a list of non-empty strings; "
+                "workflows.exclude must be a list of non-empty strings; "
                 f"got {raw!r}"
             )
 
@@ -193,55 +195,45 @@ def _workflows_enabled(metadata: dict[str, Any]) -> bool:
     return bool(block.get("enabled", False))
 
 
-def _read_allowed_tools(metadata: dict[str, Any]) -> list[str] | None:
-    """Extract ``workflows.allowed_tools`` from frontmatter.
+def _register_workflow_tools(workflow_tools: Sequence[WorkflowTool]) -> frozenset[str]:
+    effective: set[str] = set()
+    for workflow_tool in workflow_tools:
+        if workflow_tool.handler is None:
+            logger.warning(
+                "Skipping workflow tool %r: declaration-only tools are not supported",
+                workflow_tool.name,
+            )
+            continue
+        try:
+            registry.register_workflow_tool(
+                workflow_tool.name,
+                workflow_tool.description,
+                workflow_tool.handler,
+                public=workflow_tool.public,
+            )
+        except ValueError as exc:
+            logger.warning("Skipping workflow tool %r: %s", workflow_tool.name, exc)
+            continue
+        if workflow_tool.public:
+            effective.add(workflow_tool.name)
+    return frozenset(effective)
 
-    Returns ``None`` when the field is omitted (caller falls back to
-    ``registry.public_tool_names()``). Shape (``list[non-empty str]``)
-    has already been enforced by :func:`_validate_workflows_block`,
-    so this is now just a safe accessor; the registry lookup
-    happens later in :func:`_compute_effective_allowlist`.
-    """
+
+def _apply_workflow_exclude(
+    workflow_tools: Sequence[WorkflowTool],
+    metadata: dict[str, Any],
+) -> tuple[WorkflowTool, ...]:
     block = metadata.get("workflows") or {}
-    if "allowed_tools" not in block:
-        return None
-    return list(block["allowed_tools"])
-
-
-def _compute_effective_allowlist(
-    requested: list[str] | None,
-) -> frozenset[str]:
-    """Validate the requested allowlist against the registry.
-
-    With no frontmatter override, the effective set is every *public*
-    registered tool — internal tools like ``__echo`` stay out of the
-    agent's reach by default. With an override, every name must be a
-    registered tool (public or not — explicit opt-in) and must not
-    collide with a reserved workflow-management tool.
-    """
-    if requested is None:
-        return registry.public_tool_names()
-    if not requested:
-        # Explicit empty list: agent has workflows.enabled but is
-        # allowed to call zero workflow tools. Allowed (the agent could
-        # still author wait-only plans) but worth a warning since it's
-        # almost always a typo.
-        logger.warning("workflows.allowed_tools is an empty list — no tool tasks will validate.")
-        return frozenset()
-    reserved = [n for n in requested if n in registry.RESERVED_TOOL_NAMES]
-    if reserved:
-        raise RuntimeError(
-            "workflows.allowed_tools cannot include workflow-management "
-            f"tools: {sorted(reserved)}"
-        )
-    unknown = [n for n in requested if registry.get_entry(n) is None]
+    raw = block.get("exclude", [])
+    excluded = set(raw)
+    known = {tool.name for tool in workflow_tools}
+    unknown = excluded - known
     if unknown:
-        raise RuntimeError(
-            "workflows.allowed_tools contains unknown tool name(s): "
-            f"{sorted(unknown)}. Registered tools: "
-            f"{sorted(registry.all_registered_names())}"
+        logger.warning(
+            "workflows.exclude contains unknown workflow tool name(s): %s",
+            sorted(unknown),
         )
-    return frozenset(requested)
+    return tuple(tool for tool in workflow_tools if tool.name not in excluded)
 
 
 def _build_addendum(allowed_tools: frozenset[str]) -> str:
@@ -274,7 +266,9 @@ def _build_addendum(allowed_tools: frozenset[str]) -> str:
 
 
 def build_workflow_integration(
-    app: func.FunctionApp, metadata: dict[str, Any]
+    app: func.FunctionApp,
+    metadata: dict[str, Any],
+    workflow_tools: Sequence[WorkflowTool] | None = None,
 ) -> tuple[list[Any], str | None]:
     """Enable workflows for the app if the main agent opted in.
 
@@ -296,10 +290,9 @@ def build_workflow_integration(
         # so this function is safe to call multiple times in test
         # scenarios that toggle metadata.
         return [], None
-
     register_workflows(app)
-    requested = _read_allowed_tools(metadata)
-    effective = _compute_effective_allowlist(requested)
+    filtered_workflow_tools = _apply_workflow_exclude(tuple(workflow_tools or ()), metadata)
+    effective = _register_workflow_tools(filtered_workflow_tools)
     registry.set_app_config(effective)
     logger.info(
         "workflows enabled for main agent: %d tool(s) allowed (%s)",

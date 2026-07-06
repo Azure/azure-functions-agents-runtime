@@ -49,6 +49,7 @@ $ProgressPreference = "SilentlyContinue"
 
 $SrcDir = Resolve-Path (Join-Path $PSScriptRoot "..\src")
 $DtsDashboardUrl = "http://localhost:8082"
+$AgentUrl = "$($BaseUrl.TrimEnd('/'))/agents/main"
 
 function Write-Step {
     param([string]$Title, [string]$Body)
@@ -192,15 +193,15 @@ if ($activeBackend -eq "dts") {
 }
 
 try {
-    $rootResp = Invoke-WebRequest -Uri "$BaseUrl/" -Method Get -TimeoutSec 4 -UseBasicParsing
+    $rootResp = Invoke-WebRequest -Uri "$AgentUrl/" -Method Get -TimeoutSec 4 -UseBasicParsing
     if ($rootResp.StatusCode -eq 200) {
-        Write-Ok "Functions host serving the chat UI at $BaseUrl/"
+        Write-Ok "Functions host serving the chat UI at $AgentUrl/"
     } else {
-        Write-Fail "Unexpected status from $BaseUrl/ : $($rootResp.StatusCode)"
+        Write-Fail "Unexpected status from $AgentUrl/ : $($rootResp.StatusCode)"
         exit 1
     }
 } catch {
-    Write-Fail "Cannot reach the Functions host at $BaseUrl/"
+    Write-Fail "Cannot reach the Functions host at $AgentUrl/"
     Write-Note "Start it from the sample's src/ directory with:  func start"
     Write-Note "Make sure your venv is active in the same shell so the worker"
     Write-Note "picks up azure-functions-durable. (See sample README.)"
@@ -208,9 +209,9 @@ try {
 }
 
 try {
-    $probe = Invoke-WebRequest -Uri "$BaseUrl/agent/workflows" -Method Get -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop
+    $probe = Invoke-WebRequest -Uri "$AgentUrl/workflows" -Method Get -TimeoutSec 4 -UseBasicParsing -ErrorAction Stop
     if ($probe.StatusCode -eq 200) {
-        Write-Ok "Workflow tools are wired (GET /agent/workflows -> 200)"
+        Write-Ok "Workflow tools are wired (GET /agents/main/workflows -> 200)"
     } else {
         Write-Fail "Workflow capability probe returned status $($probe.StatusCode)"
         Write-Note "Expected 200. If you get 404/501, workflows.enabled is not set in main.agent.md."
@@ -235,18 +236,18 @@ Pause-If-Interactive -Prompt "Press Enter to start narration"
 
 Write-Step -Title (Next-StepLabel "open the chat UI") -Body @"
 The chat UI is served by the Functions host itself at:
-  $BaseUrl/
+  $AgentUrl/
 
 It auto-detects whether the agent has workflow tools enabled. When the
-session is visible it polls GET /agent/workflows on a 2–5s cadence and
+session is visible it polls GET /agents/main/workflows on a 2–5s cadence and
 renders a per-workflow live-progress card inline with the chat thread.
 "@
 if (-not $NoBrowser) {
     try {
-        Start-Process "$BaseUrl/" | Out-Null
+        Start-Process "$AgentUrl/" | Out-Null
         Write-Note "Opened in your default browser."
     } catch {
-        Write-Note "Could not auto-open the browser. Open $BaseUrl/ manually."
+        Write-Note "Could not auto-open the browser. Open $AgentUrl/ manually."
     }
 }
 Pause-If-Interactive

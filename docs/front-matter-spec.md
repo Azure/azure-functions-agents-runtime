@@ -25,6 +25,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
+- Can enable Dynamic Workflows on `main.agent.md`
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
@@ -45,7 +46,7 @@ For capabilities (MCP, skills, tools):
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
 | **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
-| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `input_schema`, `response_schema`, `response_example`, `metadata` |
+| **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
 ---
@@ -86,6 +87,7 @@ YAML front matter at the top of each agent file.
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
+- `workflows` — Object to enable Dynamic Workflows on `main.agent.md`
 - `input_schema` — Object, JSON Schema for HTTP request validation
 - `response_schema` — Object, JSON Schema for response validation
 - `response_example` — String, example response for documentation
@@ -119,6 +121,7 @@ Fields are organized into categories based on how they can be used:
 - `mcp` — MCP servers discovered from `mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
+- `workflows` — Dynamic Workflow enablement and workflow-tool excludes (`main.agent.md` only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
   - `dynamic_sessions_code_interpreter` — ACA Dynamic Sessions code interpreter
 
@@ -448,6 +451,25 @@ tools: false
 ```
 
 **Note:** Agents inherit all globally available custom tools by default. Use `exclude` to filter out unwanted tools.
+
+---
+
+#### `workflows`
+- **Type:** `object`
+- **Location:** Agent front matter (`main.agent.md` only in v1)
+- **Description:** Enables Dynamic Workflows and optionally excludes discovered workflow tools from this agent.
+
+```yaml
+workflows:
+  enabled: true
+  exclude: ["expensive_diagnostics"]  # Optional
+```
+
+`workflows.enabled: true` injects workflow-management tools (`start_workflow`, `get_workflow_status`, `list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public `@workflow_tool` handlers discovered from `tools/*.py` as Durable Activity targets. The Activity runner calls workflow handlers as `handler(args)`, so v1 workflow tools must be synchronous, accept one dictionary argument, and return JSON-serializable values.
+
+Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
+
+`workflows.exclude` filters only workflow Activity targets; it does not affect normal tools. Conversely, `tools.exclude` filters normal MAF tools and does not hide workflow tools. In v1, setting `workflows.enabled: true` outside `main.agent.md` logs a warning and is ignored.
 
 ---
 

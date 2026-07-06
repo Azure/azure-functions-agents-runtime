@@ -336,6 +336,26 @@ def reverse_string(text: str) -> str:
 
 `@tool` is re-exported from `agent_framework`. Functions can be sync or async; types in the signature feed MAF's automatic JSON-Schema generation. Tools that need richer schemas can be declared with `agent_framework.FunctionTool` directly.
 
+Dynamic Workflow tools live in the same `tools/` directory but must opt in
+explicitly with `@workflow_tool` so they can run safely as Durable
+Function activities:
+
+```python
+from typing import Any
+
+from azure_functions_agents import workflow_tool
+
+
+@workflow_tool(description="Fetch recent log lines for a service.")
+def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
+    return {"service": args["service"], "lines": ["..."]}
+```
+
+Use both `@tool` and `@workflow_tool` when the same callable should be
+available both directly in chat and inside workflows. See
+[`docs/workflows.md`](docs/workflows.md) for the Activity handler
+contract and `workflows.exclude`.
+
 ## Built-in Endpoint Routes
 
 Built-in endpoints are explicit per agent. The filename stem determines `{slug}`; for example, `main.agent.md` uses `main` and `daily_azure_report.agent.md` uses `daily_azure_report`.

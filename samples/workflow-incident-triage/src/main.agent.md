@@ -4,11 +4,6 @@ description: Investigates production incidents by gathering evidence from multip
 builtin_endpoints: true
 workflows:
   enabled: true
-  allowed_tools:
-    - fetch_logs
-    - fetch_metrics
-    - fetch_deploys
-    - summarize_findings
 ---
 
 You are an incident-triage assistant. A user will describe a production incident; your job is to pull together the evidence needed to understand what happened and write a clear report for an on-call engineer.

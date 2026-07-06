@@ -3,17 +3,16 @@
 Neutral home for the registry of tools the workflow orchestrator can
 dispatch via its activity. Sits between :mod:`.engine` (which looks up
 handlers at activity-execution time) and :mod:`.integration` (which
-turns frontmatter into the effective allowlist + addendum) so neither
+turns discovered workflow tools into the effective tool set + addendum) so neither
 has to import the other.
 
 Three concepts kept distinct:
 
 - **Registered**: known to the engine, dispatchable. Name → handler +
   description + ``public`` flag.
-- **Public**: included in the default allowlist when a frontmatter
-  ``workflows.allowed_tools`` is not specified. Internal helpers like
-  ``__echo`` are registered with ``public=False`` so they don't leak
-  into agent-visible plans by accident.
+- **Public**: included in the effective workflow tool set unless filtered.
+  Internal helpers like ``__echo`` are registered with ``public=False`` so
+  they don't leak into agent-visible plans by accident.
 - **Effective allowlist**: the set the running app actually permits in
   plans. Computed by :mod:`.integration` per-app and stashed via
   :func:`set_app_config`; read by ``start_workflow`` when validating

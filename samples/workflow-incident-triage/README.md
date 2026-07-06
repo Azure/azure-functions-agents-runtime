@@ -147,10 +147,13 @@ Restart `func start` after any swap so the host reloads `host.json`.
 
 ## Workflow-safe tools registered by this sample
 
-`function_app.py` registers four synthetic-but-realistic tools with the
-workflows engine before `create_function_app()` runs. The agent's
-`main.agent.md` allow-lists exactly these four, so they are the only
-tools the LLM may put on a workflow node:
+`src/tools/incident_tools.py` defines four synthetic-but-realistic
+handlers decorated with `@workflow_tool`. `create_function_app()`
+discovers them from the normal `tools/` directory and registers them with
+the workflows engine when `main.agent.md` sets `workflows.enabled: true`.
+They are workflow-only tools because the sample does not also decorate
+them with `@tool` and does not expose plain public normal-tool functions
+from that module:
 
 | Tool | Args | Result shape |
 |---|---|---|

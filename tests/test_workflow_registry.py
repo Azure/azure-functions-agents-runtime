@@ -6,10 +6,9 @@ Exercises:
   async rejection, public/private flag.
 - ``validate_plan(allowed_tools=...)`` honoring the explicit allowlist
   and isolating it from the module-level fallback used by older tests.
-- ``build_workflow_integration`` reading ``workflows.allowed_tools``
-  from frontmatter, rejecting unknown / reserved entries, defaulting
-  to the public-tools set, and emitting an addendum that lists the
-  effective allowlist.
+- ``build_workflow_integration`` registering discovered workflow tools,
+  honoring ``workflows.exclude``, and emitting an addendum that lists the
+  effective workflow tool set.
 """
 
 from __future__ import annotations
@@ -19,6 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.workflows import context, engine, integration, registry, schema, tools
 
 
@@ -230,18 +230,31 @@ class _FakeApp:
         self.blueprints.append(bp)
 
 
-def _enable_metadata(allowed=None):
+def _enable_metadata(exclude=None):
     block = {"enabled": True}
-    if allowed is not None:
-        block["allowed_tools"] = allowed
+    if exclude is not None:
+        block["exclude"] = exclude
     return {"workflows": block}
 
 
-def test_integration_default_allowlist_is_public_tools_only():
-    registry.register_workflow_tool("alpha", "alpha desc", _noop)
-    registry.register_workflow_tool("beta", "beta desc", _noop, public=False)
+def _workflow_tool(
+    name: str,
+    description: str,
+    handler=_noop,
+    *,
+    public: bool = True,
+) -> WorkflowTool:
+    return WorkflowTool(name, description, handler, public=public)
+
+
+def test_integration_default_workflow_tools_are_public_tools_only():
     tools, addendum = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata()
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[
+            _workflow_tool("alpha", "alpha desc"),
+            _workflow_tool("beta", "beta desc", public=False),
+        ],
     )
     assert tools  # 5 management tools registered
     assert "alpha" in addendum
@@ -253,39 +266,30 @@ def test_integration_default_allowlist_is_public_tools_only():
     assert "alpha" in effective and "beta" not in effective
 
 
-def test_integration_explicit_allowlist_admits_private_tools():
-    registry.register_workflow_tool("alpha", "alpha desc", _noop, public=False)
+def test_integration_exclude_filters_public_workflow_tools():
     _, addendum = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata(allowed=["alpha"])
+        _FakeApp(),
+        _enable_metadata(exclude=["beta"]),
+        workflow_tools=[
+            _workflow_tool("alpha", "alpha desc"),
+            _workflow_tool("beta", "beta desc"),
+        ],
     )
     assert "alpha" in addendum
+    assert "beta" not in addendum
     assert registry.get_app_config() == frozenset({"alpha"})
 
 
-def test_integration_unknown_tool_in_allowlist_fails_at_app_start():
-    with pytest.raises(RuntimeError, match="unknown tool name"):
-        integration.build_workflow_integration(
-            _FakeApp(), _enable_metadata(allowed=["does_not_exist"])
-        )
-
-
-def test_integration_reserved_tool_in_allowlist_fails_at_app_start():
-    with pytest.raises(RuntimeError, match="cannot include workflow-management"):
-        integration.build_workflow_integration(
-            _FakeApp(), _enable_metadata(allowed=["start_workflow"])
-        )
-
-
-def test_integration_malformed_allowlist_fails_at_app_start():
+def test_integration_malformed_exclude_fails_at_app_start():
     with pytest.raises(RuntimeError, match="must be a list of non-empty strings"):
         integration.build_workflow_integration(
-            _FakeApp(), {"workflows": {"enabled": True, "allowed_tools": "not-a-list"}}
+            _FakeApp(), {"workflows": {"enabled": True, "exclude": "not-a-list"}}
         )
 
 
-def test_integration_empty_allowlist_yields_empty_effective_set():
+def test_integration_no_workflow_tools_yields_empty_effective_set():
     tools, addendum = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata(allowed=[])
+        _FakeApp(), _enable_metadata()
     )
     assert tools  # management tools still come back
     assert "No tool tasks are currently allowed" in addendum
@@ -303,13 +307,15 @@ def test_integration_disabled_returns_empty_and_does_not_set_config():
 
 
 def test_addendum_includes_per_tool_descriptions():
-    registry.register_workflow_tool(
-        "demo_evidence_tool",
-        "Sample tool for the addendum-rendering test.",
-        _noop,
-    )
     _, addendum = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata(allowed=["demo_evidence_tool"])
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[
+            _workflow_tool(
+                "demo_evidence_tool",
+                "Sample tool for the addendum-rendering test.",
+            )
+        ],
     )
     assert "## Long-running work: workflows" in addendum
     assert "### Available workflow tools" in addendum
@@ -326,13 +332,15 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     input box from re-enabling — surfacing as the demo bug that motivated
     this guard.
     """
-    registry.register_workflow_tool(
-        "demo_evidence_tool",
-        "Sample tool for the no-poll regression test.",
-        _noop,
-    )
     tools, addendum = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata(allowed=["demo_evidence_tool"])
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[
+            _workflow_tool(
+                "demo_evidence_tool",
+                "Sample tool for the no-poll regression test.",
+            )
+        ],
     )
     # Addendum contract: explicit fire-and-forget framing + explicit
     # negative on get_workflow_status auto-polling.
@@ -365,13 +373,15 @@ def test_addendum_documents_workflow_notification_contract():
     user input and lets a future UI parse the wrapper for richer
     rendering without changing the agent contract.
     """
-    registry.register_workflow_tool(
-        "demo_evidence_tool",
-        "Sample tool for the notification-contract regression test.",
-        _noop,
-    )
     tools, addendum = integration.build_workflow_integration(
-        _FakeApp(), _enable_metadata(allowed=["demo_evidence_tool"])
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[
+            _workflow_tool(
+                "demo_evidence_tool",
+                "Sample tool for the notification-contract regression test.",
+            )
+        ],
     )
     # Addendum must name the envelope shape verbatim (so the LLM sees
     # the exact tags it will receive) and explain the one-shot

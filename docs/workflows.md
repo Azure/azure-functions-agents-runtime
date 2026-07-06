@@ -135,13 +135,10 @@ name: Incident Triage Assistant
 description: ...
 workflows:
   enabled: true
-  # Optional allowlist of tools a workflow may call. Defaults to every
-  # workflow-safe tool the agent can already use. Workflow-management
-  # tools (start_workflow, get_workflow_status, list_workflows,
-  # cancel_workflow, terminate_workflow) are always excluded.
-  allowed_tools:
-    - fetch_url
-    - summarize
+  # Optional deny-list of workflow tools to withhold from this agent.
+  # Defaults to every public @workflow_tool discovered from tools/.
+  exclude:
+    - expensive_diagnostics
   # Future v2 knobs (not honored by v1):
   # max_nodes: 100
   # allowed_sub_agents: []
@@ -166,6 +163,50 @@ agent markdown stays focused on the domain.
 > that set the flag get a startup warning and the tools are not injected.
 > A future release will lift this constraint.
 
+### Workflow tool authoring
+
+Workflow tasks run later inside Durable Function activities, so they use
+an explicit opt-in marker separate from normal MAF tools. Put workflow
+handlers in the same `tools/` directory as normal tools and decorate each
+Durable-activity-safe handler with `@workflow_tool`:
+
+```python
+# tools/incident_tools.py
+from typing import Any
+
+from azure_functions_agents import workflow_tool
+
+
+@workflow_tool(description="Fetch recent log lines for a service.")
+def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
+    service = args["service"]
+    return {"service": service, "lines": ["..."]}
+```
+
+The Activity runner calls the handler as `handler(args)`. v1 handlers
+must be synchronous, accept a single dictionary argument, and return a
+JSON-serializable value. Async handlers, reserved workflow-management
+names, and duplicate workflow names are rejected or skipped during
+startup.
+
+Normal tools keep their existing behavior: a plain public function or an
+`@tool`/`FunctionTool` in `tools/*.py` becomes a normal MAF tool. Use both
+decorators when one callable should be available both directly in chat
+and inside workflows:
+
+```python
+from azure_functions_agents import tool, workflow_tool
+
+
+@tool
+@workflow_tool(description="Summarize evidence collected by a workflow.")
+def summarize(args: dict[str, object]) -> dict[str, object]:
+    return {"summary": "..."}
+```
+
+Use `_`-prefixed helper functions for code that should be neither a
+normal tool nor a workflow tool.
+
 ## Tools
 
 Five tools are added to the agent's schema when `workflows.enabled: true`:
@@ -186,7 +227,7 @@ validation.
 
 A workflow plan is a list of tasks with `depends_on` edges. Task types:
 
-- **`tool`** — call a `workflow_safe` tool by name with args.
+- **`tool`** — call a discovered `@workflow_tool` by name with args.
 - **`wait`** — durable timer. Accepts `duration` (ISO-8601, e.g. `PT30S`)
   or `until` (absolute ISO-8601 timestamp).
 
@@ -371,7 +412,7 @@ existence cannot be probed by guessing IDs across sessions).
 v1 includes:
 
 - five built-in workflow tools;
-- DAG execution of workflow-safe tool calls and wait tasks;
+- DAG execution of `@workflow_tool` calls and wait tasks;
 - fan-out/fan-in via `depends_on`;
 - result templating with `${node_id.result}` and dotted paths;
 - cooperative cancel and hard terminate;
@@ -381,7 +422,8 @@ v1 includes:
 - fixed v1 guardrails for plan size, parallelism, wait duration, active
   workflows per session, and status-list result count.
 
-v2 follow-up work includes sub-orchestrations/sub-agent tasks, per-agent
-registry isolation, configurable caps, retry and timeout policies,
-HMAC-backed workflow ownership, blob-offloaded large outputs, an MCP Tasks
-bridge, richer error taxonomy, and storage hygiene.
+v2 follow-up work includes enabling workflows for non-`main.agent.md`
+agents, sub-orchestrations/sub-agent tasks, per-agent registry isolation,
+configurable caps, retry and timeout policies, HMAC-backed workflow
+ownership, blob-offloaded large outputs, an MCP Tasks bridge, richer error
+taxonomy, and storage hygiene.
