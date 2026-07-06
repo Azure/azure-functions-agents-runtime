@@ -93,6 +93,12 @@ def _index_path() -> Path:
     return Path(__file__).resolve().parent.parent / "public" / "index.html"
 
 
+def _source_marker(source_file: str | None) -> str:
+    if not source_file:
+        return "<unknown>"
+    return Path(str(source_file)).name
+
+
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
@@ -227,7 +233,11 @@ def _register_http_chat(
             return _json_error(str(exc), status_code=400)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
-            logger.error("Built-in chat API error for '%s': %s", resolved.name, error_msg)
+            logger.error(
+                "Built-in chat API error: source_file=%s error=%s",
+                _source_marker(resolved.source_file),
+                error_msg,
+            )
             return _json_error(error_msg)
 
     app.function_name(name=function_name)(chat)
@@ -260,7 +270,11 @@ def _register_http_chat_stream(
             return _sse_error_response(str(exc), status_code=400)
         except Exception as exc:
             error_msg = _format_exception_message(exc)
-            logger.error("Built-in chat stream error for '%s': %s", resolved.name, error_msg)
+            logger.error(
+                "Built-in chat stream error: source_file=%s error=%s",
+                _source_marker(resolved.source_file),
+                error_msg,
+            )
             return _sse_error_response(error_msg, status_code=500)
 
     app.function_name(name=function_name)(chat_stream)
@@ -304,7 +318,11 @@ def _register_mcp_endpoint(
             )
         except Exception as exc:
             error_msg = _format_exception_message(exc)
-            logger.error("Built-in MCP error for '%s': %s", resolved.name, error_msg)
+            logger.error(
+                "Built-in MCP error: source_file=%s error=%s",
+                _source_marker(resolved.source_file),
+                error_msg,
+            )
             return json.dumps({"error": error_msg})
 
     app.function_name(name=function_name)(mcp_agent_chat)

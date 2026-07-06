@@ -7,6 +7,7 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
+from pathlib import Path
 from typing import Any, cast
 
 import azure.functions as func
@@ -163,6 +164,12 @@ def _new_session_id() -> str:
     return uuid.uuid4().hex
 
 
+def _source_marker(source_file: str | None) -> str:
+    if not source_file:
+        return "<unknown>"
+    return Path(str(source_file)).name
+
+
 def make_agent_handler(
     resolved: ResolvedAgent,
     trigger_type: str,
@@ -176,7 +183,11 @@ def make_agent_handler(
     # the parameter unannotated tells the worker to skip that type check, so
     # this single handler can be reused across all non-HTTP trigger types.
     async def _handler(trigger_data) -> None:  # type: ignore[no-untyped-def]
-        logger.info("Agent '%s' triggered", resolved.name)
+        logger.info(
+            "Agent triggered: trigger_type=%s source_file=%s",
+            trigger_type,
+            _source_marker(resolved.source_file),
+        )
 
         try:
             session_id = _new_session_id()
@@ -200,8 +211,8 @@ def make_agent_handler(
 
             if _should_log(resolved):
                 logger.info(
-                    "Agent '%s' response: %s",
-                    resolved.name,
+                    "Agent response: source_file=%s payload=%s",
+                    _source_marker(resolved.source_file),
                     json.dumps(
                         {
                             "session_id": result.session_id,
@@ -213,7 +224,11 @@ def make_agent_handler(
                     ),
                 )
         except Exception as exc:
-            logger.exception("Agent '%s' failed: %s", resolved.name, exc)
+            logger.exception(
+                "Agent execution failed: source_file=%s error=%s",
+                _source_marker(resolved.source_file),
+                exc,
+            )
             raise
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
@@ -227,7 +242,10 @@ def make_http_agent_handler(
     """Create an async handler for an HTTP-triggered agent."""
 
     async def _handler(req: Request) -> Response:
-        logger.info("HTTP agent '%s' triggered", resolved.name)
+        logger.info(
+            "HTTP agent triggered: source_file=%s",
+            _source_marker(resolved.source_file),
+        )
 
         try:
             session_id = _request_header_value(req, "x-ms-session-id") or _new_session_id()
@@ -243,8 +261,8 @@ def make_http_agent_handler(
             if validation_error is not None:
                 if validation_error.status_code == 500:
                     logger.error(
-                        "HTTP agent '%s' has invalid input schema: %s",
-                        resolved.name,
+                        "HTTP agent has invalid input schema: source_file=%s error=%s",
+                        _source_marker(resolved.source_file),
                         validation_error.body.decode("utf-8"),
                     )
                 validation_error.headers["x-ms-session-id"] = session_id
@@ -269,8 +287,8 @@ def make_http_agent_handler(
 
             if _should_log(resolved):
                 logger.info(
-                    "HTTP agent '%s' response: %s",
-                    resolved.name,
+                    "HTTP agent response: source_file=%s payload=%s",
+                    _source_marker(resolved.source_file),
                     json.dumps(
                         {
                             "session_id": result.session_id,
@@ -287,8 +305,8 @@ def make_http_agent_handler(
                     parsed = json.loads(extracted)
                 except json.JSONDecodeError as exc:
                     logger.warning(
-                        "HTTP agent '%s' returned invalid JSON: %s",
-                        resolved.name,
+                        "HTTP agent returned invalid JSON: source_file=%s error=%s",
+                        _source_marker(resolved.source_file),
                         exc,
                     )
                     return Response(
@@ -310,8 +328,8 @@ def make_http_agent_handler(
                         )
                     except jsonschema.ValidationError as exc:
                         logger.warning(
-                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
-                            resolved.name,
+                            "HTTP agent returned JSON that failed schema validation: source_file=%s error=%s",
+                            _source_marker(resolved.source_file),
                             exc,
                         )
                         return Response(
@@ -339,7 +357,11 @@ def make_http_agent_handler(
                 headers={"x-ms-session-id": session_id},
             )
         except Exception as exc:
-            logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
+            logger.exception(
+                "HTTP agent execution failed: source_file=%s error=%s",
+                _source_marker(resolved.source_file),
+                exc,
+            )
             return Response(
                 content=json.dumps({"error": str(exc)}),
                 status_code=500,

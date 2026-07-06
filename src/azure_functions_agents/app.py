@@ -27,6 +27,12 @@ def _tool_name(tool: object) -> str:
     return str(name)
 
 
+def _source_marker(source_file: str | None) -> str:
+    if not source_file:
+        return "<unknown>"
+    return Path(str(source_file)).name
+
+
 def _serialize_capabilities_for_log(
     *,
     user_tools: list[Any] | None,
@@ -124,9 +130,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             skill_name_by_path=skill_name_by_path,
         )
         logger.info(
-            "agent_capabilities_registered: agent=%s source_file=%s user_tools=%s mcp_servers=%s skills=%s",
-            resolved.name,
-            resolved.source_file,
+            "agent_capabilities_registered: source_file=%s user_tools=%s mcp_servers=%s skills=%s",
+            _source_marker(resolved.source_file),
             capability_names["user_tools"],
             capability_names["mcp_servers"],
             capability_names["skills"],
@@ -151,8 +156,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
-            "name": resolved.name,
-            "source_file": resolved.source_file,
+            "source_file": _source_marker(resolved.source_file),
             "registered_capabilities": capability_names,
         }
         if resolved.trigger:

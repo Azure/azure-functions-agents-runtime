@@ -103,8 +103,8 @@ def register_agent(
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
         logger.warning(
-            "Skipping '%s': resolved agent has no trigger",
-            resolved.name,
+            "Skipping registration: resolved agent has no trigger (source_file=%s)",
+            resolved.source_file,
         )
         return
 
@@ -123,8 +123,8 @@ def register_agent(
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
         logger.info(
-            "Registered trigger: agent=%s function=%s trigger_type=http_trigger route=%s methods=%s",
-            resolved.name,
+            "Registered trigger: source_file=%s function=%s trigger_type=http_trigger route=%s methods=%s",
+            resolved.source_file,
             function_name,
             trigger_params.get("route"),
             trigger_params.get("methods", ["POST"]),
@@ -142,8 +142,8 @@ def register_agent(
         trigger_type,
     )
     logger.info(
-        "Registered trigger: agent=%s function=%s trigger_type=%s",
-        resolved.name,
+        "Registered trigger: source_file=%s function=%s trigger_type=%s",
+        resolved.source_file,
         function_name,
         trigger_type,
     )
