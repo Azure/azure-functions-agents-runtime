@@ -16,12 +16,15 @@ The app's `function_app.py` stays two lines — you enable telemetry through con
 **Minimum (path of least resistance):**
 
 1. `APPLICATIONINSIGHTS_CONNECTION_STRING` — already present on most function apps.
-2. The worker OpenTelemetry exporter package `azure-monitor-opentelemetry`. The runtime configures
-   it **automatically**, so no code is needed. (If it isn't installed, the runtime falls back to the
-   Functions host exporter — see the optional step below.)
+2. Install the worker exporter extra: `pip install azurefunctions-agents-runtime[monitor]`. The
+   runtime configures Azure Monitor **automatically** when that extra is installed and no
+   OpenTelemetry provider is already active.
 
-That's it — the runtime's `agent.run` / `dynamic_session.execute` spans and metrics flow to
-Application Insights.
+That's it — when a real OpenTelemetry provider is active, the runtime's `agent.run` /
+`dynamic_session.execute` spans and metrics flow to Application Insights. Without the `[monitor]`
+extra, the runtime's worker spans are not exported unless another OpenTelemetry provider is already
+active, and if a connection string is set in that state the runtime logs a warning telling you to
+install `azurefunctions-agents-runtime[monitor]`.
 
 **Optional — unified host + worker correlation:**
 
@@ -34,18 +37,10 @@ The runtime now auto-detects an already-configured OpenTelemetry provider and sk
 Monitor setup, so the worker path will not double-export — though it is still unnecessary when the
 runtime is already configuring the exporter.
 
-**Optional — tune behavior in `agents.config.yaml`:**
-
-```yaml
-observability:
-  enabled: true                  # default: on when the App Insights connection string is set
-  capture_sensitive_data: false  # default: off — see "Sensitive data" below
-```
-
 The runtime bootstraps everything from `create_function_app()`
 (`_observability.configure_observability()`): it enables Microsoft Agent Framework (MAF) `gen_ai`
-instrumentation and, when the `azure-monitor-opentelemetry` package is installed, the Azure Monitor
-exporter. When disabled or unconfigured it is a no-op.
+instrumentation and, when the `[monitor]` extra is installed and no OpenTelemetry provider is
+already active, the Azure Monitor exporter. When no OpenTelemetry provider is active it is a no-op.
 
 ## Where the runtime's output shows up (traces, not logs)
 
@@ -116,8 +111,8 @@ spans and the sandbox span together.
 | `af.agent.tool_error_count` | Tool calls that failed — includes a "successful" call whose result carried an error or non-empty stderr. |
 | `af.agent.input_bytes` | Size of the trigger payload / HTTP body. |
 | `af.agent.response_bytes` | Size of the model's final response. |
-| `af.agent.input` | The trigger payload / HTTP body. **Content — only when `capture_sensitive_data` is on.** |
-| `af.agent.response` | The final response text. **Content — only when `capture_sensitive_data` is on.** |
+| `af.agent.input` | The trigger payload / HTTP body. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
+| `af.agent.response` | The final response text. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
@@ -152,7 +147,7 @@ One per `execute_python` call, as a child of `agent.run`.
 | `af.dynamic_session.stderr_present` | `true` ⇒ the code failed (this is what used to be invisible). |
 | `af.dynamic_session.session_reused` | Whether the ACA session already existed. |
 | `af.dynamic_session.setup_ran` | Whether the one-time session setup ran this call. |
-| `af.dynamic_session.code` / `.stdout` / `.stderr` | **Content — only when `capture_sensitive_data` is on.** |
+| `af.dynamic_session.code` / `.stdout` / `.stderr` | **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 
 Plus `af.lifecycle_stage=tool_execution`. When stderr is present or the call throws, the span is
 marked ERROR with `af.fault_domain=sandbox`. This is the key fix: a broken execution no longer
@@ -169,9 +164,8 @@ Namespace `azure_functions_agents.*`:
 
 ## Sensitive data
 
-`capture_sensitive_data` is a single flag, **default off**, resolved from
-`agents.config.yaml` (`observability.capture_sensitive_data`) or the environment
-(`AZURE_FUNCTIONS_AGENTS_CAPTURE_SENSITIVE_DATA`, or MAF's `ENABLE_SENSITIVE_DATA`).
+Sensitive-data capture is controlled by the single `ENABLE_SENSITIVE_DATA` environment variable from
+Microsoft Agent Framework, **default off**.
 
 - **Off (default):** only metadata is recorded — sizes, counts, outcome, fault domain. The
   `*_bytes` attributes above are emitted; the content attributes are not.
@@ -188,11 +182,11 @@ runtime + MAF spans were only a few KB/run, while over 90% of ingestion was low-
 Azure SDK HTTP request/response dumps, the Azure Monitor exporter's own "Transmission succeeded…"
 logs, credential chatter, and Functions host startup dumps.
 
-**Worker-side noise — handled for you.** When observability is enabled, the runtime raises the log
-level of known-noisy third-party loggers (Azure SDK HTTP logging, the Azure Monitor exporter,
-`azure.identity`, `httpx`, and OpenTelemetry internals) — but only when no level is set directly on
-that logger, so a level you set directly on it is never overridden (a level set on a parent/root
-logger is not consulted). See `_NOISY_LOGGERS` in `_observability.py`.
+**Worker-side noise — handled for you.** Regardless of whether telemetry export is active, the
+runtime raises the log level of known-noisy third-party loggers (Azure SDK HTTP logging, the Azure
+Monitor exporter, `azure.identity`, `httpx`, and OpenTelemetry internals) — but only when no level
+is set directly on that logger, so a level you set directly on it is never overridden (a level set
+on a parent/root logger is not consulted). See `_NOISY_LOGGERS` in `_observability.py`.
 
 **Host-side noise — set it in `host.json`.** Host startup/options logging is emitted by the
 Functions host, so quiet it with log-level overrides (or the equivalent
@@ -211,7 +205,7 @@ Functions host, so quiet it with log-level overrides (or the equivalent
 }
 ```
 
-**Other levers:** keep `capture_sensitive_data` off (default); sample with
+**Other levers:** keep `ENABLE_SENSITIVE_DATA` off (default); sample with
 `OTEL_TRACES_SAMPLER=parentbased_traceidratio` + `OTEL_TRACES_SAMPLER_ARG=0.1`; set a daily cap /
 retention on the workspace; and **avoid double export** — don't run both the worker exporter and
 host worker-streaming (`PYTHON_APPLICATIONINSIGHTS_ENABLE_TELEMETRY` + `telemetryMode`) for the same
@@ -303,9 +297,9 @@ wants richer dashboards. They build on the spans/metrics above.
 
 ## Appendix B — Roadmap
 
-**Implemented (must-have):** runtime-owned OTel bootstrap + `observability` config; fault-domain /
-lifecycle-stage conventions; sandbox truth-telling + ACA correlation; the `agent.run` summary span;
-sensitive-data gating (default off).
+**Implemented (must-have):** runtime-owned OTel bootstrap + Azure Monitor auto-configuration via
+the optional `[monitor]` extra; fault-domain / lifecycle-stage conventions; sandbox truth-telling +
+ACA correlation; the `agent.run` summary span; sensitive-data gating (default off).
 
 **Follow-ups (good-to-have):**
 
@@ -321,7 +315,7 @@ sensitive-data gating (default off).
 | --- | --- |
 | Bootstrap, conventions, helpers, metrics | `src/azure_functions_agents/_observability.py` |
 | Bootstrap call site | `src/azure_functions_agents/app.py` |
-| Config (`observability` block) | `src/azure_functions_agents/config/schema.py`, `config/__init__.py` |
+| Sensitive-data env handling (`ENABLE_SENSITIVE_DATA`) | `src/azure_functions_agents/_observability.py` |
 | Sandbox span + stderr surfacing + ACA correlation | `src/azure_functions_agents/system_tools/sandbox.py` |
 | `agent.run` span + sensitive-log gating | `src/azure_functions_agents/registration/_handlers.py` |
 | Tests | `tests/test_observability.py`, `tests/test_system_tools_sandbox.py` |

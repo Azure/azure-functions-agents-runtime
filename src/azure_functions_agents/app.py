@@ -50,8 +50,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     global_config = load_global_config(resolved_root)
 
     # Bootstrap observability before anything runs so MAF gen_ai spans + runtime spans/metrics
-    # flow to Application Insights with zero app code. No-op when disabled/unconfigured.
-    configure_observability(global_config)
+    # flow to Application Insights with zero app code. No-op unless a telemetry provider is active.
+    configure_observability()
 
     agent_specs = load_agent_specs(resolved_root)
     user_tools = discover_user_tools(resolved_root)

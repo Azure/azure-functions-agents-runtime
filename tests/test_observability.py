@@ -1,86 +1,131 @@
 from __future__ import annotations
 
+import logging
 import types
 
 import azure_functions_agents._observability as obs
-from azure_functions_agents.config.schema import GlobalConfig, ObservabilityConfig
 
 
 def _clear_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     for name in (
         "APPLICATIONINSIGHTS_CONNECTION_STRING",
-        "AZURE_FUNCTIONS_AGENTS_OBSERVABILITY_ENABLED",
-        "AZURE_FUNCTIONS_AGENTS_CAPTURE_SENSITIVE_DATA",
         "ENABLE_SENSITIVE_DATA",
     ):
         monkeypatch.delenv(name, raising=False)
 
 
-def test_resolve_disabled_without_connection_string(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _clear_env(monkeypatch)
-    resolved = obs._resolve(GlobalConfig())
-    assert resolved.enabled is False
-    assert resolved.capture_sensitive_data is False
-
-
-def test_resolve_enabled_when_connection_present(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
-    resolved = obs._resolve(GlobalConfig())
-    assert resolved.enabled is True
-
-
-def test_resolve_explicit_disable_wins_over_connection(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
-    config = GlobalConfig(observability=ObservabilityConfig(enabled=False))
-    assert obs._resolve(config).enabled is False
-
-
-def test_capture_sensitive_data_from_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _clear_env(monkeypatch)
-    config = GlobalConfig(observability=ObservabilityConfig(capture_sensitive_data=True))
-    assert obs._resolve(config).capture_sensitive_data is True
-
-
-def test_capture_sensitive_data_env_overrides_config(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_CAPTURE_SENSITIVE_DATA", "true")
-    config = GlobalConfig(observability=ObservabilityConfig(capture_sensitive_data=False))
-    assert obs._resolve(config).capture_sensitive_data is True
-
-
-def test_configure_observability_sets_capture_flag(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    _clear_env(monkeypatch)
-    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
+def _reset_bootstrap(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     monkeypatch.setattr(obs, "_configured", False, raising=False)
     monkeypatch.setattr(obs, "_enabled", False, raising=False)
-    monkeypatch.setattr(obs, "_enable_agent_framework_instrumentation", lambda capture: None)
-    monkeypatch.setattr(obs, "_configure_azure_monitor", lambda connection: None)
+    monkeypatch.setattr(obs, "_capture_sensitive_data", False, raising=False)
 
-    resolved = obs.configure_observability(
-        GlobalConfig(observability=ObservabilityConfig(capture_sensitive_data=True))
+
+# --- capture_sensitive_data resolution (reuses MAF's ENABLE_SENSITIVE_DATA) --------------------
+
+
+def test_capture_sensitive_data_default_off(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _clear_env(monkeypatch)
+    assert obs._resolve_capture_sensitive_data() is False
+
+
+def test_capture_sensitive_data_from_enable_sensitive_data_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("ENABLE_SENSITIVE_DATA", "true")
+    assert obs._resolve_capture_sensitive_data() is True
+
+
+# --- configure_observability enablement (driven by an active OTel provider) --------------------
+
+
+def test_configure_observability_enabled_when_provider_active(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
+    monkeypatch.setenv("ENABLE_SENSITIVE_DATA", "true")
+    _reset_bootstrap(monkeypatch)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
+    monkeypatch.setattr(obs, "_configure_azure_monitor", lambda connection: None)
+    enable_calls: list[bool] = []
+    monkeypatch.setattr(
+        obs, "_enable_agent_framework_instrumentation", lambda capture: enable_calls.append(capture)
     )
+
+    resolved = obs.configure_observability()
 
     assert resolved.enabled is True
     assert resolved.capture_sensitive_data is True
     assert obs.capture_sensitive_data() is True
     assert obs.is_observability_enabled() is True
+    assert enable_calls == [True]  # MAF instrumentation enabled with the resolved capture flag
 
 
-def test_configure_observability_disabled_is_noop(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_configure_observability_noop_without_provider_or_connection(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     _clear_env(monkeypatch)
-    monkeypatch.setattr(obs, "_enabled", False, raising=False)
-    called = {"enable": False}
+    _reset_bootstrap(monkeypatch)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    enable_calls: list[bool] = []
+    monkeypatch.setattr(
+        obs, "_enable_agent_framework_instrumentation", lambda capture: enable_calls.append(capture)
+    )
 
-    def _fail_enable(capture: bool) -> None:
-        called["enable"] = True
+    resolved = obs.configure_observability()
 
-    monkeypatch.setattr(obs, "_enable_agent_framework_instrumentation", _fail_enable)
-    resolved = obs.configure_observability(GlobalConfig())
     assert resolved.enabled is False
-    assert called["enable"] is False
+    assert enable_calls == []
     assert obs.is_observability_enabled() is False
+
+
+def test_configure_observability_rides_existing_worker_provider(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # No connection string, but a provider is already active (e.g. the Functions worker): the runtime
+    # still emits, riding the existing provider, without configuring its own exporter.
+    _clear_env(monkeypatch)
+    _reset_bootstrap(monkeypatch)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
+    configure_calls: list[str] = []
+    monkeypatch.setattr(
+        obs, "_configure_azure_monitor", lambda connection: configure_calls.append(connection)
+    )
+    monkeypatch.setattr(obs, "_enable_agent_framework_instrumentation", lambda capture: None)
+
+    resolved = obs.configure_observability()
+
+    assert resolved.enabled is True
+    assert configure_calls == []  # no connection string => never attempts its own exporter setup
+
+
+def test_configure_observability_warns_when_connection_but_no_exporter(  # type: ignore[no-untyped-def]
+    monkeypatch, caplog
+) -> None:
+    _clear_env(monkeypatch)
+    monkeypatch.setenv("APPLICATIONINSIGHTS_CONNECTION_STRING", "InstrumentationKey=abc")
+    _reset_bootstrap(monkeypatch)
+    # Exporter missing / no provider becomes active after the configure attempt.
+    monkeypatch.setattr(obs, "_configure_azure_monitor", lambda connection: None)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    enable_calls: list[bool] = []
+    monkeypatch.setattr(
+        obs, "_enable_agent_framework_instrumentation", lambda capture: enable_calls.append(capture)
+    )
+
+    with caplog.at_level(logging.WARNING, logger="azure.functions.AgentRuntime"):
+        resolved = obs.configure_observability()
+
+    assert resolved.enabled is False
+    assert enable_calls == []
+    assert "azurefunctions-agents-runtime[monitor]" in caplog.text
+
+
+def test_configure_observability_quiets_loggers_even_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    # Noise control runs regardless of whether observability ends up enabled.
+    _clear_env(monkeypatch)
+    _reset_bootstrap(monkeypatch)
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    name = "azure.identity"
+    logging.getLogger(name).setLevel(logging.NOTSET)
+
+    obs.configure_observability()
+
+    assert logging.getLogger(name).level == logging.WARNING
+    logging.getLogger(name).setLevel(logging.NOTSET)  # reset for other tests
 
 
 def test_otel_provider_already_configured_true_for_sdk_provider(monkeypatch) -> None:  # type: ignore[no-untyped-def]

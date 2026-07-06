@@ -1,19 +1,20 @@
 """OpenTelemetry bootstrap and telemetry conventions for the Agent Runtime.
 
-Low/no-code observability. The app enables telemetry purely through configuration — the
-``observability`` block in ``agents.config.yaml`` and/or environment variables, plus the standard
-Azure Functions ``APPLICATIONINSIGHTS_CONNECTION_STRING``. The app's ``function_app.py`` stays a
-two-line file; this module owns:
+Low/no-code observability. The app enables telemetry by installing the optional ``[monitor]``
+exporter extra (``azurefunctions-agents-runtime[monitor]``) and setting the standard Azure Functions
+``APPLICATIONINSIGHTS_CONNECTION_STRING`` — no app code required. The app's ``function_app.py`` stays
+a two-line file; this module owns:
 
 * turning on Microsoft Agent Framework (MAF) ``gen_ai`` instrumentation and, when the optional
-  ``azure-monitor-opentelemetry`` exporter is installed, the Azure Monitor exporter;
+  ``[monitor]`` exporter is installed, the Azure Monitor exporter;
 * the span/attribute conventions the rest of the runtime uses so failures self-classify as
   ``app`` vs ``runtime`` vs ``platform`` (see :data:`ATTR_FAULT_DOMAIN`);
-* a single resolved ``capture_sensitive_data`` flag that gates whether prompts, payloads, tool
-  arguments, code, and model output are attached to telemetry (default off).
+* a single resolved ``capture_sensitive_data`` flag (from MAF's ``ENABLE_SENSITIVE_DATA``) that gates
+  whether prompts, payloads, tool arguments, code, and model output are attached to telemetry
+  (default off).
 
-Everything degrades to a no-op when OpenTelemetry is unavailable or observability is disabled, so
-importing this module and calling its helpers is always safe.
+Everything degrades to a no-op when OpenTelemetry is unavailable or no telemetry provider is active,
+so importing this module and calling its helpers is always safe.
 """
 
 from __future__ import annotations
@@ -22,13 +23,10 @@ import logging
 from collections.abc import Iterator, Mapping
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
 from ._logger import logger
 from .config.env import _to_bool, runtime_env_value
-
-if TYPE_CHECKING:
-    from .config.schema import GlobalConfig
 
 # ---------------------------------------------------------------------------
 # Conventions
@@ -90,14 +88,16 @@ class LifecycleStage:
 
 @dataclass(frozen=True)
 class ResolvedObservability:
-    """The effective observability settings after merging config + environment."""
+    """The effective observability settings after bootstrap.
+
+    ``enabled`` reflects whether a real OpenTelemetry provider is active (so the runtime's spans and
+    metrics are emitted); ``capture_sensitive_data`` gates attaching content to telemetry.
+    """
 
     enabled: bool
     capture_sensitive_data: bool
 
 
-_ENABLED_ENV = "AZURE_FUNCTIONS_AGENTS_OBSERVABILITY_ENABLED"
-_SENSITIVE_ENV = "AZURE_FUNCTIONS_AGENTS_CAPTURE_SENSITIVE_DATA"
 _MAF_SENSITIVE_ENV = "ENABLE_SENSITIVE_DATA"
 _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
 
@@ -118,62 +118,68 @@ def capture_sensitive_data() -> bool:
     return _capture_sensitive_data
 
 
-def _resolve(global_config: GlobalConfig) -> ResolvedObservability:
-    obs = getattr(global_config, "observability", None)
-    connection = runtime_env_value(_CONNECTION_ENV)
+def _resolve_capture_sensitive_data() -> bool:
+    """Resolve the content-capture flag from Microsoft Agent Framework's ``ENABLE_SENSITIVE_DATA``.
 
-    enabled_env = runtime_env_value(_ENABLED_ENV)
-    if enabled_env:
-        enabled = _to_bool(enabled_env, default=True)
-    elif obs is not None and obs.enabled is not None:
-        enabled = bool(obs.enabled)
-    else:
-        # Default: on when an App Insights connection string is present.
-        enabled = bool(connection)
-
-    sensitive_env = runtime_env_value(_SENSITIVE_ENV) or runtime_env_value(_MAF_SENSITIVE_ENV)
-    if sensitive_env:
-        capture = _to_bool(sensitive_env, default=False)
-    elif obs is not None:
-        capture = bool(obs.capture_sensitive_data)
-    else:
-        capture = False
-
-    return ResolvedObservability(enabled=enabled, capture_sensitive_data=capture)
+    The runtime deliberately reuses MAF's own switch (default off) so a single environment variable
+    governs both MAF ``gen_ai`` content and the runtime's ``af.*`` content, with no divergence and
+    nothing to reconcile. See FRD 0003 (sensitive-data exposure decision).
+    """
+    value = runtime_env_value(_MAF_SENSITIVE_ENV)
+    return _to_bool(value, default=False) if value else False
 
 
-def configure_observability(global_config: GlobalConfig) -> ResolvedObservability:
-    """Resolve observability settings and, when enabled, bootstrap OTel once.
+def configure_observability() -> ResolvedObservability:
+    """Bootstrap runtime observability once and return the effective settings.
 
-    Called from :func:`azure_functions_agents.app.create_function_app`. Idempotent: the actual
-    instrumentation/exporter bootstrap runs at most once per process. Always safe to call.
+    Called from :func:`azure_functions_agents.app.create_function_app`. Enablement is driven by the
+    optional ``[monitor]`` exporter plus the standard ``APPLICATIONINSIGHTS_CONNECTION_STRING`` —
+    there is no separate config/enable flag:
+
+    * Third-party log-noise control runs **unconditionally** — it is useful whether or not telemetry
+      is exported, and only raises a logger whose own level is unset.
+    * When a connection string is present the runtime configures the Azure Monitor exporter, but only
+      if the ``[monitor]`` extra is installed and no OpenTelemetry provider is active yet.
+    * Runtime spans/metrics are emitted only when a real OpenTelemetry provider is active — the one we
+      just configured, or one the Functions worker/host already installed. Otherwise all helpers
+      no-op.
+
+    Idempotent: the bootstrap runs at most once per process. Always safe to call.
     """
     global _configured, _enabled, _capture_sensitive_data
 
-    resolved = _resolve(global_config)
-    _enabled = resolved.enabled
-    _capture_sensitive_data = resolved.capture_sensitive_data
+    _capture_sensitive_data = _resolve_capture_sensitive_data()
 
-    if not resolved.enabled:
-        logger.info(
-            "Observability disabled (no APPLICATIONINSIGHTS_CONNECTION_STRING or explicitly off)"
-        )
-        return resolved
+    # Noise control is independent of export, so run it every time (idempotent; never overrides a
+    # level set directly on a logger).
+    _quiet_noisy_loggers()
 
     if _configured:
-        return resolved
+        return ResolvedObservability(
+            enabled=_enabled, capture_sensitive_data=_capture_sensitive_data
+        )
 
-    _enable_agent_framework_instrumentation(resolved.capture_sensitive_data)
     connection = runtime_env_value(_CONNECTION_ENV)
     if connection:
         _configure_azure_monitor(connection)
-    _quiet_noisy_loggers()
 
+    _enabled = _otel_provider_already_configured()
     _configured = True
-    logger.info(
-        "Observability enabled (capture_sensitive_data=%s)", resolved.capture_sensitive_data
-    )
-    return resolved
+
+    if _enabled:
+        _enable_agent_framework_instrumentation(_capture_sensitive_data)
+        logger.info("Observability enabled (capture_sensitive_data=%s)", _capture_sensitive_data)
+    elif connection:
+        logger.warning(
+            "APPLICATIONINSIGHTS_CONNECTION_STRING is set but no OpenTelemetry exporter is active "
+            "(the Azure Monitor exporter is not installed and no OpenTelemetry provider was found), "
+            "so the runtime's spans and metrics will NOT be exported. Install "
+            "'azurefunctions-agents-runtime[monitor]' to export telemetry to Application Insights."
+        )
+    else:
+        logger.info("Observability inactive (no OpenTelemetry provider or exporter configured)")
+
+    return ResolvedObservability(enabled=_enabled, capture_sensitive_data=_capture_sensitive_data)
 
 
 def _enable_agent_framework_instrumentation(capture: bool) -> None:
@@ -228,10 +234,9 @@ def _configure_azure_monitor(connection_string: str) -> None:
     try:
         from azure.monitor.opentelemetry import configure_azure_monitor
     except ImportError:
-        logger.info(
-            "azure-monitor-opentelemetry not installed; relying on the Functions host "
-            "OpenTelemetry export (host.json telemetryMode: OpenTelemetry)"
-        )
+        # The optional [monitor] exporter is not installed. Do not raise or claim a host fallback:
+        # host.json telemetryMode exports only *host* telemetry, not the runtime's worker spans. The
+        # caller detects that no provider became active and emits an actionable warning.
         return
     try:
         configure_azure_monitor(connection_string=connection_string)
@@ -370,14 +375,15 @@ def start_span(
     lifecycle_stage: str | None = None,
     attributes: Mapping[str, Any] | None = None,
 ) -> Iterator[RuntimeSpan]:
-    """Start a current span, degrading to a no-op when observability is disabled or tracing is unavailable.
+    """Start a current span, degrading to a no-op when no telemetry provider is active or tracing is unavailable.
 
     ``fault_domain`` is the domain attributed if the span exits with an exception. It is not set on
     success — only failing spans carry :data:`ATTR_FAULT_DOMAIN`.
     """
-    # Gate on the runtime's resolved state so `observability.enabled: false` (or no connection
-    # string) truly suppresses runtime-owned spans, even when another OTel provider is present
-    # (e.g. the Functions host under `telemetryMode: OpenTelemetry`).
+    # Gate on the runtime's resolved state: `_enabled` is true only when a real OpenTelemetry
+    # provider is active (the Azure Monitor exporter we configured, or one the Functions
+    # worker/host already installed). When no provider is active, runtime-owned spans are suppressed
+    # entirely rather than recorded into a no-op tracer.
     tracer = get_tracer() if _enabled else None
     manager: Any = None
     raw_span: Any = None
