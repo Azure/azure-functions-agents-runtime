@@ -96,9 +96,16 @@ YAML front matter at the top of each agent file.
 ```
 /
   agents.config.yaml          # Optional: Global defaults
-  *.agent.md               # Agents (triggered and/or built-in endpoint-enabled)
+  *.agent.md                  # Agents at top-level
+  agents/                     # Optional: folder for organizing agents
+    *.agent.md                # Agents in folder (same format as top-level)
+  tools/                      # Custom tools (auto-discovered)
+  skills/                     # Skills (auto-discovered)
+  mcp.json                    # MCP server definitions
   ...
 ```
+
+Agent markdown files (`*.agent.md`) can be placed at the app root or in an `agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`). Files from both locations are combined and sorted by path for deterministic ordering. `main.agent.md` in either location is marked as the main agent.
 
 ---
 
@@ -487,6 +494,38 @@ description: One sentence the LLM uses to decide whether to load this skill.
 
 Skill body — instructions, examples, references to in-directory resources.
 ```
+
+**Organizing skill content:**
+
+Skills can include reference material in `references/` and `assets/` subdirectories. MAF's `read_skill_resource` tool allows the agent to read these files on demand at runtime (progressive disclosure):
+
+```
+my-skill/
+├── SKILL.md              # Main skill file (keep <500 lines)
+├── references/
+│   └── api-spec.md       # Agent reads via read_skill_resource when needed
+└── assets/
+    └── example.py        # Agent reads via read_skill_resource when needed
+```
+
+In the `SKILL.md` body, reference the available resources so the agent knows they exist:
+```markdown
+---
+name: my-skill
+description: Skill for interacting with Foo API
+---
+
+# Foo API Skill
+
+When you need detailed API information, use the read_skill_resource tool to read
+files from the references/ directory.
+
+## Available Resources
+- `references/api-spec.md` - Full API specification
+- `assets/example.py` - Example usage code
+```
+
+This progressive disclosure pattern keeps the agent's context window lean while giving it access to detailed reference material on demand. See the [MAF file-based skills docs](https://learn.microsoft.com/en-us/agent-framework/agents/skills?pivots=programming-language-python#file-based-skills-1) for more details.
 
 **Agent filtering - Use exclude lists:**
 ```yaml

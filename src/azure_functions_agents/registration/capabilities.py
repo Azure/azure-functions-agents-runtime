@@ -57,6 +57,7 @@ def build_capabilities(
     if resolved.skills_disabled:
         enabled_skill_paths: list[Path] = []
     else:
+        # Filter to enabled skills
         enabled_skill_paths = [
             discovered_skills[name]
             for name in resolved.enabled_skills_names

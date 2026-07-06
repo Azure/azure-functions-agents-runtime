@@ -92,12 +92,36 @@ def load_global_config(app_root: Path) -> GlobalConfig:
         raise _format_validation_error(source_file, exc) from exc
 
 
+def _resolve_agents_dir(app_root: Path) -> Path | None:
+    """Find ``{app_root}/agents`` (or ``Agents``) if it exists."""
+    for name in ("agents", "Agents"):
+        candidate = app_root / name
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
-    """Read every *.agent.md in app_root and return parsed AgentSpec values."""
+    """Read every *.agent.md in app_root and agents/ folder, return AgentSpec values.
+
+    Searches for agent markdown files in two locations:
+    1. Top-level: ``{app_root}/*.agent.md``
+    2. Agents folder: ``{app_root}/agents/*.agent.md`` (case-insensitive)
+
+    Files from both locations are combined and sorted by path for deterministic
+    ordering. This allows customers to organize agents in a dedicated folder
+    while maintaining backward compatibility with top-level agents.
+    """
     root = Path(app_root).resolve()
     specs: list[AgentSpec] = []
 
-    for source_file in sorted(root.glob("*.agent.md")):
+    # Collect agent files from both top-level and agents/ folder
+    agent_files: list[Path] = list(root.glob("*.agent.md"))
+    agents_dir = _resolve_agents_dir(root)
+    if agents_dir is not None:
+        agent_files.extend(agents_dir.glob("*.agent.md"))
+
+    for source_file in sorted(agent_files):
         try:
             specs.append(_load_agent_spec(source_file))
         except Exception as exc:

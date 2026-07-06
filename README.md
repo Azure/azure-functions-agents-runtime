@@ -160,6 +160,17 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 - **Event triggers** — timer, queue, blob, Event Hub, Service Bus, Cosmos DB, Teams, Office 365, etc.
 - **HTTP triggers** — expose agents as REST API endpoints; add `response_example` or `response_schema` for validated JSON responses
 
+Agent files can be placed at the app root or in an `agents/` folder:
+```
+my-app/
+├── main.agent.md           # Top-level (is_main=true)
+├── agents/                  # Optional folder for organization
+│   ├── chat.agent.md
+│   └── report.agent.md
+├── tools/
+└── skills/
+```
+
 ### Shared capabilities
 - **Markdown-first** — agent instructions, trigger config, and tool bindings in `.agent.md` files
 - **Skills** — progressive-disclosure prompt modules under `skills/<name>/SKILL.md` (loaded on demand via MAF's `SkillsProvider`)
@@ -449,7 +460,7 @@ When the agent uses connector-backed MCP servers, connector triggers, or `dynami
 
 | Setting | Purpose |
 |---|---|
-| `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `tools/`, `skills/`, and `mcp.json` |
+| `AZURE_FUNCTIONS_AGENTS_APP_ROOT` | Override the app root used to discover `*.agent.md`, `agents/`, `tools/`, `skills/`, and `mcp.json` |
 | `AZURE_FUNCTIONS_AGENTS_SESSION_DIR` | Override the directory used for local session storage |
 | `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
 | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
