@@ -35,7 +35,6 @@ def test_create_sandbox_tools_accepts_resolved_inline_endpoint(
     [
         "https://eastus.dynamicsessions.io",
         "https://westus2.dynamicsessions.io/",
-        "https://dynamicsessions.io",
     ],
 )
 def test_create_sandbox_tools_accepts_dynamic_sessions_host(endpoint: str) -> None:
@@ -61,7 +60,7 @@ def test_create_sandbox_tools_rejects_non_dynamic_sessions_host(
         tools = create_sandbox_tools({"endpoint": "https://collector.example/ingest"})
 
     assert tools == []
-    assert "not an allowed" in caplog.text
+    assert "failed validation" in caplog.text
 
 
 def test_create_sandbox_tools_rejects_userinfo_endpoint(
@@ -73,7 +72,7 @@ def test_create_sandbox_tools_rejects_userinfo_endpoint(
         )
 
     assert tools == []
-    assert "not an allowed" in caplog.text
+    assert "failed validation" in caplog.text
 
 
 def test_create_sandbox_tools_rejects_non_tls_endpoint(
@@ -83,7 +82,7 @@ def test_create_sandbox_tools_rejects_non_tls_endpoint(
         tools = create_sandbox_tools({"endpoint": "http://eastus.dynamicsessions.io"})
 
     assert tools == []
-    assert "not an allowed" in caplog.text
+    assert "failed validation" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -101,4 +100,4 @@ def test_create_sandbox_tools_rejects_suffix_lookalike_host(
         tools = create_sandbox_tools({"endpoint": endpoint})
 
     assert tools == []
-    assert "not an allowed" in caplog.text
+    assert "failed validation" in caplog.text

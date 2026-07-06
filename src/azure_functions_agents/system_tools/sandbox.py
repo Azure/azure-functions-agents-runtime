@@ -38,15 +38,15 @@ _API_VERSION = "2025-10-02-preview"
 
 # The managed-identity bearer token is minted for the Azure Container Apps
 # dynamic sessions audience and must only ever be attached to a genuine dynamic
-# sessions host. Endpoints are restricted to ``dynamicsessions.io`` and its
-# subdomains so a mis-set app setting cannot redirect the token elsewhere.
+# sessions host. Endpoints are restricted to subdomains of ``dynamicsessions.io``
+# so a mis-set app setting cannot redirect the token elsewhere.
 _ALLOWED_SESSIONS_HOST_SUFFIX = ".dynamicsessions.io"
 
 
 def _is_allowed_sessions_endpoint(endpoint: str) -> bool:
     """Return ``True`` only for https URLs on an ACA dynamic sessions host.
 
-    The resolved endpoint host must be ``dynamicsessions.io`` or a subdomain
+    The resolved endpoint host must be a subdomain of ``dynamicsessions.io``
     (``*.dynamicsessions.io``). Any non-https scheme, embedded userinfo, empty
     host, lookalike host, or malformed URL is rejected so the tool (and the
     managed-identity token it carries) is never bound to an unintended host.
@@ -62,7 +62,7 @@ def _is_allowed_sessions_endpoint(endpoint: str) -> bool:
     host = (parsed.hostname or "").lower()
     if not host:
         return False
-    return host == "dynamicsessions.io" or host.endswith(_ALLOWED_SESSIONS_HOST_SUFFIX)
+    return host.endswith(_ALLOWED_SESSIONS_HOST_SUFFIX)
 
 
 # ---------------------------------------------------------------------------
@@ -312,9 +312,9 @@ def create_sandbox_tools(
 
     if not _is_allowed_sessions_endpoint(endpoint):
         logger.warning(
-            "dynamic_sessions_code_interpreter: resolved endpoint host is not an allowed "
-            "Azure Container Apps dynamic sessions endpoint (*.dynamicsessions.io); "
-            "skipping tool creation. endpoint=%s",
+            "dynamic_sessions_code_interpreter: resolved endpoint '%s' failed validation "
+            "(must be an https URL whose host is *.dynamicsessions.io); "
+            "skipping tool creation",
             endpoint,
         )
         return []
