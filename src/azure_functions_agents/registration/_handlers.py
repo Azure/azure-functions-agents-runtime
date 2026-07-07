@@ -29,6 +29,7 @@ AUTH_LEVEL_MAP = {
     "function": func.AuthLevel.FUNCTION,
     "admin": func.AuthLevel.ADMIN,
 }
+_SESSION_ID_HEADER = "x-ms-session-id"
 
 
 def serialize_trigger_data(trigger_data: Any) -> str:
@@ -312,7 +313,7 @@ def make_http_agent_handler(
             },
         ) as span:
             try:
-                session_id = _request_header_value(req, "x-ms-session-id") or _new_session_id()
+                session_id = _request_header_value(req, _SESSION_ID_HEADER) or _new_session_id()
                 span.set_attribute("af.agent.session_id", session_id)
                 try:
                     body = await req.json()
@@ -342,7 +343,7 @@ def make_http_agent_handler(
                             "af.http.status_code": validation_error.status_code,
                         },
                     )
-                    validation_error.headers["x-ms-session-id"] = session_id
+                    validation_error.headers[_SESSION_ID_HEADER] = session_id
                     return validation_error
 
                 parts: list[str] = []
@@ -402,7 +403,7 @@ def make_http_agent_handler(
                             ),
                             status_code=500,
                             media_type="application/json",
-                            headers={"x-ms-session-id": session_id},
+                            headers={_SESSION_ID_HEADER: session_id},
                         )
                     if resolved.response_schema:
                         try:
@@ -433,20 +434,20 @@ def make_http_agent_handler(
                                 ),
                                 status_code=500,
                                 media_type="application/json",
-                                headers={"x-ms-session-id": session_id},
+                                headers={_SESSION_ID_HEADER: session_id},
                             )
                     return Response(
                         content=json.dumps(parsed, ensure_ascii=False),
                         status_code=200,
                         media_type="application/json",
-                        headers={"x-ms-session-id": session_id},
+                        headers={_SESSION_ID_HEADER: session_id},
                     )
 
                 return Response(
                     content=result.content,
                     status_code=200,
                     media_type="text/plain",
-                    headers={"x-ms-session-id": session_id},
+                    headers={_SESSION_ID_HEADER: session_id},
                 )
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
@@ -456,7 +457,7 @@ def make_http_agent_handler(
                     content=json.dumps({"error": str(exc)}),
                     status_code=500,
                     media_type="application/json",
-                    headers={"x-ms-session-id": session_id},
+                    headers={_SESSION_ID_HEADER: session_id},
                 )
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"

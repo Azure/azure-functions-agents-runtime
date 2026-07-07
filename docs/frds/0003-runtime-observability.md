@@ -66,7 +66,7 @@ runtime's, or a downstream platform, and they can't see it at all without hand-r
 
 A new cross-cutting module `azure_functions_agents/_observability.py` owns the OTel bootstrap, the
 span/attribute conventions, the resolved sensitive-data flag, minimal metrics, and noise control.
-`create_function_app()` calls `configure_observability(global_config)` once, before agents run.
+`create_function_app()` calls `configure_observability()` once, before agents run.
 
 **Boundary note.** Observability is an intentional *cross-cutting* concern, not a fifth pipeline
 stage. Its bootstrap runs at the app-factory level (before discovery), and it deliberately holds the
