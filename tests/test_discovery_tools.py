@@ -187,6 +187,87 @@ def test_dual_decorator_workflow_tool_then_tool_is_both(tmp_path: Path) -> None:
     assert [tool.name for tool in discovered.workflow_tools] == ["shared"]
 
 
+def test_dual_decorator_with_schema_tool_then_workflow_tool_is_both(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "shared_tool",
+        """
+        from pydantic import BaseModel
+
+        from azure_functions_agents import tool, workflow_tool
+
+        class SharedArgs(BaseModel):
+            value: str
+
+        @tool(schema=SharedArgs)
+        @workflow_tool(description="Shared schema tool")
+        def shared(args: SharedArgs) -> dict[str, str]:
+            return {"value": args.value}
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert _tool_names(discovered.user_tools) == ["shared"]
+    assert discovered.user_tools[0].input_model.__name__ == "SharedArgs"
+    [workflow_tool] = discovered.workflow_tools
+    assert workflow_tool.name == "shared"
+    assert workflow_tool.description == "Shared schema tool"
+    assert workflow_tool.handler is not None
+
+
+def test_dual_decorator_with_schema_workflow_tool_then_tool_is_both(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "shared_tool",
+        """
+        from pydantic import BaseModel
+
+        from azure_functions_agents import tool, workflow_tool
+
+        class SharedArgs(BaseModel):
+            value: str
+
+        @workflow_tool(description="Shared schema tool")
+        @tool(schema=SharedArgs)
+        def shared(args: SharedArgs) -> dict[str, str]:
+            return {"value": args.value}
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert _tool_names(discovered.user_tools) == ["shared"]
+    assert discovered.user_tools[0].input_model.__name__ == "SharedArgs"
+    [workflow_tool] = discovered.workflow_tools
+    assert workflow_tool.name == "shared"
+    assert workflow_tool.description == "Shared schema tool"
+    assert workflow_tool.handler is not None
+
+
+def test_workflow_tool_public_false_flows_through_discovery(tmp_path: Path) -> None:
+    _write_tool_file(
+        tmp_path,
+        "private_workflow_tool",
+        """
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool(name="private_lookup", description="Internal lookup", public=False)
+        def lookup(args: dict[str, object]) -> dict[str, object]:
+            return {"args": args}
+        """,
+    )
+
+    discovered = discover_project_tools(tmp_path)
+
+    assert discovered.user_tools == []
+    [workflow_tool] = discovered.workflow_tools
+    assert workflow_tool.name == "private_lookup"
+    assert workflow_tool.description == "Internal lookup"
+    assert workflow_tool.public is False
+    assert workflow_tool.handler is not None
+
+
 def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> None:
     _write_tool_file(
         tmp_path,
