@@ -35,19 +35,12 @@ awkward for work that:
 - produces large intermediate results that should stay out of the model context;
 - should survive host restarts or a user reconnecting later.
 
-PR #77 introduced a working Dynamic Workflows vertical slice, but review
-discussion identified two authoring problems in the initial shape:
-
-1. Workflow tools were manually registered in `function_app.py` via
-   `register_with_engine()`, which conflicts with the long-term goal of removing
-   app-code customization for common cases.
-2. `workflows.allowed_tools` used an include-list UX, while existing capability
-   filtering uses `exclude` (`tools.exclude`, `mcp.exclude`, `skills.exclude`).
-
-The team agreed on a revised authoring model: use the existing `tools/`
-directory as the single placement surface, preserve normal plain-function tool
-discovery, and require `@workflow_tool` to explicitly opt a function into the
-Durable Activity execution path.
+Dynamic Workflows introduces a new authoring surface, so the first release needs
+to make workflow tools easy to place, hard to register accidentally, and
+consistent with the runtime's existing capability-filtering model. The agreed
+model uses the existing `tools/` directory as the single placement surface,
+preserves normal plain-function tool discovery, and requires `@workflow_tool` to
+explicitly opt a function into the Durable Activity execution path.
 
 ## 3. Goals / Non-goals
 
@@ -55,9 +48,10 @@ Durable Activity execution path.
 
 - Enable `workflows.enabled: true` for `main.agent.md` to register Durable
   workflow management tools and a Durable orchestrator/activity engine.
-- Replace `workflows.allowed_tools` with `workflows.exclude` so workflow
-  filtering matches existing exclude-style capability UX.
-- Remove sample/manual workflow tool registration from `function_app.py`.
+- Add `workflows.exclude` so workflow filtering matches existing exclude-style
+  capability UX (`tools.exclude`, `mcp.exclude`, `skills.exclude`).
+- Keep sample `function_app.py` minimal so workflow authoring is expressed
+  through `main.agent.md` plus `tools/`.
 - Add `@workflow_tool` as an explicit workflow authoring decorator for functions
   placed in `tools/`.
 - Preserve existing normal `tools/` behavior: public plain functions and `@tool`
@@ -118,8 +112,6 @@ workflows:
   `main.agent.md`.
 - `workflows.exclude`: optional `list[str]`; filters discovered workflow tool
   names out of the effective workflow tool set.
-- `workflows.allowed_tools`: removed before first release of this PR because it
-  is new, not on `main`, and conflicts with the agreed exclude-style UX.
 - Durable backend and task hub configuration stay in `host.json` and app
   settings, not frontmatter.
 - If `workflows.enabled: true` is set on a non-main agent in v1, the runtime
@@ -252,11 +244,8 @@ execution.
   - existing `@tool` usage remains a normal MAF tool.
 - `@workflow_tool` alone must not accidentally enter the normal plain-function
   fallback path.
-- Since `workflows.allowed_tools` exists only in PR #77 and not on `main`, it can
-  be replaced with `workflows.exclude` before merge without a compatibility
-  burden.
-- Sample `function_app.py` manual registration is removed; samples should use
-  the same authoring model expected of users.
+- Sample `function_app.py` stays minimal; samples use the same `tools/` plus
+  `@workflow_tool` authoring model expected of users.
 - `@workflow_tool` accepts only supported v1 metadata (`name`, `description`,
   `public`) until retry/timeout metadata is implemented. Unknown keyword
   arguments fail fast at startup so authors do not think unsupported policy knobs
@@ -268,10 +257,10 @@ execution.
 | - | -------- | ------------------ | ------ | ---------- | ---- |
 | 1 | Workflow execution backend | Direct chat tool loop / in-process scheduler / Durable Functions | Durable Functions orchestrator + Activity engine | Human + Agent | 2026-07-01 |
 | 2 | Workflow enablement surface | Always on / agent frontmatter flag / global config only | `workflows.enabled: true` on `main.agent.md` | Human + Agent | 2026-07-01 |
-| 3 | Workflow tool placement | Manual `function_app.py` registration / dedicated `workflow_tools/` / existing `tools/` | Existing `tools/` directory | Human | 2026-07-06 |
+| 3 | Workflow tool placement | Dedicated `workflow_tools/` / existing `tools/` | Existing `tools/` directory | Human | 2026-07-06 |
 | 4 | Workflow tool opt-in | Auto-promote compatible plain functions / `@tool(workflow=True)` / explicit `@workflow_tool` | Explicit `@workflow_tool` decorator | Human | 2026-07-06 |
 | 5 | Normal plain function behavior | Stop auto-wrapping / keep existing normal tool discovery | Keep existing plain-function discovery for normal MAF tools | Human | 2026-07-06 |
-| 6 | Workflow filter style | `allowed_tools` include list / `exclude` list / no filtering | Replace `allowed_tools` with `workflows.exclude` | Human | 2026-07-06 |
+| 6 | Workflow filter style | `exclude` list / no filtering | Use `workflows.exclude` to match existing capability filtering | Human | 2026-07-06 |
 | 7 | Workflow-only functions | Require duplicate wrappers / `@workflow_tool` only / config-only exclusion | `@workflow_tool` only means workflow-only and must not become normal MAF tool | Human + Agent | 2026-07-06 |
 | 8 | Future workflow metadata | Separate config maps / decorator kwargs / postpone with no surface | Reserve `@workflow_tool(...)` for future retry/timeout/etc. metadata | Human + Agent | 2026-07-06 |
 | 9 | Incompatible workflow candidates | Fail all startup / silently skip / warn and skip where safe | Warn and skip incompatible workflow tool declarations where safe | Human | 2026-07-06 |
@@ -303,10 +292,9 @@ execution.
     workflow tools.
 - [ ] Unit: `tests/test_workflow_integration_validation.py`
   - `workflows.exclude` shape validation;
-  - unknown workflow keys fail with actionable messages;
-  - `workflows.allowed_tools` is rejected as unsupported.
+  - unknown workflow keys fail with actionable messages.
 - [ ] Unit: `tests/test_app_routes.py`
-  - no manual sample registration is needed for workflow-enabled app startup;
+  - workflow-enabled app startup discovers sample workflow tools from `tools/`;
   - workflow addendum lists discovered non-excluded workflow tools.
 - [ ] Fixture scenario:
   `tests/fixtures/config_scenarios/<next>_dynamic_workflow_tools/`
@@ -322,8 +310,8 @@ execution.
   pipeline-stage descriptions.
 - [ ] `docs/front-matter-spec.md` — document `workflows.enabled` and
   `workflows.exclude`.
-- [ ] `docs/workflows.md` — replace `allowed_tools` and manual registration with
-  `@workflow_tool` authoring.
+- [ ] `docs/workflows.md` — document `@workflow_tool` authoring and
+  auto-registration from `tools/`.
 - [ ] `README.md` — ensure experimental workflows mention points to the sample
   and docs.
 - [ ] `samples/workflow-incident-triage/README.md` — update authoring and local
