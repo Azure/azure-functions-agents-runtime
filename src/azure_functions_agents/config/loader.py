@@ -17,7 +17,6 @@ from azure_functions_agents.config.env import (
 )
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
 
-
 _FRONTMATTER_SCHEMA_LINK = "aka.ms/agents-front-matter-schema"
 
 

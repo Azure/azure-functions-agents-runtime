@@ -139,9 +139,8 @@ def test_load_agent_specs_unknown_field_raises(
         ).lstrip(),
         encoding="utf-8",
     )
-    with caplog.at_level(logging.ERROR):
-        with pytest.raises(ValueError, match=r"unknown_field"):
-            load_agent_specs(tmp_path, strict=True)
+    with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match=r"unknown_field"):
+        load_agent_specs(tmp_path, strict=True)
 
     assert any(
         "frontmatter_validation_error:" in record.getMessage()
