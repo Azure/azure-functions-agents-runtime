@@ -36,6 +36,35 @@ if TYPE_CHECKING:
 
 _API_VERSION = "2025-10-02-preview"
 
+# The managed-identity bearer token is minted for the Azure Container Apps
+# dynamic sessions audience and must only ever be attached to a genuine dynamic
+# sessions host. Endpoints are restricted to subdomains of ``dynamicsessions.io``
+# so a mis-set app setting cannot redirect the token elsewhere.
+_ALLOWED_SESSIONS_HOST_SUFFIX = ".dynamicsessions.io"
+
+
+def _is_allowed_sessions_endpoint(endpoint: str) -> bool:
+    """Return ``True`` only for https URLs on an ACA dynamic sessions host.
+
+    The resolved endpoint host must be a subdomain of ``dynamicsessions.io``
+    (``*.dynamicsessions.io``). Any non-https scheme, embedded userinfo, empty
+    host, lookalike host, or malformed URL is rejected so the tool (and the
+    managed-identity token it carries) is never bound to an unintended host.
+    """
+    try:
+        parsed = urllib.parse.urlparse(endpoint)
+    except ValueError:
+        return False
+    if parsed.scheme != "https":
+        return False
+    if "@" in parsed.netloc:
+        return False
+    host = (parsed.hostname or "").lower()
+    if not host:
+        return False
+    return host.endswith(_ALLOWED_SESSIONS_HOST_SUFFIX)
+
+
 # ---------------------------------------------------------------------------
 # Playwright helper that is pre-loaded into every sandbox session
 # ---------------------------------------------------------------------------
@@ -278,6 +307,15 @@ def create_sandbox_tools(
         logger.warning(
             "dynamic_sessions_code_interpreter: could not resolve endpoint '%s', skipping",
             raw_endpoint,
+        )
+        return []
+
+    if not _is_allowed_sessions_endpoint(endpoint):
+        logger.warning(
+            "dynamic_sessions_code_interpreter: resolved endpoint '%s' failed validation "
+            "(must be an https URL whose host is *.dynamicsessions.io); "
+            "skipping tool creation",
+            endpoint,
         )
         return []
 
