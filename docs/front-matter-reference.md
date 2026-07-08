@@ -1,3 +1,7 @@
+<!-- AUTO-GENERATED FROM PYDANTIC MODELS - DO NOT EDIT MANUALLY -->
+<!-- Generated from: src/azure_functions_agents/config/schema.py -->
+<!-- To regenerate: python eng/scripts/generate_config_reference.py -->
+
 # Front Matter Reference
 
 API reference for Azure Functions agent configuration properties. For examples and detailed usage patterns, see [front-matter-spec.md](./front-matter-spec.md).
@@ -19,14 +23,14 @@ Optional file in the root directory. All properties are optional.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `dynamic_sessions_code_interpreter` | object | No | N/A | ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter) |
+| `dynamic_sessions_code_interpreter` | object | No | `{}` | ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter) |
 
 ### Global: `system_tools.dynamic_sessions_code_interpreter`
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `endpoint` | string | **Yes** | N/A | ACA session pool endpoint URL. Supports env var substitution. |
-| `client_id` | string \| null | No | `null` | Optional managed identity client ID for multi-identity Function Apps |
+| `client_id` | string | No | `null` | Optional managed identity client ID for multi-identity Function Apps |
 
 ### Global: `tools`
 
@@ -54,18 +58,18 @@ YAML front matter at the top of each agent markdown file.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `builtin_endpoints` | object \| boolean | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
+| `builtin_endpoints` | boolean \| object | No | `false` | Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints) |
 | `model` | string | No | Inherited from global | Override LLM model for this agent |
 | `timeout` | number | No | Inherited from global | Override execution timeout (seconds) for this agent |
 | `logger` | boolean | No | `true` | Enable/disable response logging for triggered agents |
 | `substitute_variables` | boolean | No | `true` | Enable/disable environment variable substitution |
 | `system_tools` | object | No | Inherited | Opt out of system tools. [Details](#agent-system_tools) |
 | `mcp` | boolean \| object | No | `true` (inherit all) | MCP server filtering. [Details](#agent-mcp) |
-| `skills` | object \| boolean | No | Inherit all | Skill filtering. [Details](#agent-skills) |
-| `tools` | object \| boolean | No | Inherit all | Custom tool filtering. [Details](#agent-tools) |
-| `input_schema` | object | No | N/A | JSON Schema for HTTP request validation |
-| `response_schema` | object | No | N/A | JSON Schema for response validation |
-| `response_example` | string | No | N/A | Example response structure (multiline string) |
+| `skills` | boolean \| object | No | Inherit all | Skill filtering. [Details](#agent-skills) |
+| `tools` | boolean \| object | No | Inherit all | Custom tool filtering. [Details](#agent-tools) |
+| `input_schema` | object | No | `null` | JSON Schema for HTTP request validation |
+| `response_schema` | object | No | `null` | JSON Schema for response validation |
+| `response_example` | string | No | `null` | Example response structure (multiline string) |
 | `metadata` | object | No | `{}` | Additional metadata for organization. Free-form. |
 
 ### Agent: `trigger`
@@ -79,10 +83,10 @@ trigger:
   args: <type_specific_configuration>
 ```
 
-| Property | Type | Required | Description |
-|----------|------|----------|-------------|
-| `type` | string | **Yes** | Trigger type identifier. See [Supported Trigger Types](#supported-trigger-types) |
-| `args` | object | No | Type-specific configuration. See [Supported Trigger Types](#supported-trigger-types) |
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `type` | string | **Yes** | N/A | Trigger type identifier. See [Supported Trigger Types](#supported-trigger-types) |
+| `args` | object | No | `{}` | Type-specific configuration. See [Supported Trigger Types](#supported-trigger-types) |
 
 **See:** [Front Matter Spec - trigger](./front-matter-spec.md#trigger), [Triggers Reference](./triggers.md)
 
@@ -112,7 +116,7 @@ Opt out of system-level tools configured globally.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `dynamic_sessions_code_interpreter` | boolean | No | Inherited | Set to `false` to opt out of code execution capabilities |
+| `dynamic_sessions_code_interpreter` | boolean | No | `null` | Set to `false` to opt out of code execution capabilities |
 
 **See:** [Front Matter Spec - system_tools](./front-matter-spec.md#system_tools)
 
