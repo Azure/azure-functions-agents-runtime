@@ -45,7 +45,7 @@ Runtime rules:
 | `dapr_service_invocation_trigger` | `dapr_service_invocation_trigger(...)` | Supported | Dapr service invocation trigger. |
 | `dapr_topic_trigger` | `dapr_topic_trigger(...)` | Supported | Dapr pub/sub topic trigger. |
 | `generic_trigger` | `generic_trigger(...)` | Supported | Custom extension binding trigger. |
-| `connector_trigger` | `connector_trigger(...)` | Supported | Generic connector trigger. |
+| `connector_trigger` | `connector_trigger(...)` | Supported | Generic connector trigger. Falls back to `generic_trigger(type="connectorTrigger")` when the installed Azure Functions package does not expose the native decorator. |
 
 ## Unsupported Trigger Decorators
 
@@ -470,12 +470,21 @@ Ref: [Azure Functions custom bindings](https://learn.microsoft.com/azure/azure-f
 
 ## Connector Triggers
 
-Connector-triggered agents use `trigger.type: connector_trigger`. The runtime uses the Azure Functions Python `connector_trigger(...)` decorator.
+Connector-triggered agents use `trigger.type: connector_trigger`. The runtime uses the Azure Functions Python `connector_trigger(...)` decorator when it is available, and otherwise registers the equivalent generic binding shape with `type: connectorTrigger`.
 
 ```yaml
 trigger:
   type: connector_trigger
+  args:
+    connection_name: $CONNECTION_NAME
+    trigger_identifier: <trigger-id>
 ```
+
+Rules:
+
+- Use `trigger.type: connector_trigger`; dotted connector trigger names are rejected during config validation.
+- The runtime registers the trigger through `FunctionApp.connector_trigger(...)` when available, otherwise through `FunctionApp.generic_trigger(type="connectorTrigger", ...)`.
+- Connector-specific fields are passed through to the Azure Functions connector trigger binding.
 
 Connector actions that an agent calls as tools should be exposed through connector-backed MCP servers in `mcp.json`; connector triggers are only for invoking an agent when an external connector event occurs.
 
