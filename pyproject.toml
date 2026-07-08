@@ -25,6 +25,16 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
+# runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
+# only when another OpenTelemetry provider is already active (e.g. the Functions worker) and exports
+# nothing on its own. Pinned to 1.8.8 (opentelemetry-sdk 1.40) to avoid the crashing combo in 1.8.9
+# (opentelemetry-sdk 1.43 freezes span attributes on end, which the exporter's gen_ai main-agent
+# processor mutates in on_end -> TypeError). Fixed upstream in azure-monitor-opentelemetry-exporter
+# b55 (Azure/azure-sdk-for-python#47796). TODO: bump to the distro that bundles exporter >=b55.
+monitor = [
+    "azure-monitor-opentelemetry==1.8.8",
+]
 dev = [
     "ruff==0.15.*",
     "mypy==2.1.*",
@@ -32,6 +42,10 @@ dev = [
     "pytest==9.0.*",
     "types-jsonschema==4.26.*",
     "pytest-cov==7.1.*",
+    # Bring the exporter into the dev/test/type-check env so the observability tests (which import
+    # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
+    # [monitor] extra above.
+    "azure-monitor-opentelemetry==1.8.8",
 ]
 
 [tool.setuptools.packages.find]

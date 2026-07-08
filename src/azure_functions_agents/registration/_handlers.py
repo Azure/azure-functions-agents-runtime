@@ -14,6 +14,13 @@ import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger
+from .._observability import (
+    ATTR_FAULT_DOMAIN,
+    FaultDomain,
+    LifecycleStage,
+    capture_sensitive_data,
+    start_span,
+)
 from ..config import ResolvedAgent, _to_bool
 from .capabilities import AgentCapabilities
 
@@ -22,6 +29,7 @@ AUTH_LEVEL_MAP = {
     "function": func.AuthLevel.FUNCTION,
     "admin": func.AuthLevel.ADMIN,
 }
+_SESSION_ID_HEADER = "x-ms-session-id"
 
 
 def serialize_trigger_data(trigger_data: Any) -> str:
@@ -118,6 +126,58 @@ def _should_log(resolved: ResolvedAgent) -> bool:
     return _to_bool(resolved.metadata.get("logger", True), default=True)
 
 
+def _looks_like_tool_error(result: Any) -> bool:
+    """Best-effort: does a recorded tool result represent a failure?
+
+    Catches both the sandbox error envelope (``{"error": ...}``) and a "successful" call whose
+    ``stderr`` is non-empty — the case that used to hide broken code execution.
+    """
+    if not isinstance(result, str):
+        return False
+    try:
+        parsed = json.loads(result)
+    except (TypeError, json.JSONDecodeError):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    if parsed.get("error"):
+        return True
+    stderr = parsed.get("stderr")
+    return bool(isinstance(stderr, str) and stderr.strip())
+
+
+def _tool_error_count(tool_calls: list[dict[str, Any]] | None) -> int:
+    if not tool_calls:
+        return 0
+    return sum(1 for call in tool_calls if _looks_like_tool_error(call.get("result")))
+
+
+def _set_run_result_attributes(span: Any, result: Any) -> None:
+    """Attach non-sensitive run-summary attributes; content only when opted in."""
+    tool_calls = list(getattr(result, "tool_calls", None) or [])
+    content = str(getattr(result, "content", "") or "")
+    span.set_attribute("af.agent.tool_call_count", len(tool_calls))
+    span.set_attribute("af.agent.tool_error_count", _tool_error_count(tool_calls))
+    span.set_attribute("af.agent.response_bytes", len(content))
+    span.set_content("af.agent.response", content)
+
+
+def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
+    """Build the response log body, gating raw content behind capture_sensitive_data."""
+    tool_calls = list(getattr(result, "tool_calls", None) or [])
+    content = str(getattr(result, "content", "") or "")
+    payload: dict[str, Any] = {
+        "session_id": getattr(result, "session_id", None),
+        "response_bytes": len(content),
+        "tool_call_count": len(tool_calls),
+        "tool_error_count": _tool_error_count(tool_calls),
+    }
+    if capture_sensitive_data():
+        payload["response"] = content
+        payload["tool_calls"] = tool_calls
+    return payload
+
+
 def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
     if resolved.response_example:
         return [
@@ -178,43 +238,57 @@ def make_agent_handler(
     async def _handler(trigger_data) -> None:  # type: ignore[no-untyped-def]
         logger.info("Agent '%s' triggered", resolved.name)
 
-        try:
-            session_id = _new_session_id()
-            data_json = serialize_trigger_data(trigger_data)
-            parts: list[str] = [
-                f"Triggered by: {trigger_type}\n\nTrigger data:\n```json\n{data_json}\n```"
-            ]
-            prompt = "\n\n".join(parts)
+        session_id = _new_session_id()
+        with start_span(
+            f"agent.run {resolved.name}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.name,
+                "af.agent.trigger_type": trigger_type,
+                "af.agent.session_id": session_id,
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
+            try:
+                data_json = serialize_trigger_data(trigger_data)
+                span.set_attribute("af.agent.input_bytes", len(data_json))
+                span.set_content("af.agent.input", data_json)
+                parts: list[str] = [
+                    f"Triggered by: {trigger_type}\n\nTrigger data:\n```json\n{data_json}\n```"
+                ]
+                prompt = "\n\n".join(parts)
 
-            result = await _run_agent(
-                prompt,
-                instructions=resolved.instructions,
-                timeout=resolved.timeout,
-                model=resolved.model,
-                session_id=session_id,
-                sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
-                tools=capabilities.filtered_user_tools,
-                mcp_tools=capabilities.filtered_mcp_tools,
-                skill_paths=capabilities.enabled_skill_paths,
-            )
-
-            if _should_log(resolved):
-                logger.info(
-                    "Agent '%s' response: %s",
-                    resolved.name,
-                    json.dumps(
-                        {
-                            "session_id": result.session_id,
-                            "response": result.content,
-                            "tool_calls": result.tool_calls,
-                        },
-                        ensure_ascii=False,
-                        default=str,
-                    ),
+                result = await _run_agent(
+                    prompt,
+                    instructions=resolved.instructions,
+                    timeout=resolved.timeout,
+                    model=resolved.model,
+                    session_id=session_id,
+                    sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
+                    tools=capabilities.filtered_user_tools,
+                    mcp_tools=capabilities.filtered_mcp_tools,
+                    skill_paths=capabilities.enabled_skill_paths,
                 )
-        except Exception as exc:
-            logger.exception("Agent '%s' failed: %s", resolved.name, exc)
-            raise
+
+                _set_run_result_attributes(span, result)
+                span.add_event("af.agent.invoke.completed")
+                span.set_attribute("af.agent.outcome", "success")
+
+                if _should_log(resolved):
+                    logger.info(
+                        "Agent '%s' response: %s",
+                        resolved.name,
+                        json.dumps(
+                            _run_log_payload(resolved, result),
+                            ensure_ascii=False,
+                            default=str,
+                        ),
+                    )
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                logger.exception("Agent '%s' failed: %s", resolved.name, exc)
+                raise
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
     return _handler
@@ -229,123 +303,162 @@ def make_http_agent_handler(
     async def _handler(req: Request) -> Response:
         logger.info("HTTP agent '%s' triggered", resolved.name)
 
-        try:
-            session_id = _request_header_value(req, "x-ms-session-id") or _new_session_id()
+        with start_span(
+            f"agent.run {resolved.name}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.name,
+                "af.agent.trigger_type": "http",
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
             try:
-                body = await req.json()
-                body_json = json.dumps(body, ensure_ascii=False, default=str)
-            except Exception:
-                body_bytes = await req.body()
-                body = body_bytes.decode("utf-8", errors="replace") if body_bytes else {}
-                body_json = body if isinstance(body, str) else json.dumps(body)
+                session_id = _request_header_value(req, _SESSION_ID_HEADER) or _new_session_id()
+                span.set_attribute("af.agent.session_id", session_id)
+                try:
+                    body = await req.json()
+                    body_json = json.dumps(body, ensure_ascii=False, default=str)
+                except Exception:
+                    body_bytes = await req.body()
+                    body = body_bytes.decode("utf-8", errors="replace") if body_bytes else {}
+                    body_json = body if isinstance(body, str) else json.dumps(body)
 
-            validation_error = validate_request_body(body, resolved.input_schema)
-            if validation_error is not None:
-                if validation_error.status_code == 500:
-                    logger.error(
-                        "HTTP agent '%s' has invalid input schema: %s",
-                        resolved.name,
-                        validation_error.body.decode("utf-8"),
-                    )
-                validation_error.headers["x-ms-session-id"] = session_id
-                return validation_error
+                span.set_attribute("af.agent.input_bytes", len(body_json))
+                span.set_content("af.agent.input", body_json)
 
-            parts: list[str] = []
-            parts.extend(_response_format_instructions(resolved))
-            parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
-            prompt = "\n\n".join(parts)
-
-            result = await _run_agent(
-                prompt,
-                instructions=resolved.instructions,
-                timeout=resolved.timeout,
-                model=resolved.model,
-                session_id=session_id,
-                sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
-                tools=capabilities.filtered_user_tools,
-                mcp_tools=capabilities.filtered_mcp_tools,
-                skill_paths=capabilities.enabled_skill_paths,
-            )
-
-            if _should_log(resolved):
-                logger.info(
-                    "HTTP agent '%s' response: %s",
-                    resolved.name,
-                    json.dumps(
+                validation_error = validate_request_body(body, resolved.input_schema)
+                if validation_error is not None:
+                    if validation_error.status_code == 500:
+                        logger.error(
+                            "HTTP agent '%s' has invalid input schema: %s",
+                            resolved.name,
+                            validation_error.body.decode("utf-8"),
+                        )
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_error("input validation failed", fault_domain=FaultDomain.APP)
+                    span.add_event(
+                        "af.input.validation_failed",
                         {
-                            "session_id": result.session_id,
-                            "response": result.content[:500],
+                            ATTR_FAULT_DOMAIN: FaultDomain.APP,
+                            "af.http.status_code": validation_error.status_code,
                         },
-                        ensure_ascii=False,
-                        default=str,
-                    ),
+                    )
+                    validation_error.headers[_SESSION_ID_HEADER] = session_id
+                    return validation_error
+
+                parts: list[str] = []
+                parts.extend(_response_format_instructions(resolved))
+                parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
+                prompt = "\n\n".join(parts)
+
+                result = await _run_agent(
+                    prompt,
+                    instructions=resolved.instructions,
+                    timeout=resolved.timeout,
+                    model=resolved.model,
+                    session_id=session_id,
+                    sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
+                    tools=capabilities.filtered_user_tools,
+                    mcp_tools=capabilities.filtered_mcp_tools,
+                    skill_paths=capabilities.enabled_skill_paths,
                 )
 
-            if resolved.response_example or resolved.response_schema:
-                extracted = extract_json_from_response(result.content)
-                try:
-                    parsed = json.loads(extracted)
-                except json.JSONDecodeError as exc:
-                    logger.warning(
-                        "HTTP agent '%s' returned invalid JSON: %s",
+                _set_run_result_attributes(span, result)
+                span.add_event("af.agent.invoke.completed")
+                span.set_attribute("af.agent.outcome", "success")
+
+                if _should_log(resolved):
+                    logger.info(
+                        "HTTP agent '%s' response: %s",
                         resolved.name,
-                        exc,
-                    )
-                    return Response(
-                        content=json.dumps(
-                            {
-                                "error": "Agent returned invalid JSON",
-                                "raw_response": result.content,
-                            }
+                        json.dumps(
+                            _run_log_payload(resolved, result),
+                            ensure_ascii=False,
+                            default=str,
                         ),
-                        status_code=500,
-                        media_type="application/json",
-                        headers={"x-ms-session-id": session_id},
                     )
-                if resolved.response_schema:
+
+                if resolved.response_example or resolved.response_schema:
+                    extracted = extract_json_from_response(result.content)
                     try:
-                        jsonschema.validate(
-                            instance=parsed,
-                            schema=resolved.response_schema,
-                        )
-                    except jsonschema.ValidationError as exc:
+                        parsed = json.loads(extracted)
+                    except json.JSONDecodeError as exc:
                         logger.warning(
-                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
+                            "HTTP agent '%s' returned invalid JSON: %s",
                             resolved.name,
                             exc,
+                        )
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_error("agent returned invalid JSON", fault_domain=FaultDomain.APP)
+                        span.add_event(
+                            "af.response.invalid_json",
+                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
                         )
                         return Response(
                             content=json.dumps(
                                 {
-                                    "error": "Agent response validation failed",
-                                    "details": exc.message,
+                                    "error": "Agent returned invalid JSON",
+                                    "raw_response": result.content,
                                 }
                             ),
                             status_code=500,
                             media_type="application/json",
-                            headers={"x-ms-session-id": session_id},
+                            headers={_SESSION_ID_HEADER: session_id},
                         )
-                return Response(
-                    content=json.dumps(parsed, ensure_ascii=False),
-                    status_code=200,
-                    media_type="application/json",
-                    headers={"x-ms-session-id": session_id},
-                )
+                    if resolved.response_schema:
+                        try:
+                            jsonschema.validate(
+                                instance=parsed,
+                                schema=resolved.response_schema,
+                            )
+                        except jsonschema.ValidationError as exc:
+                            logger.warning(
+                                "HTTP agent '%s' returned JSON that failed schema validation: %s",
+                                resolved.name,
+                                exc,
+                            )
+                            span.set_attribute("af.agent.outcome", "error")
+                            span.set_error(
+                                "response schema validation failed", fault_domain=FaultDomain.APP
+                            )
+                            span.add_event(
+                                "af.response.schema_validation_failed",
+                                {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+                            )
+                            return Response(
+                                content=json.dumps(
+                                    {
+                                        "error": "Agent response validation failed",
+                                        "details": exc.message,
+                                    }
+                                ),
+                                status_code=500,
+                                media_type="application/json",
+                                headers={_SESSION_ID_HEADER: session_id},
+                            )
+                    return Response(
+                        content=json.dumps(parsed, ensure_ascii=False),
+                        status_code=200,
+                        media_type="application/json",
+                        headers={_SESSION_ID_HEADER: session_id},
+                    )
 
-            return Response(
-                content=result.content,
-                status_code=200,
-                media_type="text/plain",
-                headers={"x-ms-session-id": session_id},
-            )
-        except Exception as exc:
-            logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
-            return Response(
-                content=json.dumps({"error": str(exc)}),
-                status_code=500,
-                media_type="application/json",
-                headers={"x-ms-session-id": session_id},
-            )
+                return Response(
+                    content=result.content,
+                    status_code=200,
+                    media_type="text/plain",
+                    headers={_SESSION_ID_HEADER: session_id},
+                )
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                logger.exception("HTTP agent '%s' failed: %s", resolved.name, exc)
+                return Response(
+                    content=json.dumps({"error": str(exc)}),
+                    status_code=500,
+                    media_type="application/json",
+                    headers={_SESSION_ID_HEADER: session_id},
+                )
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
     return _handler
