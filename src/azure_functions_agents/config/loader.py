@@ -22,7 +22,7 @@ _FRONTMATTER_SCHEMA_LINK = "aka.ms/agents-front-matter-schema"
 
 _FRONTMATTER_ACTION_ITEMS = (
     "Fix YAML syntax between leading and trailing '---' delimiters.",
-    "Validate required fields like `name`, `description`, and `trigger` against docs/front-matter-spec.md.",
+    f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",
     "Re-run startup in strict mode to fail fast (load_agent_specs(..., strict=True)).",
 )
 
@@ -121,7 +121,7 @@ def load_global_config(app_root: Path) -> GlobalConfig:
             "global_config_yaml_error: file=%s reason=%s action_items=%s",
             source_file,
             exc,
-            "1) Fix YAML syntax in agents.config.yaml. | 2) Validate fields against docs/front-matter-spec.md.",
+            f"1) Fix YAML syntax in agents.config.yaml. | 2) Validate fields against {_FRONTMATTER_SCHEMA_LINK}.",
         )
         raise ValueError(f"{source_file}: invalid YAML in agents.config.yaml: {exc}") from exc
 
@@ -134,7 +134,7 @@ def load_global_config(app_root: Path) -> GlobalConfig:
             "1) Ensure the YAML root is a mapping/object. | 2) Move list/scalar values under supported fields.",
         )
         raise ValueError(
-            f"{source_file}: field `<root>`: expected a YAML mapping. See docs/front-matter-spec.md"
+            f"{source_file}: field `<root>`: expected a YAML mapping. See {_FRONTMATTER_SCHEMA_LINK}"
         )
 
     normalized = _normalize_global_config_dict(data)
@@ -145,7 +145,7 @@ def load_global_config(app_root: Path) -> GlobalConfig:
             "global_config_validation_error: file=%s reason=%s action_items=%s",
             source_file,
             exc,
-            "1) Fix invalid field types/values in agents.config.yaml. | 2) Compare fields to docs/front-matter-spec.md.",
+            f"1) Fix invalid field types/values in agents.config.yaml. | 2) Compare fields to {_FRONTMATTER_SCHEMA_LINK}.",
         )
         raise _format_validation_error(source_file, exc) from exc
 

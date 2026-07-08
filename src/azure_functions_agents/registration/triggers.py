@@ -124,7 +124,7 @@ def register_agent(
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
         logger.info(
             "Registered trigger: source_file=%s function=%s trigger_type=http_trigger route=%s methods=%s",
-            resolved.source_file,
+            _source_marker(resolved.source_file),
             function_name,
             trigger_params.get("route"),
             trigger_params.get("methods", ["POST"]),
@@ -143,7 +143,7 @@ def register_agent(
     )
     logger.info(
         "Registered trigger: source_file=%s function=%s trigger_type=%s",
-        resolved.source_file,
+        _source_marker(resolved.source_file),
         function_name,
         trigger_type,
     )

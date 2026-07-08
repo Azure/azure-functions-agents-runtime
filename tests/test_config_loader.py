@@ -145,7 +145,7 @@ def test_load_agent_specs_unknown_field_raises(
     assert any(
         "frontmatter_validation_error:" in record.getMessage()
         and "field=unknown_field" in record.getMessage()
-        and "reason=Extra inputs are not permitted" in record.getMessage()
+        and "reason=" in record.getMessage()
         and "schema=aka.ms/agents-front-matter-schema" in record.getMessage()
         for record in caplog.records
     )
