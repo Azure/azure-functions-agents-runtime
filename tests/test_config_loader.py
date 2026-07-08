@@ -266,7 +266,7 @@ def test_load_global_config_non_mapping_root_raises(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert str(source) in message
     assert "mapping" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
