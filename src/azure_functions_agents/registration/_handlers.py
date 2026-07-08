@@ -7,7 +7,6 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
-from pathlib import Path
 from typing import Any, cast
 
 import azure.functions as func
@@ -15,6 +14,7 @@ import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger
+from .._source_marker import source_marker
 from ..config import ResolvedAgent, _to_bool
 from .capabilities import AgentCapabilities
 
@@ -164,12 +164,6 @@ def _new_session_id() -> str:
     return uuid.uuid4().hex
 
 
-def _source_marker(source_file: str | None) -> str:
-    if not source_file:
-        return "<unknown>"
-    return Path(str(source_file)).name
-
-
 def make_agent_handler(
     resolved: ResolvedAgent,
     trigger_type: str,
@@ -186,7 +180,7 @@ def make_agent_handler(
         logger.info(
             "Agent triggered: trigger_type=%s source_file=%s",
             trigger_type,
-            _source_marker(resolved.source_file),
+            source_marker(resolved.source_file),
         )
 
         try:
@@ -212,7 +206,7 @@ def make_agent_handler(
             if _should_log(resolved):
                 logger.info(
                     "Agent response: source_file=%s payload=%s",
-                    _source_marker(resolved.source_file),
+                    source_marker(resolved.source_file),
                     json.dumps(
                         {
                             "session_id": result.session_id,
@@ -226,7 +220,7 @@ def make_agent_handler(
         except Exception as exc:
             logger.exception(
                 "Agent execution failed: source_file=%s error=%s",
-                _source_marker(resolved.source_file),
+                source_marker(resolved.source_file),
                 exc,
             )
             raise
@@ -244,7 +238,7 @@ def make_http_agent_handler(
     async def _handler(req: Request) -> Response:
         logger.info(
             "HTTP agent triggered: source_file=%s",
-            _source_marker(resolved.source_file),
+            source_marker(resolved.source_file),
         )
 
         try:
@@ -262,7 +256,7 @@ def make_http_agent_handler(
                 if validation_error.status_code == 500:
                     logger.error(
                         "HTTP agent has invalid input schema: source_file=%s error=%s",
-                        _source_marker(resolved.source_file),
+                        source_marker(resolved.source_file),
                         validation_error.body.decode("utf-8"),
                     )
                 validation_error.headers["x-ms-session-id"] = session_id
@@ -288,7 +282,7 @@ def make_http_agent_handler(
             if _should_log(resolved):
                 logger.info(
                     "HTTP agent response: source_file=%s payload=%s",
-                    _source_marker(resolved.source_file),
+                    source_marker(resolved.source_file),
                     json.dumps(
                         {
                             "session_id": result.session_id,
@@ -306,7 +300,7 @@ def make_http_agent_handler(
                 except json.JSONDecodeError as exc:
                     logger.warning(
                         "HTTP agent returned invalid JSON: source_file=%s error=%s",
-                        _source_marker(resolved.source_file),
+                        source_marker(resolved.source_file),
                         exc,
                     )
                     return Response(
@@ -329,7 +323,7 @@ def make_http_agent_handler(
                     except jsonschema.ValidationError as exc:
                         logger.warning(
                             "HTTP agent returned JSON that failed schema validation: source_file=%s error=%s",
-                            _source_marker(resolved.source_file),
+                            source_marker(resolved.source_file),
                             exc,
                         )
                         return Response(
@@ -359,7 +353,7 @@ def make_http_agent_handler(
         except Exception as exc:
             logger.exception(
                 "HTTP agent execution failed: source_file=%s error=%s",
-                _source_marker(resolved.source_file),
+                source_marker(resolved.source_file),
                 exc,
             )
             return Response(

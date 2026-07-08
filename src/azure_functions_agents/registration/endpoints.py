@@ -17,6 +17,7 @@ import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
+from .._source_marker import source_marker
 from ..config import ResolvedAgent
 from ._handlers import build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
@@ -91,12 +92,6 @@ def _ensure_unique_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
 
 def _index_path() -> Path:
     return Path(__file__).resolve().parent.parent / "public" / "index.html"
-
-
-def _source_marker(source_file: str | None) -> str:
-    if not source_file:
-        return "<unknown>"
-    return Path(str(source_file)).name
 
 
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
@@ -235,7 +230,7 @@ def _register_http_chat(
             error_msg = _format_exception_message(exc)
             logger.error(
                 "Built-in chat API error: source_file=%s error=%s",
-                _source_marker(resolved.source_file),
+                source_marker(resolved.source_file),
                 error_msg,
             )
             return _json_error(error_msg)
@@ -272,7 +267,7 @@ def _register_http_chat_stream(
             error_msg = _format_exception_message(exc)
             logger.error(
                 "Built-in chat stream error: source_file=%s error=%s",
-                _source_marker(resolved.source_file),
+                source_marker(resolved.source_file),
                 error_msg,
             )
             return _sse_error_response(error_msg, status_code=500)
@@ -320,7 +315,7 @@ def _register_mcp_endpoint(
             error_msg = _format_exception_message(exc)
             logger.error(
                 "Built-in MCP error: source_file=%s error=%s",
-                _source_marker(resolved.source_file),
+                source_marker(resolved.source_file),
                 error_msg,
             )
             return json.dumps({"error": error_msg})

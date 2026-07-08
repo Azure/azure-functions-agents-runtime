@@ -9,6 +9,7 @@ from typing import Any
 import azure.functions as func
 
 from ._logger import logger
+from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -25,12 +26,6 @@ from .registration.triggers import register_agent
 def _tool_name(tool: object) -> str:
     name = getattr(tool, "name", "") or ""
     return str(name)
-
-
-def _source_marker(source_file: str | None) -> str:
-    if not source_file:
-        return "<unknown>"
-    return Path(str(source_file)).name
 
 
 def _serialize_capabilities_for_log(
@@ -131,7 +126,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
         logger.info(
             "agent_capabilities_registered: source_file=%s user_tools=%s mcp_servers=%s skills=%s",
-            _source_marker(resolved.source_file),
+            source_marker(resolved.source_file),
             capability_names["user_tools"],
             capability_names["mcp_servers"],
             capability_names["skills"],
@@ -156,7 +151,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
-            "source_file": _source_marker(resolved.source_file),
+            "source_file": source_marker(resolved.source_file),
             "registered_capabilities": capability_names,
         }
         if resolved.trigger:
