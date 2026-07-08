@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -35,9 +36,44 @@ class DummyRequest:
         return json.dumps(self._payload).encode("utf-8")
 
 
+class RecordingSpan:
+    def __init__(self) -> None:
+        self.events: list[tuple[str, dict[str, Any] | None]] = []
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        return None
+
+    def set_content(self, key: str, value: str) -> None:
+        return None
+
+    def set_error(self, message: str, *, fault_domain: str) -> None:
+        return None
+
+    def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
+        return None
+
+    def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
+        self.events.append((name, attributes))
+
+
+def _install_recording_span(monkeypatch: Any) -> RecordingSpan:
+    span = RecordingSpan()
+
+    @contextmanager
+    def _fake_start_span(*args: Any, **kwargs: Any) -> Any:
+        yield span
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.start_span",
+        _fake_start_span,
+    )
+    return span
+
+
 def _resolved_agent(
     *,
     response_schema: dict[str, Any] | None,
+    input_schema: dict[str, Any] | None = None,
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None = None,
     tools_disabled: bool = False,
 ) -> ResolvedAgent:
@@ -56,7 +92,7 @@ def _resolved_agent(
         tool_filter=ToolsFilter(),
         tools_disabled=tools_disabled,
         sandbox_config=sandbox_config,
-        input_schema=None,
+        input_schema=input_schema,
         response_schema=response_schema,
         response_example=None,
         metadata={},
@@ -117,6 +153,94 @@ def test_http_handler_response_schema_invalid_output_returns_500(monkeypatch: An
         "error": "Agent response validation failed",
         "details": "123 is not of type 'string'",
     }
+
+
+def test_http_handler_records_input_validation_failed_event(monkeypatch: Any) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema=None,
+            input_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            },
+        ),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"message": 123})))
+
+    assert response.status_code == 400
+    assert span.events == [
+        (
+            "af.input.validation_failed",
+            {"af.fault_domain": "app", "af.http.status_code": 400},
+        )
+    ]
+
+
+def test_http_handler_records_invalid_json_event(monkeypatch: Any) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="not-json", session_id="session-123", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            }
+        ),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 500
+    assert span.events == [
+        ("af.agent.invoke.completed", None),
+        ("af.response.invalid_json", {"af.fault_domain": "app"}),
+    ]
+
+
+def test_http_handler_records_response_schema_validation_failed_event(monkeypatch: Any) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content='{"message":123}', session_id="session-123", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema={
+                "type": "object",
+                "properties": {"message": {"type": "string"}},
+                "required": ["message"],
+            }
+        ),
+        AgentCapabilities(),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 500
+    assert span.events == [
+        ("af.agent.invoke.completed", None),
+        ("af.response.schema_validation_failed", {"af.fault_domain": "app"}),
+    ]
 
 
 def test_build_sandbox_tools_skips_disabled_tools(monkeypatch: Any) -> None:
@@ -279,6 +403,25 @@ def test_http_handler_passes_instructions_only_as_system_message(monkeypatch: An
     assert 'HTTP request data:\n```json\n{"hello": "world"}\n```' in captured["prompt"]
 
 
+def test_http_handler_records_invoke_completed_event(monkeypatch: Any) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="plain text", session_id="session-123", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 200
+    assert span.events == [("af.agent.invoke.completed", None)]
+
+
 def test_non_http_handler_generates_fresh_session_id_per_invocation(monkeypatch: Any) -> None:
     sandbox_session_ids: list[str | None] = []
     run_session_ids: list[str | None] = []
@@ -348,6 +491,30 @@ def test_non_http_handler_passes_instructions_only_as_system_message(monkeypatch
     assert captured["prompt"] == (
         'Triggered by: queue_trigger\n\nTrigger data:\n```json\n{"message": "hello"}\n```'
     )
+
+
+def test_non_http_handler_records_invoke_completed_event(monkeypatch: Any) -> None:
+    span = _install_recording_span(monkeypatch)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content="ok",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None), "queue_trigger", AgentCapabilities()
+    )
+
+    asyncio.run(handler({"message": "hello"}))
+
+    assert span.events == [("af.agent.invoke.completed", None)]
 
 
 def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:

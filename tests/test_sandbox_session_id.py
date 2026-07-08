@@ -12,7 +12,7 @@ from azure_functions_agents.system_tools import sandbox
 
 
 def _sandbox_config() -> dict[str, str]:
-    return {"endpoint": "https://sandbox.example"}
+    return {"endpoint": "https://eastus.dynamicsessions.io"}
 
 
 def _capture_aca_session_ids(

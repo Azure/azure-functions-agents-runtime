@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -11,6 +10,7 @@ import azure.functions as func
 
 from ._logger import logger
 from ._obo import OboTokenProvider, reset_obo_provider
+from ._observability import configure_observability
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -66,6 +66,10 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         # Ensure OBO provider is cleared if not configured
         reset_obo_provider()
         set_obo_provider(None)
+
+    # Bootstrap observability before anything runs so MAF gen_ai spans + runtime spans/metrics
+    # flow to Application Insights with zero app code. No-op unless a telemetry provider is active.
+    configure_observability()
 
     agent_specs = load_agent_specs(resolved_root)
     user_tools = discover_user_tools(resolved_root)
