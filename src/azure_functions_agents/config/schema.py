@@ -89,11 +89,49 @@ class SystemToolsAgentOverride(BaseModel):
     dynamic_sessions_code_interpreter: bool | None = None
 
 
+class OboConfig(BaseModel):
+    """On-Behalf-Of (OBO) authentication configuration.
+
+    Enables agents to call downstream APIs using the authenticated end-user's
+    identity rather than the function app's managed identity. Requires
+    pre-consented permissions on the Azure AD app registration.
+
+    The OBO flow exchanges an incoming user access token for a new token
+    scoped to a downstream API. This allows the agent to act on behalf of
+    the user when calling MCP servers, user tools, or other APIs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = True
+    client_id: str
+    client_secret: str | None = None
+    tenant_id: str
+    downstream_scopes: dict[str, str] = Field(default_factory=dict)
+
+    @field_validator("client_id", "tenant_id")
+    @classmethod
+    def validate_required_string(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("value must be non-empty")
+        return trimmed
+
+
+class AuthConfig(BaseModel):
+    """Global authentication configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    obo: OboConfig | None = None
+
+
 class GlobalConfig(BaseModel):
     """Top-level agents.config.yaml schema."""
 
     model_config = ConfigDict(extra="forbid")
 
+    auth: AuthConfig | None = None
     system_tools: SystemToolsConfig | None = None
     model: str | None = None
     timeout: float | None = None

@@ -1,0 +1,35 @@
+@baseUrl = http://localhost:7071
+@agentName = main
+@contentType = application/json
+
+# Paste a real user access token here for User A
+@userAToken = <paste-user-a-token>
+
+# Paste a real user access token here for User B
+@userBToken = <paste-user-b-token>
+
+### User A -> downstream should see User A identity
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userAToken}}
+
+{
+  "prompt": "Call the downstream whoami MCP tool and return raw JSON"
+}
+
+### User B -> downstream should see User B identity
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userBToken}}
+
+{
+  "prompt": "Call the downstream whoami MCP tool and return raw JSON"
+}
+
+### No user token -> managed identity fallback expected
+POST {{baseUrl}}/agents/{{agentName}}/chat
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Call the downstream whoami MCP tool and return raw JSON"
+}

@@ -1,0 +1,14 @@
+{
+  "servers": {
+    "whoami-api": {
+      "url": "http://localhost:8000/mcp",
+      "auth": {
+        "type": "obo",
+        "scope": "https://graph.microsoft.com/.default"
+      },
+      "headers": {
+        "x-client": "obo-e2e-sample"
+      }
+    }
+  }
+}

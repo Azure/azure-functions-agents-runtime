@@ -7,13 +7,21 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import azure.functions as func
 import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger
+from .._obo import (
+    InteractionRequiredError,
+    UserContext,
+    create_user_context,
+    extract_user_id_from_headers,
+    extract_user_token_from_headers,
+    get_obo_provider,
+)
 from .._observability import (
     ATTR_FAULT_DOMAIN,
     FaultDomain,
@@ -24,12 +32,127 @@ from .._observability import (
 from ..config import ResolvedAgent, _to_bool
 from .capabilities import AgentCapabilities
 
+if TYPE_CHECKING:
+    from .._obo import OboTokenProvider
+
 AUTH_LEVEL_MAP = {
     "anonymous": func.AuthLevel.ANONYMOUS,
     "function": func.AuthLevel.FUNCTION,
     "admin": func.AuthLevel.ADMIN,
 }
 _SESSION_ID_HEADER = "x-ms-session-id"
+
+# Global OBO provider reference (set during app initialization)
+_obo_provider: OboTokenProvider | None = None
+
+
+def set_obo_provider(provider: OboTokenProvider | None) -> None:
+    """Set the global OBO provider for handlers to use."""
+    global _obo_provider
+    _obo_provider = provider
+
+
+def get_handler_obo_provider() -> OboTokenProvider | None:
+    """Get the current OBO provider."""
+    return _obo_provider
+
+
+async def _build_user_context_from_request(req: Request) -> UserContext:
+    """Extract user context from HTTP request headers."""
+    headers = getattr(req, "headers", {})
+    access_token = extract_user_token_from_headers(headers)
+    user_id = extract_user_id_from_headers(headers)
+
+    return create_user_context(
+        access_token=access_token,
+        user_id=user_id,
+        obo_provider=_obo_provider,
+    )
+
+
+def _build_interaction_required_response(exc: InteractionRequiredError, session_id: str) -> Response:
+    """Build HTTP 401 response for OBO interaction required errors."""
+    import base64
+
+    headers: dict[str, str] = {"x-ms-session-id": session_id}
+
+    # Build WWW-Authenticate header with error info and claims
+    www_auth_parts = [f'Bearer error="{exc.error}"']
+    if exc.error_description:
+        desc = exc.error_description.replace('"', '\\"')
+        www_auth_parts.append(f'error_description="{desc}"')
+    if exc.claims:
+        claims_b64 = base64.b64encode(exc.claims.encode()).decode()
+        www_auth_parts.append(f'claims="{claims_b64}"')
+
+    headers["WWW-Authenticate"] = ", ".join(www_auth_parts)
+
+    return Response(
+        content=json.dumps({
+            "error": exc.error,
+            "error_description": exc.error_description,
+            "claims": exc.claims,
+        }),
+        status_code=401,
+        media_type="application/json",
+        headers=headers,
+    )
+
+# Global OBO provider reference (set during app initialization)
+_obo_provider: OboTokenProvider | None = None
+
+
+def set_obo_provider(provider: OboTokenProvider | None) -> None:
+    """Set the global OBO provider for handlers to use."""
+    global _obo_provider
+    _obo_provider = provider
+
+
+def get_handler_obo_provider() -> OboTokenProvider | None:
+    """Get the current OBO provider."""
+    return _obo_provider
+
+
+async def _build_user_context_from_request(req: Request) -> UserContext:
+    """Extract user context from HTTP request headers."""
+    headers = getattr(req, "headers", {})
+    access_token = extract_user_token_from_headers(headers)
+    user_id = extract_user_id_from_headers(headers)
+
+    return create_user_context(
+        access_token=access_token,
+        user_id=user_id,
+        obo_provider=_obo_provider,
+    )
+
+
+def _build_interaction_required_response(exc: InteractionRequiredError, session_id: str) -> Response:
+    """Build HTTP 401 response for OBO interaction required errors."""
+    import base64
+
+    headers: dict[str, str] = {"x-ms-session-id": session_id}
+
+    # Build WWW-Authenticate header with error info and claims
+    www_auth_parts = [f'Bearer error="{exc.error}"']
+    if exc.error_description:
+        desc = exc.error_description.replace('"', '\\"')
+        www_auth_parts.append(f'error_description="{desc}"')
+    if exc.claims:
+        claims_b64 = base64.b64encode(exc.claims.encode()).decode()
+        www_auth_parts.append(f'claims="{claims_b64}"')
+
+    headers["WWW-Authenticate"] = ", ".join(www_auth_parts)
+
+    return Response(
+        content=json.dumps({
+            "error": exc.error,
+            "error_description": exc.error_description,
+            "claims": exc.claims,
+        }),
+        status_code=401,
+        media_type="application/json",
+        headers=headers,
+    )
 
 
 def serialize_trigger_data(trigger_data: Any) -> str:
@@ -314,6 +437,7 @@ def make_http_agent_handler(
         ) as span:
             try:
                 session_id = _request_header_value(req, _SESSION_ID_HEADER) or _new_session_id()
+                user_context = await _build_user_context_from_request(req)
                 span.set_attribute("af.agent.session_id", session_id)
                 try:
                     body = await req.json()
@@ -361,6 +485,7 @@ def make_http_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    user_context=user_context,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -449,6 +574,13 @@ def make_http_agent_handler(
                     media_type="text/plain",
                     headers={_SESSION_ID_HEADER: session_id},
                 )
+            except InteractionRequiredError as exc:
+                logger.warning(
+                    "HTTP agent '%s' OBO interaction required: %s",
+                    resolved.name,
+                    exc.error_description,
+                )
+                return _build_interaction_required_response(exc, session_id)
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
