@@ -714,7 +714,7 @@ def main() -> int:
             print("Run: python eng/scripts/generate_config_reference.py", file=sys.stderr)
             return 1
 
-        print(f"✓ {output_path.relative_to(repo_root)} is up to date")
+        print(f"OK: {output_path.relative_to(repo_root)} is up to date")
         return 0
 
     # Generate mode: write the file
