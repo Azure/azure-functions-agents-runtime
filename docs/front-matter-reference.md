@@ -25,7 +25,7 @@ Optional file in the root directory. All properties are optional.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `endpoint` | string | No | N/A | ACA session pool endpoint URL. Supports env var substitution. |
+| `endpoint` | string | **Yes** | N/A | ACA session pool endpoint URL. Supports env var substitution. |
 | `client_id` | string \| null | No | `null` | Optional managed identity client ID for multi-identity Function Apps |
 
 ### Global: `tools`
