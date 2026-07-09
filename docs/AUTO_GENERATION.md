@@ -92,7 +92,7 @@ git push --force-with-lease
 
 ### Trigger Types
 
-Trigger type documentation is defined in the script's `TRIGGER_TYPES` dictionary since it's not in the Pydantic models. To add/modify trigger types, edit the `TRIGGER_TYPES` dict in `generate_config_reference.py`.
+Trigger type documentation is defined in the `TRIGGER_TYPES` dictionary in `src/azure_functions_agents/config/schema.py` alongside the Pydantic models. To add/modify trigger types, edit the `TRIGGER_TYPES` dict in `schema.py`.
 
 ### Field Descriptions
 

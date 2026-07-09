@@ -80,11 +80,17 @@ bug fixes.
 
 1. Update `docs/architecture.md` (module map / pipeline) — it is the design source
    of truth and must stay accurate.
-2. Update `docs/front-matter-spec.md` and/or `docs/triggers.md` if the authoring
-   surface changed, and `README.md` if user-facing behavior changed.
-3. Update the FRD index in `docs/frds/README.md`.
-4. Verify the `AGENTS.md` §8 Definition of Done, then open the PR.
-5. After merge, remove the worktree (`git worktree remove <path>`) and set the FRD
+2. **If schema.py changed:**
+   - Run `python eng/scripts/generate_config_reference.py` to regenerate the reference
+   - Use the **`update-schema-docs` skill** to add examples to `docs/front-matter-spec.md`
+     and review `docs/architecture.md` for consistency
+   - Review the skill's PR checklist and address architectural concerns
+3. Update `docs/front-matter-spec.md` and/or `docs/triggers.md` if the authoring
+   surface changed (for non-schema changes, or to refine schema-generated examples).
+4. Update `README.md` if user-facing behavior changed.
+5. Update the FRD index in `docs/frds/README.md`.
+6. Verify the `AGENTS.md` §8 Definition of Done, then open the PR.
+7. After merge, remove the worktree (`git worktree remove <path>`) and set the FRD
    `status: Implemented`.
 
 ## Guardrails
