@@ -3,7 +3,6 @@ import inspect
 import os
 import sys
 from collections.abc import Callable
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, get_type_hints
 
@@ -14,14 +13,6 @@ from .._function_tool import tool
 from .._logger import logger
 
 _DISCOVERED_TOOLS_CACHE: dict[Path, list[FunctionTool]] = {}
-
-
-@dataclass
-class ToolDiscoveryResult:
-    """Result of user tool discovery including successes and failures."""
-
-    tools: list[FunctionTool]
-    failed_loads: list[tuple[str, str]]  # [(filename, error_message), ...]
 
 
 def _single_basemodel_parameter(fn: Callable[..., Any]) -> type[BaseModel] | None:
@@ -51,7 +42,7 @@ def clear_tool_discovery_cache() -> None:
     _DISCOVERED_TOOLS_CACHE.clear()
 
 
-def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:
+def discover_user_tools(app_root: Path) -> list[FunctionTool]:
     """
     Dynamically discover and load tools from the project's ``tools/`` folder.
 
@@ -70,10 +61,9 @@ def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:
     resolved_root = Path(app_root).resolve()
     cached_tools = _DISCOVERED_TOOLS_CACHE.get(resolved_root)
     if cached_tools is not None:
-        return ToolDiscoveryResult(tools=list(cached_tools), failed_loads=[])
+        return list(cached_tools)
 
     tools: list[FunctionTool] = []
-    failed_loads: list[tuple[str, str]] = []
     project_src_dir = str(resolved_root)
     tools_dir = os.path.join(project_src_dir, "tools")
 
@@ -86,7 +76,7 @@ def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:
     if not os.path.exists(tools_dir):
         logger.warning("Tools directory not found: %s", tools_dir)
         _DISCOVERED_TOOLS_CACHE[resolved_root] = tools
-        return ToolDiscoveryResult(tools=list(tools), failed_loads=[])
+        return list(tools)
 
     files = sorted(f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_"))
     logger.debug("Python tool files found in %s: %s", tools_dir, files)
@@ -136,12 +126,8 @@ def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:
             if picked is not None:
                 tools.append(picked)
         except Exception as exc:
-            error_msg = f"{type(exc).__name__}: {exc}"
-            failed_loads.append((filename, error_msg))
             logger.warning("Failed to load tool from %s: %s", filename, exc, exc_info=True)
 
     _DISCOVERED_TOOLS_CACHE[resolved_root] = tools
     logger.info("Discovered %d user tool(s) from %s", len(tools), tools_dir)
-    if failed_loads:
-        logger.warning("Failed to load %d tool file(s)", len(failed_loads))
-    return ToolDiscoveryResult(tools=list(tools), failed_loads=failed_loads)
+    return list(tools)

@@ -412,8 +412,7 @@ def test_mcp_json_env_substitution(monkeypatch: pytest.MonkeyPatch) -> None:
 
     clear_mcp_cache()
     try:
-        result = discover_mcp_servers(fixture)
-        servers = result.servers
+        servers = discover_mcp_servers(fixture)
     finally:
         clear_mcp_cache()
 

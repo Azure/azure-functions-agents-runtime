@@ -142,8 +142,7 @@ def test_discover_user_tools_flattens_single_basemodel_parameter(tmp_path: Path)
 
     clear_tool_discovery_cache()
     try:
-        result = discover_user_tools(tmp_path)
-        discovered = result.tools
+        discovered = discover_user_tools(tmp_path)
         assert len(discovered) == 1
 
         tool = discovered[0]

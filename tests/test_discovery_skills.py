@@ -30,25 +30,20 @@ def _write_skill(app_root: Path, dir_name: str, name: str, description: str = "T
 def test_discover_skills_returns_name_to_directory_map(tmp_path: Path) -> None:
     skill_dir = _write_skill(tmp_path, "alpha", "alpha")
 
-    result = discover_skills(tmp_path)
+    discovered = discover_skills(tmp_path)
 
-    assert result.skills == {"alpha": skill_dir.resolve()} or result.skills == {"alpha": skill_dir}
-    assert result.failed_loads == []
+    assert discovered == {"alpha": skill_dir.resolve()} or discovered == {"alpha": skill_dir}
 
 
 def test_discover_skills_returns_empty_when_no_skills_dir(tmp_path: Path) -> None:
-    result = discover_skills(tmp_path)
-    assert result.skills == {}
-    assert result.failed_loads == []
+    assert discover_skills(tmp_path) == {}
 
 
 def test_discover_skills_returns_empty_when_no_skill_files(tmp_path: Path) -> None:
     (tmp_path / "skills").mkdir()
     (tmp_path / "skills" / "README.md").write_text("not a skill", encoding="utf-8")
 
-    result = discover_skills(tmp_path)
-    assert result.skills == {}
-    assert result.failed_loads == []
+    assert discover_skills(tmp_path) == {}
 
 
 def test_discover_skills_caches_results(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -147,9 +142,7 @@ def test_discover_skills_skips_unparseable_frontmatter(
     )
     _write_skill(tmp_path, "good", "good")
 
-    result = discover_skills(tmp_path)
+    discovered = discover_skills(tmp_path)
 
-    assert "good" in result.skills
-    assert "broken" not in result.skills
-    assert len(result.failed_loads) == 1
-    assert "broken" in result.failed_loads[0][0]
+    assert "good" in discovered
+    assert "broken" not in discovered

@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, cast
 
@@ -19,14 +18,6 @@ type MCPTool = MCPStreamableHTTPTool
 
 _DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
-
-
-@dataclass
-class MCPDiscoveryResult:
-    """Result of MCP server discovery including successes and failures."""
-
-    servers: dict[str, MCPTool]  # {server_name: MCPTool}
-    failed_loads: list[tuple[str, str]]  # [(server_name, error_message), ...]
 
 
 def clear_mcp_cache() -> None:
@@ -99,11 +90,8 @@ def _build_http_client(header_provider: Any) -> Any:
     return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
 
 
-def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, str | None]:
-    """Translate a single mcp.json entry to a MAF MCP tool object.
-    
-    Returns (tool, error_message). If tool is None, error_message explains why.
-    """
+def _build_mcp_tool(name: str, server: dict[str, Any]) -> MCPTool | None:
+    """Translate a single mcp.json entry to a MAF MCP tool object."""
     server_type = str(server.get("type", "")).lower()
     raw_tools = server.get("tools", ["*"])
     if isinstance(raw_tools, list) and any(tool == "*" for tool in raw_tools):
@@ -113,28 +101,24 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
     else:
         allowed_tools = None
     if "command" in server or server_type in {"local", "stdio"}:
-        error = "MCP stdio transport is not supported"
-        logger.warning("%s; skipping server '%s'", error, name)
-        return None, error
+        logger.warning("MCP stdio transport is not supported; skipping server '%s'", name)
+        return None
 
     if "url" in server or server_type in {"http", "streamable-http"}:
         if server_type and server_type not in {"http", "streamable-http"}:
-            error = f"unknown server type '{server_type}'; supported types are 'http' and 'streamable-http'"
             logger.warning(
-                "MCP server '%s': %s",
+                "MCP server '%s': unknown server type '%s'; supported types are 'http' and 'streamable-http'",
                 name,
-                error,
+                server_type,
             )
-            return None, error
+            return None
         url = str(server.get("url", "")).strip()
         if not url:
-            error = "missing 'url'"
-            logger.warning("MCP server '%s': %s, skipping", name, error)
-            return None, error
+            logger.warning("MCP server '%s': missing 'url', skipping", name)
+            return None
         if has_unresolved_placeholders(url):
-            error = f"could not resolve url '{url}'"
-            logger.warning("MCP server '%s': %s, skipping", name, error)
-            return None, error
+            logger.warning("MCP server '%s': could not resolve url '%s', skipping", name, url)
+            return None
         header_provider = _build_header_provider(server)
 
         return MCPStreamableHTTPTool(
@@ -145,42 +129,39 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             load_prompts=False,
             header_provider=header_provider,
             http_client=_build_http_client(header_provider),
-        ), None
+        )
 
     if server_type:
-        error = f"unknown server type '{server_type}'; supported types are 'http' and 'streamable-http'"
         logger.warning(
-            "MCP server '%s': %s",
+            "MCP server '%s': unknown server type '%s'; supported types are 'http' and 'streamable-http'",
             name,
-            error,
+            server_type,
         )
     else:
-        error = "unrecognized config (expected 'url' plus type 'http' or 'streamable-http')"
         logger.warning(
-            "MCP server '%s': %s, skipping",
+            "MCP server '%s': unrecognized config (expected 'url' plus type 'http' or 'streamable-http'), skipping",
             name,
-            error,
         )
-    return None, error
+    return None
 
 
-def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
+def discover_mcp_servers(app_root: Path) -> dict[str, MCPTool]:
     resolved_root = Path(app_root).resolve()
     cached_servers = _DISCOVERED_MCP_SERVERS_CACHE.get(resolved_root)
     if cached_servers is not None:
-        return MCPDiscoveryResult(servers=dict(cached_servers), failed_loads=[])
+        return dict(cached_servers)
 
     path = resolved_root / "mcp.json"
     if not path.exists():
         _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        return {}
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Failed to read MCP config from %s: %s", path, exc)
         _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        return {}
 
     if not isinstance(data, dict):
         logger.warning(
@@ -189,32 +170,27 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
             type(data).__name__,
         )
         _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        return {}
 
     data = cast(dict[str, Any], resolve_env_vars_in_data(data))
     servers = data.get("servers", {})
     if not isinstance(servers, dict):
         logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
         _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        return {}
 
     tools: dict[str, MCPTool] = {}
-    failed_loads: list[tuple[str, str]] = []
     for name in sorted(servers.keys()):
         config = servers[name]
         if not isinstance(name, str) or not isinstance(config, dict):
             continue
-        built, error = _build_mcp_tool(name, config)
+        built = _build_mcp_tool(name, config)
         if built is not None:
             tools[name] = built
-        elif error is not None:
-            failed_loads.append((name, error))
 
     if tools:
         logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
     else:
         logger.info("No valid MCP servers found in %s", path)
-    if failed_loads:
-        logger.warning("Failed to load %d MCP server(s)", len(failed_loads))
     _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
-    return MCPDiscoveryResult(servers=dict(tools), failed_loads=failed_loads)
+    return dict(tools)
