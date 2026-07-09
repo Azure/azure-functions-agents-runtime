@@ -262,7 +262,7 @@ class TestStructuredIndexingLog:
         assert log_json["event"] == "agent_runtime_indexed"
         assert log_json["agent_count"] == 1
         assert len(log_json["agents"]) == 1
-        assert log_json["agents"][0]["name"] == "Main"
+        assert log_json["agents"][0]["source_file"].endswith("main.agent.md")
         assert "discovered_capabilities" in log_json
 
     def test_indexing_log_includes_trigger_type(
@@ -371,8 +371,8 @@ class TestStructuredIndexingLog:
 
         assert log_json["agent_count"] == 2
         assert len(log_json["agents"]) == 2
-        agent_names = {a["name"] for a in log_json["agents"]}
-        assert agent_names == {"Agent One", "Agent Two"}
+        source_files = {Path(a["source_file"]).name for a in log_json["agents"]}
+        assert source_files == {"agent1.agent.md", "agent2.agent.md"}
 
     def test_indexing_log_includes_discovered_capabilities(
         self,
@@ -408,4 +408,94 @@ class TestStructuredIndexingLog:
         assert isinstance(capabilities["mcp_servers"], int)
         assert isinstance(capabilities["skills"], int)
         assert isinstance(capabilities["user_tools"], int)
+
+    def test_indexing_log_includes_discovered_capability_names(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that the indexing log includes concrete names for discovered capabilities."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "main.agent.md",
+            """
+            name: Main
+            description: Main agent
+            builtin_endpoints:
+                debug_chat_ui: true
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        log_message = indexing_logs[0].message
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        discovered_names = log_json["discovered_capability_names"]
+        assert set(discovered_names.keys()) == {"mcp_servers", "skills", "user_tools"}
+        assert isinstance(discovered_names["mcp_servers"], list)
+        assert isinstance(discovered_names["skills"], list)
+        assert isinstance(discovered_names["user_tools"], list)
+
+    def test_indexing_log_includes_per_agent_registered_capabilities(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """Test that each agent entry includes concrete registered capability names."""
+        import json
+
+        _write_agent(
+            tmp_path,
+            "main.agent.md",
+            """
+            name: Main
+            description: Main agent
+            builtin_endpoints:
+                debug_chat_ui: true
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        indexing_logs = [r for r in caplog.records if "agent_runtime_indexed" in r.message]
+        log_message = indexing_logs[0].message
+        json_start = log_message.index("{")
+        log_json = json.loads(log_message[json_start:])
+
+        agent_entry = log_json["agents"][0]
+        registered = agent_entry["registered_capabilities"]
+        assert set(registered.keys()) == {"mcp_servers", "skills", "user_tools"}
+        assert isinstance(registered["mcp_servers"], list)
+        assert isinstance(registered["skills"], list)
+        assert isinstance(registered["user_tools"], list)
+
+    def test_emits_agent_capabilities_registered_log(
+        self,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        _write_agent(
+            tmp_path,
+            "main.agent.md",
+            """
+            name: Main
+            description: Main agent
+            builtin_endpoints:
+                debug_chat_ui: true
+            """,
+        )
+
+        with caplog.at_level(logging.INFO):
+            create_function_app(tmp_path)
+
+        assert any(
+            "agent_capabilities_registered" in record.getMessage() for record in caplog.records
+        )
 

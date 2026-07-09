@@ -19,8 +19,7 @@ def _function_name_from_source(source_file: str | Path | None, fallback_name: st
     source_value = str(source_file).strip() if source_file is not None else ""
     if not source_value:
         logger.warning(
-            "Resolved agent '%s' is missing source_file; falling back to sanitized display name for function registration.",
-            fallback_name,
+            "Resolved agent is missing source_file; falling back to sanitized default for function registration.",
         )
         return _safe_function_name(fallback_name)
 
@@ -54,7 +53,7 @@ def allocate_unique_function_name(
     if not collided:
         return function_name
 
-    source_desc = f"{source_file!r}" if source_file else f"agent {name!r}"
+    source_desc = f"{source_file!r}" if source_file else "<unknown source_file>"
     logger.warning(
         "Function name collision: %s would register as %r but that name is already used. "
         "Registering as %r. Rename the source file to avoid the suffix.",
@@ -73,7 +72,7 @@ def allocate_unique_builtin_slug(
     if not collided:
         return slug
 
-    source_desc = Path(str(source_file)).name if source_file else f"agent {name!r}"
+    source_desc = Path(str(source_file)).name if source_file else "<unknown source_file>"
     logger.warning(
         "Built-in endpoint slug collision: %r would register at '/agents/%s/' but that route is already used. "
         "Registering at '/agents/%s/'. Rename the source file to avoid the suffix.",
