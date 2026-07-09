@@ -85,20 +85,20 @@ def test_discover_mcp_servers_caches_by_resolved_app_root(
     first = discover_mcp_servers(tmp_path)
     second = discover_mcp_servers(tmp_path / ".")
 
-    assert list(first) == ["demo"]
-    assert list(second) == ["demo"]
+    assert list(first.servers) == ["demo"]
+    assert list(second.servers) == ["demo"]
     assert read_count == 1
 
 
 def test_discover_mcp_servers_returns_independent_dicts(tmp_path: Path) -> None:
     _write_mcp_config(tmp_path)
 
-    discovered_servers = discover_mcp_servers(tmp_path)
-    discovered_servers["extra"] = discovered_servers["demo"]
+    first_result = discover_mcp_servers(tmp_path)
+    first_result.servers["extra"] = first_result.servers["demo"]
 
-    subsequent_servers = discover_mcp_servers(tmp_path)
+    second_result = discover_mcp_servers(tmp_path)
 
-    assert list(subsequent_servers) == ["demo"]
+    assert list(second_result.servers) == ["demo"]
 
 
 def test_clear_mcp_cache_reruns_discovery(
@@ -132,9 +132,9 @@ def test_discover_mcp_servers_handles_top_level_list(
     config_path.write_text("[1, 2, 3]", encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
-        discovered_servers = discover_mcp_servers(tmp_path)
+        result = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert result.servers == {}
     assert any(
         record.levelno == logging.WARNING
         and record.getMessage()
@@ -150,9 +150,9 @@ def test_discover_mcp_servers_handles_top_level_string(
     config_path.write_text(json.dumps("hello"), encoding="utf-8")
 
     with caplog.at_level(logging.WARNING):
-        discovered_servers = discover_mcp_servers(tmp_path)
+        result = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert result.servers == {}
     assert any(
         record.levelno == logging.WARNING
         and record.getMessage()
@@ -173,9 +173,12 @@ def test_discover_mcp_servers_skips_stdio_command_config(
     )
 
     with caplog.at_level(logging.WARNING):
-        discovered_servers = discover_mcp_servers(tmp_path)
+        result = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert result.servers == {}
+    assert len(result.failed_loads) == 1
+    assert "demo" in result.failed_loads[0][0]
+    assert "stdio" in result.failed_loads[0][1].lower()
     assert any(
         record.levelno == logging.WARNING
         and record.getMessage()
@@ -196,9 +199,12 @@ def test_discover_mcp_servers_skips_sse_config(
     )
 
     with caplog.at_level(logging.WARNING):
-        discovered_servers = discover_mcp_servers(tmp_path)
+        result = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert result.servers == {}
+    assert len(result.failed_loads) == 1
+    assert "demo" in result.failed_loads[0][0]
+    assert "sse" in result.failed_loads[0][1].lower()
     assert any(
         record.levelno == logging.WARNING
         and record.getMessage()
@@ -218,8 +224,8 @@ def test_discover_mcp_servers_supports_streamable_http(tmp_path: Path) -> None:
 
     discovered_servers = discover_mcp_servers(tmp_path)
 
-    assert list(discovered_servers) == ["demo"]
-    assert isinstance(discovered_servers["demo"], MCPStreamableHTTPTool)
+    assert list(discovered_servers.servers) == ["demo"]
+    assert isinstance(discovered_servers.servers["demo"], MCPStreamableHTTPTool)
 
 
 def test_discover_mcp_servers_accepts_url_without_type(tmp_path: Path) -> None:
@@ -230,8 +236,8 @@ def test_discover_mcp_servers_accepts_url_without_type(tmp_path: Path) -> None:
 
     discovered_servers = discover_mcp_servers(tmp_path)
 
-    assert list(discovered_servers) == ["demo"]
-    assert isinstance(discovered_servers["demo"], MCPStreamableHTTPTool)
+    assert list(discovered_servers.servers) == ["demo"]
+    assert isinstance(discovered_servers.servers["demo"], MCPStreamableHTTPTool)
 
 
 def test_discover_mcp_servers_skips_http_type_missing_url(
@@ -242,7 +248,7 @@ def test_discover_mcp_servers_skips_http_type_missing_url(
     with caplog.at_level(logging.WARNING):
         discovered_servers = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert discovered_servers.servers == {}
     assert any(
         record.levelno == logging.WARNING
         and record.getMessage() == "MCP server 'demo': missing 'url', skipping"
@@ -265,7 +271,7 @@ def test_discover_mcp_servers_ignores_vscode_mcp_json(tmp_path: Path) -> None:
 
     discovered_servers = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert discovered_servers.servers == {}
 
 
 def test_discover_substitutes_dollar_in_http_url(
@@ -284,7 +290,8 @@ def test_discover_substitutes_dollar_in_http_url(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["demo"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["demo"]
 
     assert isinstance(tool, MCPStreamableHTTPTool)
     assert tool.url == "https://example.com/api"
@@ -310,7 +317,8 @@ def test_discover_substitutes_inline_in_headers(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["demo"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["demo"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
@@ -326,7 +334,7 @@ def test_discover_undefined_variable_stays_literal(tmp_path: Path) -> None:
 
     discovered_servers = discover_mcp_servers(tmp_path)
 
-    assert discovered_servers == {}
+    assert discovered_servers.servers == {}
 
 
 def test_discover_mcp_servers_supports_auth_scope(
@@ -362,7 +370,8 @@ def test_discover_mcp_servers_supports_auth_scope(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["office365"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["office365"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
@@ -399,7 +408,8 @@ def test_discover_mcp_servers_auth_without_scope_uses_static_headers(
     )
 
     with caplog.at_level(logging.WARNING):
-        tool = discover_mcp_servers(tmp_path)["office365"]
+        result = discover_mcp_servers(tmp_path)
+    tool = result.servers["office365"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
@@ -445,7 +455,8 @@ def test_discover_mcp_servers_supports_auth_client_id(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["office365"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["office365"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
@@ -486,7 +497,8 @@ def test_discover_mcp_servers_ignores_unresolved_auth_client_id(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["office365"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["office365"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
@@ -513,7 +525,8 @@ def test_discover_mcp_servers_ignores_load_flags(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["demo"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["demo"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.load_tools is True
@@ -531,8 +544,8 @@ def test_discover_does_not_substitute_server_name_keys(
 
     discovered_servers = discover_mcp_servers(tmp_path)
 
-    assert list(discovered_servers) == ["$KEYNAME"]
-    assert isinstance(discovered_servers["$KEYNAME"], MCPStreamableHTTPTool)
+    assert list(discovered_servers.servers) == ["$KEYNAME"]
+    assert isinstance(discovered_servers.servers["$KEYNAME"], MCPStreamableHTTPTool)
 
 
 def test_discover_does_not_substitute_header_keys(
@@ -555,7 +568,8 @@ def test_discover_does_not_substitute_header_keys(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["demo"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["demo"]
 
     assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
     assert tool.header_provider is not None
@@ -579,7 +593,8 @@ def test_discover_inline_mix_in_url(
         },
     )
 
-    tool = discover_mcp_servers(tmp_path)["demo"]
+    result = discover_mcp_servers(tmp_path)
+    tool = result.servers["demo"]
 
     assert isinstance(tool, MCPStreamableHTTPTool)
     assert tool.url == "https://example.com:8080/api"

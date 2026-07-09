@@ -54,9 +54,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     configure_observability()
 
     agent_specs = load_agent_specs(resolved_root)
-    user_tools = discover_user_tools(resolved_root)
-    mcp_tools = discover_mcp_servers(resolved_root)
-    skills = discover_skills(resolved_root)
+    tool_result = discover_user_tools(resolved_root)
+    mcp_result = discover_mcp_servers(resolved_root)
+    skill_result = discover_skills(resolved_root)
+    
+    user_tools = tool_result.tools
+    mcp_tools = mcp_result.servers
+    skills = skill_result.skills
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
 
@@ -113,7 +117,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
-            "name": resolved.name,
             "source_file": resolved.source_file,
         }
         if resolved.trigger:
@@ -146,6 +149,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             "mcp_servers": len(mcp_names),
             "skills": len(skill_names),
             "user_tools": len(user_tools),
+        },
+        "failed_loads": {
+            "mcp_servers": [f"{name}: {error}" for name, error in mcp_result.failed_loads],
+            "skills": [f"{path}: {error}" for path, error in skill_result.failed_loads],
+            "user_tools": [f"{file}: {error}" for file, error in tool_result.failed_loads],
         },
     }
     logger.info(
