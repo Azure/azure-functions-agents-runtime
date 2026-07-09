@@ -318,8 +318,157 @@ result headers, body, `url`, and error strings, and from span attributes, before
 anything is returned to the model or telemetry. The honest guarantee is: *the
 runtime never returns the auth it injected and redacts known secret values, but a
 cooperating upstream can still reflect other data — response bodies are untrusted.*
+
+See **Residual threat: reflection / confused-deputy exfiltration** below for the
+sharpest remaining risk and its mitigation ladder, and **Execution surfaces & the
+in-worker-code boundary** for *why* an injected secret is safe from model-authored
+code in the first place.
+
 This shape also extends cleanly to #1037 (`{ key_vault: ... }` /
 `{ managed_identity: ... }` references).
+
+### Execution surfaces & the in-worker-code boundary
+
+This subsection makes the runtime's code-execution model explicit, because it is
+what makes an injected `http_call` secret safe from the model in the first place.
+
+- **The model never executes code in the worker process.** The runtime's *only*
+  code-execution tool is the ACA Dynamic Sessions sandbox (`system_tools/sandbox.py`),
+  and it dispatches the model's code to a **separate ACA container over HTTPS** —
+  there is no `exec` / `eval` / `compile` / `runpy` of model output anywhere in
+  `src/`. Crucially, **there is no in-worker fallback**: if
+  `system_tools.dynamic_sessions_code_interpreter` is absent, `sandbox_config` is
+  `None` (`registration/_handlers.py`) and *no* code-execution tool is built. The
+  model then simply **cannot run code anywhere** — any code it emits is inert text.
+  "No sandbox configured" therefore *removes* execution; it does **not** downgrade
+  to running code in the worker.
+- **The ACA sandbox cannot read the worker's secrets either.** Session pools are
+  independent Azure resources that do **not** inherit the Function app's App
+  Settings, so an `http_call` auth secret living in a worker closure is not visible
+  to sandbox code. (The sandbox's own managed-identity token is host-locked to
+  `*.dynamicsessions.io`.)
+- **The one in-worker author-code path is `tools/*.py`.** Discovery loads project
+  tool modules via `spec.loader.exec_module` (`discovery/tools.py`) **once at
+  startup**, cached thereafter. That code runs in the worker with full `os.environ`
+  access — but it is **author / deploy-time** code, not model-authored runtime
+  code. Whoever writes `tools/*.py` is whoever deploys the app and already holds
+  every app secret; reading an `http_call` secret there is not a privilege
+  escalation, it is the definition of owning the deployment (the **single
+  trust-domain assumption**, above). The model **cannot add or modify `tools/` at
+  runtime** (discovery is startup-only and cached; the sandbox filesystem is
+  isolated from the worker's `tools/` folder), so it can only *call* human-vetted
+  tools, never author new in-worker code.
+
+**Standing invariant.** The runtime must **never `exec` model-supplied output in
+the worker process.** Model code has exactly one home — the isolated ACA sandbox.
+
+**Author guideline.** If you need to run LLM-generated code or shell commands,
+enable the **ACA sandbox** (isolated; cannot see App Settings). **Do not** author
+an in-worker `tools/*.py` that executes model-supplied code/commands: that
+re-creates the sandbox *without* its isolation and hands the model an
+`echo $SECRET` primitive that can exfiltrate **every** app secret (not just
+`http_call`'s). This footgun is **outside `http_call`'s threat model** — no
+in-worker storage trick can hide a secret from hostile code in the same process —
+and the escalation path if that assumption ever weakens is out-of-process custody
+(see *Alternatives considered*).
+
+### Residual threat: reflection / confused-deputy exfiltration
+
+Because the model never receives the secret, and the secret is attached only
+**after** SSRF validation and never carried across a redirect to another host, the
+runtime prevents the model from *reading* the credential directly or *redirecting*
+it to an unscoped host. The **sharpest remaining residual** is a confused-deputy
+**reflection**: the model controls the *destination within the allowlist* **and**
+*reads the response*, so a credentialed request aimed at an echo/debug endpoint on
+an allow-listed host (`/echo`, `/headers`, `/anything`, a logging sink) can bounce
+the injected `Authorization` header back in the response body → into model context
+→ out. **Untrusted response bodies amplify this**: an injected instruction inside a
+third-party body can *drive* the offending call (prompt-injection → reflection →
+exfiltration chain).
+
+This residual is **inherent to any authenticated tool** whose
+destination-within-allowlist and response the model controls; it is **not** closed
+by *where* the secret is stored (see the egress-proxy analysis below — moving
+custody out of process does not fix it, and in one respect makes it worse).
+Mitigation ladder, in order of leverage:
+
+1. **Least-privilege, short-lived credentials** (managed identity / Key Vault refs,
+   #1037) so a leaked token is low-value and self-expiring. **Highest-value
+   mitigation.** Static, long-lived bearer tokens are the real danger.
+2. **Path/method-level allowlist** (v2, "Tier 1" below) so operators can block known
+   reflection endpoints — finer-grained than v1's host-only allowlist.
+3. **Response redaction** (v1, best-effort): known configured secret *values* are
+   stripped from result headers/body/`url`/errors and span attributes. Catches
+   **verbatim** reflection only; an adversarial upstream can base64/hex/split the
+   value to defeat it.
+4. **Response DLP** (future): scan responses for secret-shaped tokens before they
+   reach the model.
+5. **Governance:** do not grant credentialed `http_call` to less-trusted agent
+   authors — the v2 `allow_agent_override: false` ceiling (**A6**) and the
+   single-trust-domain assumption exist for exactly this.
+
+### Alternatives considered: out-of-process secret custody
+
+The v1 design holds the auth secret in the **worker process** (a closure-local
+structure, dereferenced at tool-build). This is safe **under the single
+trust-domain assumption** but, by construction, cannot defend against *malicious
+in-worker code* (a hostile `tools/*.py`). Two out-of-process alternatives were
+evaluated; both are **deferred or rejected** for v1.
+
+**(a) ACA Dynamic Sessions egress proxy — deferred to a v2 opt-in tier.** ACA
+sandboxes ship an [egress-policy engine](https://learn.microsoft.com/en-us/azure/container-apps/sandboxes-egress-policies)
+(preview): a `default` Allow/Deny action, rules matching host/path/method, and a
+`Transform` action that **injects credentials from a secret store / managed
+identity at the network layer** — so sandbox code never holds the credential. This
+is genuine out-of-process custody, and it destination-binds the credential in
+infrastructure rather than in our hand-rolled validator.
+
+| Property | v1 in-worker `FunctionTool` (this FRD) | ACA egress-proxy `Transform` |
+| --- | --- | --- |
+| **Secret custody** | In the worker process (readable by hostile in-worker `tools/*.py`) | **Out-of-process** — proxy / secret store; never in the process or model context |
+| **Cross-host leak** | Blocked by our in-process SSRF validator | Blocked at the network layer; credential **destination-bound** by infra |
+| **Reflection off an allow-listed host** | Open — **but** the runtime can redact the known secret value from the response | Open — **and** the proxy does not scrub response bodies, so a reflected secret returns **unredacted** (the runtime never holds it to redact) |
+| **SSRF enforcement** | Hand-rolled validator (large surface to get right) | Managed, `default-deny`, auditable; host + path + method |
+| **Sandbox dependency** | **None** — works with zero sandbox config | **Mandatory** — the proxy only governs traffic **originating inside a session** |
+| **Latency / cost** | Direct worker `aiohttp` call | Sandbox round-trip per call |
+| **Maturity** | Stable | **Preview** |
+
+Net: the egress proxy is a strictly better *custody* model and *cross-host* guard,
+but it (i) makes the sandbox **mandatory** for credentialed calls — directly
+contradicting the "no sandbox required" motivation (§2); (ii) is **preview**;
+(iii) adds latency/cost; and, decisively, (iv) **does not solve the reflection
+residual** — and on *that one axis* is marginally **worse**, because moving custody
+out of the worker removes the runtime's ability to redact a reflected secret it no
+longer holds. It is therefore recorded as an **opt-in v2 "Tier 2" custody backend**,
+not a v1 replacement. **`http_call`'s v1 design is deliberately independent of this
+feature:** it is a plain Functions `FunctionTool` that needs no sandbox, so the
+egress proxy neither blocks v1 nor is required by it.
+
+**(b) Re-hosting the runtime's compute on ACA Sandboxes — rejected.** "Move our
+compute onto Sandboxes so the egress proxy governs *all* traffic" is a **category
+mismatch**: Dynamic Sessions are an ephemeral *code-execution service you call
+into*, not an app-hosting compute — there is no ingress / trigger / long-lived
+process model there to host a `FunctionApp`. More broadly, the compute host (Azure
+Functions vs. ACA Container Apps vs. anything else) **defines what this project
+is** and is a **product-level decision outside this FRD's scope**. The achievable
+form of "brokered egress" *without leaving Functions* is an **out-of-process egress
+broker** — Azure Firewall / APIM-as-egress / a forward-proxy sidecar in the
+worker's outbound path — that injects credentials and enforces the allowlist. That
+is the real Tier 2 vehicle and does **not** require re-platforming. (Note:
+re-hosting still would **not** fix reflection.)
+
+**Tiered custody roadmap** — the throughline of the above:
+
+| Tier | Where the secret lives | Adds defense against | Cost |
+| --- | --- | --- | --- |
+| **0 (v1, this FRD)** | Worker closure | Model reading the secret; cross-host redirect; **verbatim** reflection (redaction) | None — no sandbox, direct calls |
+| **1 (v2)** | Worker closure | + known reflection endpoints (path/method allowlist) | Small — still in-worker |
+| **2 (future, opt-in)** | Out-of-process broker / egress proxy | + hostile **in-worker** code (secret never in the process) | Sandbox or egress-broker dependency; **still not reflection-proof** |
+
+v1 deliberately targets **Tier 0** under the single trust-domain assumption; Tiers
+1–2 are the escalation path if that assumption weakens. **The choice of custody tier
+is orthogonal to the compute host** and to the ACA egress feature — `http_call`
+remains a plain Functions `FunctionTool` regardless.
 
 ### Compatibility
 
@@ -382,6 +531,10 @@ This shape also extends cleanly to #1037 (`{ key_vault: ... }` /
 | B5 | Binary / HEAD / truncated-JSON result semantics | implicit / explicit | Binary → `body: null` + `body_omitted_reason: "binary"` + `response_bytes`; `HEAD` → `body: null` + reason `"head"`; truncated JSON returned as **raw text**, not parsed | Agent (arch review) | 2026-07-08 |
 | G4 | `aiohttp` session lifecycle | app-shared pool / lazy per-agent closure | Build the closure **synchronously** at registration; create connector/session **lazily** on first invocation (mirrors the sandbox's lazy async resources) so no event loop is required at build time | Agent (arch review) | 2026-07-08 |
 | G5 | `tools: false` and system tools | separate kill-switch now / reuse `tools_disabled` | `tools: false` also suppresses `http_call` (parity with the sandbox); a dedicated `system_tools: false` kill-switch is deferred to v2 | Agent (arch review) | 2026-07-08 |
+| I1 | Execution-surface boundary & invariant | rely on prose / make it explicit | Model code runs **only** in the ACA sandbox (separate container over HTTPS), **never** the worker, with **no in-worker fallback** (no sandbox config ⇒ no code execution at all); `tools/*.py` (`exec_module`, startup-only, cached) is the sole in-worker author-code path — in-trust-domain, not model-reachable at runtime. Standing invariant: **never `exec` model output in the worker**. Guideline: use the ACA sandbox for LLM code; **never** author an in-worker LLM-exec tool | Human | 2026-07-09 |
+| I2 | Reflection / confused-deputy residual | leave implicit / name it + mitigation ladder | Name it as the sharpest residual (model controls credentialed destination-within-allowlist **and** reads the response; prompt-injection in untrusted bodies amplifies). Mitigations, by leverage: short-lived/least-privilege creds (#1037) → path/method allowlist (v2) → value redaction (v1, best-effort) → response DLP (future) → governance/ceiling (A6) | Human | 2026-07-09 |
+| I3 | ACA egress-proxy custody | adopt for v1 / reject / defer as opt-in tier | **Defer to a v2 opt-in "Tier 2" backend.** True out-of-process custody + destination-bound injection, but it mandates the sandbox (contradicts the "no sandbox" motivation §2), is **preview**, adds latency/cost, does **not** solve reflection, and **removes the runtime's response-redaction backstop**. v1 stays a plain Functions `FunctionTool`, independent of this feature | Human | 2026-07-09 |
+| I4 | Re-host compute on ACA Sandboxes | re-platform / reject | **Rejected** — category mismatch (Sandboxes are a call-in exec service, not an app host; no ingress/trigger model to host a `FunctionApp`); compute host is a **product-level decision outside this FRD**; and it still wouldn't fix reflection. The real custody path without leaving Functions is an out-of-process **egress broker** (Firewall / APIM / forward-proxy sidecar) in the outbound path = Tier 2 | Human | 2026-07-09 |
 
 ## 6. Test plan
 
@@ -443,7 +596,12 @@ This shape also extends cleanly to #1037 (`{ key_vault: ... }` /
   secret-reference shape and a **security warning**: v1 is **public-only** (private
   ranges are always blocked), per-agent config may **widen** the global config
   (single trust domain), and **response bodies are untrusted** (a cooperating
-  upstream can reflect data the runtime does not redact).
+  upstream can reflect data the runtime does not redact). Also state the
+  **execution-surface** guidance from §4: the model can only run code in the ACA
+  sandbox (never the worker), operators should prefer **short-lived /
+  least-privilege** credentials (#1037), and authors must **never write an
+  in-worker `tools/*.py` that executes model-supplied code/commands** (use the ACA
+  sandbox instead).
 - [ ] `docs/architecture.md` — add `system_tools/http_call.py` to the §3 module
   map, note the new `AgentCapabilities.http_call_tools` field + `http_call_tools=`
   runner channel, and describe the second system tool in the pipeline description.
@@ -471,6 +629,20 @@ This shape also extends cleanly to #1037 (`{ key_vault: ... }` /
     rows A6/B4/B5/C8–C12/D5/F4/G3–G5, §6 expanded suite, §7 security warning).
     Both reviews split only on the trust model; resolved per **A6** (keep the A2/A4
     widening; document the boundary; defer a ceiling mode to v2).
+
+- **Follow-up security discussion (phase 2, 2026-07-09): complete.** A human-led
+  deep-dive on secret custody and code-execution surfaces, folded into §4 (new
+  *Execution surfaces & the in-worker-code boundary*, *Residual threat: reflection /
+  confused-deputy exfiltration*, and *Alternatives considered: out-of-process secret
+  custody* subsections) and §5 rows **I1–I4**. Conclusions: (1) the model never runs
+  code in the worker and has no in-worker fallback, so an injected secret is safe
+  from model-authored code; (2) the **reflection** residual is named with a
+  mitigation ladder; (3) the ACA **egress proxy** is real out-of-process custody but
+  is **deferred to a v2 opt-in tier** (mandates the sandbox, preview, doesn't fix
+  reflection, removes the redaction backstop); (4) **re-hosting compute on ACA
+  Sandboxes is rejected** (category mismatch + product-level). **This does not change
+  v1 scope** — `http_call` stays a plain Functions `FunctionTool`. Rows I1–I4 were
+  decided in the human-led discussion; the sign-off gate is unchanged.
 
 - **Prior open items — now resolved (were §"Open implementation details"):**
   - *`aiohttp` session lifecycle* → **G4**: build the closure synchronously at
