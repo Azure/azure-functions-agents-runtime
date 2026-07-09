@@ -18,9 +18,9 @@ from .._obo import (
     InteractionRequiredError,
     UserContext,
     create_user_context,
+    extract_hooks_session_token_from_headers,
     extract_user_id_from_headers,
     extract_user_token_from_headers,
-    get_obo_provider,
 )
 from .._observability import (
     ATTR_FAULT_DOMAIN,
@@ -61,10 +61,12 @@ async def _build_user_context_from_request(req: Request) -> UserContext:
     """Extract user context from HTTP request headers."""
     headers = getattr(req, "headers", {})
     access_token = extract_user_token_from_headers(headers)
+    hooks_session_token = extract_hooks_session_token_from_headers(headers)
     user_id = extract_user_id_from_headers(headers)
 
     return create_user_context(
         access_token=access_token,
+        hooks_session_token=hooks_session_token,
         user_id=user_id,
         obo_provider=_obo_provider,
     )
@@ -97,63 +99,6 @@ def _build_interaction_required_response(exc: InteractionRequiredError, session_
         media_type="application/json",
         headers=headers,
     )
-
-# Global OBO provider reference (set during app initialization)
-_obo_provider: OboTokenProvider | None = None
-
-
-def set_obo_provider(provider: OboTokenProvider | None) -> None:
-    """Set the global OBO provider for handlers to use."""
-    global _obo_provider
-    _obo_provider = provider
-
-
-def get_handler_obo_provider() -> OboTokenProvider | None:
-    """Get the current OBO provider."""
-    return _obo_provider
-
-
-async def _build_user_context_from_request(req: Request) -> UserContext:
-    """Extract user context from HTTP request headers."""
-    headers = getattr(req, "headers", {})
-    access_token = extract_user_token_from_headers(headers)
-    user_id = extract_user_id_from_headers(headers)
-
-    return create_user_context(
-        access_token=access_token,
-        user_id=user_id,
-        obo_provider=_obo_provider,
-    )
-
-
-def _build_interaction_required_response(exc: InteractionRequiredError, session_id: str) -> Response:
-    """Build HTTP 401 response for OBO interaction required errors."""
-    import base64
-
-    headers: dict[str, str] = {"x-ms-session-id": session_id}
-
-    # Build WWW-Authenticate header with error info and claims
-    www_auth_parts = [f'Bearer error="{exc.error}"']
-    if exc.error_description:
-        desc = exc.error_description.replace('"', '\\"')
-        www_auth_parts.append(f'error_description="{desc}"')
-    if exc.claims:
-        claims_b64 = base64.b64encode(exc.claims.encode()).decode()
-        www_auth_parts.append(f'claims="{claims_b64}"')
-
-    headers["WWW-Authenticate"] = ", ".join(www_auth_parts)
-
-    return Response(
-        content=json.dumps({
-            "error": exc.error,
-            "error_description": exc.error_description,
-            "claims": exc.claims,
-        }),
-        status_code=401,
-        media_type="application/json",
-        headers=headers,
-    )
-
 
 def serialize_trigger_data(trigger_data: Any) -> str:
     """Serialize trigger binding data to a JSON string."""

@@ -7,6 +7,8 @@ This server exposes one tool:
 
 - `whoami` - reads inbound `Authorization: Bearer` token and returns decoded
   claims (`oid`, `sub`, `aud`, `azp`, `appid`, etc.).
+- It also reports whether `X-MS-Access-Token` and
+  `X-MS-Hooks-Session-Token` were forwarded by the upstream callback.
 
 Use this server as the `<downstream-mcp-endpoint>` target in
 `samples/obo-e2e/src/mcp.json`.
@@ -70,5 +72,7 @@ When your upstream OBO sample calls `whoami`:
 
 - User A request should show User A `oid/sub`.
 - User B request should show User B `oid/sub`.
+- `hooks_session_token_present` should be `true` for BigMac callback tests.
+- `token_source` should be `x-ms-access-token` when passthrough headers are used.
 - No user token should show fallback identity behavior (or missing auth,
   depending on downstream auth config).

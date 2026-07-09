@@ -56,17 +56,26 @@ def whoami(ctx: Context) -> dict[str, Any]:
     """Echoes token identity details to validate OBO pass-through."""
     headers = _request_headers(ctx)
     auth_header = headers.get("authorization", "")
+    hooks_session_token = headers.get("x-ms-hooks-session-token")
+    access_token_header = headers.get("x-ms-access-token")
 
-    if not auth_header.lower().startswith("bearer "):
+    selected_token = access_token_header
+    selected_token_source = "x-ms-access-token"
+
+    if not selected_token and auth_header.lower().startswith("bearer "):
+        selected_token = auth_header.split(" ", 1)[1].strip()
+        selected_token_source = "authorization"
+
+    if not selected_token:
         return {
             "auth_present": bool(auth_header),
             "token_present": False,
-            "error": "missing_or_non_bearer_authorization_header",
+            "error": "missing_token_headers",
+            "hooks_session_token_present": bool(hooks_session_token),
             "observed_headers": sorted(list(headers.keys())),
         }
 
-    token = auth_header.split(" ", 1)[1].strip()
-    claims = _decode_jwt_payload(token)
+    claims = _decode_jwt_payload(selected_token)
 
     # Surface only common identity/audience fields for quick validation.
     selected_claims = {
@@ -83,9 +92,16 @@ def whoami(ctx: Context) -> dict[str, Any]:
     }
 
     return {
-        "auth_present": True,
+        "auth_present": bool(auth_header),
         "token_present": True,
-        "token_sha256_12": hashlib.sha256(token.encode("utf-8")).hexdigest()[:12],
+        "token_source": selected_token_source,
+        "hooks_session_token_present": bool(hooks_session_token),
+        "hooks_session_token_sha256_12": (
+            hashlib.sha256(hooks_session_token.encode("utf-8")).hexdigest()[:12]
+            if hooks_session_token
+            else None
+        ),
+        "token_sha256_12": hashlib.sha256(selected_token.encode("utf-8")).hexdigest()[:12],
         "claims": selected_claims,
         "raw_claims": claims,
     }

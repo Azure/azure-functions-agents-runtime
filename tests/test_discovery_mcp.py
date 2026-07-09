@@ -4,11 +4,16 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import pytest
 from agent_framework import MCPStreamableHTTPTool
 
 import azure_functions_agents.discovery.mcp as mcp_discovery
+from azure_functions_agents._obo import (
+    BIGMAC_ACCESS_TOKEN_HEADER,
+    BIGMAC_HOOKS_SESSION_TOKEN_HEADER,
+)
 from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
 
 
@@ -376,6 +381,108 @@ def test_discover_mcp_servers_supports_auth_scope(
         "X-Test": "yes",
     }
     assert credential.calls == 1
+
+
+def test_discover_mcp_servers_obo_bigmac_flow_uses_mi_and_passthrough_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeCredential:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_token(self, scope: str) -> SimpleNamespace:
+            self.calls += 1
+            assert scope == "https://apihub.azure.com/.default"
+            return SimpleNamespace(token=f"mi-token-{self.calls}", expires_on=9999999999)
+
+    credential = FakeCredential()
+    monkeypatch.setattr(mcp_discovery, "build_credential", lambda: credential)
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    monkeypatch.setattr(
+        mcp_discovery,
+        "get_current_user_context",
+        lambda: SimpleNamespace(
+            access_token="user-access-token",
+            hooks_session_token="hooks-session-token",
+            has_obo_support=True,
+        ),
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "headers": {"X-Test": "yes"},
+                    "auth": {
+                        "type": "obo",
+                        "scope": "https://apihub.azure.com/.default",
+                    },
+                }
+            }
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.header_provider(None) == {
+        "Authorization": "Bearer mi-token-1",
+        BIGMAC_ACCESS_TOKEN_HEADER: "user-access-token",
+        BIGMAC_HOOKS_SESSION_TOKEN_HEADER: "hooks-session-token",
+        "X-Test": "yes",
+    }
+    assert credential.calls == 1
+
+
+def test_discover_mcp_servers_obo_without_hooks_uses_obo_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeCredential:
+        def get_token(self, scope: str) -> SimpleNamespace:
+            return SimpleNamespace(token="mi-token", expires_on=9999999999)
+
+    monkeypatch.setattr(mcp_discovery, "build_credential", lambda: FakeCredential())
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    user_context = SimpleNamespace(
+        access_token="user-access-token",
+        hooks_session_token=None,
+        has_obo_support=True,
+        get_token_for_scope=MagicMock(return_value=None),
+    )
+    monkeypatch.setattr(mcp_discovery, "get_current_user_context", lambda: user_context)
+    monkeypatch.setattr(
+        mcp_discovery,
+        "_get_obo_token_sync",
+        lambda user_context, scope: "obo-downstream-token",
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "auth": {
+                        "type": "obo",
+                        "scope": "https://apihub.azure.com/.default",
+                    },
+                }
+            }
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.header_provider(None) == {"Authorization": "Bearer obo-downstream-token"}
 
 
 def test_discover_mcp_servers_auth_without_scope_uses_static_headers(

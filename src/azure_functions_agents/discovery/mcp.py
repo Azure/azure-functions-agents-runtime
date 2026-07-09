@@ -13,6 +13,7 @@ from agent_framework import MCPStreamableHTTPTool
 
 from .._credential import build_credential, build_credential_with_client_id
 from .._logger import logger
+from .._obo import BIGMAC_ACCESS_TOKEN_HEADER, BIGMAC_HOOKS_SESSION_TOKEN_HEADER
 from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
 if TYPE_CHECKING:
@@ -120,8 +121,31 @@ def _build_obo_header_provider(scope: str, static_headers: dict[str, str]) -> An
     fallback_credential = build_credential()
     fallback_cached_token: dict[str, str | int] = {"token": "", "expires_on": 0}
 
+    def _get_or_refresh_managed_identity_token() -> str:
+        now = int(time.time())
+        expires_on = int(fallback_cached_token["expires_on"])
+        if not fallback_cached_token["token"] or expires_on - _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS <= now:
+            token = fallback_credential.get_token(scope)
+            fallback_cached_token["token"] = token.token
+            fallback_cached_token["expires_on"] = token.expires_on
+        return str(fallback_cached_token["token"])
+
     def obo_header_provider(_ctx: Any) -> dict[str, str]:
         user_context = get_current_user_context()
+
+        # BigMac callback flow: forward hooks/access headers and always use MI auth.
+        if (
+            user_context is not None
+            and user_context.hooks_session_token
+            and user_context.access_token
+        ):
+            mi_token = _get_or_refresh_managed_identity_token()
+            result = dict(static_headers)
+            result[BIGMAC_ACCESS_TOKEN_HEADER] = user_context.access_token
+            result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = user_context.hooks_session_token
+            result["Authorization"] = f"Bearer {mi_token}"
+            logger.debug("MCP: Using BigMac hook-session callback headers for scope %s", scope)
+            return result
 
         # Try OBO if user context is available
         if user_context is not None and user_context.has_obo_support:
@@ -152,15 +176,10 @@ def _build_obo_header_provider(scope: str, static_headers: dict[str, str]) -> An
                 logger.warning("MCP: OBO token acquisition failed, falling back to managed identity: %s", exc)
 
         # Fallback to managed identity
-        now = int(time.time())
-        expires_on = int(fallback_cached_token["expires_on"])
-        if not fallback_cached_token["token"] or expires_on - _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS <= now:
-            token = fallback_credential.get_token(scope)
-            fallback_cached_token["token"] = token.token
-            fallback_cached_token["expires_on"] = token.expires_on
+        mi_token = _get_or_refresh_managed_identity_token()
 
         result = dict(static_headers)
-        result["Authorization"] = f"Bearer {fallback_cached_token['token']}"
+        result["Authorization"] = f"Bearer {mi_token}"
         logger.debug("MCP: Using managed identity token for scope %s", scope)
         return result
 

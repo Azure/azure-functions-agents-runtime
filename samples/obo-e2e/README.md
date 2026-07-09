@@ -10,6 +10,13 @@ It verifies four paths:
 3. No user token -> managed identity fallback.
 4. Missing consent/MFA -> HTTP 401 with `WWW-Authenticate` claims challenge.
 
+For BigMac hook-session callback validation, requests should include:
+
+- `X-MS-Access-Token`
+- `X-MS-Hooks-Session-Token`
+
+If access token is unavailable, `X-MS-TOKEN-AAD-ID-TOKEN` can be used as fallback.
+
 ## Important clarification
 
 You do **not** need to deploy to production to test this.
@@ -117,7 +124,7 @@ $UserAToken = az account get-access-token --scope $FunctionAudienceScope --query
 $Body = @{ prompt = "Call the downstream whoami MCP tool and return raw JSON" } | ConvertTo-Json
 $RespA = Invoke-WebRequest -Method Post `
   -Uri "$FunctionBaseUrl/agents/$AgentName/chat" `
-  -Headers @{ "X-MS-TOKEN-AAD-ACCESS-TOKEN" = $UserAToken } `
+  -Headers @{ "X-MS-Access-Token" = $UserAToken; "X-MS-Hooks-Session-Token" = "<user-a-hooks-session-token>" } `
   -ContentType "application/json" `
   -Body $Body
 
@@ -131,7 +138,7 @@ $UserBToken = az account get-access-token --scope $FunctionAudienceScope --query
 # 4) Call chat endpoint as User B
 $RespB = Invoke-WebRequest -Method Post `
   -Uri "$FunctionBaseUrl/agents/$AgentName/chat" `
-  -Headers @{ "X-MS-TOKEN-AAD-ACCESS-TOKEN" = $UserBToken } `
+  -Headers @{ "X-MS-Access-Token" = $UserBToken; "X-MS-Hooks-Session-Token" = "<user-b-hooks-session-token>" } `
   -ContentType "application/json" `
   -Body $Body
 
@@ -152,7 +159,7 @@ $RespFallback.Content
 try {
   Invoke-WebRequest -Method Post `
     -Uri "$FunctionBaseUrl/agents/$AgentName/chat" `
-    -Headers @{ "X-MS-TOKEN-AAD-ACCESS-TOKEN" = $UserAToken } `
+    -Headers @{ "X-MS-Access-Token" = $UserAToken; "X-MS-Hooks-Session-Token" = "<user-a-hooks-session-token>" } `
     -ContentType "application/json" `
     -Body (@{ prompt = "Call MCP tool for protected scope" } | ConvertTo-Json)
 } catch {

@@ -287,6 +287,9 @@ class UserContext:
     access_token: str | None = None
     """The incoming user access token, or None if unauthenticated."""
 
+    hooks_session_token: str | None = None
+    """The incoming hooks session token used by EasyAuth refresh callbacks."""
+
     user_id: str | None = None
     """The user's object ID from the token claims, if available."""
 
@@ -413,6 +416,7 @@ def reset_obo_provider() -> None:
 
 def create_user_context(
     access_token: str | None = None,
+    hooks_session_token: str | None = None,
     user_id: str | None = None,
     claims: dict[str, Any] | None = None,
     obo_provider: OboTokenProvider | None = None,
@@ -423,6 +427,8 @@ def create_user_context(
     ----------
     access_token:
         The incoming user access token from the request.
+    hooks_session_token:
+        The hooks session token from the request, if present.
     user_id:
         The user's object ID, if known.
     claims:
@@ -437,6 +443,7 @@ def create_user_context(
     """
     return UserContext(
         access_token=access_token,
+        hooks_session_token=hooks_session_token,
         user_id=user_id,
         claims=claims or {},
         _obo_provider=obo_provider,
@@ -450,6 +457,8 @@ def create_user_context(
 # EasyAuth header names
 EASYAUTH_ACCESS_TOKEN_HEADER = "X-MS-TOKEN-AAD-ACCESS-TOKEN"
 EASYAUTH_ID_TOKEN_HEADER = "X-MS-TOKEN-AAD-ID-TOKEN"
+BIGMAC_ACCESS_TOKEN_HEADER = "X-MS-Access-Token"
+BIGMAC_HOOKS_SESSION_TOKEN_HEADER = "X-MS-Hooks-Session-Token"
 EASYAUTH_PRINCIPAL_ID_HEADER = "X-MS-CLIENT-PRINCIPAL-ID"
 EASYAUTH_PRINCIPAL_NAME_HEADER = "X-MS-CLIENT-PRINCIPAL-NAME"
 
@@ -487,10 +496,22 @@ def extract_user_token_from_headers(headers: dict[str, str] | Any) -> str | None
                         return val.strip() if isinstance(val, str) else None
         return None
 
-    # Try EasyAuth header first
+    # BigMac callback path: prefer explicit access token header first.
+    token = get_header(BIGMAC_ACCESS_TOKEN_HEADER)
+    if token:
+        logger.debug("OBO: Found user token in BigMac access token header")
+        return token
+
+    # Try EasyAuth access token header.
     token = get_header(EASYAUTH_ACCESS_TOKEN_HEADER)
     if token:
         logger.debug("OBO: Found user token in EasyAuth header")
+        return token
+
+    # EasyAuth ID token fallback is used when access token is not present.
+    token = get_header(EASYAUTH_ID_TOKEN_HEADER)
+    if token:
+        logger.debug("OBO: Found user token in EasyAuth id token header")
         return token
 
     # Try Authorization header
@@ -500,6 +521,36 @@ def extract_user_token_from_headers(headers: dict[str, str] | Any) -> str | None
         if token:
             logger.debug("OBO: Found user token in Authorization header")
             return token
+
+    return None
+
+
+def extract_hooks_session_token_from_headers(headers: dict[str, str] | Any) -> str | None:
+    """Extract the hooks session token from request headers.
+
+    Parameters
+    ----------
+    headers:
+        The request headers (dict-like or object with get method).
+
+    Returns
+    -------
+    str | None
+        The hooks session token, or None if not found.
+    """
+
+    if not hasattr(headers, "get"):
+        return None
+
+    value = headers.get(BIGMAC_HOOKS_SESSION_TOKEN_HEADER)
+    if value:
+        return value.strip() if isinstance(value, str) else None
+
+    # Case-insensitive fallback
+    if hasattr(headers, "items"):
+        for key, val in headers.items():
+            if key.lower() == BIGMAC_HOOKS_SESSION_TOKEN_HEADER.lower():
+                return val.strip() if isinstance(val, str) else None
 
     return None
 

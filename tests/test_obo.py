@@ -2,26 +2,27 @@
 
 from __future__ import annotations
 
-import asyncio
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
 from azure_functions_agents._obo import (
+    BIGMAC_ACCESS_TOKEN_HEADER,
+    BIGMAC_HOOKS_SESSION_TOKEN_HEADER,
+    EASYAUTH_ID_TOKEN_HEADER,
     InteractionRequiredError,
     OboError,
     OboTokenProvider,
-    UserContext,
     clear_token_cache,
     create_user_context,
+    extract_hooks_session_token_from_headers,
     extract_user_id_from_headers,
     extract_user_token_from_headers,
     get_obo_provider,
     reset_obo_provider,
 )
 from azure_functions_agents.config.schema import AuthConfig, OboConfig
-
 
 # ---------------------------------------------------------------------------
 # OboConfig tests
@@ -106,6 +107,12 @@ class TestHeaderExtraction:
         token = extract_user_token_from_headers(headers)
         assert token == "test-token-123"
 
+    def test_extract_from_bigmac_access_token_header(self) -> None:
+        """Should extract token from BigMac access token header."""
+        headers = {BIGMAC_ACCESS_TOKEN_HEADER: "bigmac-token-123"}
+        token = extract_user_token_from_headers(headers)
+        assert token == "bigmac-token-123"
+
     def test_extract_from_authorization_header(self) -> None:
         """Should extract token from Authorization header."""
         headers = {"Authorization": "Bearer test-token-456"}
@@ -120,6 +127,22 @@ class TestHeaderExtraction:
         }
         token = extract_user_token_from_headers(headers)
         assert token == "easyauth-token"
+
+    def test_bigmac_takes_precedence(self) -> None:
+        """BigMac access token header should take precedence over other token headers."""
+        headers = {
+            BIGMAC_ACCESS_TOKEN_HEADER: "bigmac-token",
+            "X-MS-TOKEN-AAD-ACCESS-TOKEN": "easyauth-token",
+            "Authorization": "Bearer auth-token",
+        }
+        token = extract_user_token_from_headers(headers)
+        assert token == "bigmac-token"
+
+    def test_extract_id_token_fallback(self) -> None:
+        """Should fall back to EasyAuth ID token when access token is missing."""
+        headers = {EASYAUTH_ID_TOKEN_HEADER: "id-token-value"}
+        token = extract_user_token_from_headers(headers)
+        assert token == "id-token-value"
 
     def test_no_token_returns_none(self) -> None:
         """Should return None when no token is present."""
@@ -138,6 +161,18 @@ class TestHeaderExtraction:
         headers = {"X-MS-CLIENT-PRINCIPAL-ID": "user-object-id-123"}
         user_id = extract_user_id_from_headers(headers)
         assert user_id == "user-object-id-123"
+
+    def test_extract_hooks_session_token_from_headers(self) -> None:
+        """Should extract hooks session token from BigMac header."""
+        headers = {BIGMAC_HOOKS_SESSION_TOKEN_HEADER: "hooks-session-123"}
+        token = extract_hooks_session_token_from_headers(headers)
+        assert token == "hooks-session-123"
+
+    def test_extract_hooks_session_token_case_insensitive(self) -> None:
+        """Should extract hooks session token with case-insensitive lookup."""
+        headers = {"x-ms-hooks-session-token": "hooks-session-456"}
+        token = extract_hooks_session_token_from_headers(headers)
+        assert token == "hooks-session-456"
 
     def test_user_id_missing_returns_none(self) -> None:
         """Should return None when user ID header is missing."""
@@ -158,9 +193,11 @@ class TestUserContext:
         """Should create context with access token."""
         context = create_user_context(
             access_token="test-token",
+            hooks_session_token="hooks-token",
             user_id="user-123",
         )
         assert context.access_token == "test-token"
+        assert context.hooks_session_token == "hooks-token"
         assert context.user_id == "user-123"
         assert context.is_authenticated is True
 

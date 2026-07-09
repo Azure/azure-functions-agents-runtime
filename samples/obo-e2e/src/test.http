@@ -5,13 +5,20 @@
 # Paste a real user access token here for User A
 @userAToken = <paste-user-a-token>
 
+# Paste a hooks session token for User A
+@userAHooksSessionToken = <paste-user-a-hooks-session-token>
+
 # Paste a real user access token here for User B
 @userBToken = <paste-user-b-token>
+
+# Paste a hooks session token for User B
+@userBHooksSessionToken = <paste-user-b-hooks-session-token>
 
 ### User A -> downstream should see User A identity
 POST {{baseUrl}}/agents/{{agentName}}/chat
 Content-Type: {{contentType}}
-X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userAToken}}
+X-MS-Access-Token: {{userAToken}}
+X-MS-Hooks-Session-Token: {{userAHooksSessionToken}}
 
 {
   "prompt": "Call the downstream whoami MCP tool and return raw JSON"
@@ -20,7 +27,8 @@ X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userAToken}}
 ### User B -> downstream should see User B identity
 POST {{baseUrl}}/agents/{{agentName}}/chat
 Content-Type: {{contentType}}
-X-MS-TOKEN-AAD-ACCESS-TOKEN: {{userBToken}}
+X-MS-Access-Token: {{userBToken}}
+X-MS-Hooks-Session-Token: {{userBHooksSessionToken}}
 
 {
   "prompt": "Call the downstream whoami MCP tool and return raw JSON"
