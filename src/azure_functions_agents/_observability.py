@@ -232,7 +232,9 @@ def _configure_azure_monitor(connection_string: str) -> None:
         )
         return
     try:
-        from azure.monitor.opentelemetry import configure_azure_monitor
+        from azure.monitor.opentelemetry import (  # type: ignore[import-untyped]
+            configure_azure_monitor,
+        )
     except ImportError:
         # The optional [monitor] exporter is not installed. Do not raise or claim a host fallback:
         # host.json telemetryMode exports only *host* telemetry, not the runtime's worker spans. The

@@ -9,8 +9,8 @@ from typing import Any
 import azure.functions as func
 
 from ._logger import logger
-from ._source_marker import source_marker
 from ._observability import configure_observability
+from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -194,6 +194,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             "mcp_servers": len(mcp_names),
             "skills": len(skill_names),
             "user_tools": len(user_tools),
+        },
+        "discovered_capability_names": {
+            "mcp_servers": sorted(mcp_names),
+            "skills": sorted(skill_names),
+            "user_tools": discovered_user_tool_names,
         },
         "failed_loads": {
             "mcp_servers": [f"{name}: {error}" for name, error in mcp_result.failed_loads],

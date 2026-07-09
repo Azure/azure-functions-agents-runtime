@@ -14,7 +14,6 @@ import jsonschema
 from azurefunctions.extensions.http.fastapi import Request, Response
 
 from .._logger import logger
-from .._source_marker import source_marker
 from .._observability import (
     ATTR_FAULT_DOMAIN,
     FaultDomain,
@@ -22,6 +21,7 @@ from .._observability import (
     capture_sensitive_data,
     start_span,
 )
+from .._source_marker import source_marker
 from ..config import ResolvedAgent, _to_bool
 from .capabilities import AgentCapabilities
 
