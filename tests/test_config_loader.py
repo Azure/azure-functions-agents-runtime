@@ -121,7 +121,10 @@ def test_load_agent_specs_reads_files_and_substitutes(
     assert report.source_file == str((tmp_path / "report.agent.md").resolve())
 
 
-def test_load_agent_specs_unknown_field_raises(tmp_path: Path) -> None:
+def test_load_agent_specs_unknown_field_raises(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
     source = tmp_path / "main.agent.md"
     source.write_text(
         textwrap.dedent(
@@ -136,8 +139,16 @@ def test_load_agent_specs_unknown_field_raises(tmp_path: Path) -> None:
         ).lstrip(),
         encoding="utf-8",
     )
-    with pytest.raises(ValueError, match=r"unknown_field"):
+    with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match=r"unknown_field"):
         load_agent_specs(tmp_path, strict=True)
+
+    assert any(
+        "frontmatter_validation_error:" in record.getMessage()
+        and "field=unknown_field" in record.getMessage()
+        and "reason=" in record.getMessage()
+        and "schema=aka.ms/agents-front-matter-schema" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_load_agent_specs_resolves_frontmatter_strings(
@@ -255,7 +266,7 @@ def test_load_global_config_non_mapping_root_raises(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert str(source) in message
     assert "mapping" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
@@ -267,7 +278,7 @@ def test_load_global_config_invalid_field_type_raises(tmp_path: Path) -> None:
     message = str(exc_info.value)
     assert str(source) in message
     assert "timeout" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_rejects_top_level_mcp_field(tmp_path: Path) -> None:
@@ -278,7 +289,7 @@ def test_load_global_config_rejects_top_level_mcp_field(tmp_path: Path) -> None:
         load_global_config(tmp_path)
     message = str(exc_info.value)
     assert "field `mcp`" in message
-    assert "docs/front-matter-spec.md" in message
+    assert "aka.ms/agents-front-matter-schema" in message
 
 
 def test_load_global_config_resolves_numeric_and_bool_values(
@@ -365,7 +376,9 @@ def test_load_agent_specs_skips_malformed_file_and_logs_warning(
     assert len(specs) == 1
     assert specs[0].name == "Main"
     assert any(str(bad_source) in record.getMessage() for record in caplog.records)
-    assert any("Skipping malformed agent file" in record.getMessage() for record in caplog.records)
+    assert any(
+        "Skipping agent during indexing" in record.getMessage() for record in caplog.records
+    )
 
 
 def test_load_agent_specs_strict_reraises_first_failure(tmp_path: Path) -> None:

@@ -21,6 +21,7 @@ from .._observability import (
     capture_sensitive_data,
     start_span,
 )
+from .._source_marker import source_marker
 from ..config import ResolvedAgent, _to_bool
 from .capabilities import AgentCapabilities
 
@@ -236,7 +237,11 @@ def make_agent_handler(
     # the parameter unannotated tells the worker to skip that type check, so
     # this single handler can be reused across all non-HTTP trigger types.
     async def _handler(trigger_data) -> None:  # type: ignore[no-untyped-def]
-        logger.info("Agent '%s' triggered", resolved.name)
+        logger.info(
+            "Agent triggered: trigger_type=%s source_file=%s",
+            trigger_type,
+            source_marker(resolved.source_file),
+        )
 
         session_id = _new_session_id()
         with start_span(
@@ -276,10 +281,14 @@ def make_agent_handler(
 
                 if _should_log(resolved):
                     logger.info(
-                        "Agent '%s' response: %s",
-                        resolved.name,
+                        "Agent response: source_file=%s payload=%s",
+                        source_marker(resolved.source_file),
                         json.dumps(
-                            _run_log_payload(resolved, result),
+                            {
+                                "session_id": result.session_id,
+                                "response": result.content,
+                                "tool_calls": result.tool_calls,
+                            },
                             ensure_ascii=False,
                             default=str,
                         ),
@@ -287,7 +296,11 @@ def make_agent_handler(
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
                 span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                logger.exception("Agent '%s' failed: %s", resolved.name, exc)
+                logger.exception(
+                    "Agent execution failed: source_file=%s error=%s",
+                    source_marker(resolved.source_file),
+                    exc,
+                )
                 raise
 
     _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
@@ -301,7 +314,10 @@ def make_http_agent_handler(
     """Create an async handler for an HTTP-triggered agent."""
 
     async def _handler(req: Request) -> Response:
-        logger.info("HTTP agent '%s' triggered", resolved.name)
+        logger.info(
+            "HTTP agent triggered: source_file=%s",
+            source_marker(resolved.source_file),
+        )
 
         with start_span(
             f"agent.run {resolved.name}",
