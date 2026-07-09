@@ -236,14 +236,14 @@ async def _build_agent_session_history(
     # tools.
     app_root = get_app_root()
     resolved_tools: list[Any] = (
-        list(discover_user_tools(app_root)) if tools is None else list(tools)
+        discover_user_tools(app_root).tools if tools is None else list(tools)
     )
 
     if sandbox_tools:
         resolved_tools.extend(sandbox_tools)
 
     resolved_mcp_tools = (
-        list(discover_mcp_servers(app_root).values()) if mcp_tools is None else list(mcp_tools)
+        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
     )
     if resolved_mcp_tools:
         # MAF's Agent.tools accepts a heterogeneous list of FunctionTool and MCP tools.

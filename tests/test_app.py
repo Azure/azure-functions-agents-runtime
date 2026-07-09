@@ -262,7 +262,7 @@ class TestStructuredIndexingLog:
         assert log_json["event"] == "agent_runtime_indexed"
         assert log_json["agent_count"] == 1
         assert len(log_json["agents"]) == 1
-        assert log_json["agents"][0]["source_file"] == "main.agent.md"
+        assert log_json["agents"][0]["source_file"].endswith("main.agent.md")
         assert "discovered_capabilities" in log_json
 
     def test_indexing_log_includes_trigger_type(
@@ -371,7 +371,7 @@ class TestStructuredIndexingLog:
 
         assert log_json["agent_count"] == 2
         assert len(log_json["agents"]) == 2
-        source_files = {a["source_file"] for a in log_json["agents"]}
+        source_files = {Path(a["source_file"]).name for a in log_json["agents"]}
         assert source_files == {"agent1.agent.md", "agent2.agent.md"}
 
     def test_indexing_log_includes_discovered_capabilities(

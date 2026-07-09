@@ -70,9 +70,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     global_config = load_global_config(resolved_root)
     agent_specs = load_agent_specs(resolved_root)
-    user_tools = discover_user_tools(resolved_root)
-    mcp_tools = discover_mcp_servers(resolved_root)
-    skills = discover_skills(resolved_root)
+    tool_result = discover_user_tools(resolved_root)
+    mcp_result = discover_mcp_servers(resolved_root)
+    skill_result = discover_skills(resolved_root)
+    
+    user_tools = tool_result.tools
+    mcp_tools = mcp_result.servers
+    skills = skill_result.skills
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
     skill_name_by_path = {str(path.resolve()): name for name, path in skills.items()}
@@ -185,10 +189,10 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             "skills": len(skill_names),
             "user_tools": len(user_tools),
         },
-        "discovered_capability_names": {
-            "mcp_servers": sorted(mcp_names),
-            "skills": sorted(skill_names),
-            "user_tools": discovered_user_tool_names,
+        "failed_loads": {
+            "mcp_servers": [f"{name}: {error}" for name, error in mcp_result.failed_loads],
+            "skills": [f"{path}: {error}" for path, error in skill_result.failed_loads],
+            "user_tools": [f"{file}: {error}" for file, error in tool_result.failed_loads],
         },
     }
     logger.info(
