@@ -10,6 +10,7 @@ import azure.functions as func
 
 from ._logger import logger
 from ._source_marker import source_marker
+from ._observability import configure_observability
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -69,6 +70,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     resolved_root = get_app_root()
 
     global_config = load_global_config(resolved_root)
+
+    # Bootstrap observability before anything runs so MAF gen_ai spans + runtime spans/metrics
+    # flow to Application Insights with zero app code. No-op unless a telemetry provider is active.
+    configure_observability()
+
     agent_specs = load_agent_specs(resolved_root)
     tool_result = discover_user_tools(resolved_root)
     mcp_result = discover_mcp_servers(resolved_root)

@@ -8,7 +8,6 @@
   "logging": {
     "logLevel": {
       "default": "Information",
-      "azure.functions.AgentRuntime": "Information",
       "Microsoft.Azure.Functions.Extensions.Connector": "Information"
     }
   },
