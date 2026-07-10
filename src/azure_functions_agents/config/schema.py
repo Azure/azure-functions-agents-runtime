@@ -117,6 +117,7 @@ class AgentSpec(BaseModel):
     mcp: bool | McpFilter | None = None
     skills: bool | SkillsFilter | None = None
     tools: bool | ToolsFilter | None = None
+    workflows: dict[str, Any] | None = None
     input_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
     response_example: str | None = None
@@ -145,6 +146,7 @@ class ResolvedAgent(BaseModel):
     skills_exclude_names: list[str] = Field(default_factory=list)
     tool_exclude_names: list[str] = Field(default_factory=list)
     tool_filter: ToolsFilter
+    workflows: dict[str, Any] | None = None
     tools_disabled: bool = False
     skills_disabled: bool = False
     mcp_disabled: bool = False
