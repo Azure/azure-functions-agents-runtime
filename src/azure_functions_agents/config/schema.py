@@ -213,3 +213,85 @@ TRIGGER_TYPES: dict[str, dict[str, Any]] = {
         "note": "No configuration properties. Receives Connector events.",
     },
 }
+
+
+# Field description metadata for documentation generation
+# Used by eng/scripts/generate_config_reference.py to enhance generated docs.
+# These descriptions complement or override Pydantic field metadata and may include
+# markdown formatting and internal document links.
+
+GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
+    "system_tools": "System-level tools configuration. [Details](#global-system_tools)",
+    "model": "Default LLM model identifier for all agents",
+    "timeout": "Default execution timeout in seconds",
+    "tools": "Global tool filtering configuration. [Details](#global-tools)",
+}
+
+GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
+    "system_tools": "`{}`",
+    "model": "Resolved from env/provider",
+    "timeout": "`900`",
+    "tools": "`{}`",
+}
+
+SYSTEM_TOOLS_CONFIG_DESCRIPTIONS: dict[str, str] = {
+    "dynamic_sessions_code_interpreter": "ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter)",
+}
+
+DYNAMIC_SESSIONS_DESCRIPTIONS: dict[str, str] = {
+    "endpoint": "ACA session pool endpoint URL. Supports env var substitution.",
+    "client_id": "Optional managed identity client ID for multi-identity Function Apps",
+}
+
+TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "Tool names to exclude globally from all agents",
+}
+
+AGENT_SPEC_REQUIRED_DESCRIPTIONS: dict[str, str] = {
+    "name": "Display name for the agent. Does not control function name or route.",
+    "description": "Brief description of the agent's purpose",
+    "trigger": "Required unless at least one `builtin_endpoints` value is enabled. [Details](#agent-trigger)",
+}
+
+AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
+    "builtin_endpoints": "Enable built-in chat UI, chat API, and/or MCP tool endpoints. [Details](#agent-builtin_endpoints)",
+    "model": "Override LLM model for this agent",
+    "timeout": "Override execution timeout (seconds) for this agent",
+    "logger": "Enable/disable response logging for triggered agents",
+    "substitute_variables": "Enable/disable environment variable substitution",
+    "system_tools": "Opt out of system tools. [Details](#agent-system_tools)",
+    "mcp": "MCP server filtering. [Details](#agent-mcp)",
+    "skills": "Skill filtering. [Details](#agent-skills)",
+    "tools": "Custom tool filtering. [Details](#agent-tools)",
+    "input_schema": "JSON Schema for HTTP request validation",
+    "response_schema": "JSON Schema for response validation",
+    "response_example": "Example response structure (multiline string)",
+    "metadata": "Additional metadata for organization. Free-form.",
+}
+
+TRIGGER_SPEC_DESCRIPTIONS: dict[str, str] = {
+    "type": "Trigger type identifier. See [Supported Trigger Types](#supported-trigger-types)",
+    "args": "Type-specific configuration. See [Supported Trigger Types](#supported-trigger-types)",
+}
+
+BUILTIN_ENDPOINTS_DESCRIPTIONS: dict[str, str] = {
+    "debug_chat_ui": "Enable browser-based chat UI at `/agents/{slug}/` plus backing chat APIs",
+    "chat_api": "Enable REST API endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`)",
+    "mcp": "Expose agent as MCP tool on shared runtime MCP transport",
+}
+
+SYSTEM_TOOLS_AGENT_DESCRIPTIONS: dict[str, str] = {
+    "dynamic_sessions_code_interpreter": "Set to `false` to opt out of code execution capabilities",
+}
+
+MCP_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "MCP server names to exclude. Must match servers in `mcp.json`.",
+}
+
+SKILLS_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "Skill names to exclude. Matched against `SKILL.md` `name` field.",
+}
+
+AGENT_TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
+    "exclude": "Tool names to exclude (in addition to global excludes)",
+}

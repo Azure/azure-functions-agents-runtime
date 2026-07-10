@@ -85,8 +85,9 @@ bug fixes.
    - Use the **`update-schema-docs` skill** to add examples to `docs/front-matter-spec.md`
      and review `docs/architecture.md` for consistency
    - Review the skill's PR checklist and address architectural concerns
-3. Update `docs/front-matter-spec.md` and/or `docs/triggers.md` if the authoring
-   surface changed (for non-schema changes, or to refine schema-generated examples).
+3. Update relevant docs under `docs/` (commonly `front-matter-spec.md`, `triggers.md`, 
+   or other files as needed) if the authoring surface changed (for non-schema changes, 
+   or to refine schema-generated examples).
 4. Update `README.md` if user-facing behavior changed.
 5. Update the FRD index in `docs/frds/README.md`.
 6. Verify the `AGENTS.md` §8 Definition of Done, then open the PR.
