@@ -10,6 +10,8 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from ._logger import logger
+from ._observability import configure_observability
+from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -22,6 +24,27 @@ from .registration.capabilities import build_capabilities
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
 from .workflows import build_workflow_integration
+
+
+def _tool_name(tool: object) -> str:
+    name = getattr(tool, "name", "") or ""
+    return str(name)
+
+
+def _serialize_capabilities_for_log(
+    *,
+    user_tools: list[Any] | None,
+    mcp_tools: list[Any] | None,
+    skill_paths: list[Path],
+    skill_name_by_path: dict[str, str],
+) -> dict[str, list[str]]:
+    return {
+        "user_tools": sorted(_tool_name(tool) for tool in (user_tools or [])),
+        "mcp_servers": sorted(_tool_name(tool) for tool in (mcp_tools or [])),
+        "skills": sorted(
+            skill_name_by_path.get(str(path.resolve()), path.name) for path in skill_paths
+        ),
+    }
 
 
 def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
@@ -53,14 +76,31 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     resolved_root = get_app_root()
 
     global_config = load_global_config(resolved_root)
+
+    # Bootstrap observability before anything runs so MAF gen_ai spans + runtime spans/metrics
+    # flow to Application Insights with zero app code. No-op unless a telemetry provider is active.
+    configure_observability()
+
     agent_specs = load_agent_specs(resolved_root)
-    discovered_tools = discover_project_tools(resolved_root)
-    user_tools = discovered_tools.user_tools
-    workflow_tools = discovered_tools.workflow_tools
-    mcp_tools = discover_mcp_servers(resolved_root)
-    skills = discover_skills(resolved_root)
+    tool_result = discover_project_tools(resolved_root)
+    mcp_result = discover_mcp_servers(resolved_root)
+    skill_result = discover_skills(resolved_root)
+
+    user_tools = tool_result.user_tools
+    workflow_tools = tool_result.workflow_tools
+    mcp_tools = mcp_result.servers
+    skills = skill_result.skills
     skill_names = list(skills)
     mcp_names = list(mcp_tools)
+    skill_name_by_path = {str(path.resolve()): name for name, path in skills.items()}
+    discovered_user_tool_names = sorted(_tool_name(tool) for tool in user_tools)
+
+    logger.info(
+        "discovery_summary: mcp_servers=%s skills=%s user_tools=%s",
+        sorted(mcp_names),
+        sorted(skill_names),
+        discovered_user_tool_names,
+    )
 
     resolved_agents = [
         compose(
@@ -107,7 +147,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_mcp_tools=mcp_tools,
             discovered_skills=skills,
         )
-
         workflows_enabled = False
         workflow_system_addendum: str | None = None
         if resolved.is_main:
@@ -124,6 +163,19 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 resolved.name,
             )
 
+        capability_names = _serialize_capabilities_for_log(
+            user_tools=capabilities.filtered_user_tools,
+            mcp_tools=capabilities.filtered_mcp_tools,
+            skill_paths=capabilities.enabled_skill_paths,
+            skill_name_by_path=skill_name_by_path,
+        )
+        logger.info(
+            "agent_capabilities_registered: source_file=%s user_tools=%s mcp_servers=%s skills=%s",
+            source_marker(resolved.source_file),
+            capability_names["user_tools"],
+            capability_names["mcp_servers"],
+            capability_names["skills"],
+        )
         allocated_name: str | None = None
         if resolved.trigger is not None or _builtin_endpoints_enabled(resolved.builtin_endpoints):
             allocated_name = allocate_unique_function_name(
@@ -151,8 +203,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
-            "name": resolved.name,
-            "source_file": resolved.source_file,
+            "source_file": source_marker(resolved.source_file),
+            "registered_capabilities": capability_names,
         }
         if resolved.trigger:
             agent_info["trigger_type"] = resolved.trigger.type
@@ -186,6 +238,16 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             "mcp_servers": len(mcp_names),
             "skills": len(skill_names),
             "user_tools": len(user_tools),
+        },
+        "discovered_capability_names": {
+            "mcp_servers": sorted(mcp_names),
+            "skills": sorted(skill_names),
+            "user_tools": discovered_user_tool_names,
+        },
+        "failed_loads": {
+            "mcp_servers": [f"{name}: {error}" for name, error in mcp_result.failed_loads],
+            "skills": [f"{path}: {error}" for path, error in skill_result.failed_loads],
+            "user_tools": [f"{file}: {error}" for file, error in tool_result.failed_loads],
         },
     }
     logger.info(

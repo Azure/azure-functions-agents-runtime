@@ -477,6 +477,17 @@ Set the model provider env vars described above. The preview samples use Microso
 
 When the agent uses connector-backed MCP servers, connector triggers, or `dynamic_sessions_code_interpreter`, the function app's **system-assigned or user-assigned Managed Identity** must be enabled and granted access to the target resource — otherwise `DefaultAzureCredential` will fail to obtain a token. In multi-identity Function Apps, set `AZURE_CLIENT_ID` so the runtime uses the intended managed identity for Azure OpenAI, Foundry, blob-backed session storage, ACA Dynamic Sessions, and ARM/data-plane connector calls. For an individual MCP server, set `auth.client_id` in `mcp.json` to choose a different managed identity just for that server. For an individual code interpreter pool, set `system_tools.dynamic_sessions_code_interpreter.client_id`.
 
+### Observability
+
+Install `azurefunctions-agents-runtime[monitor]` to export the runtime's OpenTelemetry spans and
+metrics to Application Insights. Enablement is simply the `[monitor]` extra plus
+`APPLICATIONINSIGHTS_CONNECTION_STRING`; sensitive content stays off by default and is included only
+when `ENABLE_SENSITIVE_DATA=true`. The runtime emits an `agent.run` span for each invocation and a
+`dynamic_session.execute` span for sandbox calls, adds `af.*` attributes, marks failures with
+`af.fault_domain`, and quiets noisy third-party loggers. For full setup and the span/attribute
+reference, see [`docs/observability.md`](docs/observability.md). If you also want host↔worker
+correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive.
+
 ### Optional config overrides
 
 | Setting | Purpose |

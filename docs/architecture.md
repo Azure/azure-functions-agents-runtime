@@ -56,6 +56,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool registry, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
+| `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `FaultDomain`, `LifecycleStage` |
 
 ### How the packages line up
 
@@ -64,6 +65,7 @@ A few boundaries are worth calling out explicitly:
 - `registration/` answers **"which Azure Functions surfaces should exist for this agent?"**
 - `system_tools/` answers **"which runtime-provided tools can be attached on demand?"**
 - `runner.py` and `client_manager.py` answer **"once invoked, how does an agent call the model and its tools?"**
+- `_observability.py` (cross-cutting) answers **"what did the run do, and is a failure the app's, runtime's, or platform's fault?"**
 
 ### Typical startup trace
 
@@ -71,12 +73,13 @@ When the host imports your app module and calls `create_function_app()`, control
 
 1. `app.py` resolves the project root.
 2. `config/loader.py` reads `agents.config.yaml`.
-3. `config/loader.py` reads every `*.agent.md` file and creates `AgentSpec` values.
-4. `discovery/tools.py`, `discovery/mcp.py`, and `discovery/skills.py` build the shared inventories for the project.
-5. `config/merge.py` turns each `AgentSpec` plus `GlobalConfig` into one `ResolvedAgent`.
-6. `config/validation.py` checks each merged object for missing triggers, bad MCP references, and similar config mistakes.
-7. `registration/capabilities.py` converts name-based filters into concrete tool lists and skill paths.
-8. `registration/triggers.py` and `registration/endpoints.py` mutate one `FunctionApp` instance until all agents are registered.
+3. `app.py` calls `_observability.configure_observability()`: when an Application Insights connection string is present, this bootstraps OpenTelemetry export + instrumentation once if the optional `[monitor]` exporter is available and no provider is already active; otherwise the runtime uses an already-active provider or no-ops.
+4. `config/loader.py` reads every `*.agent.md` file and creates `AgentSpec` values.
+5. `discovery/tools.py`, `discovery/mcp.py`, and `discovery/skills.py` build the shared inventories for the project.
+6. `config/merge.py` turns each `AgentSpec` plus `GlobalConfig` into one `ResolvedAgent`.
+7. `config/validation.py` checks each merged object for missing triggers, bad MCP references, and similar config mistakes.
+8. `registration/capabilities.py` converts name-based filters into concrete tool lists and skill paths.
+9. `registration/triggers.py` and `registration/endpoints.py` mutate one `FunctionApp` instance until all agents are registered.
 
 That ordering matters because later modules assume earlier stages have already reduced free-form author input into typed, validated objects. For example, registration code does not re-parse YAML or front matter; it trusts `ResolvedAgent` and `AgentCapabilities`.
 
@@ -237,6 +240,7 @@ This design keeps global config declarative: shared config says what exists, whi
 - **Skills:** discovered as `SKILL.md` directories and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
+- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span) and `system_tools/sandbox.py` (the `dynamic_session.execute` span). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
 
 ## 7. Related docs
 
@@ -250,3 +254,4 @@ This design keeps global config declarative: shared config says what exists, whi
 
 - [`docs/front-matter-spec.md`](front-matter-spec.md) — agent file format and configuration reference
 - [`docs/triggers.md`](triggers.md) — supported trigger types and examples
+- [`docs/observability.md`](observability.md) — OpenTelemetry enablement, the `af.*` span/attribute reference, sensitive-data gating, and cost control

@@ -17,6 +17,28 @@ from azure_functions_agents.config.env import (
 )
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
 
+_FRONTMATTER_SCHEMA_LINK = "aka.ms/agents-front-matter-schema"
+
+
+_FRONTMATTER_ACTION_ITEMS = (
+    "Fix YAML syntax between leading and trailing '---' delimiters.",
+    f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",
+    "Re-run startup in strict mode to fail fast (load_agent_specs(..., strict=True)).",
+)
+
+
+def _format_action_items(items: tuple[str, ...]) -> str:
+    return " | ".join(f"{index + 1}) {item}" for index, item in enumerate(items))
+
+
+def _log_frontmatter_indexing_error(source_file: Path, exc: Exception) -> None:
+    logger.error(
+        "frontmatter_indexing_error: file=%s reason=%s action_items=%s",
+        source_file,
+        exc,
+        _format_action_items(_FRONTMATTER_ACTION_ITEMS),
+    )
+
 
 def _normalize_global_config_dict(data: dict[str, Any]) -> dict[str, Any]:
     normalized = dict(data)
@@ -35,15 +57,26 @@ def _format_validation_error(source_file: Path, exc: ValidationError) -> ValueEr
     )
     message = error.get("msg", str(exc))
     return ValueError(
-        f"{source_file}: field `{location}`: {message}. See docs/front-matter-spec.md"
+        f"{source_file}: field `{location}`: {message}. See {_FRONTMATTER_SCHEMA_LINK}"
     )
+
+
+def _first_validation_issue(exc: ValidationError) -> tuple[str, str]:
+    error = exc.errors()[0]
+    location = ".".join(str(part) for part in error.get("loc", ()) if part != "__root__") or "<root>"
+    reason = str(error.get("msg", str(exc))).strip()
+    return location, reason
 
 
 def _load_agent_spec(source_file: Path) -> AgentSpec:
     try:
         post = frontmatter.load(str(source_file))
     except yaml.YAMLError as exc:
+        _log_frontmatter_indexing_error(source_file, exc)
         raise ValueError(f"{source_file}: invalid YAML frontmatter: {exc}") from exc
+    except Exception as exc:
+        _log_frontmatter_indexing_error(source_file, exc)
+        raise ValueError(f"{source_file}: failed to parse frontmatter: {exc}") from exc
 
     metadata = dict(post.metadata or {})
     substitute_variables = _to_bool(metadata.pop("substitute_variables", True), default=True)
@@ -63,6 +96,14 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     try:
         return AgentSpec.model_validate(normalized)
     except ValidationError as exc:
+        field, reason = _first_validation_issue(exc)
+        logger.error(
+            "frontmatter_validation_error: file=%s field=%s reason=%s schema=%s",
+            source_file,
+            field,
+            reason,
+            _FRONTMATTER_SCHEMA_LINK,
+        )
         raise _format_validation_error(source_file, exc) from exc
 
 
@@ -76,19 +117,36 @@ def load_global_config(app_root: Path) -> GlobalConfig:
         with source_file.open("r", encoding="utf-8") as handle:
             data = yaml.safe_load(handle)
     except yaml.YAMLError as exc:
+        logger.error(
+            "global_config_yaml_error: file=%s reason=%s action_items=%s",
+            source_file,
+            exc,
+            f"1) Fix YAML syntax in agents.config.yaml. | 2) Validate fields against {_FRONTMATTER_SCHEMA_LINK}.",
+        )
         raise ValueError(f"{source_file}: invalid YAML in agents.config.yaml: {exc}") from exc
 
     if data is None:
         return GlobalConfig()
     if not isinstance(data, dict):
+        logger.error(
+            "global_config_validation_error: file=%s reason=expected YAML mapping action_items=%s",
+            source_file,
+            "1) Ensure the YAML root is a mapping/object. | 2) Move list/scalar values under supported fields.",
+        )
         raise ValueError(
-            f"{source_file}: field `<root>`: expected a YAML mapping. See docs/front-matter-spec.md"
+            f"{source_file}: field `<root>`: expected a YAML mapping. See {_FRONTMATTER_SCHEMA_LINK}"
         )
 
     normalized = _normalize_global_config_dict(data)
     try:
         return GlobalConfig.model_validate(normalized)
     except ValidationError as exc:
+        logger.error(
+            "global_config_validation_error: file=%s reason=%s action_items=%s",
+            source_file,
+            exc,
+            f"1) Fix invalid field types/values in agents.config.yaml. | 2) Compare fields to {_FRONTMATTER_SCHEMA_LINK}.",
+        )
         raise _format_validation_error(source_file, exc) from exc
 
 
@@ -127,7 +185,11 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
         except Exception as exc:
             if strict:
                 raise
-            logger.warning("Skipping malformed agent file %s: %s", source_file, exc)
+            logger.warning(
+                "Skipping agent during indexing: file=%s reason=%s",
+                source_file,
+                exc,
+            )
             continue
 
     return specs

@@ -18,7 +18,7 @@ from azure_functions_agents.discovery.tools import (
 
 def _write_tool_file(app_root: Path, name: str, body: str) -> None:
     tools_dir = app_root / "tools"
-    tools_dir.mkdir()
+    tools_dir.mkdir(exist_ok=True)
     (tools_dir / f"{name}.py").write_text(textwrap.dedent(body), encoding="utf-8")
 
 
@@ -67,11 +67,11 @@ def test_discover_user_tools_caches_imports(tmp_path: Path, monkeypatch: pytest.
     _write_tool_file(tmp_path, "counter_tool", _counter_tool_source())
     counter = _set_counter_module(monkeypatch)
 
-    first_tools = discover_user_tools(tmp_path)
-    second_tools = discover_user_tools(tmp_path)
+    first_result = discover_user_tools(tmp_path)
+    second_result = discover_user_tools(tmp_path)
 
-    assert _tool_names(first_tools) == ["ping"]
-    assert _tool_names(second_tools) == ["ping"]
+    assert _tool_names(first_result.tools) == ["ping"]
+    assert _tool_names(second_result.tools) == ["ping"]
     assert counter.IMPORT_COUNT == 1
 
 
@@ -79,11 +79,11 @@ def test_discover_user_tools_normalizes_paths(tmp_path: Path, monkeypatch: pytes
     _write_tool_file(tmp_path, "counter_tool", _counter_tool_source())
     counter = _set_counter_module(monkeypatch)
 
-    first_tools = discover_user_tools(tmp_path)
-    second_tools = discover_user_tools(tmp_path / ".")
+    first_result = discover_user_tools(tmp_path)
+    second_result = discover_user_tools(tmp_path / ".")
 
-    assert _tool_names(first_tools) == ["ping"]
-    assert _tool_names(second_tools) == ["ping"]
+    assert _tool_names(first_result.tools) == ["ping"]
+    assert _tool_names(second_result.tools) == ["ping"]
     assert counter.IMPORT_COUNT == 1
 
 
@@ -100,12 +100,12 @@ def test_discover_user_tools_returns_independent_lists(tmp_path: Path) -> None:
         """,
     )
 
-    discovered_tools = discover_user_tools(tmp_path)
-    discovered_tools.append(extra_tool)
+    first_result = discover_user_tools(tmp_path)
+    first_result.tools.append(extra_tool)
 
-    subsequent_tools = discover_user_tools(tmp_path)
+    second_result = discover_user_tools(tmp_path)
 
-    assert _tool_names(subsequent_tools) == ["ping"]
+    assert _tool_names(second_result.tools) == ["ping"]
 
 
 def test_clear_tool_discovery_cache_reruns_discovery(
@@ -122,7 +122,9 @@ def test_clear_tool_discovery_cache_reruns_discovery(
 
 
 def test_discover_user_tools_returns_empty_when_tools_dir_missing(tmp_path: Path) -> None:
-    assert discover_user_tools(tmp_path) == []
+    result = discover_user_tools(tmp_path)
+    assert result.tools == []
+    assert result.failed_loads == []
 
 
 def test_workflow_tool_only_is_not_normal_user_tool(tmp_path: Path) -> None:
@@ -295,3 +297,35 @@ def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> 
         "fetch_logs",
         "fetch_metrics",
     ]
+
+
+def test_discover_user_tools_tracks_failed_loads(tmp_path: Path) -> None:
+    """Test that failed tool loads are tracked and reported."""
+    _write_tool_file(
+        tmp_path,
+        "broken_tool",
+        """
+        # This will fail with a syntax error
+        def broken(
+        """,
+    )
+    _write_tool_file(
+        tmp_path,
+        "good_tool",
+        """
+        from azure_functions_agents._function_tool import tool
+
+        @tool
+        def working() -> str:
+            return "ok"
+        """,
+    )
+
+    result = discover_user_tools(tmp_path)
+
+    # Should have 1 success and 1 failure
+    assert len(result.tools) == 1
+    assert result.tools[0].name == "working"
+    assert len(result.failed_loads) == 1
+    assert "broken_tool.py" in result.failed_loads[0][0]
+    assert "SyntaxError" in result.failed_loads[0][1]

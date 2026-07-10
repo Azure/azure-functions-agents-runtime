@@ -22,9 +22,18 @@ class ProjectTools:
 
     user_tools: list[FunctionTool]
     workflow_tools: list[WorkflowTool]
+    failed_loads: list[tuple[str, str]]
 
 
 _DISCOVERED_TOOLS_CACHE: dict[Path, _CachedProjectTools] = {}
+
+
+@dataclass
+class ToolDiscoveryResult:
+    """Result of user tool discovery including successes and failures."""
+
+    tools: list[FunctionTool]
+    failed_loads: list[tuple[str, str]]  # [(filename, error_message), ...]
 
 
 def _single_basemodel_parameter(fn: Callable[..., Any]) -> type[BaseModel] | None:
@@ -58,6 +67,7 @@ def _copy_cached(cached: _CachedProjectTools) -> ProjectTools:
     return ProjectTools(
         user_tools=list(cached[0]),
         workflow_tools=list(cached[1]),
+        failed_loads=[],
     )
 
 
@@ -125,6 +135,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
 
     tools: list[FunctionTool] = []
     workflow_tools: list[WorkflowTool] = []
+    failed_loads: list[tuple[str, str]] = []
     project_src_dir = str(resolved_root)
     tools_dir = os.path.join(project_src_dir, "tools")
 
@@ -137,7 +148,11 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
     if not os.path.exists(tools_dir):
         logger.warning("Tools directory not found: %s", tools_dir)
         _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools))
-        return ProjectTools(user_tools=list(tools), workflow_tools=list(workflow_tools))
+        return ProjectTools(
+            user_tools=list(tools),
+            workflow_tools=list(workflow_tools),
+            failed_loads=[],
+        )
 
     files = sorted(f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_"))
     logger.debug("Python tool files found in %s: %s", tools_dir, files)
@@ -195,13 +210,25 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
             if picked is not None:
                 tools.append(picked)
         except Exception as exc:
+            error_msg = f"{type(exc).__name__}: {exc}"
+            failed_loads.append((filename, error_msg))
             logger.warning("Failed to load tool from %s: %s", filename, exc, exc_info=True)
 
     _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools))
     logger.info("Discovered %d user tool(s) from %s", len(tools), tools_dir)
-    return ProjectTools(user_tools=list(tools), workflow_tools=list(workflow_tools))
+    if failed_loads:
+        logger.warning("Failed to load %d tool file(s)", len(failed_loads))
+    return ProjectTools(
+        user_tools=list(tools),
+        workflow_tools=list(workflow_tools),
+        failed_loads=failed_loads,
+    )
 
 
-def discover_user_tools(app_root: Path) -> list[FunctionTool]:
+def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:
     """Return only the normal MAF user tools from ``tools/``."""
-    return discover_project_tools(app_root).user_tools
+    project_tools = discover_project_tools(app_root)
+    return ToolDiscoveryResult(
+        tools=project_tools.user_tools,
+        failed_loads=project_tools.failed_loads,
+    )

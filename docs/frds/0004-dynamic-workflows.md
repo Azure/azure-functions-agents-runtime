@@ -1,5 +1,5 @@
 ---
-frd: 0003
+frd: 0004
 title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
@@ -10,7 +10,7 @@ pull_requests: [#77]
 branch: TsuyoshiUshio/dynamic-workflows-conflicts
 ---
 
-# FRD 0003 — Dynamic workflows
+# FRD 0004 — Dynamic workflows
 
 ## 1. Summary
 
@@ -316,7 +316,7 @@ execution.
   and docs.
 - [ ] `samples/workflow-incident-triage/README.md` — update authoring and local
   run instructions for auto-registration.
-- [ ] `docs/frds/README.md` — add FRD 0003 to the index.
+- [ ] `docs/frds/README.md` — add FRD 0004 to the index.
 
 ## 8. Status & sign-off
 
