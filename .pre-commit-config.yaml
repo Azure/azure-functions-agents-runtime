@@ -1,0 +1,13 @@
+# Pre-commit hooks for azure-functions-agents-runtime
+# See https://pre-commit.com for more information
+
+repos:
+  - repo: local
+    hooks:
+      - id: generate-config-reference
+        name: Generate config reference docs
+        entry: python eng/scripts/generate_config_reference.py
+        language: system
+        files: ^src/azure_functions_agents/config/schema\.py$
+        pass_filenames: false
+        always_run: false

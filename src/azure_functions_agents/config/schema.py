@@ -160,3 +160,56 @@ class ResolvedAgent(BaseModel):
 GlobalConfig.model_rebuild()
 AgentSpec.model_rebuild()
 ResolvedAgent.model_rebuild()
+
+
+# Trigger type documentation metadata
+# Used by eng/scripts/generate_config_reference.py for generating trigger reference docs.
+# Each trigger type maps to its field specifications and optional notes.
+# Format: "trigger_type": {"fields": {field_name: (type, required, default, description)}, "note": "..."}
+TRIGGER_TYPES: dict[str, dict[str, Any]] = {
+    "http_trigger": {
+        "fields": {
+            "route": ("string", True, "N/A", "URL path for the HTTP endpoint"),
+            "methods": ("string[]", False, '`["POST"]`', "Array of HTTP methods (GET, POST, PUT, DELETE, PATCH, HEAD, OPTIONS)"),
+            "auth_level": ("string", False, '`"function"`', "One of: `anonymous`, `function`, `admin`"),
+        }
+    },
+    "timer_trigger": {
+        "fields": {
+            "schedule": ("string", True, "N/A", "NCRONTAB expression (6 fields or 5 fields with seconds prepended)"),
+        }
+    },
+    "queue_trigger": {
+        "fields": {
+            "queue_name": ("string", True, "N/A", "Azure Queue Storage queue name"),
+            "connection": ("string", True, "N/A", "App setting or setting collection for connection"),
+        }
+    },
+    "blob_trigger": {
+        "fields": {
+            "path": ("string", True, "N/A", 'Blob path pattern (e.g., `"uploads/{name}.txt"`)'),
+            "connection": ("string", False, '`"AzureWebJobsStorage"`', "App setting name for connection string"),
+        }
+    },
+    "event_grid_trigger": {
+        "fields": {},
+        "note": "No configuration properties. Receives Event Grid events.",
+    },
+    "service_bus_queue_trigger": {
+        "fields": {
+            "queue_name": ("string", True, "N/A", "Service Bus queue name"),
+            "connection": ("string", True, "N/A", "App setting or setting collection for connection"),
+        }
+    },
+    "service_bus_topic_trigger": {
+        "fields": {
+            "topic_name": ("string", True, "N/A", "Service Bus topic name"),
+            "subscription_name": ("string", True, "N/A", "Service Bus subscription name"),
+            "connection": ("string", True, "N/A", "App setting or setting collection for connection"),
+        }
+    },
+    "connector_trigger": {
+        "fields": {},
+        "note": "No configuration properties. Receives Connector events.",
+    },
+}
