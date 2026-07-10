@@ -4,9 +4,9 @@ title: http_call system tool
 status: In review            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-08
-updated: 2026-07-08
+updated: 2026-07-10
 issues: [https://github.com/Azure/azure-functions-bucees-planning/issues/1176]
-pull_requests: []
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/87]
 branch: larohra-http-call-system-tool
 ---
 
@@ -14,7 +14,7 @@ branch: larohra-http-call-system-tool
 
 ## 1. Summary
 
-Add a built-in, opt-in **`http_call` system tool** so an agent can invoke an HTTP
+Add a built-in, default-on **`http_call` system tool** so an agent can invoke an HTTP
 endpoint **directly** instead of generating and running code to make the request.
 It is the runtime's second system tool and mirrors the existing
 `dynamic_sessions_code_interpreter` (sandbox) across the full config → merge →
@@ -26,8 +26,10 @@ redaction-filtered `response_headers` subset, parsed `body`, `body_truncated`,
 an always-on **SSRF security floor** (globally-routable-unicast-only IP validation
 + DNS-rebind IP-pinning) that no configuration can switch off, plus optional
 operator controls (exact-host allowlist, https-only, size and time caps) and
-opt-in telemetry. It is enabled by adding a `system_tools.http_call` block to
-`agents.config.yaml`; the default is **off**.
+opt-in telemetry. **It is on by default** for every agent — the reduced,
+SSRF-floored public-fetch scope makes it safe to ship as a standard built-in — so a
+`system_tools.http_call` block *configures* it rather than enabling it. Set
+`http_call: false` (globally or per-agent), or `tools: false`, to turn it off.
 
 **v1 is deliberately minimal — a public, *unauthenticated* fetch primitive.**
 Governed per-host credential injection, redirect following, per-agent override
@@ -91,9 +93,10 @@ deployments.
 **Goals (v1)**
 - A single `http_call` tool the model invokes with `method`/`url`/`headers`/
   `query`/`body`|`json`, returning a structured JSON result.
-- **Opt-in**, default off; enabled by the presence of the
-  `system_tools.http_call` config object (mirrors the sandbox's config-presence
-  enablement).
+- **On by default** for every agent (unlike the opt-in sandbox): the reduced
+  public-fetch scope + always-on SSRF floor make it safe as a standard built-in.
+  A `system_tools.http_call` block *configures* it; `http_call: false` (global or
+  per-agent) or `tools: false` disables it.
 - An **always-on SSRF floor** that no config can disable: globally-routable-
   unicast-only IP validation (internal-range blocklist + evasion hardening) and
   DNS-rebind IP-pinning.
@@ -107,24 +110,86 @@ deployments.
   string, headers, or bodies in logs/spans).
 - No new hard dependency (`aiohttp` is already a runtime dependency).
 
-**Non-goals**
-- Managed-identity token acquisition and Key Vault secret references — deferred
-  to #1037; the auth-profile shape and the `{env: VAR}` secret-reference are
-  designed to extend to them (e.g. `{key_vault: ...}`, `{managed_identity: ...}`).
-- **Private / internal-network destinations** (RFC1918 / ULA / link-local) — out
-  of scope for v1; the always-on floor blocks them. A v2 operator-controlled
-  private-range allowlist (not agent-overridable) is the planned path.
+**Non-goals (v1)** — §4 documents the full target design; the items below are
+explicitly **out of v1** and are tagged **(v2)** / **(v3+)** where they appear in
+§4. See *Phased delivery* (below) for the exact cut line.
+
+- **Per-host authentication** — static-header auth profiles and `{env: VAR}`
+  secret injection are **deferred to v2**. v1 is an *unauthenticated* public-fetch
+  primitive: the model may still pass its own `headers`, but the runtime injects
+  no operator-managed credentials. Dropping auth from v1 also removes the entire
+  secret-custody / redaction / reflection surface (§4 *Secret handling*, *Residual
+  threat*, *Alternatives considered*) from the v1 threat model.
+- **Managed-identity token acquisition and Key Vault secret references** — a
+  **v3+** extension of the v2 auth-profile shape (tracked by #1037); the
+  `{env: VAR}` reference is designed to grow `{key_vault: ...}` /
+  `{managed_identity: ...}` siblings.
+- **Redirect following** — **deferred to v2**. v1 issues a single request
+  (`allow_redirects=False`) and **returns** a 3xx response as-is (status + the
+  `Location` header) for the agent to act on; `redirect_count` is always `0`.
+  Transparent per-hop-revalidated following (§4 *Redirect handling*) is v2.
+- **Per-agent override *object*** — **deferred to v2**. v1 front matter supports
+  only `false` (opt this agent out) or `true`/absent (inherit the global config).
+  Field-level override objects and the agent-vs-operator trust model (§4 *Trust
+  model*) land in v2.
+- **Wildcard / IDNA host matching** — **deferred to v2**. v1 `allowed_hosts` is
+  **exact-host only**; wildcard/suffix matching (`*.partner.com`) and IDNA /
+  punycode normalization (§4 *Host normalization*) are v2.
 - **A per-agent-widening opt-out** (`allow_agent_override` / global-ceiling mode)
-  — v1 assumes a single trust domain (§4 trust model); a future flag can lock it
-  down for deployments where agent authors are less trusted than operators.
+  — **v3+**. With no override object in v1, the agent-vs-operator ceiling question
+  does not arise yet; a future flag locks widening down for deployments where
+  agent authors are less trusted than operators.
+- **Private / internal-network destinations** (RFC1918 / ULA / link-local) — the
+  always-on floor blocks them in **every** version; a **v2** operator-controlled
+  private-range allowlist (not agent-overridable) is the planned path.
+- **Full telemetry parity with the sandbox** — v1 ships a **minimal** set (one
+  span, one counter, `FaultDomain.HTTP_CALL`, the indexing key, basic redaction);
+  richer per-outcome metrics/attributes and secret-value redaction are **v2**.
 - Retries / backoff — intentionally left to the agent, not the tool.
-- Response streaming — deferred to v2 (does not fit a single-result tool call);
-  v1 still reads incrementally up to `max_response_bytes` as a guardrail.
+- Response streaming — **v2** (does not fit a single-result tool call); v1 still
+  reads incrementally up to `max_response_bytes` as a guardrail.
 - Cookie jar / cross-call HTTP state; non-HTTP(S) schemes.
 - A generalized system-tools registry / shared base — deferred; `http_call` is
   added as a sibling field like the sandbox.
 
+### Phased delivery (v1 / v2 / v3+)
+
+v1 is deliberately a **minimal, public, unauthenticated fetch** primitive. The
+security floor (SSRF validation + caps) ships in full from day one; everything
+that adds *credential handling* or *destination flexibility* is staged later, so
+v1 carries the smallest possible threat surface.
+
+| Capability | v1 | v2 | v3+ |
+| --- | --- | --- | --- |
+| Tool surface `http_call(method, url, headers?, query?, body?/json?)` | Yes | Yes | Yes |
+| Structured JSON response (`status` / `response_headers` / `body` / truncation) | Yes | Yes | Yes |
+| Default-on enablement + per-agent `false` / inherit | Yes | Yes | Yes |
+| Always-on SSRF floor (blocklist + global-unicast + DNS-rebind pin) | Yes | Yes | Yes |
+| `https`-only floor + `allow_http` escape hatch | Yes | Yes | Yes |
+| Caps (timeout / request bytes / response bytes) | Yes | Yes | Yes |
+| Static request/response header denylist (hop-by-hop / cookie / auth) | Yes | Yes | Yes |
+| `allowed_hosts` **exact-host** allowlist | Yes | Yes | Yes |
+| Minimal telemetry (span + counter + `HTTP_CALL` + indexing key) | Yes | Yes | Yes |
+| **Per-host auth** (static headers + `{env: VAR}`) + secret redaction | — | Yes | Yes |
+| **Redirect following** (per-hop re-validation) | — (returns 3xx) | Yes | Yes |
+| **Per-agent override object** (field-level) + trust model | — | Yes | Yes |
+| **Wildcard / IDNA** host matching | — | Yes | Yes |
+| Full telemetry parity (per-outcome metrics / attributes) | — | Yes | Yes |
+| Operator private-range allowlist (not agent-overridable) | — | Yes | Yes |
+| Reflection / exfiltration mitigations (path-method allowlist, etc.) | n/a | Yes | Yes |
+| Managed identity / Key Vault secret refs (#1037) | — | — | Yes |
+| Global-ceiling mode (`allow_agent_override: false`) | — | — | Yes |
+| Out-of-process secret broker / egress-proxy custody (Tier 2) | — | — | Yes |
+| Response DLP; streaming; retries; cookie jar; tools registry | — | — | Yes |
+
 ## 4. Proposed design
+
+> **Reading guide (v1 scope).** This section documents the **full target design**.
+> Items tagged **(v2)** or **(v3+)** are deferred (see §3 *Phased delivery*); the
+> **v1** surface is everything **untagged** — a public, *unauthenticated* fetch with
+> the always-on SSRF floor. In particular, v1 ships **no** `auth` injection, **no**
+> redirect following (a 3xx is returned as-is), **no** per-agent override object
+> (only `false` / inherit), and **exact-host** allowlist matching only.
 
 `http_call` is a **system tool**, so it rides the existing four-stage pipeline
 (`docs/architecture.md` §2: discover → translate → register → execute) exactly
@@ -137,8 +202,8 @@ carries it through a dedicated `http_call_tools=` channel; `_observability.py` a
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
-| translate | `config/schema.py` | New `HttpCallAuthProfile`, `HttpCallConfig`, `HttpCallAgentOverride` models. `SystemToolsConfig.http_call: HttpCallConfig \| None`; `SystemToolsAgentOverride.http_call: bool \| HttpCallAgentOverride \| None`; `ResolvedAgent.http_call_config: HttpCallConfig \| None`. |
-| translate | `config/merge.py` | New `_resolve_http_call(spec, global_config)`: `False` → disabled; override object → field-level replacement over the global `HttpCallConfig` (unspecified fields fall back to global); `True`/absent → global. Mirrors `_resolve_sandbox`. |
+| translate | `config/schema.py` | New `HttpCallAuthProfile`, `HttpCallConfig`, `HttpCallAgentOverride` models. `SystemToolsConfig.http_call: HttpCallConfig \| bool \| None` (**default-on**: absent/`None`/`True` → enabled with defaults, `False` → disabled app-wide, object → enabled + configured); `SystemToolsAgentOverride.http_call: bool \| HttpCallAgentOverride \| None`; `ResolvedAgent.http_call_config: HttpCallConfig \| None` (`None` ⇒ disabled for this agent). |
+| translate | `config/merge.py` | New `_resolve_http_call(spec, global_config)`. **Global** absent/`True`/object → enabled (default `HttpCallConfig()` unless an object is given), `False` → disabled app-wide. **Per-agent** `False` → disabled; `True`/absent → inherit the (default-on) global; override object → field-level replacement over global **(v2)**. Unlike `_resolve_sandbox` (opt-in), the default when unset is **enabled**. |
 | register | `registration/capabilities.py`, `registration/_handlers.py`, `runner.py` | `build_capabilities(...)` builds the tool **once per agent** (stateless — no session id) via `create_http_call_tools(resolved.http_call_config)` and stores it on a new `AgentCapabilities.http_call_tools` field, suppressed when `resolved.tools_disabled` (mirrors `filtered_user_tools`). A new dedicated `http_call_tools=` runner channel — parallel to the existing `sandbox_tools=` channel (`runner.py:242`) — carries it through **every** registration path (HTTP/non-HTTP triggers, built-in chat + SSE endpoints) so all entry points behave identically. |
 | execute | **new** `system_tools/http_call.py` | `create_http_call_tools(config)` resolves `{env: VAR}` auth secrets into a **closure-local** structure (never on `ResolvedAgent`) and returns a `FunctionTool` via `@tool` + a Pydantic param schema; async HTTP resources (connector/session) are created **lazily** on first invocation. Per invocation: canonicalize the URL, run the SSRF validator (parse/normalize → allowlist → resolve → validate every resolved IP as global-unicast → **pin**), attach the matching per-host auth **after** validation, issue the `aiohttp` request with `allow_redirects=False` and a **manual, per-hop-revalidated** redirect loop that rebuilds headers/auth from scratch for each hop, enforce caps + incremental read, shape the redaction-filtered JSON result, and emit a span + counter. |
 | bootstrap / telemetry | `_observability.py`, `app.py` | New `FaultDomain.HTTP_CALL`; `record_http_call(...)` counter(s); an `http_call.request` span with redaction. `app.py` adds `"http_call"` to the `system_tools_used` indexing summary (global block + per-agent when enabled). |
@@ -150,54 +215,52 @@ captures the agent's resolved `HttpCallConfig`. Each invocation performs its own
 validated request. This keeps registration the only Azure-aware stage untouched —
 `http_call` reaches arbitrary *public* hosts and needs no Azure resource.
 
+**Enablement note.** Because it needs no Azure resource and is SSRF-floored,
+`http_call` is **on by default** — diverging from the opt-in sandbox
+(`dynamic_sessions_code_interpreter`), which stays presence-enabled because it
+provisions an ACA session pool. Operators disable `http_call` with
+`system_tools.http_call: false` (app-wide) or per-agent `http_call: false`; the
+`tools: false` kill-switch suppresses it too (parity with the sandbox).
+
 ### Authoring / API surface
 
-**Global config (`agents.config.yaml`)** — presence enables the tool:
+**`http_call` is on by default** (see the *Enablement note* above). The
+`system_tools.http_call` block is therefore for **configuration**, not enablement —
+and every field in it is optional.
+
+**Global config (`agents.config.yaml`)** — the v1 surface:
 
 ```yaml
 system_tools:
-  http_call:
+  http_call:                  # optional — omit this block and http_call is still ON
     allowed_hosts:            # optional; unset = any PUBLIC host reachable
-      - api.example.com
-      - "*.partner.com"       # wildcard: subdomains only, not the apex
+      - api.example.com       # exact host only in v1 (wildcards are v2)
     allow_http: false         # https-only floor unless true (default false)
     timeout_seconds: 30       # clamped to an absolute operational max
     max_response_bytes: 5000000
     max_request_bytes: 1000000
-    max_redirects: 5
-    auth:                     # per-host static-header profiles
-      - host: api.example.com
-        headers:
-          Authorization: { env: API_TOKEN }   # typed secret-ref; resolved at
-                                               # tool-build, never persisted
-      - host: "*.partner.com"
-        headers:
-          X-API-Key: { env: PARTNER_KEY }
 ```
 
-`http_call: {}` enables the tool with defaults; the key being **absent** (or
-`false`) leaves it off.
-
-**Per-agent override (`*.agent.md` front matter)** — three shapes:
+To **turn the tool off app-wide**, set the key to `false`:
 
 ```yaml
 system_tools:
-  http_call: false            # (1) opt this agent out entirely
+  http_call: false            # disable http_call for every agent
 ```
-```yaml
-# (2) key absent or `true` → inherit the global config
-```
+
+**Per-agent (`*.agent.md` front matter)** — v1 supports two shapes:
+
 ```yaml
 system_tools:
-  http_call:                  # (3) object = field-level override of global defaults
-    allowed_hosts:
-      - api.crm.example.com
-    auth:                     # `auth` fully replaces the global auth set (A5)
-      - host: api.crm.example.com
-        headers:
-          Authorization: { env: CRM_TOKEN }
-    # other fields not specified here fall back to the global http_call config
+  http_call: false            # (1) opt this agent out (overrides the default-on)
 ```
+```yaml
+# (2) key absent, or `true` → inherit the global config (on by default)
+```
+
+> The field-level per-agent **override object** (its own `allowed_hosts` / `auth` /
+> caps) is a **v2** feature; see *Target authoring surface (once all versions ship)*
+> at the end of this section. In v1, a per-agent value is only `false` or `true`.
 
 **Tool surface seen by the model:**
 `http_call(method, url, headers?, query?, body?|json?)` where `method` is a
@@ -225,7 +288,9 @@ hop-by-hop, cookie, and auth headers (`Set-Cookie`, `Authorization`,
 every configured auth header name) are stripped, and any configured secret values
 are redacted from whatever remains (see *Header policy* and *Secret handling &
 redaction*). The returned `url` has its **query string and userinfo stripped**,
-and `redirect_count` reports how many hops were followed. Binary bodies are **not**
+and `redirect_count` reports how many hops were followed (**v1: not followed** — a
+3xx is returned as-is with its `Location` header, so `redirect_count` is always
+`0`; see *Redirect handling*). Binary bodies are **not**
 returned (`body: null`, `body_omitted_reason: "binary"`, with `content_type` +
 `response_bytes` still reported); a `HEAD` returns `body: null,
 body_omitted_reason: "head"`. A response exceeding `max_response_bytes` is
@@ -234,8 +299,13 @@ JSON body is returned as **raw text**, not parsed.
 
 ### Trust model / security boundary
 
-v1 assumes a **single trust domain**: whoever authors an agent's front matter is
-as trusted as whoever writes the global `agents.config.yaml`. Concretely, a
+> **(v2 concern.)** v1 has **no per-agent override object** — a per-agent value is
+> only `false` or inherit — so agents cannot widen config and this trust question
+> does not arise in v1. It governs the **v2** override object below.
+
+The per-agent override model (**v2**) assumes a **single trust domain**: whoever
+authors an agent's front matter is as trusted as whoever writes the global
+`agents.config.yaml`. Concretely, a
 per-agent `http_call` object may **widen** beyond the global config (add hosts,
 relax `allow_http`, replace `auth`), because a secret-reference in front matter
 already implies config-level access to the deployment. The global config is a
@@ -251,7 +321,8 @@ it is intentionally out of v1 (see Non-goals).
 
 ### SSRF validator contract
 
-A single URL parser runs before every request and every redirect hop:
+A single URL parser runs before every request (and, in **v2**, before every
+redirect hop):
 
 1. **Parse & reject** malformed URLs: missing scheme/host, embedded userinfo
    (`user:pass@host`), non-`http(s)` scheme, invalid/out-of-range port.
@@ -272,15 +343,18 @@ A single URL parser runs before every request and every redirect hop:
 
 ### Host normalization & matching
 
+> **v1: exact host only.** v1 matches the **exact** normalized host; the IDN /
+> punycode and wildcard rows below are **v2**.
+
 The same normalized host feeds both allowlist and auth-profile matching:
 
 | Aspect | Rule |
 | --- | --- |
 | Case | Case-insensitive (hosts lowercased). |
 | Trailing dot | One trailing `.` stripped before comparison. |
-| IDN / punycode | IDNA-encoded to ASCII before comparison. |
+| IDN / punycode **(v2)** | IDNA-encoded to ASCII before comparison. |
 | Exact match | `api.example.com` matches only that host. |
-| Wildcard `*.example.com` | Matches any sub-label depth (`a.example.com`, `a.b.example.com`) but **not** the apex `example.com`. |
+| Wildcard `*.example.com` **(v2)** | Matches any sub-label depth (`a.example.com`, `a.b.example.com`) but **not** the apex `example.com`. |
 | Port | Allowlist entries are host-only; port is validated separately (below). |
 
 ### Header policy (request & response)
@@ -297,6 +371,10 @@ The same normalized host feeds both allowlist and auth-profile matching:
 
 ### Redirect handling
 
+> **(v2.)** v1 does **not** follow redirects — a 3xx is returned as-is with its
+> `Location` header (`redirect_count` is always `0`; see the tool surface). This
+> subsection describes the **v2** per-hop-revalidated follower.
+
 Redirects are followed manually (`allow_redirects=False`) so each hop is
 re-validated:
 
@@ -309,6 +387,11 @@ re-validated:
 - Stop at `max_redirects`; report the number followed as `redirect_count`.
 
 ### Secret handling & redaction
+
+> **(v2.)** v1 injects **no** credentials, so there is no auth secret to custody or
+> redact at the auth layer; this subsection describes the **v2** secret model. (v1
+> still strips auth/cookie/hop-by-hop headers from **responses** — see *Header
+> policy*.)
 
 Auth secret values use a **typed env secret-reference** — a mapping
 `{ env: VAR_NAME }` — rather than an inline `${VAR}` string. This is deliberate:
@@ -334,6 +417,10 @@ This shape also extends cleanly to #1037 (`{ key_vault: ... }` /
 `{ managed_identity: ... }` references).
 
 ### Execution surfaces & the in-worker-code boundary
+
+> **Version-independent.** The no-in-worker-`exec` invariant below holds in **all**
+> versions and is a v1 guarantee. Its framing around a *credential* only becomes
+> load-bearing once auth ships (**v2**); v1 injects no secret.
 
 This subsection makes the runtime's code-execution model explicit, because it is
 what makes an injected `http_call` secret safe from the model in the first place.
@@ -380,6 +467,10 @@ and the escalation path if that assumption ever weakens is out-of-process custod
 
 ### Residual threat: reflection / confused-deputy exfiltration
 
+> **(v2.)** v1 injects **no** credentials, so there is no credential to reflect —
+> this residual applies once auth ships (**v2**). It is documented now because it
+> shapes the auth design (least-privilege creds, path/method allowlist).
+
 Because the model never receives the secret, and the secret is attached only
 **after** SSRF validation and never carried across a redirect to another host, the
 runtime prevents the model from *reading* the credential directly or *redirecting*
@@ -414,6 +505,11 @@ Mitigation ladder, in order of leverage:
    single-trust-domain assumption exist for exactly this.
 
 ### Alternatives considered: out-of-process secret custody
+
+> **(v2 / v3+.)** This analysis is about **credential custody**, which exists only
+> once auth ships. "v1 design" **in this subsection** means the *first authenticated
+> design* (the v2 in-worker `FunctionTool`), contrasted with out-of-process custody
+> (v2 opt-in / v3+). The reduced v1 in this FRD injects **no** credentials at all.
 
 The v1 design holds the auth secret in the **worker process** (a closure-local
 structure, dereferenced at tool-build). This is safe **under the single
@@ -476,15 +572,63 @@ v1 deliberately targets **Tier 0** under the single trust-domain assumption; Tie
 is orthogonal to the compute host** and to the ACA egress feature — `http_call`
 remains a plain Functions `FunctionTool` regardless.
 
+### Target authoring surface (once all versions ship)
+
+> **Illustrative — not v1.** The blocks below show the **full** configuration
+> surface after the v2/v3+ features land (per-host `auth`, wildcard hosts, the
+> per-agent override object, redirect following). In v1 these portions are **not
+> accepted**; the v1 surface is the minimal example under *Authoring / API surface*
+> above.
+
+```yaml
+# agents.config.yaml — full (future) surface
+system_tools:
+  http_call:
+    allowed_hosts:
+      - api.example.com
+      - "*.partner.com"       # (v2) wildcard: subdomains only, not the apex
+    allow_http: false
+    timeout_seconds: 30
+    max_response_bytes: 5000000
+    max_request_bytes: 1000000
+    max_redirects: 5          # (v2) redirect following
+    auth:                     # (v2) per-host static-header profiles
+      - host: api.example.com
+        headers:
+          Authorization: { env: API_TOKEN }   # typed secret-ref; resolved at
+                                               # tool-build, never persisted
+      - host: "*.partner.com"
+        headers:
+          X-API-Key: { env: PARTNER_KEY }
+```
+
+```yaml
+# *.agent.md — full (future) per-agent override object (v2). `auth` fully
+# replaces the global auth set (A5); unspecified fields fall back to global.
+system_tools:
+  http_call:
+    allowed_hosts:
+      - api.crm.example.com
+    auth:
+      - host: api.crm.example.com
+        headers:
+          Authorization: { env: CRM_TOKEN }
+```
+
 ### Compatibility
 
-- **Purely additive** and **default off.** No existing behavior changes; the
-  sandbox is untouched. An app with no `system_tools.http_call` block behaves
-  exactly as before.
+- **Additive, but default-on (behavior change on upgrade).** The sandbox is
+  untouched, but once the runtime ships `http_call`, every agent **gains it
+  enabled** — an app that sets no `system_tools.http_call` block now has an
+  outbound-HTTP tool it did not have before. The always-on SSRF floor + https-only
+  keep this safe from internal-resource attacks (IMDS / private ranges); operators
+  who require **zero outbound egress** must set `system_tools.http_call: false`, and
+  those who want a hard destination boundary should set `allowed_hosts`.
 - **No new hard dependency** — `aiohttp` is already a runtime dependency (used by
   the sandbox).
-- The three per-agent shapes (`false` / inherit / object) match the established
-  `bool | Filter | None` override idiom used for `mcp` / `skills` / `tools`.
+- The per-agent shapes (`false` / inherit in v1; `+ object` in v2) match the
+  established `bool | Filter | None` override idiom used for `mcp` / `skills` /
+  `tools`.
 - The auth-profile model is forward-compatible with #1037: today only `headers`
   is supported; `managed_identity` / `key_vault_ref` can be added per profile
   later without breaking the shape.
@@ -541,21 +685,38 @@ remains a plain Functions `FunctionTool` regardless.
 | I2 | Reflection / confused-deputy residual | leave implicit / name it + mitigation ladder | Name it as the sharpest residual (model controls credentialed destination-within-allowlist **and** reads the response; prompt-injection in untrusted bodies amplifies). Mitigations, by leverage: short-lived/least-privilege creds (#1037) → path/method allowlist (v2) → value redaction (v1, best-effort) → response DLP (future) → governance/ceiling (A6) | Human | 2026-07-09 |
 | I3 | ACA egress-proxy custody | adopt for v1 / reject / defer as opt-in tier | **Defer to a v2 opt-in "Tier 2" backend.** True out-of-process custody + destination-bound injection, but it mandates the sandbox (contradicts the "no sandbox" motivation §2), is **preview**, adds latency/cost, does **not** solve reflection, and **removes the runtime's response-redaction backstop**. v1 stays a plain Functions `FunctionTool`, independent of this feature | Human | 2026-07-09 |
 | I4 | Re-host compute on ACA Sandboxes | re-platform / reject | **Rejected** — category mismatch (Sandboxes are a call-in exec service, not an app host; no ingress/trigger model to host a `FunctionApp`); compute host is a **product-level decision outside this FRD**; and it still wouldn't fix reflection. The real custody path without leaving Functions is an out-of-process **egress broker** (Firewall / APIM / forward-proxy sidecar) in the outbound path = Tier 2 | Human | 2026-07-09 |
+| J1 | **v1 scope reduction** (supersedes H1/H2) | keep full v1 / cut to a minimal primitive | **v1 = public, *unauthenticated* fetch primitive.** IN: single-tool schema (B1/B2/B3/B5); default-on enablement (J7) + per-agent `false`/inherit (J4); **always-on SSRF floor** (C2/C3/C9/C12) + https floor (C4) + caps (C7) + request-header denylist (C6/C11) + response-header subset (F4, static part) + **exact-host** allowlist (J5) + minimal telemetry (J6) + build-once wiring (G1/G3/G4/G5). Everything else → v2/v3+ (J2–J6) | Human | 2026-07-10 |
+| J2 | Auth / credential injection (revisit D1–D5) | ship in v1 / defer | **→ v2.** v1 injects **no** credentials; `auth`, secret custody/redaction, and the reflection residual (I2) are deferred. Removes the sharpest v1 risk and lets v1 ship without #1037 | Human | 2026-07-10 |
+| J3 | Redirect following (revisit C5/C8) | follow+revalidate / don't follow | **→ v2.** v1 does **not** follow redirects — a 3xx is returned as-is with its `Location` header; `redirect_count` is always `0`. The per-hop-revalidated follower is v2 | Human | 2026-07-10 |
+| J4 | Per-agent override object (revisit A2/A4/A5/A6) | full object replacement / bool-only | **→ v2.** v1 per-agent value is **only `false` or `true`/inherit** (`SystemToolsAgentOverride.http_call: bool \| None` in v1). The field-level `HttpCallAgentOverride` object, the widen-vs-ceiling trust model, and the `allow_agent_override` ceiling are deferred | Human | 2026-07-10 |
+| J5 | Host matching (revisit C1/C10) | exact + wildcard + IDNA / exact-only | **→ exact-host only in v1.** `allowed_hosts` matches the exact normalized (lowercased, trailing-dot-stripped) host; wildcard `*.example.com` and IDNA/punycode canonicalization are **v2** | Human | 2026-07-10 |
+| J6 | Telemetry & redaction depth (revisit F1–F4) | full sandbox parity / minimal | **→ minimal in v1.** v1 emits one `http_call.request` span (method, host, status, duration_ms, outcome), `FaultDomain.HTTP_CALL`, `"http_call"` in `system_tools_used`, and the **static** response-header subset stripping (F4). Deferred to **v2**: the full counter set (F1), the complete structured attribute set (F2), and **secret-value** redaction across surfaces (F3 / F4) — inert in v1 since no secrets are injected | Human | 2026-07-10 |
+| J7 | Tool enablement (supersedes A1) | opt-in presence / default-on | **Default-on.** Absent/`None`/`True` on `SystemToolsConfig.http_call` ⇒ enabled with defaults; `False` ⇒ disabled app-wide; object ⇒ enabled + configured. Per-agent `false` opts out; `tools: false` suppresses it. The reduced, SSRF-floored public-fetch scope makes default-on safe; diverges from the opt-in sandbox (which needs an Azure resource) | Human | 2026-07-10 |
 
 ## 6. Test plan
 
-- [ ] Unit: `tests/test_config_merge.py` — `_resolve_http_call`: `False` opt-out;
-  `True`/absent inherits global; override object replaces specified fields and
-  falls back to global for the rest; `auth` full-replace (A5); caps fallback.
+> **v1 vs v2.** This plan covers the **full** feature. For the reduced v1, the
+> **live v1 tests** are: config merge (`False`/inherit + default-on), tool-param
+> schema, body/binary/HEAD/truncation, the **SSRF suite** (exact-host allowlist,
+> blocklist, evasion vectors, DNS-rebind pin, https floor), the static
+> response-header subset, minimal telemetry, and the default-on regression. Bullets
+> tagged **(v2)** — auth, redirect following, per-agent override object, wildcard/IDN
+> matching, secret-value redaction — are written now but land with those features.
+
+- [ ] Unit: `tests/test_config_merge.py` — `_resolve_http_call`: **default-on**
+  (absent/`True` ⇒ enabled with defaults, global `False` ⇒ disabled app-wide) and
+  per-agent `False` opt-out / inherit; **(v2)** override object replaces specified
+  fields and falls back to global for the rest, `auth` full-replace (A5); caps
+  fallback.
 - [ ] Fixture scenario: `tests/fixtures/config_scenarios/<nn_http_call>/` —
-  global-only enablement, per-agent opt-out, per-agent object replacement,
-  per-agent auth override.
+  default-on (no block ⇒ enabled), global `http_call: false`, per-agent opt-out;
+  **(v2)** per-agent object replacement / auth override.
 - [ ] Unit: `tests/test_config_schema.py` (or loader test) — **config** models
   parse; `extra="forbid"` rejects unknown keys; the `{env: VAR}` secret-reference
   parses as a typed ref (not a plain string). Note: `method` Literal validation and
   `body`/`json` mutual exclusion are **tool-parameter** schema, so they live in
   `tests/test_http_call.py`, not the config-schema test.
-- [ ] **Secret-reference / no-leak** (`tests/test_config_loader.py` +
+- [ ] **(v2) Secret-reference / no-leak** (`tests/test_config_loader.py` +
   `test_http_call.py`): a `{env: VAR}` auth value **passes through** the loader's
   eager env-substitution untouched and is **never** present on the resolved
   `GlobalConfig` / `AgentSpec` / `ResolvedAgent`; it is dereferenced only at
@@ -574,45 +735,57 @@ remains a plain Functions `FunctionTool` regardless.
     (`100.64.0.0/10`) / unspecified blocked, **with and without** an allowlist.
   - **Evasion vectors:** IPv4-mapped IPv6 (`::ffff:169.254.169.254`), non-canonical
     numeric IPs (decimal `2130706433`, octal `0177.0.0.1`, hex `0x7f000001`),
-    embedded userinfo (`user@host`), trailing-dot host, IDN/punycode host.
+    embedded userinfo (`user@host`), trailing-dot host; **(v2)** IDN/punycode host.
   - DNS-rebind IP-pin: host resolves to a blocked IP → refused; multi-record host
     with one blocked IP → refused.
-  - Allowlist exact + wildcard (subdomain matches at any depth, apex does **not**).
+  - Allowlist **exact host (v1)**; **(v2)** wildcard (subdomain matches at any depth,
+    apex does **not**).
   - `https` floor + `allow_http`; non-`http(s)` scheme rejected.
-- [ ] **Redirect suite:** redirect to a blocked host → refused (each hop
+- [ ] **Redirect handling — (v1)** a 3xx is returned unfollowed (`redirect_count:
+  0`, `Location` preserved). **(v2) suite:** redirect to a blocked host → refused (each hop
   re-validated); **auth is not carried across hosts** (redirect to a different host
   → no `Authorization`; redirect to a profile host → its auth attached);
   `301/302/303` → GET (body dropped), `307/308` preserve method + body;
   `max_redirects` enforced.
-- [ ] Auth: per-host profile attached only **after** validation; wildcard host
+- [ ] **(v2)** Auth: per-host profile attached only **after** validation; wildcard host
   match; config auth header overrides a model-supplied header of the same name.
-- [ ] Telemetry: `record_http_call` counter increments per outcome; span emitted
-  with the F2 attributes; F3 + F4 redaction (no query/auth/body/secret values in
-  spans or results).
-- [ ] Regression: empty `GlobalConfig` dump includes the new `http_call` key path
-  as expected (mirror the observability-key regression in `test_config_loader`).
+- [ ] Telemetry: **(v1)** the `http_call.request` span is emitted with the basic
+  attributes (method/host/status/duration/outcome) and the static response-header
+  subset is applied. **(v2)** full counter set, complete F2 attributes, and F3/F4
+  **secret-value** redaction (no query/auth/body/secret values in spans or results).
 - [ ] Regression: empty `GlobalConfig` dump includes the new `http_call` key path
   as expected (mirror the observability-key regression in `test_config_loader`).
 
 ## 7. Docs impact
 
-- [ ] `docs/front-matter-spec.md` — document the `system_tools.http_call` global
-  block and the per-agent `system_tools.http_call: bool | object` override
-  (the spec already anticipates multiple system tools). Include the `{env: VAR}`
-  secret-reference shape and a **security warning**: v1 is **public-only** (private
-  ranges are always blocked), per-agent config may **widen** the global config
-  (single trust domain), and **response bodies are untrusted** (a cooperating
-  upstream can reflect data the runtime does not redact). Also state the
-  **execution-surface** guidance from §4: the model can only run code in the ACA
-  sandbox (never the worker), operators should prefer **short-lived /
-  least-privilege** credentials (#1037), and authors must **never write an
-  in-worker `tools/*.py` that executes model-supplied code/commands** (use the ACA
-  sandbox instead).
+> **v1 docs = public-fetch primitive.** Document the **v1** surface (default-on,
+> exact-host allowlist, https floor, caps; no auth/redirects/override object) as the
+> shipping behavior; present auth, redirect following, the per-agent override object,
+> and wildcard hosts as **"future / v2"** so users aren't told to configure things
+> the runtime rejects.
+
+- [ ] `docs/front-matter-spec.md` — document that `http_call` is **on by default**
+  and that the `system_tools.http_call` block **configures / disables** it (set
+  `http_call: false`, globally or per-agent, to turn it off). Cover the **v1** fields
+  only (exact-host `allowed_hosts`, `allow_http`, caps); the per-agent value is
+  **`bool` in v1** (the `object` override, `auth` / `{env: VAR}` secrets, wildcard
+  hosts, and redirect following are **v2**). Security warning: v1 is **public-only**
+  (private ranges are always blocked) and **default-on** (operators requiring zero
+  egress must opt out with `http_call: false`), and **response bodies are
+  untrusted**. Also state the **execution-surface** guidance from §4: the model can
+  only run code in the ACA sandbox (never the worker), and authors must **never
+  write an in-worker `tools/*.py` that executes model-supplied code/commands** (use
+  the ACA sandbox instead).
 - [ ] `docs/architecture.md` — add `system_tools/http_call.py` to the §3 module
   map, note the new `AgentCapabilities.http_call_tools` field + `http_call_tools=`
   runner channel, and describe the second system tool in the pipeline description.
+- [ ] `docs/front-matter-reference.md` (**auto-generated**) — regenerate with
+  `python eng/scripts/generate_config_reference.py` so the new `http_call` schema
+  keys appear; CI runs the script with `--check`, so the committed reference must
+  match the Pydantic models or the build fails.
 - [ ] `README.md` — add an `http_call` example under the system-tools / quickstart
-  section (enable + a minimal agent call), with the same public-only + untrusted-
+  section. Note it is **on by default** (show `http_call: false` to disable) and use
+  the **v1** surface (exact-host allowlist), with the same public-only + untrusted-
   body caveats.
 - [ ] `docs/triggers.md` — no change (not a trigger).
 
@@ -659,6 +832,14 @@ remains a plain Functions `FunctionTool` regardless.
     only at tool-build, never on `ResolvedAgent`.
   - *Interaction with `tools: false`* → **G5**: `http_call` follows the same
     `tools_disabled` kill-switch as the sandbox.
+
+- **Scope reduction + default-on (2026-07-10): complete (this revision).** v1 is
+  narrowed to a **public, unauthenticated fetch primitive** and made **on by
+  default** — decisions **J1–J7** in §5. Deferred to v2/v3+: auth (J2), redirect
+  following (J3), the per-agent override object (J4), wildcard/IDN host matching
+  (J5), and full telemetry/redaction (J6). The always-on SSRF floor + https + caps
+  still ship in v1. These are **human-decided** scope calls; the sign-off gate below
+  is unchanged.
 
 - **Human sign-off:** pending → on sign-off, set `status: Finalized`, confirm (or
   revise) the Agent-decided rows, then proceed to phase 3 (implementation).
