@@ -1,13 +1,14 @@
 # Global configuration for OBO end-to-end validation
 
-auth:
-  obo:
-    enabled: true
-    client_id: $AZURE_CLIENT_ID
-    client_secret: $AZURE_CLIENT_SECRET
-    tenant_id: $AZURE_TENANT_ID
-    downstream_scopes:
-      whoami_api: "api://<downstream-api-app-id>/.default"
+# auth: (disabled for local CLI-auth testing - re-enable with valid client_id/secret/tenant for OBO flow)
+# auth:
+#   obo:
+#     enabled: true
+#     client_id: $AZURE_CLIENT_ID
+#     client_secret: $AZURE_CLIENT_SECRET
+#     tenant_id: $AZURE_TENANT_ID
+#     downstream_scopes:
+#       whoami_api: "api://<downstream-api-app-id>/.default"
 
 # Default runtime model configuration
 model: $FOUNDRY_MODEL
