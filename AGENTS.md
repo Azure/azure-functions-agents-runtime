@@ -42,7 +42,7 @@ Run these phases in order. Each has an exit gate; do not advance until it is met
 | **2 · Architecture review** *(planning mode)* | Review the FRD for **completeness** and alignment with the module map in `docs/architecture.md`. Iterate. | Human sign-off recorded in the Decisions log → status `Finalized` |
 | **3 · Implementation** | Implement **product changes only**, per the finalized FRD. Keep diffs surgical. | `ruff` + `mypy` clean |
 | **4 · Testing** | Design/extend coverage for the new behavior; add tests under `tests/`. | Full gate green (§3) |
-| **5 · Docs** | Update `docs/architecture.md` (module map / pipeline), `docs/front-matter-spec.md`, `docs/triggers.md`, and `README.md` as relevant. | Docs reflect reality; DoD met (§6) |
+| **5 · Docs** | Update `docs/architecture.md` (module map / pipeline), `docs/front-matter-spec.md`, `docs/triggers.md`, and `README.md` as relevant. **For schema changes:** run `eng/scripts/generate_config_reference.py` then use the `update-schema-docs` skill to sync examples. | Docs reflect reality; DoD met (§6) |
 
 > Phases 2 and 4 are explicit *review* checkpoints. Treat them as separate
 > passes (ideally a dedicated review sub-agent): an **architecture review** that
@@ -168,11 +168,27 @@ Grounded in `pyproject.toml` and current code:
 - `docs/architecture.md` is the design source of truth — its **module map** and
   **pipeline stages** must stay accurate. Update it in the same PR as behavior
   changes (lifecycle phase 5).
-- `docs/front-matter-spec.md` documents the `.agent.md` authoring format;
-  `docs/triggers.md` documents trigger types. Update when the authoring surface
-  changes.
+- `docs/front-matter-reference.md` is **auto-generated** from
+  `src/azure_functions_agents/config/schema.py` via
+  `eng/scripts/generate_config_reference.py`. Never edit manually. Pre-commit
+  hooks regenerate it when schema.py changes; CI validates it stays current.
+- `docs/front-matter-spec.md` documents the `.agent.md` authoring format with
+  **examples and patterns**. When schema.py changes, use the `update-schema-docs`
+  skill ([`.github/skills/update-schema-docs/SKILL.md`](.github/skills/update-schema-docs/SKILL.md))
+  to generate usage examples for new fields and sync with the reference.
+- `docs/triggers.md` documents trigger types. Update when trigger surface changes.
 - `README.md` is the user-facing quickstart — update examples when public
   behavior changes.
+
+### Schema change workflow
+
+When modifying `src/azure_functions_agents/config/schema.py`:
+
+1. Make schema changes (new fields, models, validators)
+2. Run `python eng/scripts/generate_config_reference.py` → regenerates reference
+3. Use the **`update-schema-docs` skill** → adds examples to spec, reviews architecture
+4. Human review of architectural concerns and PR checklist
+5. Commit all doc updates together with implementation
 
 ---
 
@@ -183,5 +199,6 @@ Grounded in `pyproject.toml` and current code:
 - [ ] `ruff`, `mypy`, and `pytest` all green locally (§3).
 - [ ] New behavior is tested (regression test for bugs).
 - [ ] `docs/architecture.md` + relevant `docs/*` / `README.md` updated.
+- [ ] (schema changes) `front-matter-reference.md` regenerated + `update-schema-docs` skill run.
 - [ ] Diff is surgical — no unrelated changes.
 - [ ] Worktree removed after merge.

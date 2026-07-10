@@ -242,9 +242,6 @@ trigger:
 ```yaml
 trigger:
   type: connector_trigger
-  args:
-    connection_name: string      # Required by connector binding configuration
-    trigger_identifier: string   # Required by connector binding configuration
 ```
 
 ---
