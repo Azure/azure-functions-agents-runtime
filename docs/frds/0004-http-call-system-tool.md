@@ -24,12 +24,16 @@ JSON result (`status`, final `url` with query/userinfo stripped, `content_type`,
 redaction-filtered `response_headers` subset, parsed `body`, `body_truncated`,
 `redirect_count`). Because the tool can reach arbitrary **public** hosts, it adds
 an always-on **SSRF security floor** (globally-routable-unicast-only IP validation
-+ DNS-rebind IP-pinning + per-hop redirect re-validation) that no configuration can
-switch off, plus optional operator controls (host allowlist, per-host auth with
-typed env secret-references, https-only, size and time caps) and full opt-in
-telemetry. It is enabled by adding a `system_tools.http_call` block to
-`agents.config.yaml`; the default is **off**. **v1 is public-only** — destinations
-that resolve to private/internal ranges are blocked by the floor.
++ DNS-rebind IP-pinning) that no configuration can switch off, plus optional
+operator controls (exact-host allowlist, https-only, size and time caps) and
+opt-in telemetry. It is enabled by adding a `system_tools.http_call` block to
+`agents.config.yaml`; the default is **off**.
+
+**v1 is deliberately minimal — a public, *unauthenticated* fetch primitive.**
+Governed per-host credential injection, redirect following, per-agent override
+objects, and wildcard host matching are **deferred to v2** (see *Phased delivery*,
+§3). **v1 is also public-only** — destinations that resolve to private/internal
+ranges are blocked by the floor.
 
 ## 2. Motivation / problem
 
@@ -54,51 +58,53 @@ today there is no first-class, safe primitive for it.
 - Fire a webhook / post to a downstream system (Teams/Slack webhook, CRM).
 - Chain services (call A, use the result to call B) without glue code.
 
-> **v1 is public-only.** Line-of-business APIs that resolve to private
-> (RFC1918 / ULA / link-local) addresses are **out of scope for v1** — the
+> **v1 is public-only and unauthenticated.** Line-of-business APIs that resolve to
+> private (RFC1918 / ULA / link-local) addresses are **out of scope for v1** — the
 > always-on SSRF floor blocks private ranges even when the host is allow-listed.
 > Operator-controlled private-network access is a planned v2 follow-up (see
-> Non-goals and the trust model in §4).
+> Non-goals and the trust model in §4). Likewise, **v1 injects no credentials**:
+> the model supplies any auth header itself, so v1 targets public or
+> model-authenticated endpoints. Governed per-host credential injection (secret
+> never in model context) is **v2** (see *Phased delivery*, §3).
 
 **Why built-in rather than left to customers.** Making outbound HTTP calls
 *safely* is genuinely hard — SSRF, IMDS token theft (`169.254.169.254`), DNS
 rebinding, and credential leakage are easy to get wrong. Centralizing it as a
-governed system tool means **every agent inherits the security floor** (internal
-blocklist, IP-pinning, allowlist, secret redaction) for free instead of each
+governed system tool means **every agent inherits the security floor** (internal blocklist, IP-pinning,
+allowlist) for free instead of each
 customer re-implementing it, usually incorrectly. It is deterministic, faster,
 and cheaper than code-gen, and needs no sandbox. The existing sandbox already
 does deny-by-default host allowlisting to protect its MI token; `http_call`
 applies the same rigor to protect the whole worker.
 
-**Enterprise fit.** An operator-controlled host allowlist + per-host auth +
-env-substituted secrets let a security team govern exactly which hosts agents may
-reach and with which credentials, with opt-in telemetry for visibility — a
-prerequisite for production / regulated deployments.
+**Enterprise fit.** An operator-controlled **exact-host allowlist** + opt-in
+telemetry let a security team govern exactly which hosts agents may reach, with
+visibility, from **v1**. **Governed per-host credential injection** (env / Key
+Vault / managed identity — so a security team also controls *with which
+credentials*, with the secret never entering model context) lands in **v2** (see
+*Phased delivery*, §3); until then v1 targets public or model-authenticated
+endpoints. Together they are a prerequisite for production / regulated
+deployments.
 
 ## 3. Goals / Non-goals
 
-**Goals**
+**Goals (v1)**
 - A single `http_call` tool the model invokes with `method`/`url`/`headers`/
   `query`/`body`|`json`, returning a structured JSON result.
 - **Opt-in**, default off; enabled by the presence of the
   `system_tools.http_call` config object (mirrors the sandbox's config-presence
   enablement).
-- An **always-on SSRF floor** that no config can disable: internal-range
-  blocklist and DNS-rebind IP-pinning.
-- Operator guardrails: optional host allowlist (exact + wildcard/suffix),
-  https-only with an `allow_http` escape hatch, and caps on timeout / response
-  size / request size / redirects.
-- **Per-host static-header auth** whose secret values are sourced from a typed
-  env secret-reference (`{env: VAR}`), are **never persisted** in the resolved
-  config (`ResolvedAgent`), never enter the model context, and are redacted in
-  telemetry. The runtime never returns the auth it injected and redacts known
-  secret values from results; a cooperating upstream can still reflect other data
-  in its body, so response bodies are treated as untrusted (see §4 secret
-  handling & redaction).
-- **Per-agent override** via front matter: opt out (`false`), inherit global, or
-  replace config fields with an override object.
-- Full telemetry parity with the sandbox: opt-in indexing summary, a per-call
-  span, a metric counter, and a new fault domain — with strict redaction.
+- An **always-on SSRF floor** that no config can disable: globally-routable-
+  unicast-only IP validation (internal-range blocklist + evasion hardening) and
+  DNS-rebind IP-pinning.
+- Operator guardrails: optional **exact-host** allowlist, https-only with an
+  `allow_http` escape hatch, and caps on timeout / response size / request size.
+- **Per-agent enablement** via front matter: opt out (`false`) or inherit the
+  global config (`true`/absent). No per-agent override *object* in v1 (see
+  Non-goals / *Phased delivery*).
+- Opt-in telemetry: a per-call span, a metric counter, a new fault domain, and
+  the `system_tools_used` indexing summary key — with basic redaction (no query
+  string, headers, or bodies in logs/spans).
 - No new hard dependency (`aiohttp` is already a runtime dependency).
 
 **Non-goals**
