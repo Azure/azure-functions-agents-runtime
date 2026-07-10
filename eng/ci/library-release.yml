@@ -1,3 +1,16 @@
+trigger:
+  batch: true
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - src/**
+    exclude:
+      - src/azure_functions_agents/__init__.py
+
+pr: none
+
 parameters:
   - name: libraryVersion
     type: string
@@ -12,7 +25,7 @@ parameters:
     displayName: 'Path to version file (e.g., __init__.py or version.py)'
   - name: versionPattern
     type: string
-    default: "__version__ = ['\"]([0-9])+\\.([0-9])+.*['\"]"
+    default: "__version__ = [\"]([0-9])+\\.([0-9])+.*[\"]"
     displayName: 'Regex pattern to match version string in version file'
   - name: versionReplacement
     type: string
@@ -20,11 +33,11 @@ parameters:
     displayName: 'Replacement pattern for version (use {{VERSION}} as placeholder)'
   - name: releaseBranchPrefix
     type: string
-    default: 'release'
+    default: 'v'
     displayName: 'Prefix for release branch (e.g., release or release-v2)'
   - name: tagPrefix
     type: string
-    default: ''
+    default: 'v'
     displayName: 'Optional prefix for git tags (e.g., runtimes/v2-)'
   - name: createPullRequest
     type: boolean
