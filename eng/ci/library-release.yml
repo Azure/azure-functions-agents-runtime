@@ -14,6 +14,7 @@ pr: none
 parameters:
   - name: libraryVersion
     type: string
+    default: ''
     displayName: 'Library version to release (e.g., 0.1.0)'
   - name: projectDisplayName
     type: string
@@ -84,12 +85,71 @@ extends:
       os: windows
 
     stages:
+      - stage: ResolveVersion
+        displayName: 'Resolve Library Version'
+        jobs:
+          - job: ResolveVersionJob
+            displayName: 'Compute next beta version'
+            pool:
+              name: 1es-pool-azfunc
+              image: 1es-windows-2022
+              os: windows
+            steps:
+              - powershell: |
+                  $providedVersion = "${{ parameters.libraryVersion }}".Trim()
+                  if (-not [string]::IsNullOrWhiteSpace($providedVersion)) {
+                    Write-Host "Using provided libraryVersion: $providedVersion"
+                    Write-Host "##vso[task.setvariable variable=resolvedLibraryVersion;isOutput=true]$providedVersion"
+                    exit 0
+                  }
+
+                  $versionFilePath = "${{ parameters.versionFilePath }}"
+                  if (-not (Test-Path -LiteralPath $versionFilePath)) {
+                    Write-Host "Version file not found: $versionFilePath"
+                    exit 1
+                  }
+
+                  $content = Get-Content -LiteralPath $versionFilePath -Raw
+                  $match = [regex]::Match($content, '__version__\s*=\s*"(?<version>[^"]+)"')
+                  if (-not $match.Success) {
+                    $match = [regex]::Match($content, "__version__\s*=\s*'(?<version>[^']+)'")
+                  }
+                  if (-not $match.Success) {
+                    Write-Host "Unable to read __version__ from $versionFilePath"
+                    exit 1
+                  }
+
+                  $currentVersion = $match.Groups['version'].Value
+                  $nextVersion = $null
+
+                  $betaMatch = [regex]::Match($currentVersion, "^(?<base>\d+\.\d+\.\d+)b(?<beta>\d+)$")
+                  if ($betaMatch.Success) {
+                    $baseVersion = $betaMatch.Groups['base'].Value
+                    $nextBeta = [int]$betaMatch.Groups['beta'].Value + 1
+                    $nextVersion = "$baseVersion" + "b$nextBeta"
+                  }
+                  elseif ($currentVersion -match '^\d+\.\d+\.\d+$') {
+                    $nextVersion = "$currentVersion" + "b1"
+                  }
+                  else {
+                    Write-Host "Unsupported version format '$currentVersion'. Expected x.y.z or x.y.zbN"
+                    exit 1
+                  }
+
+                  Write-Host "Resolved libraryVersion: $nextVersion (from $currentVersion)"
+                  Write-Host "##vso[task.setvariable variable=resolvedLibraryVersion;isOutput=true]$nextVersion"
+                displayName: 'Resolve libraryVersion value'
+                name: setVersion
+
       - stage: BumpVersion
         displayName: 'Bump Version'
+        dependsOn: ResolveVersion
+        variables:
+          resolvedLibraryVersion: $[ stageDependencies.ResolveVersion.ResolveVersionJob.outputs['setVersion.resolvedLibraryVersion'] ]
         jobs:
           - template: /eng/templates/official/jobs/bump-version.yml@self
             parameters:
-              libraryVersion: ${{ parameters.libraryVersion }}
+              libraryVersion: $(resolvedLibraryVersion)
               projectDisplayName: ${{ parameters.projectDisplayName }}
               versionFilePath: ${{ parameters.versionFilePath }}
               versionPattern: ${{ parameters.versionPattern }}
@@ -102,24 +162,32 @@ extends:
 
       - stage: Build
         displayName: 'Build ${{ parameters.projectDisplayName }}'
-        dependsOn: BumpVersion
+        dependsOn:
+          - BumpVersion
+          - ResolveVersion
+        variables:
+          resolvedLibraryVersion: $[ stageDependencies.ResolveVersion.ResolveVersionJob.outputs['setVersion.resolvedLibraryVersion'] ]
         jobs:
           - template: /eng/templates/official/jobs/build-artifacts.yml@self
             parameters:
               artifactName: ${{ parameters.artifactName }}
               projectDisplayName: ${{ parameters.projectDisplayName }}
-              libraryVersion: ${{ parameters.libraryVersion }}
+              libraryVersion: $(resolvedLibraryVersion)
               releaseBranchPrefix: ${{ parameters.releaseBranchPrefix }}
               githubOrg: ${{ parameters.githubOrg }}
               githubRepo: ${{ parameters.githubRepo }}
 
       - stage: Release
         displayName: 'Release ${{ parameters.projectDisplayName }}'
-        dependsOn: Build
+        dependsOn:
+          - Build
+          - ResolveVersion
+        variables:
+          resolvedLibraryVersion: $[ stageDependencies.ResolveVersion.ResolveVersionJob.outputs['setVersion.resolvedLibraryVersion'] ]
         jobs:
           - template: /eng/templates/official/jobs/publish-release.yml@self
             parameters:
-              libraryVersion: ${{ parameters.libraryVersion }}
+              libraryVersion: $(resolvedLibraryVersion)
               projectDisplayName: ${{ parameters.projectDisplayName }}
               releaseBranchPrefix: ${{ parameters.releaseBranchPrefix }}
               tagPrefix: ${{ parameters.tagPrefix }}
