@@ -32,5 +32,8 @@ jobs:
           python -m mypy src
         displayName: 'Type check with mypy'
       - bash: |
+          python eng/scripts/generate_config_reference.py --check
+        displayName: 'Verify config reference docs are up to date'
+      - bash: |
           python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
         displayName: 'Test with pytest'

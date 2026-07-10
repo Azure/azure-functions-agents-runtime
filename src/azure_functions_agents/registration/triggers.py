@@ -7,6 +7,7 @@ from typing import Any
 import azure.functions as func
 
 from .._logger import logger
+from .._source_marker import source_marker
 from ..config import ResolvedAgent
 from . import _naming
 from ._handlers import (
@@ -103,8 +104,8 @@ def register_agent(
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
         logger.warning(
-            "Skipping '%s': resolved agent has no trigger",
-            resolved.name,
+            "Skipping registration: resolved agent has no trigger (source_file=%s)",
+            source_marker(resolved.source_file),
         )
         return
 
@@ -122,6 +123,13 @@ def register_agent(
 
     if trigger_type == "http_trigger":
         _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
+        logger.info(
+            "Registered trigger: source_file=%s function=%s trigger_type=http_trigger route=%s methods=%s",
+            source_marker(resolved.source_file),
+            function_name,
+            trigger_params.get("route"),
+            trigger_params.get("methods", ["POST"]),
+        )
         if registered_names is not None:
             registered_names.add(function_name)
         return
@@ -132,6 +140,12 @@ def register_agent(
         capabilities,
         function_name,
         trigger_params,
+        trigger_type,
+    )
+    logger.info(
+        "Registered trigger: source_file=%s function=%s trigger_type=%s",
+        source_marker(resolved.source_file),
+        function_name,
         trigger_type,
     )
     if registered_names is not None:

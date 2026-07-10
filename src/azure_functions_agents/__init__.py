@@ -11,9 +11,11 @@ Framework. The most common entry points are:
   (auto-detects OpenAI, Azure OpenAI, or Foundry from environment variables).
 * :func:`tool` — decorator for registering Python functions from ``tools/*.py``
   as agent tools.
+* :func:`workflow_tool` — decorator for opting ``tools/*.py`` callables into
+  Dynamic Workflow Activity execution.
 """
 
-__version__ = "0.1.0b5"
+__version__ = "0.1.0b6"
 
 # ---------------------------------------------------------------------------
 # Global MAF ExperimentalWarning suppression
@@ -106,7 +108,7 @@ except ImportError:
     pass
 
 
-from ._function_tool import tool  # noqa: E402
+from ._function_tool import tool, workflow_tool  # noqa: E402
 from .app import create_function_app  # noqa: E402
 from .client_manager import (  # noqa: E402
     ClientManager,
@@ -142,4 +144,5 @@ __all__ = [
     "set_client_manager",
     "shutdown_client_manager",
     "tool",
+    "workflow_tool",
 ]

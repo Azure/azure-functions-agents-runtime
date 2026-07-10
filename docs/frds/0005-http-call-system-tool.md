@@ -1,5 +1,5 @@
 ---
-frd: 0004
+frd: 0005
 title: http_call system tool
 status: In review            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
@@ -10,7 +10,7 @@ pull_requests: []
 branch: larohra-http-call-system-tool
 ---
 
-# FRD 0004 — `http_call` system tool
+# FRD 0005 — `http_call` system tool
 
 ## 1. Summary
 

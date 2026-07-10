@@ -113,6 +113,8 @@ def compose(
     metadata = dict(spec.metadata or {})
     if spec.logger is not None:
         metadata["logger"] = spec.logger
+    if spec.workflows is not None:
+        metadata["workflows"] = spec.workflows
 
     resolved = ResolvedAgent(
         name=spec.name,
@@ -131,6 +133,7 @@ def compose(
         else [],
         tool_exclude_names=list(tool_filter.exclude),
         tool_filter=tool_filter,
+        workflows=spec.workflows,
         tools_disabled=tools_disabled,
         skills_disabled=skills_disabled,
         mcp_disabled=mcp_disabled,

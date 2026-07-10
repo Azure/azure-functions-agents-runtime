@@ -3,6 +3,8 @@ from __future__ import annotations
 import logging
 import types
 
+import pytest
+
 import azure_functions_agents._observability as obs
 
 
@@ -149,6 +151,7 @@ def test_otel_provider_already_configured_false_for_proxy_provider(monkeypatch) 
 def test_configure_azure_monitor_skips_when_provider_already_configured(  # type: ignore[no-untyped-def]
     monkeypatch, caplog
 ) -> None:
+    pytest.importorskip("azure.monitor.opentelemetry")
     import logging
 
     from azure.monitor import opentelemetry as azure_monitor_opentelemetry
@@ -173,6 +176,7 @@ def test_configure_azure_monitor_skips_when_provider_already_configured(  # type
 
 
 def test_configure_azure_monitor_calls_when_provider_not_configured(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    pytest.importorskip("azure.monitor.opentelemetry")
     from azure.monitor import opentelemetry as azure_monitor_opentelemetry
 
     called = {"connection_string": None}
