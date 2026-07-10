@@ -67,6 +67,7 @@ YAML front matter at the top of each agent markdown file.
 | `mcp` | boolean \| object | No | `true` (inherit all) | MCP server filtering. [Details](#agent-mcp) |
 | `skills` | boolean \| object | No | Inherit all | Skill filtering. [Details](#agent-skills) |
 | `tools` | boolean \| object | No | Inherit all | Custom tool filtering. [Details](#agent-tools) |
+| `workflows` | object | No | `null` | Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows) |
 | `input_schema` | object | No | `null` | JSON Schema for HTTP request validation |
 | `response_schema` | object | No | `null` | JSON Schema for response validation |
 | `response_example` | string | No | `null` | Example response structure (multiline string) |

@@ -265,6 +265,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
+    "workflows": "Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows)",
     "input_schema": "JSON Schema for HTTP request validation",
     "response_schema": "JSON Schema for response validation",
     "response_example": "Example response structure (multiline string)",
