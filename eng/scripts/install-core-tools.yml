@@ -1,61 +1,32 @@
-# Shared step template: Install Azure Functions Core Tools
+# Install Azure Functions Core Tools
 # Uses a pinned version with direct GitHub download (no API call).
 # Falls back to npm install if the download fails (e.g., GitHub outage).
 parameters:
-  - name: os
-    type: string
-    values: ['linux', 'windows']
   - name: version
     type: string
     default: '4.12.0'
 
 steps:
-  - ${{ if eq(parameters.os, 'linux') }}:
-    - bash: |
-        VERSION="${{ parameters.version }}"
-        ZIP_NAME="Azure.Functions.Cli.linux-x64.$VERSION.zip"
-        URL="https://github.com/Azure/azure-functions-core-tools/releases/download/$VERSION/$ZIP_NAME"
+  - bash: |
+      VERSION="${{ parameters.version }}"
+      ZIP_NAME="Azure.Functions.Cli.linux-x64.$VERSION.zip"
+      URL="https://github.com/Azure/azure-functions-core-tools/releases/download/$VERSION/$ZIP_NAME"
 
-        echo "Downloading Core Tools version $VERSION from: $URL"
-        HTTP_CODE=$(curl -L -o coretools.zip -w "%{http_code}" "$URL" 2>/dev/null)
+      echo "Downloading Core Tools version $VERSION from: $URL"
+      HTTP_CODE=$(curl -L -o coretools.zip -w "%{http_code}" "$URL" 2>/dev/null)
 
-        if [ "$HTTP_CODE" -eq 200 ] && [ -f coretools.zip ] && [ "$(stat -c%s coretools.zip 2>/dev/null || echo 0)" -gt 1000 ]; then
-          sudo mkdir -p /opt/coretools
-          sudo unzip -o coretools.zip -d /opt/coretools
-          sudo chmod +x /opt/coretools/func
-          echo "Installed to /opt/coretools via zip download"
-          echo "##vso[task.prependpath]/opt/coretools"
-        else
-          echo "##[warning]Zip download failed (HTTP $HTTP_CODE). Falling back to npm install..."
-          rm -f coretools.zip
-          sudo npm install -g azure-functions-core-tools@$VERSION --unsafe-perm true
-        fi
-      displayName: "Install Azure Functions Core Tools (zip)"
-
-  - ${{ if eq(parameters.os, 'windows') }}:
-    - powershell: |
-        $version = "${{ parameters.version }}"
-        $zipName = "Azure.Functions.Cli.min.win-x64.$version.zip"
-        $url = "https://github.com/Azure/azure-functions-core-tools/releases/download/$version/$zipName"
-
-        Write-Host "Downloading Core Tools version $version from: $url"
-        try {
-          Invoke-WebRequest -Uri $url -OutFile coretools.zip -ErrorAction Stop
-          if ((Get-Item coretools.zip).Length -gt 1000) {
-            Expand-Archive -Path coretools.zip -DestinationPath "C:\coretools"
-            Write-Host "Installed to C:\coretools via zip download"
-            Write-Host "##vso[task.prependpath]C:\coretools"
-          }
-          else {
-            throw "Downloaded file too small"
-          }
-        }
-        catch {
-          Write-Host "##[warning]Zip download failed ($($_.Exception.Message)). Falling back to npm install..."
-          Remove-Item -Path coretools.zip -ErrorAction SilentlyContinue
-          npm install -g azure-functions-core-tools@$version --unsafe-perm true
-        }
-      displayName: "Install Azure Functions Core Tools (zip)"
+      if [ "$HTTP_CODE" -eq 200 ] && [ -f coretools.zip ] && [ "$(stat -c%s coretools.zip 2>/dev/null || echo 0)" -gt 1000 ]; then
+        sudo mkdir -p /opt/coretools
+        sudo unzip -o coretools.zip -d /opt/coretools
+        sudo chmod +x /opt/coretools/func
+        echo "Installed to /opt/coretools via zip download"
+        echo "##vso[task.prependpath]/opt/coretools"
+      else
+        echo "##[warning]Zip download failed (HTTP $HTTP_CODE). Falling back to npm install..."
+        rm -f coretools.zip
+        sudo npm install -g azure-functions-core-tools@$VERSION --unsafe-perm true
+      fi
+    displayName: "Install Azure Functions Core Tools (zip)"
 
   - bash: |
       which func

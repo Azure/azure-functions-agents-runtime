@@ -2,6 +2,9 @@ parameters:
   - name: artifactFeed
     type: string
     default: 'public/PythonSDK_PublicPackages'
+  - name: PoolName
+    type: string
+    default: '1es-pool-azfunc'
 
 jobs:
   - job: "E2ETests"
@@ -36,8 +39,6 @@ jobs:
         displayName: 'Install dependencies for $(PYTHON_VERSION)'
 
       - template: /eng/scripts/install-core-tools.yml@self
-        parameters:
-          os: 'linux'
 
       - bash: |
           npm install -g azurite
