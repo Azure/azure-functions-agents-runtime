@@ -7,11 +7,12 @@ keeps tests isolated without relying on global module state.
 
 from __future__ import annotations
 
+import inspect
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
@@ -96,6 +97,25 @@ def _index_path() -> Path:
 
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
+
+
+def _configure_client_signature(
+    handler: Callable[..., Any],
+    *,
+    workflows_enabled: bool,
+) -> None:
+    """Hide ``client`` from worker indexing when no durable binding is registered."""
+    if workflows_enabled:
+        return
+
+    signature = inspect.signature(handler)
+    cast(Any, handler).__signature__ = signature.replace(
+        parameters=[
+            parameter
+            for parameter in signature.parameters.values()
+            if parameter.name != "client"
+        ]
+    )
 
 
 async def _run_builtin_agent(
@@ -255,9 +275,11 @@ def _register_http_chat(
             )
             return _json_error(error_msg)
 
+    _configure_client_signature(chat, workflows_enabled=workflows_enabled)
     decorated = chat
     if workflows_enabled:
         decorated = app.durable_client_input(client_name="client")(decorated)
+
     decorated = app.route(route=route, methods=["POST"])(decorated)
     app.function_name(name=function_name)(decorated)
 
@@ -272,7 +294,10 @@ def _register_http_chat_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> None:
-    async def chat_stream(req: Request, client: Any | None = None) -> StreamingResponse:
+    async def chat_stream(
+        req: Request,
+        client: Any | None = None,
+    ) -> StreamingResponse:
         try:
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
@@ -300,9 +325,11 @@ def _register_http_chat_stream(
             )
             return _sse_error_response(error_msg, status_code=500)
 
+    _configure_client_signature(chat_stream, workflows_enabled=workflows_enabled)
     decorated = chat_stream
     if workflows_enabled:
         decorated = app.durable_client_input(client_name="client")(decorated)
+
     decorated = app.route(route=route, methods=["POST"])(decorated)
     app.function_name(name=function_name)(decorated)
 
@@ -351,9 +378,11 @@ def _register_mcp_endpoint(
             )
             return json.dumps({"error": error_msg})
 
+    _configure_client_signature(mcp_agent_chat, workflows_enabled=workflows_enabled)
     decorated = mcp_agent_chat
     if workflows_enabled:
         decorated = app.durable_client_input(client_name="client")(decorated)
+
     decorated = app.mcp_tool_trigger(
         arg_name="context",
         tool_name=tool_name,
