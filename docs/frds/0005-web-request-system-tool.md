@@ -4,7 +4,7 @@ title: web_request system tool
 status: In review            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-08
-updated: 2026-07-10
+updated: 2026-07-13
 issues: [https://github.com/Azure/azure-functions-bucees-planning/issues/1176]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/87]
 branch: larohra-http-call-system-tool
@@ -39,54 +39,31 @@ ranges are blocked by the floor.
 
 ## 2. Motivation / problem
 
-**The pain today.** An agent that needs to call a REST API has two poor options:
+Calling an HTTP API is the single most common integration need for an agent, yet
+there is no first-class, safe primitive for it today. The agent's only options are
+to **generate and run code** in the Dynamic Sessions sandbox (slow, non-
+deterministic, token-hungry, and forcing a heavyweight ACA dependency onto an app
+whose only need is a web request) or to **hand-write a custom Python tool per
+endpoint** (doesn't scale; re-implements the same request/response plumbing each
+time).
 
-1. **Generate + run code** in the Dynamic Sessions code interpreter. This is
-   slow, non-deterministic, burns tokens, can mis-parse responses, and forces a
-   heavyweight Azure dependency (an ACA sessions resource + a managed identity)
-   onto an app whose only need is a web request.
-2. **Hand-write a custom Python tool per endpoint.** This doesn't scale — a new
-   tool for every API — and re-implements request/response plumbing each time.
+`web_request` makes it a declarative, deterministic primitive with **one line of
+config and zero code generation** — enrich answers from public / partner APIs,
+read or write an allow-listed SaaS / line-of-business endpoint, fire a webhook, or
+chain services without glue code.
 
-Calling an HTTP API is the single most common integration need for an agent, and
-today there is no first-class, safe primitive for it.
+**Why built-in.** Making outbound HTTP calls *safely* is genuinely hard — SSRF,
+IMDS token theft (`169.254.169.254`), and DNS rebinding are easy to get wrong.
+Centralizing it as a governed system tool means **every agent inherits the security
+floor** (internal-range blocklist, IP-pinning, optional allowlist) for free instead
+of each customer re-implementing it, usually incorrectly. It is deterministic,
+faster, and cheaper than code-gen, and needs no sandbox.
 
-**What `web_request` unlocks.** A declarative, deterministic HTTP primitive with
-**one line of config and zero code generation**. Concrete customer scenarios:
-
-- Enrich answers from public / partner APIs (weather, geocoding, pricing, status).
-- Read/write a SaaS or line-of-business API exposed on a **public** endpoint
-  (allowlisted host) — ticket lookups, inventory, records, RAG-over-API.
-- Fire a webhook / post to a downstream system (Teams/Slack webhook, CRM).
-- Chain services (call A, use the result to call B) without glue code.
-
-> **v1 is public-only and unauthenticated.** Line-of-business APIs that resolve to
-> private (RFC1918 / ULA / link-local) addresses are **out of scope for v1** — the
-> always-on SSRF floor blocks private ranges even when the host is allow-listed.
-> Operator-controlled private-network access is a planned v2 follow-up (see
-> Non-goals and the trust model in §4). Likewise, **v1 injects no credentials**:
-> the model supplies any auth header itself, so v1 targets public or
-> model-authenticated endpoints. Governed per-host credential injection (secret
-> never in model context) is **v2** (see *Phased delivery*, §3).
-
-**Why built-in rather than left to customers.** Making outbound HTTP calls
-*safely* is genuinely hard — SSRF, IMDS token theft (`169.254.169.254`), DNS
-rebinding, and credential leakage are easy to get wrong. Centralizing it as a
-governed system tool means **every agent inherits the security floor** (internal blocklist, IP-pinning,
-allowlist) for free instead of each
-customer re-implementing it, usually incorrectly. It is deterministic, faster,
-and cheaper than code-gen, and needs no sandbox. The existing sandbox already
-does deny-by-default host allowlisting to protect its MI token; `web_request`
-applies the same rigor to protect the whole worker.
-
-**Enterprise fit.** An operator-controlled **exact-host allowlist** + opt-in
-telemetry let a security team govern exactly which hosts agents may reach, with
-visibility, from **v1**. **Governed per-host credential injection** (env / Key
-Vault / managed identity — so a security team also controls *with which
-credentials*, with the secret never entering model context) lands in **v2** (see
-*Phased delivery*, §3); until then v1 targets public or model-authenticated
-endpoints. Together they are a prerequisite for production / regulated
-deployments.
+> **v1 is public-only and unauthenticated.** The always-on SSRF floor blocks
+> private / internal ranges even for allow-listed hosts, and v1 injects no
+> credentials (the model supplies any auth header itself). Operator-controlled
+> private-range access and governed per-host credential injection are **v2** (see
+> §3 *Phased delivery*).
 
 ## 3. Goals / Non-goals
 
@@ -111,47 +88,25 @@ deployments.
   string, headers, or bodies in logs/spans).
 - No new hard dependency (`aiohttp` is already a runtime dependency).
 
-**Non-goals (v1)** — §4 documents the full target design; the items below are
-explicitly **out of v1** and are tagged **(v2)** / **(v3+)** where they appear in
-§4. See *Phased delivery* (below) for the exact cut line.
+**Non-goals (v1)** — deferred items, tagged **(v2)** / **(v3+)** where they appear
+in §4; see *Phased delivery* (below) for the exact cut line.
 
-- **Per-host authentication** — static-header auth profiles and `{env: VAR}`
-  secret injection are **deferred to v2**. v1 is an *unauthenticated* public-fetch
-  primitive: the model may still pass its own `headers`, but the runtime injects
-  no operator-managed credentials. Dropping auth from v1 also removes the entire
-  secret-custody / redaction / reflection surface (§4 *Secret handling*, *Residual
-  threat*, *Alternatives considered*) from the v1 threat model.
-- **Managed-identity token acquisition and Key Vault secret references** — a
-  **v3+** extension of the v2 auth-profile shape (tracked by #1037); the
-  `{env: VAR}` reference is designed to grow `{key_vault: ...}` /
-  `{managed_identity: ...}` siblings.
-- **Redirect following** — **deferred to v2**. v1 issues a single request
-  (`allow_redirects=False`) and **returns** a 3xx response as-is (status + the
-  `Location` header) for the agent to act on; `redirect_count` is always `0`.
-  Transparent per-hop-revalidated following (§4 *Redirect handling*) is v2.
-- **Per-agent override *object*** — **deferred to v2**. v1 front matter supports
-  only `false` (opt this agent out) or `true`/absent (inherit the global config).
-  Field-level override objects and the agent-vs-operator trust model (§4 *Trust
-  model*) land in v2.
-- **Wildcard / IDNA host matching** — **deferred to v2**. v1 `allowed_hosts` is
-  **exact-host only**; wildcard/suffix matching (`*.partner.com`) and IDNA /
-  punycode normalization (§4 *Host normalization*) are v2.
-- **A per-agent-widening opt-out** (`allow_agent_override` / global-ceiling mode)
-  — **v3+**. With no override object in v1, the agent-vs-operator ceiling question
-  does not arise yet; a future flag locks widening down for deployments where
-  agent authors are less trusted than operators.
-- **Private / internal-network destinations** (RFC1918 / ULA / link-local) — the
-  always-on floor blocks them in **every** version; a **v2** operator-controlled
-  private-range allowlist (not agent-overridable) is the planned path.
-- **Full telemetry parity with the sandbox** — v1 ships a **minimal** set (one
-  span, one counter, `FaultDomain.WEB_REQUEST`, the indexing key, basic redaction);
-  richer per-outcome metrics/attributes and secret-value redaction are **v2**.
-- Retries / backoff — intentionally left to the agent, not the tool.
-- Response streaming — **v2** (does not fit a single-result tool call); v1 still
-  reads incrementally up to `max_response_bytes` as a guardrail.
-- Cookie jar / cross-call HTTP state; non-HTTP(S) schemes.
-- A generalized system-tools registry / shared base — deferred; `web_request` is
-  added as a sibling field like the sandbox.
+- **Per-host authentication** — static-header auth profiles + `{env: VAR}` secret
+  injection are **(v2)**; managed-identity / Key Vault refs are **(v3+, #1037)**. v1
+  is unauthenticated (the model may still pass its own `headers`).
+- **Redirect following (v2)** — v1 issues one request and returns a 3xx as-is
+  (`redirect_count` always `0`).
+- **Per-agent override *object* (v2)** — v1 front matter is only `false` (opt out)
+  or `true`/absent (inherit); the field-level object, the agent-vs-operator trust
+  model, and a `allow_agent_override` ceiling (v3+) are deferred.
+- **Wildcard / IDNA host matching (v2)** — v1 `allowed_hosts` is exact-host only.
+- **Private / internal-network destinations** — blocked by the floor in **every**
+  version; a v2 operator-controlled private-range allowlist is the planned path.
+- **Full telemetry parity (v2)** — v1 ships a minimal set (one span, one counter,
+  `FaultDomain.WEB_REQUEST`, the indexing key, basic redaction).
+- Retries / backoff (left to the agent), response streaming (v2), cookie jar /
+  cross-call HTTP state, non-HTTP(S) schemes, and a generalized system-tools
+  registry / shared base.
 
 ### Phased delivery (v1 / v2 / v3+)
 
@@ -206,7 +161,7 @@ carries it through a dedicated `web_request_tools=` channel; `_observability.py`
 | translate | `config/schema.py` | New `WebRequestAuthProfile`, `WebRequestConfig`, `WebRequestAgentOverride` models. `SystemToolsConfig.web_request: WebRequestConfig \| bool \| None` (**default-on**: absent/`None`/`True` → enabled with defaults, `False` → disabled app-wide, object → enabled + configured); `SystemToolsAgentOverride.web_request: bool \| WebRequestAgentOverride \| None`; `ResolvedAgent.web_request_config: WebRequestConfig \| None` (`None` ⇒ disabled for this agent). |
 | translate | `config/merge.py` | New `_resolve_web_request(spec, global_config)`. **Global** absent/`True`/object → enabled (default `WebRequestConfig()` unless an object is given), `False` → disabled app-wide. **Per-agent** `False` → disabled; `True`/absent → inherit the (default-on) global; override object → field-level replacement over global **(v2)**. Unlike `_resolve_sandbox` (opt-in), the default when unset is **enabled**. |
 | register | `registration/capabilities.py`, `registration/_handlers.py`, `runner.py` | `build_capabilities(...)` builds the tool **once per agent** (stateless — no session id) via `create_web_request_tools(resolved.web_request_config)` and stores it on a new `AgentCapabilities.web_request_tools` field, suppressed when `resolved.tools_disabled` (mirrors `filtered_user_tools`). A new dedicated `web_request_tools=` runner channel — parallel to the existing `sandbox_tools=` channel (`runner.py:242`) — carries it through **every** registration path (HTTP/non-HTTP triggers, built-in chat + SSE endpoints) so all entry points behave identically. |
-| execute | **new** `system_tools/web_request.py` | `create_web_request_tools(config)` resolves `{env: VAR}` auth secrets into a **closure-local** structure (never on `ResolvedAgent`) and returns a `FunctionTool` via `@tool` + a Pydantic param schema; async HTTP resources (connector/session) are created **lazily** on first invocation. Per invocation: canonicalize the URL, run the SSRF validator (parse/normalize → allowlist → resolve → validate every resolved IP as global-unicast → **pin**), attach the matching per-host auth **after** validation, issue the `aiohttp` request with `allow_redirects=False` and a **manual, per-hop-revalidated** redirect loop that rebuilds headers/auth from scratch for each hop, enforce caps + incremental read, shape the redaction-filtered JSON result, and emit a span + counter. |
+| execute | **new** `system_tools/web_request.py` | `create_web_request_tools(config)` returns a `FunctionTool` via `@tool` + a Pydantic param schema; async HTTP resources (connector/session) are created **lazily** on first invocation. Per invocation: canonicalize the URL, run the SSRF validator (parse/normalize → allowlist → resolve → validate every resolved IP as global-unicast → **pin**), issue the `aiohttp` request with `allow_redirects=False` (v1 returns any 3xx as-is), enforce caps + incremental read, shape the JSON result, and emit a span + counter. **(v2)** resolves `{env: VAR}` auth into a closure-local structure (never on `ResolvedAgent`), attaches per-host auth after validation, and follows redirects with per-hop re-validation. |
 | bootstrap / telemetry | `_observability.py`, `app.py` | New `FaultDomain.WEB_REQUEST`; `record_web_request(...)` counter(s); a `web_request` span with redaction. `app.py` adds `"web_request"` to the `system_tools_used` indexing summary (global block + per-agent when enabled). |
 
 **Boundary note.** Unlike the sandbox (rebuilt per request because it needs the
@@ -285,10 +240,9 @@ parameters — they are operator config. The result is a JSON string:
 
 `response_headers` is a **redaction-filtered subset**, not the raw header set:
 hop-by-hop, cookie, and auth headers (`Set-Cookie`, `Authorization`,
-`Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`, plus
-every configured auth header name) are stripped, and any configured secret values
-are redacted from whatever remains (see *Header policy* and *Secret handling &
-redaction*). The returned `url` has its **query string and userinfo stripped**,
+`Proxy-Authorization`, `WWW-Authenticate`, `Proxy-Authenticate`, `Cookie`) are
+stripped (see *Header & scheme policy*). **(v2)** additionally redacts configured
+secret values from whatever remains. The returned `url` has its **query string and userinfo stripped**,
 and `redirect_count` reports how many hops were followed (**v1: not followed** — a
 3xx is returned as-is with its `Location` header, so `redirect_count` is always
 `0`; see *Redirect handling*). Binary bodies are **not**
@@ -297,28 +251,6 @@ returned (`body: null`, `body_omitted_reason: "binary"`, with `content_type` +
 body_omitted_reason: "head"`. A response exceeding `max_response_bytes` is
 **truncated** with `body_truncated: true` (never a hard error), and a truncated
 JSON body is returned as **raw text**, not parsed.
-
-### Trust model / security boundary
-
-> **(v2 concern.)** v1 has **no per-agent override object** — a per-agent value is
-> only `false` or inherit — so agents cannot widen config and this trust question
-> does not arise in v1. It governs the **v2** override object below.
-
-The per-agent override model (**v2**) assumes a **single trust domain**: whoever
-authors an agent's front matter is as trusted as whoever writes the global
-`agents.config.yaml`. Concretely, a
-per-agent `web_request` object may **widen** beyond the global config (add hosts,
-relax `require_https`, replace `auth`), because a secret-reference in front matter
-already implies config-level access to the deployment. The global config is a
-**default**, not a ceiling.
-
-What is **not** overridable at any layer is the always-on SSRF floor (private/
-internal-range blocking, IP-pinning, scheme/port validation, absolute operational
-caps) — it is validation logic, not a config field.
-
-A future **global-ceiling mode** (`allow_agent_override: false`) is noted as a v2
-follow-up for deployments where agent authors are *less* trusted than operators;
-it is intentionally out of v1 (see Non-goals).
 
 ### SSRF validator contract
 
@@ -344,234 +276,76 @@ redirect hop):
 
 ### Host normalization & matching
 
-> **v1: exact host only.** v1 matches the **exact** normalized host; the IDN /
-> punycode and wildcard rows below are **v2**.
+The normalized host (lowercased, one trailing `.` stripped) feeds allowlist
+matching. **v1 matches the exact host** — `api.example.com` matches only that host.
+Wildcard (`*.example.com`, subdomains only, not the apex) and IDNA / punycode
+canonicalization are **v2** (see §5 C10 / J5).
 
-The same normalized host feeds both allowlist and auth-profile matching:
+### Header & scheme policy
 
-| Aspect | Rule |
-| --- | --- |
-| Case | Case-insensitive (hosts lowercased). |
-| Trailing dot | One trailing `.` stripped before comparison. |
-| IDN / punycode **(v2)** | IDNA-encoded to ASCII before comparison. |
-| Exact match | `api.example.com` matches only that host. |
-| Wildcard `*.example.com` **(v2)** | Matches any sub-label depth (`a.example.com`, `a.b.example.com`) but **not** the apex `example.com`. |
-| Port | Allowlist entries are host-only; port is validated separately (below). |
+- **Request denylist** (caller-supplied headers dropped so they can't break framing
+  or hijack routing): `Host`, `Content-Length`, `Transfer-Encoding`, `Connection`,
+  `Upgrade`, `TE`, `Trailer`, `Proxy-Authorization`, `Proxy-Connection`.
+- **Response** headers are returned as the redaction-filtered subset described above
+  (auth / cookie / hop-by-hop stripped).
+- **Port / scheme:** any TCP port on an allow-listed public host; the scheme floor
+  is `https` unless `require_https: false`.
+- **(v2)** per-host `auth` headers are applied after validation and take precedence
+  over model-supplied headers of the same name.
 
-### Header policy (request & response)
+### Redirect handling (v1: not followed)
 
-- **Request denylist** (caller-supplied headers dropped so they can't break
-  framing or hijack routing/auth): `Host`, `Content-Length`, `Transfer-Encoding`,
-  `Connection`, `Upgrade`, `TE`, `Trailer`, `Proxy-Authorization`,
-  `Proxy-Connection`. Per-host `auth` headers are applied by the runtime **after**
-  validation and take precedence over any model-supplied header of the same name.
-- **Response** headers are returned as the redaction-filtered subset described
-  above (auth/cookie/hop-by-hop stripped, secret values redacted).
-- **Port policy (v1):** any TCP port is allowed on an allow-listed public host;
-  the scheme floor is `https` unless `require_https: false`.
+v1 issues a single request (`allow_redirects=False`) and **returns** any 3xx
+response as-is (status + `Location` header) for the agent to act on;
+`redirect_count` is always `0`. Transparent per-hop-revalidated following is **v2**
+(see §5 C5 / C8 / J3).
 
-### Redirect handling
+### Execution-surface invariant
 
-> **(v2.)** v1 does **not** follow redirects — a 3xx is returned as-is with its
-> `Location` header (`redirect_count` is always `0`; see the tool surface). This
-> subsection describes the **v2** per-hop-revalidated follower.
+The model **never executes code in the worker process.** The runtime's only
+code-execution tool is the ACA Dynamic Sessions sandbox, which dispatches model
+code to a separate container over HTTPS; there is **no in-worker `exec` / `eval`
+fallback**, so with no sandbox configured the model simply cannot run code
+anywhere. The one in-worker author-code path (`tools/*.py`, loaded once at startup
+and cached) is deploy-time code the model cannot add or modify at runtime. Standing
+invariant: **never `exec` model output in the worker.** Authors who need to run
+model-generated code must use the ACA sandbox — **never** an in-worker `tools/*.py`
+that executes model-supplied commands (that re-creates the sandbox without its
+isolation). See §5 I1.
 
-Redirects are followed manually (`allow_redirects=False`) so each hop is
-re-validated:
+### Deferred to v2 / v3+ (design notes)
 
-- Validate the **next** hop's URL (scheme/host/port + full SSRF check + pin)
-  **before** sending it; reject non-`http(s)` redirect targets.
-- **Rebuild headers from scratch** per hop; attach per-host `auth` **only** if the
-  new host matches a profile — auth is **never** carried across hosts.
-- Method semantics: `301/302/303` → `GET` (drop the body); `307/308` → preserve
-  method + body.
-- Stop at `max_redirects`; report the number followed as `redirect_count`.
+These are **out of v1** (see §3 *Phased delivery* and the §5 rows noted); they are
+sketched only so the v1 shape stays forward-compatible.
 
-### Secret handling & redaction
-
-> **(v2.)** v1 injects **no** credentials, so there is no auth secret to custody or
-> redact at the auth layer; this subsection describes the **v2** secret model. (v1
-> still strips auth/cookie/hop-by-hop headers from **responses** — see *Header
-> policy*.)
-
-Auth secret values use a **typed env secret-reference** — a mapping
-`{ env: VAR_NAME }` — rather than an inline `${VAR}` string. This is deliberate:
-the loader's eager env-substitution (`config/loader.py` → `resolve_env_vars_in_data`
-in `config/env.py`) only substitutes **string** values, so a dict passes through
-untouched and the secret value **never enters the eager-substitution path** and is
-**never stored** on `GlobalConfig` / `AgentSpec` / `ResolvedAgent`. The reference
-is dereferenced to its real value only at **tool-build time**, inside
-`create_web_request_tools`, into a closure-local structure.
-
-Redaction is defense-in-depth: known configured secret values are stripped from
-result headers, body, `url`, and error strings, and from span attributes, before
-anything is returned to the model or telemetry. The honest guarantee is: *the
-runtime never returns the auth it injected and redacts known secret values, but a
-cooperating upstream can still reflect other data — response bodies are untrusted.*
-
-See **Residual threat: reflection / confused-deputy exfiltration** below for the
-sharpest remaining risk and its mitigation ladder, and **Execution surfaces & the
-in-worker-code boundary** for *why* an injected secret is safe from model-authored
-code in the first place.
-
-This shape also extends cleanly to #1037 (`{ key_vault: ... }` /
-`{ managed_identity: ... }` references).
-
-### Execution surfaces & the in-worker-code boundary
-
-> **Version-independent.** The no-in-worker-`exec` invariant below holds in **all**
-> versions and is a v1 guarantee. Its framing around a *credential* only becomes
-> load-bearing once auth ships (**v2**); v1 injects no secret.
-
-This subsection makes the runtime's code-execution model explicit, because it is
-what makes an injected `web_request` secret safe from the model in the first place.
-
-- **The model never executes code in the worker process.** The runtime's *only*
-  code-execution tool is the ACA Dynamic Sessions sandbox (`system_tools/sandbox.py`),
-  and it dispatches the model's code to a **separate ACA container over HTTPS** —
-  there is no `exec` / `eval` / `compile` / `runpy` of model output anywhere in
-  `src/`. Crucially, **there is no in-worker fallback**: if
-  `system_tools.dynamic_sessions_code_interpreter` is absent, `sandbox_config` is
-  `None` (`registration/_handlers.py`) and *no* code-execution tool is built. The
-  model then simply **cannot run code anywhere** — any code it emits is inert text.
-  "No sandbox configured" therefore *removes* execution; it does **not** downgrade
-  to running code in the worker.
-- **The ACA sandbox cannot read the worker's secrets either.** Session pools are
-  independent Azure resources that do **not** inherit the Function app's App
-  Settings, so a `web_request` auth secret living in a worker closure is not visible
-  to sandbox code. (The sandbox's own managed-identity token is host-locked to
-  `*.dynamicsessions.io`.)
-- **The one in-worker author-code path is `tools/*.py`.** Discovery loads project
-  tool modules via `spec.loader.exec_module` (`discovery/tools.py`) **once at
-  startup**, cached thereafter. That code runs in the worker with full `os.environ`
-  access — but it is **author / deploy-time** code, not model-authored runtime
-  code. Whoever writes `tools/*.py` is whoever deploys the app and already holds
-  every app secret; reading a `web_request` secret there is not a privilege
-  escalation, it is the definition of owning the deployment (the **single
-  trust-domain assumption**, above). The model **cannot add or modify `tools/` at
-  runtime** (discovery is startup-only and cached; the sandbox filesystem is
-  isolated from the worker's `tools/` folder), so it can only *call* human-vetted
-  tools, never author new in-worker code.
-
-**Standing invariant.** The runtime must **never `exec` model-supplied output in
-the worker process.** Model code has exactly one home — the isolated ACA sandbox.
-
-**Author guideline.** If you need to run LLM-generated code or shell commands,
-enable the **ACA sandbox** (isolated; cannot see App Settings). **Do not** author
-an in-worker `tools/*.py` that executes model-supplied code/commands: that
-re-creates the sandbox *without* its isolation and hands the model an
-`echo $SECRET` primitive that can exfiltrate **every** app secret (not just
-`web_request`'s). This footgun is **outside `web_request`'s threat model** — no
-in-worker storage trick can hide a secret from hostile code in the same process —
-and the escalation path if that assumption ever weakens is out-of-process custody
-(see *Alternatives considered*).
-
-### Residual threat: reflection / confused-deputy exfiltration
-
-> **(v2.)** v1 injects **no** credentials, so there is no credential to reflect —
-> this residual applies once auth ships (**v2**). It is documented now because it
-> shapes the auth design (least-privilege creds, path/method allowlist).
-
-Because the model never receives the secret, and the secret is attached only
-**after** SSRF validation and never carried across a redirect to another host, the
-runtime prevents the model from *reading* the credential directly or *redirecting*
-it to an unscoped host. The **sharpest remaining residual** is a confused-deputy
-**reflection**: the model controls the *destination within the allowlist* **and**
-*reads the response*, so a credentialed request aimed at an echo/debug endpoint on
-an allow-listed host (`/echo`, `/headers`, `/anything`, a logging sink) can bounce
-the injected `Authorization` header back in the response body → into model context
-→ out. **Untrusted response bodies amplify this**: an injected instruction inside a
-third-party body can *drive* the offending call (prompt-injection → reflection →
-exfiltration chain).
-
-This residual is **inherent to any authenticated tool** whose
-destination-within-allowlist and response the model controls; it is **not** closed
-by *where* the secret is stored (see the egress-proxy analysis below — moving
-custody out of process does not fix it, and in one respect makes it worse).
-Mitigation ladder, in order of leverage:
-
-1. **Least-privilege, short-lived credentials** (managed identity / Key Vault refs,
-   #1037) so a leaked token is low-value and self-expiring. **Highest-value
-   mitigation.** Static, long-lived bearer tokens are the real danger.
-2. **Path/method-level allowlist** (v2, "Tier 1" below) so operators can block known
-   reflection endpoints — finer-grained than v1's host-only allowlist.
-3. **Response redaction** (v1, best-effort): known configured secret *values* are
-   stripped from result headers/body/`url`/errors and span attributes. Catches
-   **verbatim** reflection only; an adversarial upstream can base64/hex/split the
-   value to defeat it.
-4. **Response DLP** (future): scan responses for secret-shaped tokens before they
-   reach the model.
-5. **Governance:** do not grant credentialed `web_request` to less-trusted agent
-   authors — the v2 `allow_agent_override: false` ceiling (**A6**) and the
-   single-trust-domain assumption exist for exactly this.
-
-### Alternatives considered: out-of-process secret custody
-
-> **(v2 / v3+.)** This analysis is about **credential custody**, which exists only
-> once auth ships. "v1 design" **in this subsection** means the *first authenticated
-> design* (the v2 in-worker `FunctionTool`), contrasted with out-of-process custody
-> (v2 opt-in / v3+). The reduced v1 in this FRD injects **no** credentials at all.
-
-The v1 design holds the auth secret in the **worker process** (a closure-local
-structure, dereferenced at tool-build). This is safe **under the single
-trust-domain assumption** but, by construction, cannot defend against *malicious
-in-worker code* (a hostile `tools/*.py`). Two out-of-process alternatives were
-evaluated; both are **deferred or rejected** for v1.
-
-**(a) ACA Dynamic Sessions egress proxy — deferred to a v2 opt-in tier.** ACA
-sandboxes ship an [egress-policy engine](https://learn.microsoft.com/en-us/azure/container-apps/sandboxes-egress-policies)
-(preview): a `default` Allow/Deny action, rules matching host/path/method, and a
-`Transform` action that **injects credentials from a secret store / managed
-identity at the network layer** — so sandbox code never holds the credential. This
-is genuine out-of-process custody, and it destination-binds the credential in
-infrastructure rather than in our hand-rolled validator.
-
-| Property | v1 in-worker `FunctionTool` (this FRD) | ACA egress-proxy `Transform` |
-| --- | --- | --- |
-| **Secret custody** | In the worker process (readable by hostile in-worker `tools/*.py`) | **Out-of-process** — proxy / secret store; never in the process or model context |
-| **Cross-host leak** | Blocked by our in-process SSRF validator | Blocked at the network layer; credential **destination-bound** by infra |
-| **Reflection off an allow-listed host** | Open — **but** the runtime can redact the known secret value from the response | Open — **and** the proxy does not scrub response bodies, so a reflected secret returns **unredacted** (the runtime never holds it to redact) |
-| **SSRF enforcement** | Hand-rolled validator (large surface to get right) | Managed, `default-deny`, auditable; host + path + method |
-| **Sandbox dependency** | **None** — works with zero sandbox config | **Mandatory** — the proxy only governs traffic **originating inside a session** |
-| **Latency / cost** | Direct worker `aiohttp` call | Sandbox round-trip per call |
-| **Maturity** | Stable | **Preview** |
-
-Net: the egress proxy is a strictly better *custody* model and *cross-host* guard,
-but it (i) makes the sandbox **mandatory** for credentialed calls — directly
-contradicting the "no sandbox required" motivation (§2); (ii) is **preview**;
-(iii) adds latency/cost; and, decisively, (iv) **does not solve the reflection
-residual** — and on *that one axis* is marginally **worse**, because moving custody
-out of the worker removes the runtime's ability to redact a reflected secret it no
-longer holds. It is therefore recorded as an **opt-in v2 "Tier 2" custody backend**,
-not a v1 replacement. **`web_request`'s v1 design is deliberately independent of this
-feature:** it is a plain Functions `FunctionTool` that needs no sandbox, so the
-egress proxy neither blocks v1 nor is required by it.
-
-**(b) Re-hosting the runtime's compute on ACA Sandboxes — rejected.** "Move our
-compute onto Sandboxes so the egress proxy governs *all* traffic" is a **category
-mismatch**: Dynamic Sessions are an ephemeral *code-execution service you call
-into*, not an app-hosting compute — there is no ingress / trigger / long-lived
-process model there to host a `FunctionApp`. More broadly, the compute host (Azure
-Functions vs. ACA Container Apps vs. anything else) **defines what this project
-is** and is a **product-level decision outside this FRD's scope**. The achievable
-form of "brokered egress" *without leaving Functions* is an **out-of-process egress
-broker** — Azure Firewall / APIM-as-egress / a forward-proxy sidecar in the
-worker's outbound path — that injects credentials and enforces the allowlist. That
-is the real Tier 2 vehicle and does **not** require re-platforming. (Note:
-re-hosting still would **not** fix reflection.)
-
-**Tiered custody roadmap** — the throughline of the above:
-
-| Tier | Where the secret lives | Adds defense against | Cost |
-| --- | --- | --- | --- |
-| **0 (v1, this FRD)** | Worker closure | Model reading the secret; cross-host redirect; **verbatim** reflection (redaction) | None — no sandbox, direct calls |
-| **1 (v2)** | Worker closure | + known reflection endpoints (path/method allowlist) | Small — still in-worker |
-| **2 (future, opt-in)** | Out-of-process broker / egress proxy | + hostile **in-worker** code (secret never in the process) | Sandbox or egress-broker dependency; **still not reflection-proof** |
-
-v1 deliberately targets **Tier 0** under the single trust-domain assumption; Tiers
-1–2 are the escalation path if that assumption weakens. **The choice of custody tier
-is orthogonal to the compute host** and to the ACA egress feature — `web_request`
-remains a plain Functions `FunctionTool` regardless.
+- **Per-host auth + secret custody (v2 — D1–D5 / J2).** Static-header profiles with a
+  typed `{env: VAR}` secret-reference resolved only at tool-build into a
+  closure-local structure (never persisted on `ResolvedAgent`), plus defense-in-depth
+  value redaction. Extends to Key Vault / managed-identity refs (#1037, v3+).
+- **Per-agent override object + trust model (v2 — A2 / A4 / J4).** A field-level
+  per-agent object that may *widen* the global config under a **single trust-domain**
+  assumption (global is a default, not a ceiling); a `allow_agent_override: false`
+  ceiling for less-trusted authors is v3+. v1 has only `false` / inherit, so this
+  question does not arise. The always-on SSRF floor is **never** overridable.
+- **Redirect following (v2 — C5 / C8 / J3)** — per-hop re-validation; auth never
+  carried cross-host; `301/302/303` → GET, `307/308` preserve method + body.
+- **Wildcard / IDNA host matching (v2 — C10 / J5).**
+- **Reflection / confused-deputy residual (v2 — I2).** Once auth ships, a credentialed
+  request to a model-controlled destination-within-allowlist whose response the model
+  reads can bounce the injected header back into context. Mitigation ladder (by
+  leverage): short-lived least-privilege creds (#1037) → path/method allowlist →
+  value redaction (best-effort) → response DLP → governance ceiling. Inherent to any
+  authenticated tool; **not** closed by *where* the secret is stored.
+- **Out-of-process secret custody (v2 opt-in / v3+ — I3 / I4).** The ACA egress proxy
+  offers true out-of-process, destination-bound credential injection, but it mandates
+  the sandbox (contradicting the "no sandbox required" motivation), is preview, adds
+  latency, does **not** fix reflection, and removes the runtime's redaction backstop
+  — so it is a deferred opt-in "Tier 2" backend, not a v1 replacement. Re-hosting the
+  runtime's compute on ACA Sandboxes is **rejected** (category mismatch; a
+  product-level decision outside this FRD). `web_request` stays a plain Functions
+  `FunctionTool` independent of these features.
+- **Full telemetry parity (v2 — F1–F4 / J6)** — richer per-outcome metrics /
+  attributes and secret-value redaction across surfaces.
 
 ### Target authoring surface (once all versions ship)
 
@@ -701,13 +475,8 @@ system_tools:
 
 ## 6. Test plan
 
-> **v1 vs v2.** This plan covers the **full** feature. For the reduced v1, the
-> **live v1 tests** are: config merge (`False`/inherit + default-on), tool-param
-> schema, body/binary/HEAD/truncation, the **SSRF suite** (exact-host allowlist,
-> blocklist, evasion vectors, DNS-rebind pin, https floor), the static
-> response-header subset, minimal telemetry, and the default-on regression. Bullets
-> tagged **(v2)** — auth, redirect following, per-agent override object, wildcard/IDN
-> matching, secret-value redaction — are written now but land with those features.
+> **v1 vs v2.** Bullets tagged **(v2)** are written now but land with those
+> features; everything untagged is the **v1** suite.
 
 - [ ] Unit: `tests/test_config_merge.py` — `_resolve_web_request`: **default-on**
   (absent/`True` ⇒ enabled with defaults, global `False` ⇒ disabled app-wide) and
@@ -765,10 +534,9 @@ system_tools:
 ## 7. Docs impact
 
 > **v1 docs = public-fetch primitive.** Document the **v1** surface (default-on,
-> exact-host allowlist, https floor, caps; no auth/redirects/override object) as the
-> shipping behavior; present auth, redirect following, the per-agent override object,
-> and wildcard hosts as **"future / v2"** so users aren't told to configure things
-> the runtime rejects.
+> exact-host allowlist, https floor, caps) as shipping behavior; present auth,
+> redirects, the override object, and wildcard hosts as **v2** so users aren't told
+> to configure things the runtime rejects.
 
 - [ ] `docs/front-matter-spec.md` — document that `web_request` is **on by default**
   and that the `system_tools.web_request` block **configures / disables** it (set
@@ -797,58 +565,19 @@ system_tools:
 
 ## 8. Status & sign-off
 
-- **Status:** `In review`. **Ready for human sign-off.** Decisions **A6, B4, B5,
-  C8–C12, D5, F4, G3–G5** were made by the Agent while the human reviewer was
-  unavailable (recorded in §5 as *Agent (arch review)*) and are **pending human
-  confirmation**; the FRD is **not** flipped to `Finalized` and **no product code
-  is written** until sign-off (AGENTS.md §1, phase 2).
-
-- **Architecture review (phase 2): complete — two independent reviews.**
-  - **gpt-5.4** (rubber-duck): verdict *Has blockers* — 3 blockers, 3 refinements,
-    2 nits.
-  - **gpt-5.5** (rubber-duck, high effort): verdict *Has blockers* — 5 blockers,
-    7 refinements, 4 nits; a strict superset of gpt-5.4 plus the internal-LOB/floor
-    conflict (B4), the wiring channel (G3), deeper SSRF evasion enumeration (C9),
-    and the eager-env-substitution root cause with `file:line` citations (D5).
-  - **All findings incorporated** into this revision (§4 security subsections, §5
-    rows A6/B4/B5/C8–C12/D5/F4/G3–G5, §6 expanded suite, §7 security warning).
-    Both reviews split only on the trust model; resolved per **A6** (keep the A2/A4
-    widening; document the boundary; defer a ceiling mode to v2).
-
-- **Follow-up security discussion (phase 2, 2026-07-09): complete.** A human-led
-  deep-dive on secret custody and code-execution surfaces, folded into §4 (new
-  *Execution surfaces & the in-worker-code boundary*, *Residual threat: reflection /
-  confused-deputy exfiltration*, and *Alternatives considered: out-of-process secret
-  custody* subsections) and §5 rows **I1–I4**. Conclusions: (1) the model never runs
-  code in the worker and has no in-worker fallback, so an injected secret is safe
-  from model-authored code; (2) the **reflection** residual is named with a
-  mitigation ladder; (3) the ACA **egress proxy** is real out-of-process custody but
-  is **deferred to a v2 opt-in tier** (mandates the sandbox, preview, doesn't fix
-  reflection, removes the redaction backstop); (4) **re-hosting compute on ACA
-  Sandboxes is rejected** (category mismatch + product-level). **This does not change
-  v1 scope** — `web_request` stays a plain Functions `FunctionTool`. Rows I1–I4 were
-  decided in the human-led discussion; the sign-off gate is unchanged.
-
-- **Prior open items — now resolved (were §"Open implementation details"):**
-  - *`aiohttp` session lifecycle* → **G4**: build the closure synchronously at
-    registration; create connector/session lazily on first call.
-  - *IP-pinning mechanics* → **C3 + C9**: custom resolver/connector pins to the
-    validated IP(s), preserving `Host` + SNI, DNS cache disabled.
-  - *Where env-substitution runs* → **D5**: typed `{env: VAR}` ref, dereferenced
-    only at tool-build, never on `ResolvedAgent`.
-  - *Interaction with `tools: false`* → **G5**: `web_request` follows the same
-    `tools_disabled` kill-switch as the sandbox.
-
-- **Scope reduction + default-on (2026-07-10): complete (this revision).** v1 is
-  narrowed to a **public, unauthenticated fetch primitive** and made **on by
-  default** — decisions **J1–J7** in §5. Deferred to v2/v3+: auth (J2), redirect
-  following (J3), the per-agent override object (J4), wildcard/IDN host matching
-  (J5), and full telemetry/redaction (J6). The always-on SSRF floor + https + caps
-  still ship in v1. These are **human-decided** scope calls; the sign-off gate below
-  is unchanged.
-
-- **Human sign-off:** pending → on sign-off, set `status: Finalized`, confirm (or
-  revise) the Agent-decided rows, then proceed to phase 3 (implementation).
+- **Status:** `In review` — **ready for human sign-off.** The FRD is **not** flipped
+  to `Finalized` and **no product code is written** until sign-off (AGENTS.md §1,
+  phase 2).
+- **Agent-decided rows pending confirmation.** Decisions **A6, B4, B5, C8–C12, D5,
+  F4, G3–G5** were made by the Agent during architecture review (recorded in §5 as
+  *Agent (arch review)*) and need human confirmation.
+- **Reviews complete (phase 2).** Two independent architecture reviews and a
+  human-led security deep-dive were incorporated; the execution-surface / custody
+  discussion is captured in §5 rows **I1–I4**. v1 was subsequently narrowed to a
+  public, unauthenticated fetch primitive and made default-on (rows **J1–J8**). The
+  full rationale and options considered live in the Decisions log and git history.
+- **On sign-off:** set `status: Finalized`, confirm (or revise) the Agent-decided
+  rows, then proceed to phase 3 (implementation).
 
 ### Residual implementation details (settle during implementation)
 
