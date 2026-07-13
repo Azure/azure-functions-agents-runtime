@@ -14,6 +14,7 @@ import pytest
 
 import azure_functions_agents.discovery.mcp as mcp_discovery
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
+from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     McpFilter,
@@ -512,3 +513,37 @@ def test_agents_folder_hybrid_discovery() -> None:
     assert report.source_file.lower().replace("\\", "/").split("/")[-2] == "agents"
     assert report.trigger is not None
     assert report.trigger.type == "timer_trigger"
+
+
+# ---------------------------------------------------------------------------
+# 14 — web_request system tool (default-on, per-agent opt-out)
+# ---------------------------------------------------------------------------
+
+
+def test_web_request_fixture() -> None:
+    """Global web_request config is honored by default; an agent can opt out."""
+    fixture = FIXTURES_ROOT / "14_web_request"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    assert global_config.system_tools is not None
+    global_web_request = global_config.system_tools.web_request
+    assert global_web_request is not None
+    assert global_web_request is not False
+    assert global_web_request.allowed_hosts == ["api.example.test"]
+    assert global_web_request.timeout_seconds == 10
+    assert global_web_request.max_response_bytes == 1000000
+    assert global_web_request.max_request_bytes == 200000
+
+    default_spec = by_name["Default Web Agent"]
+    resolved_default = compose(default_spec, global_config)
+    assert resolved_default.web_request_config is not None
+    assert resolved_default.web_request_config.allowed_hosts == ["api.example.test"]
+
+    opted_out_spec = by_name["Opted Out Agent"]
+    assert opted_out_spec.system_tools is not None
+    assert opted_out_spec.system_tools.web_request is False
+    resolved_opted_out = compose(opted_out_spec, global_config)
+    assert resolved_opted_out.web_request_config is None

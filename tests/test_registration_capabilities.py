@@ -22,6 +22,7 @@ def _resolved(
     mcp_disabled: bool = False,
     tools_disabled: bool = False,
     exclude: list[str] | None = None,
+    web_request_config: Any | None = None,
 ) -> Any:
     return SimpleNamespace(
         enabled_skills_names=enabled_skills_names or [],
@@ -30,6 +31,7 @@ def _resolved(
         mcp_disabled=mcp_disabled,
         tools_disabled=tools_disabled,
         tool_filter=SimpleNamespace(exclude=exclude or []),
+        web_request_config=web_request_config,
     )
 
 
