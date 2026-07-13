@@ -1,12 +1,12 @@
 ---
 frd: 0005
 title: web_request system tool
-status: In review            # Draft → In review → Finalized  (→ Implemented after merge)
+status: Finalized            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-08
 updated: 2026-07-13
 issues: [https://github.com/Azure/azure-functions-bucees-planning/issues/1176]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/87]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/96, https://github.com/Azure/azure-functions-agents-runtime/pull/87]
 branch: larohra-http-call-system-tool
 ---
 
@@ -472,6 +472,7 @@ system_tools:
 | J6 | Telemetry & redaction depth (revisit F1–F4) | full sandbox parity / minimal | **→ minimal in v1.** v1 emits one `http_call.request` span (method, host, status, duration_ms, outcome), `FaultDomain.HTTP_CALL`, `"http_call"` in `system_tools_used`, and the **static** response-header subset stripping (F4). Deferred to **v2**: the full counter set (F1), the complete structured attribute set (F2), and **secret-value** redaction across surfaces (F3 / F4) — inert in v1 since no secrets are injected | Human | 2026-07-10 |
 | J7 | Tool enablement (supersedes A1) | opt-in presence / default-on | **Default-on.** Absent/`None`/`True` on `SystemToolsConfig.http_call` ⇒ enabled with defaults; `False` ⇒ disabled app-wide; object ⇒ enabled + configured. Per-agent `false` opts out; `tools: false` suppresses it. The reduced, SSRF-floored public-fetch scope makes default-on safe; diverges from the opt-in sandbox (which needs an Azure resource) | Human | 2026-07-10 |
 | J8 | Naming: tool + scheme flag | keep `http_call`/`allow_http` / rename | **Rename.** Tool + config key `http_call` → **`web_request`** (and `HttpCallConfig`→`WebRequestConfig`, module `system_tools/web_request.py`, `AgentCapabilities.web_request_tools`, `FaultDomain.WEB_REQUEST`, `record_web_request`, span `web_request`, `"web_request"` in `system_tools_used`); scheme flag `allow_http` (default `false`) → **`require_https`** (default `true`, inverted polarity — set `require_https: false` to allow plaintext http). Rationale: "http" was overloaded (tool name vs URL scheme), and `allow_http: false` read like it disabled a now-default-on tool | Human | 2026-07-10 |
+| K1 | FRD sign-off + PR consolidation | keep #87 FRD-only (stacked impl PR) / consolidate FRD + impl into one PR | **Finalized.** Human signed off on the FRD — including all Agent-decided rows (A6, B4, B5, C8–C12, D5, F4, G3–G5) — after the v1 implementation and a gpt-5.5 rubber-duck validation passed the full gate (ruff / mypy-strict / **587 tests**). FRD 0005 + the v1 implementation were consolidated into a single feature PR **#96** to `main`; the FRD-only PR **#87** was closed as superseded | Human | 2026-07-13 |
 
 ## 6. Test plan
 
@@ -565,19 +566,20 @@ system_tools:
 
 ## 8. Status & sign-off
 
-- **Status:** `In review` — **ready for human sign-off.** The FRD is **not** flipped
-  to `Finalized` and **no product code is written** until sign-off (AGENTS.md §1,
-  phase 2).
-- **Agent-decided rows pending confirmation.** Decisions **A6, B4, B5, C8–C12, D5,
-  F4, G3–G5** were made by the Agent during architecture review (recorded in §5 as
-  *Agent (arch review)*) and need human confirmation.
+- **Status:** `Finalized` (2026-07-13). Human sign-off received; the Agent-decided
+  rows were confirmed and the v1 implementation has landed. Becomes `Implemented`
+  when PR #96 merges.
+- **Agent-decided rows confirmed.** Decisions **A6, B4, B5, C8–C12, D5, F4, G3–G5**
+  (made by the Agent during architecture review, recorded in §5 as *Agent (arch
+  review)*) were confirmed by the human at sign-off — see row **K1**.
 - **Reviews complete (phase 2).** Two independent architecture reviews and a
   human-led security deep-dive were incorporated; the execution-surface / custody
   discussion is captured in §5 rows **I1–I4**. v1 was subsequently narrowed to a
   public, unauthenticated fetch primitive and made default-on (rows **J1–J8**). The
   full rationale and options considered live in the Decisions log and git history.
-- **On sign-off:** set `status: Finalized`, confirm (or revise) the Agent-decided
-  rows, then proceed to phase 3 (implementation).
+- **Implementation (phases 3–5) complete.** Delivered on branch
+  `larohra-web-request-system-tool`, validated by a gpt-5.5 rubber-duck pass plus a
+  full green gate (**587 tests**), and shipped via PR **#96**.
 
 ### Residual implementation details (settle during implementation)
 
