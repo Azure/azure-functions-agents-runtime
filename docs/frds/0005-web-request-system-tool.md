@@ -434,7 +434,7 @@ system_tools:
 | C4 | Scheme policy | https-only / allow http | **https-only by default**; optional `allow_http` flag (default `false`) | Human | 2026-07-08 |
 | C5 | Redirects | don't follow / follow+re-validate | Follow up to `max_redirects` (default 5), **re-validating each hop** through the full SSRF check; return the final URL | Human | 2026-07-08 |
 | C6 | Header policy | allow all / denylist | Deny `Host` and computed `Content-Length`; config-injected auth headers **win** over model-supplied headers of the same name | Human | 2026-07-08 |
-| C7 | Caps | none / global-config caps + hard max | Global caps `timeout_seconds` (default 30, absolute max ~120), `max_response_bytes`, `max_request_bytes`, `max_redirects` | Human | 2026-07-08 |
+| C7 | Caps | none / global-config caps + hard max | Global caps `timeout_seconds` (default 30 s, ceiling 120 s), `max_response_bytes` (default 5 MB, ceiling 10 MB), `max_request_bytes` (default 1 MB, ceiling 10 MB), `max_redirects`; ceilings are runtime-defined constants, not operator-configurable | Human | 2026-07-08 |
 | D1 | Auth model | single global header set / per-host profiles | **Per-host profiles** `auth: [{host, headers}]`; credentials attached only to the matching host and **only after SSRF validation** | Human | 2026-07-08 |
 | D2 | Secret sourcing | model-supplied / config env-substitution | Secrets via existing `substitute_env_vars_in_value` / `has_unresolved_placeholders`; **never** in model context; **redacted** in telemetry/logs; never echoed in responses | Human | 2026-07-08 |
 | D3 | Config vs model header precedence | model wins / config wins | Config auth headers **override** model-supplied headers of the same name (consistent with C6) | Human | 2026-07-08 |
@@ -590,7 +590,16 @@ system_tools:
   how the validated-IP set is threaded into the pinned connection (per **C3/C9/G4**)
   are a coding detail; the contract (pin to validated IPs, preserve Host/SNI, no DNS
   cache) is fixed above.
-- **Absolute operational caps.** Confirm the concrete ceiling values
-  (`timeout_seconds` max, `max_response_bytes`, `max_request_bytes`, `max_redirects`)
-  against worker limits during implementation (defaults in C7 stand unless data says
-  otherwise).
+- **Absolute operational caps.** The concrete ceiling values confirmed during
+  implementation (C7) are:
+
+  | Parameter | Default | Ceiling |
+  |-----------|---------|---------|
+  | `timeout_seconds` | 30 s | 120 s |
+  | `max_response_bytes` | 5,000,000 (5 MB) | 10,000,000 (10 MB) |
+  | `max_request_bytes` | 1,000,000 (1 MB) | 10,000,000 (10 MB) |
+
+  These are runtime-defined constants (`_MAX_TIMEOUT_SECONDS`, `_MAX_RESPONSE_BYTES`,
+  `_MAX_REQUEST_BYTES` in `system_tools/web_request.py`) and are **not
+  operator-configurable** — they are worker resource-safety floors that apply
+  regardless of what the operator sets.

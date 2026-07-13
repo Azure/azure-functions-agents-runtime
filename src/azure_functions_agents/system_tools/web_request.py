@@ -41,8 +41,13 @@ from ..config.schema import WebRequestConfig
 
 # ---------------------------------------------------------------------------
 # Absolute operational ceilings (worker resource-safety; never exceeded even
-# if an operator configures a larger value). Residual implementation detail —
-# not spelled out numerically in the FRD.
+# if an operator configures a larger value). Documented in
+# docs/frds/0005-web-request-system-tool.md §3/C7 and
+# docs/front-matter-spec.md under system_tools.web_request.
+#
+#   timeout_seconds   — ceiling 120 s  (default 30 s)
+#   max_response_bytes — ceiling 10 MB  (default 5 MB)
+#   max_request_bytes  — ceiling 10 MB  (default 1 MB)
 # ---------------------------------------------------------------------------
 
 _MAX_TIMEOUT_SECONDS = 120.0
@@ -647,9 +652,13 @@ def create_web_request_tools(config: WebRequestConfig) -> list[FunctionTool]:
                 return json.dumps({"error": "request timed out"})
             except aiohttp.ClientError as exc:
                 record_web_request(error=True)
-                span.record_exception(exc, fault_domain=FaultDomain.WEB_REQUEST)
-                logger.warning("web_request: transport error: %s", exc)
-                return json.dumps({"error": f"request failed: {exc}"})
+                # Use type name only — aiohttp exception messages can embed the
+                # full request URL (including query string) which would leak
+                # secrets or confidential query parameters back to the model.
+                safe_msg = type(exc).__name__
+                span.set_error(safe_msg, fault_domain=FaultDomain.WEB_REQUEST)
+                logger.warning("web_request: transport error (%s)", safe_msg)
+                return json.dumps({"error": f"request failed: {safe_msg}"})
 
             body, body_omitted_reason = _shape_body(
                 method=method,

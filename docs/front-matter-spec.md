@@ -437,15 +437,15 @@ system_tools:
 - **Type:** `object` or `boolean` (global), `boolean` (agent)
 - **Description:** Configures the built-in `web_request` tool, which lets an agent make a single outbound HTTP(S) request to a public host. Unlike the sandbox, **it requires no Azure resource and is enabled by default** for every agent — no configuration is needed to turn it on. An always-on SSRF security floor validates every request (blocking loopback/private/link-local/CGNAT/metadata-service addresses, etc.) regardless of configuration.
 
-**All fields are optional** and clamped to operator-defined absolute maxima:
+**All fields are optional** and clamped to runtime-defined ceilings (not operator-configurable):
 
-| Field | Default | Notes |
-|-------|---------|-------|
-| `allowed_hosts` | `null` (any public host) | Exact hostname match only — no wildcards or suffix matching in v1 |
-| `require_https` | `true` | Set `false` to also allow `http://` |
-| `timeout_seconds` | `30` | Per-request timeout |
-| `max_response_bytes` | `5,000,000` | Response is truncated (not an error) past this size |
-| `max_request_bytes` | `1,000,000` | Request body size cap |
+| Field | Default | Ceiling | Notes |
+|-------|---------|---------|-------|
+| `allowed_hosts` | `null` (any public host) | — | Exact hostname match only — no wildcards or suffix matching in v1 |
+| `require_https` | `true` | — | Set `false` to also allow `http://` |
+| `timeout_seconds` | `30` | `120` s | Per-request timeout |
+| `max_response_bytes` | `5,000,000` | `10,000,000` (10 MB) | Response is truncated (not an error) past this size |
+| `max_request_bytes` | `1,000,000` | `10,000,000` (10 MB) | Request body size cap |
 
 **Default behavior (no configuration needed):**
 ```yaml

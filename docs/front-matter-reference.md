@@ -37,11 +37,11 @@ Optional file in the root directory. All properties are optional.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `allowed_hosts` | string[] | No | `[]` | Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor). |
+| `allowed_hosts` | string[] | No | `null` | Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor). |
 | `require_https` | boolean | No | `true` | Require `https://` URLs. Set to `false` to also allow `http://`. |
-| `timeout_seconds` | number | No | `null` | Per-request timeout in seconds, clamped to an operator-defined maximum. |
-| `max_response_bytes` | integer | No | `null` | Maximum response body size read before truncating, clamped to an operator-defined maximum. |
-| `max_request_bytes` | integer | No | `null` | Maximum request body size accepted, clamped to an operator-defined maximum. |
+| `timeout_seconds` | number | No | `null` | Per-request timeout in seconds, clamped to a runtime-defined ceiling (120 s). |
+| `max_response_bytes` | integer | No | `null` | Maximum response body size read before truncating, clamped to a runtime-defined ceiling (10 MB). |
+| `max_request_bytes` | integer | No | `null` | Maximum request body size accepted, clamped to a runtime-defined ceiling (10 MB). |
 
 ### Global: `tools`
 

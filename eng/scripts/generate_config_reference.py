@@ -250,9 +250,9 @@ DYNAMIC_SESSIONS_DESCRIPTIONS = {
 WEB_REQUEST_DESCRIPTIONS = {
     "allowed_hosts": "Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor).",
     "require_https": "Require `https://` URLs. Set to `false` to also allow `http://`.",
-    "timeout_seconds": "Per-request timeout in seconds, clamped to an operator-defined maximum.",
-    "max_response_bytes": "Maximum response body size read before truncating, clamped to an operator-defined maximum.",
-    "max_request_bytes": "Maximum request body size accepted, clamped to an operator-defined maximum.",
+    "timeout_seconds": "Per-request timeout in seconds, clamped to a runtime-defined ceiling (120 s).",
+    "max_response_bytes": "Maximum response body size read before truncating, clamped to a runtime-defined ceiling (10 MB).",
+    "max_request_bytes": "Maximum request body size accepted, clamped to a runtime-defined ceiling (10 MB).",
 }
 
 TOOLS_FILTER_DESCRIPTIONS = {
@@ -337,7 +337,8 @@ def generate_markdown() -> str:
     lines.extend(["", "### Global: `system_tools.dynamic_sessions_code_interpreter`", ""])
     lines.extend(generate_model_table(DynamicSessionsCodeInterpreterConfig, descriptions=DYNAMIC_SESSIONS_DESCRIPTIONS))
     lines.extend(["", "### Global: `system_tools.web_request`", ""])
-    lines.extend(generate_model_table(WebRequestConfig, descriptions=WEB_REQUEST_DESCRIPTIONS))
+    lines.extend(generate_model_table(WebRequestConfig, descriptions=WEB_REQUEST_DESCRIPTIONS,
+                                      custom_defaults={"allowed_hosts": "`null`"}))
     lines.extend(["", "### Global: `tools`", ""])
     lines.extend(generate_model_table(ToolsFilter, descriptions=TOOLS_FILTER_DESCRIPTIONS))
 
