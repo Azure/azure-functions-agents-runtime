@@ -624,3 +624,759 @@ def test_load_agent_specs_sorting_across_locations(tmp_path: Path) -> None:
     names = [spec.name for spec in specs]
     # agents/alpha.agent.md < beta.agent.md < zebra.agent.md (lexicographic by path)
     assert names == ["Alpha", "Beta", "Zebra"]
+
+
+# bare agent.md discovery tests (flexible naming)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_agent_specs_bare_agent_md_at_top_level(tmp_path: Path) -> None:
+    """Bare agent.md at top-level is treated as default.agent.md internally."""
+    (tmp_path / "agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Single-agent app using bare agent.md
+            ---
+            You are the default agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Default Agent"
+    # Internally normalized to default.agent.md for function naming
+    assert "default.agent.md" in specs[0].source_file
+    # Bare agent.md is treated as main
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_bare_agent_md_uppercase(tmp_path: Path) -> None:
+    """Bare AGENT.MD (uppercase) is recognized case-insensitively."""
+    (tmp_path / "AGENT.MD").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Uppercase bare agent file
+            ---
+            You are the default agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Default Agent"
+    # Internally normalized to default.agent.md
+    assert "default.agent.md" in specs[0].source_file
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_bare_agent_md_mixed_case(tmp_path: Path) -> None:
+    """Bare Agent.md (mixed case) is recognized case-insensitively."""
+    (tmp_path / "Agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Mixed case bare agent file
+            ---
+            You are the default agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Default Agent"
+    assert "default.agent.md" in specs[0].source_file
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_bare_agent_md_in_agents_folder(tmp_path: Path) -> None:
+    """Bare agent.md in agents/ folder is also supported."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Single-agent in agents folder
+            ---
+            You are the default agent.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Default Agent"
+    assert "default.agent.md" in specs[0].source_file
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_bare_agent_md_with_other_agents(tmp_path: Path) -> None:
+    """Bare agent.md coexists with other named agents."""
+    (tmp_path / "agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Default agent
+            ---
+            Default
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "helper.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Helper
+            description: Helper agent
+            ---
+            Helper
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    names = {spec.name for spec in specs}
+    assert names == {"Default Agent", "Helper"}
+    # agent.md should be marked as main
+    default_spec = next(spec for spec in specs if spec.name == "Default Agent")
+    helper_spec = next(spec for spec in specs if spec.name == "Helper")
+    assert default_spec.is_main is True
+    assert helper_spec.is_main is False
+
+
+def test_load_agent_specs_bare_agent_md_and_main_both_marked_is_main(tmp_path: Path) -> None:
+    """Both bare agent.md and main.agent.md can coexist; both are marked is_main=True."""
+    (tmp_path / "agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Default agent
+            ---
+            Default
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main Agent
+            description: Main agent
+            ---
+            Main
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    # Both should be marked as main
+    for spec in specs:
+        assert spec.is_main is True
+
+
+# CLAUDE.md discovery tests (flexible naming)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_agent_specs_claude_md_at_top_level(tmp_path: Path) -> None:
+    """CLAUDE.md at top-level is treated as default.agent.md internally."""
+    (tmp_path / "CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Single-agent app using CLAUDE.md
+            ---
+            You are Claude, an AI assistant.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Claude Agent"
+    # Internally normalized to default.agent.md for function naming
+    assert "default.agent.md" in specs[0].source_file
+    # CLAUDE.md is treated as main
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_claude_md_lowercase(tmp_path: Path) -> None:
+    """claude.md (lowercase) is recognized case-insensitively."""
+    (tmp_path / "claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Lowercase CLAUDE file
+            ---
+            You are Claude, an AI assistant.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Claude Agent"
+    # Internally normalized to default.agent.md
+    assert "default.agent.md" in specs[0].source_file
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_claude_md_mixed_case(tmp_path: Path) -> None:
+    """Claude.md (mixed case) is recognized case-insensitively."""
+    (tmp_path / "Claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Mixed case CLAUDE file
+            ---
+            You are Claude, an AI assistant.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Claude Agent"
+    assert "default.agent.md" in specs[0].source_file
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_claude_md_in_agents_folder(tmp_path: Path) -> None:
+    """CLAUDE.md in agents/ folder is also supported."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Single-agent in agents folder
+            ---
+            You are Claude, an AI assistant.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Claude Agent"
+    assert "default.agent.md" in specs[0].source_file
+    assert specs[0].is_main is True
+
+
+def test_load_agent_specs_claude_md_with_other_agents(tmp_path: Path) -> None:
+    """CLAUDE.md coexists with other named agents."""
+    (tmp_path / "CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Claude agent
+            ---
+            Claude
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "helper.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Helper
+            description: Helper agent
+            ---
+            Helper
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    names = {spec.name for spec in specs}
+    assert names == {"Claude Agent", "Helper"}
+    # CLAUDE.md should be marked as main
+    claude_spec = next(spec for spec in specs if spec.name == "Claude Agent")
+    helper_spec = next(spec for spec in specs if spec.name == "Helper")
+    assert claude_spec.is_main is True
+    assert helper_spec.is_main is False
+
+
+def test_load_agent_specs_claude_md_and_agent_md_coexist(tmp_path: Path) -> None:
+    """Both CLAUDE.md and agent.md can coexist; both are marked is_main=True."""
+    (tmp_path / "CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Claude agent
+            ---
+            Claude
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Default Agent
+            description: Default agent
+            ---
+            Default
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    # Both should be marked as main
+    for spec in specs:
+        assert spec.is_main is True
+
+
+def test_load_agent_specs_claude_md_and_main_both_marked_is_main(tmp_path: Path) -> None:
+    """CLAUDE.md and main.agent.md can coexist; both are marked is_main=True."""
+    (tmp_path / "CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Claude Agent
+            description: Claude agent
+            ---
+            Claude
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "main.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main Agent
+            description: Main agent
+            ---
+            Main
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    # Both should be marked as main
+    for spec in specs:
+        assert spec.is_main is True
+
+
+# *.claude.md discovery tests (prefix pattern)
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+def test_load_agent_specs_claude_md_prefix_at_top_level(tmp_path: Path) -> None:
+    """Files matching *.claude.md pattern are recognized and normalized to *.agent.md."""
+    (tmp_path / "report.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report generation agent
+            ---
+            You generate reports.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Report Agent"
+    # Internally normalized to report.agent.md for function naming
+    assert "report.agent.md" in specs[0].source_file
+    # Prefix patterns are NOT marked as main (only bare CLAUDE.md, agent.md, main.agent.md)
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_claude_md_prefix_case_insensitive(tmp_path: Path) -> None:
+    """*.claude.md pattern is case-insensitive."""
+    (tmp_path / "Report.Claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report generation agent
+            ---
+            You generate reports.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Report Agent"
+    assert "Report.agent.md" in specs[0].source_file
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_claude_md_prefix_in_agents_folder(tmp_path: Path) -> None:
+    """*.claude.md files in agents/ folder are also supported."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "summarizer.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Summarizer Agent
+            description: Summarization agent
+            ---
+            You summarize content.
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Summarizer Agent"
+    assert "summarizer.agent.md" in specs[0].source_file
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_claude_md_prefix_with_other_agents(tmp_path: Path) -> None:
+    """*.claude.md files coexist with *.agent.md files."""
+    (tmp_path / "report.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report agent
+            ---
+            Report
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "chat.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Chat Agent
+            description: Chat agent
+            ---
+            Chat
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    names = {spec.name for spec in specs}
+    assert names == {"Report Agent", "Chat Agent"}
+    # Both are regular agents, not main
+    for spec in specs:
+        assert spec.is_main is False
+
+
+def test_load_agent_specs_claude_md_prefix_with_bare_claude_md(tmp_path: Path) -> None:
+    """*.claude.md prefix can coexist with bare CLAUDE.md."""
+    (tmp_path / "CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Main Claude Agent
+            description: Main agent
+            ---
+            Main
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "report.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report agent
+            ---
+            Report
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    names = {spec.name for spec in specs}
+    assert names == {"Main Claude Agent", "Report Agent"}
+    # Only bare CLAUDE.md is main
+    main_claude = next(spec for spec in specs if spec.name == "Main Claude Agent")
+    report = next(spec for spec in specs if spec.name == "Report Agent")
+    assert main_claude.is_main is True
+    assert report.is_main is False
+
+
+def test_load_agent_specs_multiple_claude_md_prefix_files(tmp_path: Path) -> None:
+    """Multiple *.claude.md files can coexist."""
+    (tmp_path / "report.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report agent
+            ---
+            Report
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "summarizer.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Summarizer Agent
+            description: Summarizer agent
+            ---
+            Summarize
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "analyzer.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Analyzer Agent
+            description: Analyzer agent
+            ---
+            Analyze
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 3
+    names = {spec.name for spec in specs}
+    assert names == {"Report Agent", "Summarizer Agent", "Analyzer Agent"}
+    # None are main agents
+    for spec in specs:
+        assert spec.is_main is False
+
+
+# --- Case-insensitive suffix matching tests (*.AGENT.md, *.CLAUDE.md) ---
+
+
+def test_load_agent_specs_uppercase_agent_md_suffix(tmp_path: Path) -> None:
+    """Files with uppercase .AGENT.md suffix are discovered (case-insensitive)."""
+    (tmp_path / "report.AGENT.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report agent
+            ---
+            Report
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Report Agent"
+    assert "report.agent.md" in str(specs[0].source_file).lower()
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_uppercase_claude_md_suffix(tmp_path: Path) -> None:
+    """Files with uppercase .CLAUDE.md suffix are discovered (case-insensitive)."""
+    (tmp_path / "summarizer.CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Summarizer Agent
+            description: Summarizer agent
+            ---
+            Summarize
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Summarizer Agent"
+    assert "summarizer.agent.md" in str(specs[0].source_file).lower()
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_mixed_case_agent_md_suffix(tmp_path: Path) -> None:
+    """Files with mixed case .Agent.MD suffix are discovered (case-insensitive)."""
+    (tmp_path / "data.Agent.MD").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Data Agent
+            description: Data agent
+            ---
+            Data
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Data Agent"
+    assert "data.agent.md" in str(specs[0].source_file).lower()
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_mixed_case_claude_md_suffix_in_agents_folder(tmp_path: Path) -> None:
+    """Files with mixed case .Claude.MD suffix in agents/ folder are discovered."""
+    agents_dir = tmp_path / "agents"
+    agents_dir.mkdir()
+    (agents_dir / "info.Claude.MD").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Info Agent
+            description: Info agent
+            ---
+            Info
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 1
+    assert specs[0].name == "Info Agent"
+    assert "info.agent.md" in str(specs[0].source_file).lower()
+    assert specs[0].is_main is False
+
+
+def test_load_agent_specs_case_insensitive_suffix_with_lowercase(tmp_path: Path) -> None:
+    """Uppercase and lowercase suffix variants coexist (finds both)."""
+    (tmp_path / "report.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Report Agent
+            description: Report agent
+            ---
+            Report
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "summary.AGENT.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Summary Agent
+            description: Summary agent
+            ---
+            Summarize
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 2
+    names = {spec.name for spec in specs}
+    assert names == {"Report Agent", "Summary Agent"}
+    for spec in specs:
+        assert spec.is_main is False
+
+
+def test_load_agent_specs_multiple_case_variants_together(tmp_path: Path) -> None:
+    """Multiple case variants (*.agent.md, *.AGENT.md, *.claude.md, *.CLAUDE.md) coexist."""
+    (tmp_path / "alpha.agent.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Alpha Agent
+            description: Alpha agent
+            ---
+            Alpha
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "beta.AGENT.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Beta Agent
+            description: Beta agent
+            ---
+            Beta
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "gamma.claude.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Gamma Agent
+            description: Gamma agent
+            ---
+            Gamma
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+    (tmp_path / "delta.CLAUDE.md").write_text(
+        textwrap.dedent(
+            """
+            ---
+            name: Delta Agent
+            description: Delta agent
+            ---
+            Delta
+            """
+        ).lstrip(),
+        encoding="utf-8",
+    )
+
+    specs = load_agent_specs(tmp_path)
+    assert len(specs) == 4
+    names = {spec.name for spec in specs}
+    assert names == {"Alpha Agent", "Beta Agent", "Gamma Agent", "Delta Agent"}
+    for spec in specs:
+        assert spec.is_main is False
+

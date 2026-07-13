@@ -19,7 +19,7 @@ src/
 ├── function_app.py
 ├── host.json
 ├── agents.config.yaml
-├── main.agent.md              # Top-level main agent (is_main=true)
+├── agent.md                   # Single-agent app (is_main=true)
 ├── agents/                    # Organized agents folder
 │   ├── chat.agent.md          # Chat assistant agent
 │   ├── research.agent.md      # Research agent
@@ -34,7 +34,7 @@ The runtime automatically discovers agents in both locations:
 2. **agents/ folder** (`agents/*.agent.md`) — new organizational option
 
 Both locations are merged, so you can:
-- Keep a simple `main.agent.md` at the top level
+- Keep a simple `agent.md` at the top level (no prefix required)
 - Organize feature-specific agents in the `agents/` folder
 - Migrate incrementally without breaking existing setups
 
@@ -60,7 +60,7 @@ Both locations are merged, so you can:
    ```
 
 4. **Test the agents:**
-   - Main agent UI: `http://localhost:7071/agents/main/`
+   - Main agent UI: `http://localhost:7071/agents/default/`
    - Chat agent: `POST http://localhost:7071/chat`
    - Research agent: `POST http://localhost:7071/research`
    - Summary agent: `POST http://localhost:7071/summary`
@@ -73,14 +73,14 @@ The `agents/` folder is a convention for organizing agent definitions:
 - Must be at the same level as `host.json` (app root)
 - Case-insensitive (`agents/` or `Agents/`)
 - Only immediate children are discovered (no recursion)
-- `main.agent.md` in either location is marked `is_main=true`
+- Bare `agent.md` and `main.agent.md` in either location are marked `is_main=true`
 
 ### Hybrid organization
 
 You can have agents in both locations:
 ```
 src/
-├── main.agent.md          # Top-level, is_main=true
+├── agent.md               # Single-agent app (is_main=true)
 └── agents/
     ├── helper.agent.md    # In folder
     └── worker.agent.md    # In folder
