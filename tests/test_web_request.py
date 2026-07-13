@@ -398,6 +398,51 @@ def test_ssrf_allowlist_checked_before_dns(monkeypatch: pytest.MonkeyPatch) -> N
     assert "error" in result
 
 
+def test_ssrf_allowlist_matches_host_with_single_trailing_dot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """v1 normalization strips exactly ONE trailing dot before exact-match."""
+    _stub_resolver(monkeypatch, ["93.184.216.34"])
+    _install_fake_http(monkeypatch, status=204, headers={}, body=b"")
+    tool = _build_tool(WebRequestConfig(allowed_hosts=["api.example.com"]))
+    result = _call(tool, url="https://api.example.com./ping")
+    assert result["status"] == 204
+
+
+def test_ssrf_allowlist_rejects_host_with_double_trailing_dot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only ONE trailing dot is stripped — a double trailing dot must not match."""
+
+    def _fail_resolve(_host: str) -> list[str]:
+        raise AssertionError("resolver must not be called when allowlist rejects the host")
+
+    monkeypatch.setattr(wr, "_resolve_host", _fail_resolve)
+    tool = _build_tool(WebRequestConfig(allowed_hosts=["api.example.com"]))
+    result = _call(tool, url="https://api.example.com../ping")
+    assert "error" in result
+
+
+def test_ssrf_rejects_non_http_scheme_ftp(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail_resolve(_host: str) -> list[str]:
+        raise AssertionError("resolver must not be called for a rejected scheme")
+
+    monkeypatch.setattr(wr, "_resolve_host", _fail_resolve)
+    tool = _build_tool()
+    result = _call(tool, url="ftp://example.com/")
+    assert "error" in result
+
+
+def test_ssrf_rejects_non_http_scheme_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _fail_resolve(_host: str) -> list[str]:
+        raise AssertionError("resolver must not be called for a rejected scheme")
+
+    monkeypatch.setattr(wr, "_resolve_host", _fail_resolve)
+    tool = _build_tool()
+    result = _call(tool, url="file:///etc/passwd")
+    assert "error" in result
+
+
 def test_https_floor_rejects_http_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
     tool = _build_tool()
     result = _call(tool, url="http://example.com/")
@@ -468,38 +513,79 @@ def test_pinned_resolver_resolve_returns_pinned_ips() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_request_header_denylist_strips_hop_by_hop_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+def _mixed_case(name: str) -> str:
+    """Alternate-case a header name to prove case-insensitive matching."""
+    return "".join(c.upper() if i % 2 == 0 else c.lower() for i, c in enumerate(name))
+
+
+@pytest.mark.parametrize("denied_header", sorted(wr._REQUEST_HEADER_DENYLIST))
+def test_request_header_denylist_strips_full_set(
+    monkeypatch: pytest.MonkeyPatch, denied_header: str
+) -> None:
+    """Every header in the denylist is stripped, using its canonical casing."""
     _stub_resolver(monkeypatch, ["93.184.216.34"])
     captured = _install_fake_http(monkeypatch, status=200, headers={}, body=b"")
     tool = _build_tool()
+    canonical = denied_header.title()
     _call(
         tool,
         url="https://example.com/",
-        headers={
-            "Host": "evil.example.com",
-            "Content-Length": "0",
-            "Connection": "keep-alive",
-            "Proxy-Authorization": "Basic xyz",
-            "X-Custom": "keep-me",
-        },
+        headers={canonical: "value", "X-Custom": "keep-me"},
     )
     sent_headers = captured["headers"]
     assert "X-Custom" in sent_headers
-    for denied in ("Host", "Content-Length", "Connection", "Proxy-Authorization"):
-        assert denied not in sent_headers
+    assert canonical not in sent_headers
+    assert not any(key.lower() == denied_header for key in sent_headers)
 
 
-def test_response_header_redaction_strips_sensitive_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("denied_header", sorted(wr._REQUEST_HEADER_DENYLIST))
+def test_request_header_denylist_strips_mixed_case(
+    monkeypatch: pytest.MonkeyPatch, denied_header: str
+) -> None:
+    """The denylist match is case-insensitive — mixed-case header names are stripped too."""
     _stub_resolver(monkeypatch, ["93.184.216.34"])
+    captured = _install_fake_http(monkeypatch, status=200, headers={}, body=b"")
+    tool = _build_tool()
+    mixed = _mixed_case(denied_header)
+    _call(
+        tool,
+        url="https://example.com/",
+        headers={mixed: "value", "X-Custom": "keep-me"},
+    )
+    sent_headers = captured["headers"]
+    assert "X-Custom" in sent_headers
+    assert not any(key.lower() == denied_header for key in sent_headers)
+
+
+@pytest.mark.parametrize("redacted_header", sorted(wr._RESPONSE_HEADER_REDACT))
+def test_response_header_redaction_strips_full_set(
+    monkeypatch: pytest.MonkeyPatch, redacted_header: str
+) -> None:
+    """Every header in the redaction set is stripped, using its canonical casing."""
+    _stub_resolver(monkeypatch, ["93.184.216.34"])
+    canonical = redacted_header.title()
     _install_fake_http(
         monkeypatch,
         status=200,
-        headers={
-            "Set-Cookie": "session=abc",
-            "Authorization": "Bearer xyz",
-            "WWW-Authenticate": "Basic",
-            "X-Custom": "keep-me",
-        },
+        headers={canonical: "secret-value", "X-Custom": "keep-me"},
+        body=b"",
+    )
+    tool = _build_tool()
+    result = _call(tool, url="https://example.com/")
+    assert result["response_headers"] == {"X-Custom": "keep-me"}
+
+
+@pytest.mark.parametrize("redacted_header", sorted(wr._RESPONSE_HEADER_REDACT))
+def test_response_header_redaction_strips_mixed_case(
+    monkeypatch: pytest.MonkeyPatch, redacted_header: str
+) -> None:
+    """The redaction match is case-insensitive -- mixed-case header names are stripped too."""
+    _stub_resolver(monkeypatch, ["93.184.216.34"])
+    mixed = _mixed_case(redacted_header)
+    _install_fake_http(
+        monkeypatch,
+        status=200,
+        headers={mixed: "secret-value", "X-Custom": "keep-me"},
         body=b"",
     )
     tool = _build_tool()
