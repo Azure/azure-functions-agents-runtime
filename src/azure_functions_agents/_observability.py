@@ -64,6 +64,7 @@ class FaultDomain:
     MODEL = "model"
     CONNECTOR = "connector"
     SANDBOX = "sandbox"
+    WEB_REQUEST = "web_request"
     UNKNOWN = "unknown"
 
 
@@ -424,11 +425,19 @@ def start_span(
 _meter: Any = None
 _sandbox_execution_counter: Any = None
 _sandbox_error_counter: Any = None
+_web_request_counter: Any = None
+_web_request_error_counter: Any = None
 _metrics_ready = False
 
 
 def _ensure_metrics() -> None:
-    global _meter, _sandbox_execution_counter, _sandbox_error_counter, _metrics_ready
+    global \
+        _meter, \
+        _sandbox_execution_counter, \
+        _sandbox_error_counter, \
+        _web_request_counter, \
+        _web_request_error_counter, \
+        _metrics_ready
     if _metrics_ready:
         return
     _metrics_ready = True
@@ -454,9 +463,19 @@ def _ensure_metrics() -> None:
             "azure_functions_agents.dynamic_session.errors",
             description="ACA dynamic-session executions that produced an error or stderr.",
         )
+        _web_request_counter = _meter.create_counter(
+            "azure_functions_agents.web_request.requests",
+            description="web_request system tool invocations.",
+        )
+        _web_request_error_counter = _meter.create_counter(
+            "azure_functions_agents.web_request.errors",
+            description="web_request invocations blocked or failed (SSRF, timeout, transport error).",
+        )
     except Exception:  # pragma: no cover - defensive
         _sandbox_execution_counter = None
         _sandbox_error_counter = None
+        _web_request_counter = None
+        _web_request_error_counter = None
 
 
 def record_sandbox_execution(*, error: bool) -> None:
@@ -469,5 +488,24 @@ def record_sandbox_execution(*, error: bool) -> None:
             _sandbox_execution_counter.add(1)
         if error and _sandbox_error_counter is not None:
             _sandbox_error_counter.add(1)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def record_web_request(*, error: bool) -> None:
+    """Record one ``web_request`` invocation and, when ``error``, one failure.
+
+    ``error`` covers SSRF-blocked requests, timeouts, and transport failures —
+    not application-level HTTP status codes (a 4xx/5xx response is still a
+    successful tool invocation; the model sees the status).
+    """
+    if not _enabled:
+        return
+    _ensure_metrics()
+    try:
+        if _web_request_counter is not None:
+            _web_request_counter.add(1)
+        if error and _web_request_error_counter is not None:
+            _web_request_error_counter.add(1)
     except Exception:  # pragma: no cover - defensive
         pass
