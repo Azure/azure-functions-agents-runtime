@@ -431,7 +431,8 @@ _metrics_ready = False
 
 
 def _ensure_metrics() -> None:
-    global _meter, _sandbox_execution_counter, _sandbox_error_counter, _web_request_counter, _web_request_error_counter, _metrics_ready
+    global _meter, _sandbox_execution_counter, _sandbox_error_counter
+    global _web_request_counter, _web_request_error_counter, _metrics_ready
     if _metrics_ready:
         return
     _metrics_ready = True
