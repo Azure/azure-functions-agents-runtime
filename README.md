@@ -9,6 +9,7 @@ A markdown-first programming model for building AI agents on Azure Functions, po
 - **Connect to 1,400+ services** — use connector-backed MCP servers to let agents act through Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors
 - **Extend with MCP servers** — plug in remote HTTP MCP servers, including MCP servers backed by connectors
 - **Build custom tools in plain Python** — drop a `.py` file in `tools/`, decorate functions with `@tool`, and pull in any package you need
+- **Run agents on durable workflows** *(experimental, see [`docs/workflows.md`](docs/workflows.md))* — one frontmatter flag turns on a DAG-of-tools execution model that fans out, waits, and survives restarts, **without** burning tokens on intermediate results
 - **Automatic HTTP and MCP endpoints** — optionally expose your agent as an HTTP chat API and MCP server with no extra code
 - **Serverless with built-in session management** — scales to zero, persists multi-turn conversations in Azure Blob Storage
 - **Pluggable model providers** — bring OpenAI, Azure OpenAI, or Microsoft Foundry credentials and the runtime auto-detects the right client
@@ -334,6 +335,26 @@ def reverse_string(text: str) -> str:
 ```
 
 `@tool` is re-exported from `agent_framework`. Functions can be sync or async; types in the signature feed MAF's automatic JSON-Schema generation. Tools that need richer schemas can be declared with `agent_framework.FunctionTool` directly.
+
+Dynamic Workflow tools live in the same `tools/` directory but must opt in
+explicitly with `@workflow_tool` so they can run safely as Durable
+Function activities:
+
+```python
+from typing import Any
+
+from azure_functions_agents import workflow_tool
+
+
+@workflow_tool(description="Fetch recent log lines for a service.")
+def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
+    return {"service": args["service"], "lines": ["..."]}
+```
+
+Use both `@tool` and `@workflow_tool` when the same callable should be
+available both directly in chat and inside workflows. See
+[`docs/workflows.md`](docs/workflows.md) for the Activity handler
+contract and `workflows.exclude`.
 
 ## Built-in Endpoint Routes
 

@@ -43,7 +43,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/config/merge.py` | Applies defaults, overrides, and per-agent filters to produce runtime config. | `compose()` |
 | `azure_functions_agents/config/validation.py` | Post-merge sanity checks for resolved agents. | `validate_resolved_agent()` |
 | `azure_functions_agents/discovery/skills.py` | Walks `skills/<name>/SKILL.md` files, validates frontmatter, and caches the name→directory map for MAF's `SkillsProvider`. | `discover_skills()`, `clear_skills_cache()` |
-| `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds `FunctionTool` values or wraps plain functions, and caches the result. | `discover_user_tools()` |
+| `azure_functions_agents/discovery/tools.py` | Imports `tools/*.py`, finds normal `FunctionTool`/plain-function tools, discovers `@workflow_tool` Activity targets, and caches both inventories. | `discover_project_tools()`, `discover_user_tools()` |
 | `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json`, applies `resolve_env_vars_in_data()`, and translates remote HTTP server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
 | `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory. | `AgentCapabilities`, `build_capabilities()` |
 | `azure_functions_agents/registration/_naming.py` | Derives Azure-safe function names and built-in endpoint slugs from `.agent.md` filenames; allocates unique function names via `allocate_unique_function_name()` when sanitized stems collide. | `_safe_function_name()`, `_function_name_from_source()` |
@@ -53,7 +53,8 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming. | `run_agent()`, `run_agent_stream()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`. | `tool()` |
+| `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool registry, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()` |
+| `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `FaultDomain`, `LifecycleStage` |
 
@@ -105,10 +106,10 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
    - **Notes:** the loader searches for `*.agent.md` files in two locations: the app root (`{app_root}/*.agent.md`) and an optional `agents/` folder (`{app_root}/agents/*.agent.md`). The folder name is case-insensitive (`agents/` or `Agents/`). Files from both locations are combined and sorted by path for deterministic ordering. Each file is parsed as YAML front matter plus markdown body. When substitution is enabled, front matter string values are normalized through `resolve_env_vars_in_data()` and the markdown body through `substitute_env_vars_in_text()`. The loader stamps `source_file`, sets `is_main` when the filename is `main.agent.md` (regardless of location), and stores the markdown body in `AgentSpec.instructions`.
 
 4. **Discover runtime inventories from disk**
-   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
+   - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/discovery/tools.py:discover_project_tools()`, `src/azure_functions_agents/discovery/mcp.py:discover_mcp_servers()`, `src/azure_functions_agents/discovery/skills.py:discover_skills()`
    - **Input:** `app_root: Path`
-   - **Output:** user tools as `list[FunctionTool]`, MCP servers as `dict[str, MCPTool]`, skills as `dict[str, Path]` (skill name → skill directory)
-   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. MCP discovery applies the same env-var substitution helper (`resolve_env_vars_in_data()`) to parsed `mcp.json` data that the global-config loader applies to `agents.config.yaml`. MCP discovery is a translation step too: entries are built into ready-to-use MAF MCP tool objects when they carry a `url`; `type` is optional, but if present must be `"http"` or `"streamable-http"`. Other transport shapes (`stdio`, `sse`, etc.) and entries missing `url` are skipped with warnings. Skill discovery validates each `SKILL.md` frontmatter `name` against MAF's regex and fails fast on duplicates.
+   - **Output:** project tools as normal user tools (`list[FunctionTool]`) plus workflow tools (`list[WorkflowTool]`), MCP servers as `dict[str, MCPTool]`, skills as `dict[str, Path]` (skill name → skill directory)
+   - **Notes:** all three discovery modules cache by resolved app root, so startup pays the disk/import cost once per process. Tools discovery remains read-only policy-wise: it records what `tools/` exposes as normal tools and what callables explicitly opt into workflow Activity execution via `@workflow_tool`, but per-agent filtering happens later. MCP discovery applies the same env-var substitution helper (`resolve_env_vars_in_data()`) to parsed `mcp.json` data that the global-config loader applies to `agents.config.yaml`. MCP discovery is a translation step too: entries are built into ready-to-use MAF MCP tool objects when they carry a `url`; `type` is optional, but if present must be `"http"` or `"streamable-http"`. Other transport shapes (`stdio`, `sse`, etc.) and entries missing `url` are skipped with warnings. Skill discovery validates each `SKILL.md` frontmatter `name` against MAF's regex and fails fast on duplicates.
 
 5. **Compose a per-agent runtime view**
    - **Implemented by:** `src/azure_functions_agents/config/merge.py:compose()`
@@ -124,9 +125,9 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 7. **Build per-agent capabilities**
    - **Implemented by:** `src/azure_functions_agents/registration/capabilities.py:build_capabilities()`
-   - **Input:** `ResolvedAgent`, discovered user tools, discovered MCP tools, discovered skills (`dict[str, Path]`)
+   - **Input:** `ResolvedAgent`, discovered user tools, discovered workflow tools, discovered MCP tools, discovered skills (`dict[str, Path]`)
    - **Output:** `AgentCapabilities`
-   - **Notes:** this stage converts name-based filters into actual runtime objects. After this point, the registration and runner layers do not need to reason about `exclude` lists; they only consume concrete tool lists and the final list of enabled skill directories.
+   - **Notes:** this stage converts name-based filters into actual runtime objects. `tools.exclude` applies only to normal MAF tools; `workflows.exclude` applies only to workflow Activity targets and is honored only for `main.agent.md` in v1. After this point, the registration and runner layers do not need to reason about `exclude` lists; they only consume concrete tool lists and the final list of enabled skill directories.
 
 8. **Create the Azure Functions app container**
    - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`
@@ -165,6 +166,7 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
 - `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
+- `AgentCapabilities.filtered_workflow_tools` becomes the workflow Activity target inventory used by `build_workflow_integration()` for the main agent when workflows are enabled.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
@@ -221,9 +223,11 @@ This extension point is deliberately below the registration layer: no trigger or
 
 ### Custom tools
 
-To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_user_tools()`, and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:tool()`.
+To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_project_tools()` (with `discover_user_tools()` kept as the normal-tool compatibility API), and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:tool()`.
 
 These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools and MCP tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
+
+Dynamic Workflow Activity targets use the same folder but require explicit `@workflow_tool` opt-in. A function decorated only with `@workflow_tool` is workflow-only; a plain public function or `@tool` value is normal-tool-only; using both decorators exposes the same callable in both places. This keeps Durable Activity execution explicit while preserving the existing plain-function normal-tool UX.
 
 ### Per-agent capability filtering
 
