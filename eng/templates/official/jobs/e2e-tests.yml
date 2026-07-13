@@ -54,3 +54,10 @@ jobs:
             sleep 1
           done
         displayName: 'Start Azurite'
+
+      - bash: |
+          python -m pytest -m e2e tests/endtoend -v
+        displayName: 'Run E2E sample startup tests'
+        env:
+          AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+          FUNCTIONS_WORKER_RUNTIME: 'python'
