@@ -1,0 +1,129 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Connectors</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .conn-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  @media (max-width: 1200px) { .conn-grid { grid-template-columns: repeat(2, 1fr); } }
+  .conn { display: flex; gap: 12px; align-items: flex-start; }
+  .conn .glyph { width: 40px; height: 40px; border-radius: 9px; flex: 0 0 40px; display: grid; place-items: center; font-size: 20px; background: var(--surface-2); border: 1px solid var(--border); }
+  .conn .body { flex: 1; }
+  .conn .body h4 { margin: 0 0 3px; font-size: 14px; }
+  .conn .body p { margin: 0 0 10px; color: var(--text-muted); font-size: 12.5px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item active" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend. Layout inspired by the Azure SRE Agent connectors hub.</div>
+    <div class="breadcrumb">Home / Connectors</div>
+    <div class="page-title"><h1>Connectors</h1></div>
+    <p class="page-sub">Connect agents to external services. Backed by the Azure Functions Connector Extension and remote MCP servers — 1,400+ services available.</p>
+
+    <div class="toolbar">
+      <button class="btn primary">＋ Add connection</button>
+      <div class="spacer" style="flex:1"></div>
+      <select style="width:auto"><option>All categories</option><option>Productivity</option><option>DevOps &amp; incidents</option><option>Data</option><option>CRM / ERP</option><option>Custom MCP</option></select>
+      <input type="text" placeholder="Filter connectors…" style="width:200px">
+    </div>
+
+    <div class="grid cols-4" style="margin-bottom:22px">
+      <div class="card stat"><div class="label">Connected</div><div class="value">5</div><div class="delta up">across 4 agents</div></div>
+      <div class="card stat"><div class="label">Available</div><div class="value">1,400+</div></div>
+      <div class="card stat"><div class="label">MCP servers</div><div class="value">3</div><div class="delta up">2 connector · 1 custom</div></div>
+      <div class="card stat"><div class="label">Needs attention</div><div class="value">1</div><div class="delta down">reauth required</div></div>
+    </div>
+
+    <h3 style="margin:0 0 12px">Active connections</h3>
+    <div class="table-wrap" style="margin-bottom:26px">
+      <table>
+        <thead><tr><th>Connector</th><th>Type</th><th>Used by</th><th>Auth</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="cell-title">📧 Office 365 Outlook</td>
+            <td><span class="badge blue">Connector MCP</span></td>
+            <td>outlook-reply, tech-news-email</td>
+            <td>OAuth · svc@contoso</td>
+            <td><span class="badge green"><span class="dot"></span>Connected</span></td>
+            <td><a href="#">Manage →</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">📚 Microsoft Learn</td>
+            <td><span class="badge purple">HTTP MCP</span></td>
+            <td>daily-report</td>
+            <td>Anonymous</td>
+            <td><span class="badge green"><span class="dot"></span>Connected</span></td>
+            <td><a href="#">Manage →</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">🐙 GitHub</td>
+            <td><span class="badge blue">Connector MCP</span></td>
+            <td>incident-triage</td>
+            <td>OAuth · gh-app</td>
+            <td><span class="badge amber"><span class="dot"></span>Reauth required</span></td>
+            <td><a href="#">Reconnect →</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">🗄️ Azure SQL</td>
+            <td><span class="badge blue">Connector MCP</span></td>
+            <td>incident-triage</td>
+            <td>Managed identity</td>
+            <td><span class="badge green"><span class="dot"></span>Connected</span></td>
+            <td><a href="#">Manage →</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">🛰️ azure_rest (custom)</td>
+            <td><span class="badge gray">Custom MCP</span></td>
+            <td>daily-report</td>
+            <td>Managed identity</td>
+            <td><span class="badge green"><span class="dot"></span>Connected</span></td>
+            <td><a href="#">Manage →</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3 style="margin:0 0 12px">Browse connectors</h3>
+    <div class="conn-grid">
+      <div class="card conn"><div class="glyph">💬</div><div class="body"><h4>Microsoft Teams</h4><p>Post messages, read channels.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">🎫</div><div class="body"><h4>ServiceNow</h4><p>Create &amp; update incidents.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">📟</div><div class="body"><h4>PagerDuty</h4><p>Trigger &amp; ack alerts.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">💼</div><div class="body"><h4>Salesforce</h4><p>Query &amp; update records.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">🧾</div><div class="body"><h4>SAP</h4><p>Read business documents.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">💬</div><div class="body"><h4>Slack</h4><p>Send messages, read threads.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">📁</div><div class="body"><h4>SharePoint</h4><p>Read &amp; write documents.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">🗃️</div><div class="body"><h4>Dataverse</h4><p>Query tables &amp; rows.</p><button class="btn sm">Connect</button></div></div>
+      <div class="card conn"><div class="glyph">➕</div><div class="body"><h4>Custom HTTP MCP</h4><p>Point to any MCP server URL.</p><button class="btn sm primary">Add URL</button></div></div>
+    </div>
+
+    <div class="note" style="margin-top:22px">🔒 Credentials are stored in the platform secret store (Key Vault / app settings) and are never shown in the portal. Connections map to entries in <span class="mono">mcp.json</span> and the Functions Connector Extension.</div>
+  </main>
+</div>
+</body>
+</html>

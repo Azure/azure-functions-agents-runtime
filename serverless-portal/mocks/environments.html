@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Environments</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item active" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
+    <div class="breadcrumb">Home / Environments</div>
+    <div class="page-title"><h1>Environments</h1></div>
+    <p class="page-sub">Named configuration sets. Each maps to a Function App target and its own provider, connectors, and app settings.</p>
+
+    <div class="toolbar">
+      <button class="btn primary">＋ New environment</button>
+      <div class="spacer" style="flex:1"></div>
+      <span class="badge blue"><span class="dot"></span>Active: dev</span>
+    </div>
+
+    <div class="table-wrap" style="margin-bottom:24px">
+      <table>
+        <thead><tr><th>Environment</th><th>Target</th><th>Provider</th><th>Agents</th><th>Last deploy</th><th>Status</th><th></th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="cell-title">local <div class="cell-sub">local.settings.json + Azurite</div></td>
+            <td class="mono">localhost:7071</td>
+            <td>Azure OpenAI</td>
+            <td>6</td>
+            <td>—</td>
+            <td><span class="badge green"><span class="dot"></span>Running</span></td>
+            <td><a href="#">Open →</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">dev <span class="badge blue" style="margin-left:6px">active</span><div class="cell-sub">Flex Consumption · eastus2</div></td>
+            <td class="mono">func-agents-dev</td>
+            <td>Foundry · gpt-5.4</td>
+            <td>6</td>
+            <td>2h ago</td>
+            <td><span class="badge green"><span class="dot"></span>Deployed</span></td>
+            <td><a href="#">Open →</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">prod <div class="cell-sub">Flex Consumption · eastus2</div></td>
+            <td class="mono">func-agents-prod</td>
+            <td>Foundry · gpt-5.4</td>
+            <td>4</td>
+            <td>3d ago</td>
+            <td><span class="badge green"><span class="dot"></span>Deployed</span></td>
+            <td><a href="#">Open →</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-head"><h3>Environment · dev</h3><div class="pill-row"><button class="btn sm">🚀 Deploy</button><button class="btn sm">Promote to prod →</button></div></div>
+        <div class="field">
+          <label>Name</label>
+          <input type="text" value="dev">
+        </div>
+        <div class="field">
+          <label>Function App target</label>
+          <input type="text" value="func-agents-dev">
+          <div class="hint">Deployed via <span class="mono">azd</span> (Flex Consumption).</div>
+        </div>
+        <div class="field">
+          <label>Provider</label>
+          <select><option>Microsoft Foundry · gpt-5.4</option><option>Azure OpenAI · gpt-4o</option><option>OpenAI · gpt-4o-mini</option></select>
+        </div>
+        <div class="field">
+          <label>Region</label>
+          <select><option>eastus2</option><option>eastus</option><option>westus3</option><option>canadacentral</option></select>
+        </div>
+        <div class="pill-row"><button class="btn primary">Save</button><button class="btn">Set active</button></div>
+      </div>
+
+      <div class="card">
+        <h3>App settings (dev)</h3>
+        <p class="muted" style="font-size:12.5px">Environment variables applied to this Function App. Secrets are masked.</p>
+        <table>
+          <thead><tr><th>Key</th><th>Value</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">AZURE_FUNCTIONS_AGENTS_PROVIDER</td><td class="mono">foundry</td></tr>
+            <tr><td class="mono">FOUNDRY_PROJECT_ENDPOINT</td><td class="mono">https://…/projects/myproj</td></tr>
+            <tr><td class="mono">FOUNDRY_MODEL</td><td class="mono">gpt-5.4</td></tr>
+            <tr><td class="mono">ACA_SESSION_POOL_ENDPOINT</td><td class="mono">https://…dynamicsessions…</td></tr>
+            <tr><td class="mono">AZURE_OPENAI_API_KEY</td><td><span class="badge gray">••••••• masked</span></td></tr>
+          </tbody>
+        </table>
+        <div class="pill-row" style="margin-top:12px"><button class="btn sm">＋ Add setting</button><button class="btn sm">Diff vs. prod</button></div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

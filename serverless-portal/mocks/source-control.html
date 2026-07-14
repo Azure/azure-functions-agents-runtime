@@ -1,0 +1,136 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Source &amp; history</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .flow { display: flex; align-items: stretch; gap: 0; margin-bottom: 22px; }
+  .flow .stage { flex: 1; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; }
+  .flow .arrow { flex: 0 0 56px; display: grid; place-items: center; color: var(--text-faint); font-size: 22px; }
+  .flow .stage h4 { margin: 0 0 4px; font-size: 13px; }
+  .flow .stage .sub { color: var(--text-muted); font-size: 12px; }
+  .diff-add { color: var(--green); }
+  .diff-del { color: var(--red); }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item active" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
+    <div class="breadcrumb">Home / Source &amp; history</div>
+    <div class="page-title"><h1>Source &amp; history</h1></div>
+    <p class="page-sub">Your edits live in the Function App storage account. Publish to run them; push to GitHub for history.</p>
+
+    <!-- Flow strip -->
+    <div class="flow">
+      <div class="stage">
+        <h4>📝 Working copy <span class="badge amber" style="margin-left:6px"><span class="dot"></span>3 unsaved-to-app</span></h4>
+        <div class="sub">Blob · <span class="mono">agent-projects/serverless-agent/dev/</span></div>
+        <div class="sub" style="margin-top:6px">Last saved 2m ago by you</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="stage">
+        <h4>🚀 Published <span class="badge green" style="margin-left:6px"><span class="dot"></span>running</span></h4>
+        <div class="sub">Function App · <span class="mono">func-agents-dev</span></div>
+        <div class="sub" style="margin-top:6px">Last publish 2h ago</div>
+      </div>
+      <div class="arrow">→</div>
+      <div class="stage">
+        <h4>🐙 GitHub <span class="badge amber" style="margin-left:6px"><span class="dot"></span>5 unpushed</span></h4>
+        <div class="sub">Repo · <span class="mono">contoso/serverless-agent</span> · <span class="mono">main</span></div>
+        <div class="sub" style="margin-top:6px">Last push 1d ago</div>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <button class="btn primary">🚀 Publish to app</button>
+      <button class="btn">🐙 Push to GitHub</button>
+      <div class="spacer" style="flex:1"></div>
+      <span class="badge blue"><span class="dot"></span>environment: dev</span>
+    </div>
+
+    <div class="grid cols-2">
+      <!-- Pending changes -->
+      <div class="card">
+        <div class="card-head"><h3>Pending changes (working copy)</h3><span class="badge amber">5 files</span></div>
+        <table>
+          <thead><tr><th>File</th><th>Change</th><th>vs. app</th><th>vs. GitHub</th></tr></thead>
+          <tbody>
+            <tr><td class="mono">main.agent.md</td><td><span class="badge amber">modified</span></td><td>◆ ahead</td><td>◆ ahead</td></tr>
+            <tr><td class="mono">agents/triage.agent.md</td><td><span class="badge green">added</span></td><td>◆ ahead</td><td>◆ ahead</td></tr>
+            <tr><td class="mono">agents.config.yaml</td><td><span class="badge amber">modified</span></td><td>◆ ahead</td><td>◆ ahead</td></tr>
+            <tr><td class="mono">mcp.json</td><td><span class="badge amber">modified</span></td><td>— synced</td><td>◆ ahead</td></tr>
+            <tr><td class="mono">tools/format.py</td><td><span class="badge red">deleted</span></td><td>— synced</td><td>◆ ahead</td></tr>
+          </tbody>
+        </table>
+        <div class="divider"></div>
+        <h3>Diff · main.agent.md</h3>
+        <div class="code">  name: Chat Assistant
+  description: A helpful assistant with Python
+    code execution.
+
+<span class="diff-del">- builtin_endpoints: true</span>
+<span class="diff-add">+ builtin_endpoints: true</span>
+<span class="diff-add">+ model: $FOUNDRY_MODEL</span>
+  ---</div>
+      </div>
+
+      <!-- Push panel + history -->
+      <div class="card">
+        <h3>Push to GitHub</h3>
+        <div class="field">
+          <label>Commit message</label>
+          <input type="text" value="Add triage agent; pin model in config">
+        </div>
+        <div class="field">
+          <label>Mode</label>
+          <select><option>Branch + pull request (recommended)</option><option>Commit directly to main</option></select>
+        </div>
+        <div class="pill-row"><button class="btn primary">🐙 Push 5 changes</button><button class="btn">Preview diff</button></div>
+        <div class="note" style="margin-top:14px">🔒 GitHub token is stored in Key Vault (contents:write, this repo only). It is never shown here.</div>
+
+        <div class="divider"></div>
+        <div class="card-head"><h3>Version history</h3><span class="muted" style="font-size:12px">blob versions + GitHub commits</span></div>
+        <table>
+          <thead><tr><th>When</th><th>Source</th><th>Summary</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>2m ago</td><td><span class="badge blue">blob</span></td><td>Edited main.agent.md</td><td><a href="#">Restore</a></td></tr>
+            <tr><td>18m ago</td><td><span class="badge blue">blob</span></td><td>Added triage.agent.md</td><td><a href="#">Restore</a></td></tr>
+            <tr><td>2h ago</td><td><span class="badge green">publish</span></td><td>Published to func-agents-dev</td><td><a href="#">Details</a></td></tr>
+            <tr><td>1d ago</td><td><span class="badge purple">github</span></td><td><span class="mono">a1b2c3d</span> Update connectors</td><td><a href="#">View</a></td></tr>
+            <tr><td>3d ago</td><td><span class="badge purple">github</span></td><td><span class="mono">9f8e7d6</span> Initial import</td><td><a href="#">View</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="note" style="margin-top:22px">💡 <strong>Model:</strong> the blob working copy is the primary authoring store. <strong>Publish</strong> promotes it to the running app; <strong>Push to GitHub</strong> commits it for history &amp; PRs. See <span class="mono">requirements.md §5.3</span>.</div>
+  </main>
+</div>
+</body>
+</html>
