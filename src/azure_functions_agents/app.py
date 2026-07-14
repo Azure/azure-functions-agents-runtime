@@ -132,6 +132,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         and global_config.system_tools.dynamic_sessions_code_interpreter
     ):
         system_tools_used.add("dynamic_sessions_code_interpreter")
+    if not (global_config.system_tools and global_config.system_tools.web_request is False):
+        system_tools_used.add("web_request")
 
     for resolved in resolved_agents:
         # Validation is owned by the app factory; compose() stays a pure translation step.
@@ -225,6 +227,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         # Track per-agent system tools (if not opted out)
         if resolved.sandbox_config:
             system_tools_used.add("dynamic_sessions_code_interpreter")
+        if resolved.web_request_config:
+            system_tools_used.add("web_request")
 
         agents_summary.append(agent_info)
 

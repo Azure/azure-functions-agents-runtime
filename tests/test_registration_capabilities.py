@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+from azure_functions_agents.config.schema import WebRequestConfig
+from azure_functions_agents.registration import capabilities as capabilities_module
 from azure_functions_agents.registration.capabilities import (
     AgentCapabilities,
     build_capabilities,
@@ -22,6 +24,7 @@ def _resolved(
     mcp_disabled: bool = False,
     tools_disabled: bool = False,
     exclude: list[str] | None = None,
+    web_request_config: Any | None = None,
 ) -> Any:
     return SimpleNamespace(
         enabled_skills_names=enabled_skills_names or [],
@@ -30,6 +33,7 @@ def _resolved(
         mcp_disabled=mcp_disabled,
         tools_disabled=tools_disabled,
         tool_filter=SimpleNamespace(exclude=exclude or []),
+        web_request_config=web_request_config,
     )
 
 
@@ -139,3 +143,75 @@ def test_build_skills_provider_returns_provider_for_skill_paths(tmp_path: Path) 
     from agent_framework import ContextProvider
 
     assert isinstance(provider, ContextProvider)
+
+
+# ---------------------------------------------------------------------------
+# web_request tool channel — build-once-at-registration, default-on wiring.
+# The factory import is lazy (``import_module`` inside ``capabilities.py``),
+# so these tests monkeypatch that lazy import to avoid building a real tool
+# and to assert it is skipped entirely when suppressed.
+# ---------------------------------------------------------------------------
+
+
+def test_build_capabilities_default_web_request_config_builds_one_tool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[str] = []
+
+    def _fake_import_module(name: str) -> Any:
+        calls.append(name)
+
+        def _fake_create_web_request_tools(config: Any) -> list[Any]:
+            return [_named_tool("web_request")]
+
+        return SimpleNamespace(create_web_request_tools=_fake_create_web_request_tools)
+
+    monkeypatch.setattr(capabilities_module, "import_module", _fake_import_module)
+
+    capabilities = build_capabilities(
+        _resolved(web_request_config=WebRequestConfig()),
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert capabilities.web_request_tools is not None
+    assert len(capabilities.web_request_tools) == 1
+    assert capabilities.web_request_tools[0].name == "web_request"
+    assert calls == ["azure_functions_agents.system_tools.web_request"]
+
+
+def test_build_capabilities_web_request_config_none_suppresses_tool_and_skips_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_import(name: str) -> Any:
+        raise AssertionError("import_module must not be called when web_request_config is None")
+
+    monkeypatch.setattr(capabilities_module, "import_module", _fail_import)
+
+    capabilities = build_capabilities(
+        _resolved(web_request_config=None),
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert capabilities.web_request_tools == []
+
+
+def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips_import(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_import(name: str) -> Any:
+        raise AssertionError("import_module must not be called when tools_disabled is True")
+
+    monkeypatch.setattr(capabilities_module, "import_module", _fail_import)
+
+    capabilities = build_capabilities(
+        _resolved(tools_disabled=True, web_request_config=WebRequestConfig()),
+        discovered_user_tools=[],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert capabilities.web_request_tools == []
