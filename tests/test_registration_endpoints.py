@@ -495,6 +495,7 @@ def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(
     chat_handler = chat_route["handler"]
     chat_params = inspect.signature(chat_handler).parameters
     assert "client" not in chat_params, "Chat handler should not have 'client' parameter when workflows disabled"
+    assert "__signature__" not in chat_handler.__dict__, "Chat handler should expose its natural signature"
     assert "durable_client_input" not in chat_route, "Chat handler should not have durable_client_input decorator"
 
     # Check chatstream endpoint
@@ -502,6 +503,7 @@ def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(
     stream_handler = stream_route["handler"]
     stream_params = inspect.signature(stream_handler).parameters
     assert "client" not in stream_params, "Stream handler should not have 'client' parameter when workflows disabled"
+    assert "__signature__" not in stream_handler.__dict__, "Stream handler should expose its natural signature"
     assert "durable_client_input" not in stream_route, "Stream handler should not have durable_client_input decorator"
 
 
@@ -566,6 +568,7 @@ def test_register_builtin_endpoints_mcp_without_workflows_has_no_client_paramete
     mcp_handler = mcp_routes[0]["handler"]
     mcp_params = inspect.signature(mcp_handler).parameters
     assert "client" not in mcp_params, "MCP handler should not have 'client' parameter when workflows disabled"
+    assert "__signature__" not in mcp_handler.__dict__, "MCP handler should expose its natural signature"
     assert "durable_client_input" not in mcp_routes[0], "MCP handler should not have durable_client_input decorator"
 
 
@@ -666,4 +669,3 @@ def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
     assert response.status_code == 200
     assert run_calls["kwargs"]["workflows_enabled"] is False
     assert run_calls["kwargs"]["durable_client"] is None
-
