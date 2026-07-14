@@ -41,10 +41,11 @@ jobs:
       - template: /eng/scripts/install-core-tools.yml@self
 
       - bash: |
-          npm install -g azurite
-          mkdir -p $(Agent.TempDirectory)/azurite
-          azurite --silent --location $(Agent.TempDirectory)/azurite \
-            --debug $(Agent.TempDirectory)/azurite/debug.log &
+          docker run -d --name azurite \
+            -p 10000:10000 -p 10001:10001 -p 10002:10002 \
+            mcr.microsoft.com/azure-storage/azurite \
+            azurite --skipApiVersionCheck \
+              --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
           echo "Waiting for Azurite to start..."
           for i in $(seq 1 30); do
             if curl -s http://127.0.0.1:10000/ > /dev/null; then
