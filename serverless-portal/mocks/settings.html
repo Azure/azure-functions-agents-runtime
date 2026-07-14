@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Settings</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .toggle { display: inline-flex; align-items: center; gap: 10px; }
+  .switch { width: 38px; height: 22px; border-radius: 999px; background: var(--brand); position: relative; }
+  .switch.off { background: var(--border-strong); }
+  .switch::after { content: ""; position: absolute; top: 2px; left: 18px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: var(--shadow); }
+  .switch.off::after { left: 2px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item active" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
+    <div class="breadcrumb">Home / Settings</div>
+    <div class="page-title"><h1>Settings</h1></div>
+    <p class="page-sub">Project, access, observability, and portal preferences.</p>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Project</h3>
+        <div class="field">
+          <label>Project name</label>
+          <input type="text" value="serverless-agent">
+        </div>
+        <div class="field">
+          <label>Repository</label>
+          <input type="text" value="azure-functions-agents-runtime">
+          <div class="hint">Git is the source of truth. Portal edits write the same files the runtime reads.</div>
+        </div>
+        <div class="field">
+          <label>Default branch</label>
+          <input type="text" value="main">
+        </div>
+        <div class="field">
+          <label class="toggle"><span class="switch"></span> Commit portal edits to git</label>
+          <div class="hint">When on, saves create commits; when off, edits stay in the working copy.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Access &amp; roles</h3>
+        <p class="muted" style="font-size:12.5px">Portal sits behind Entra ID. Role-based access controls who can edit vs. operate.</p>
+        <table>
+          <thead><tr><th>Member</th><th>Role</th><th></th></tr></thead>
+          <tbody>
+            <tr><td>swapnil@contoso.com <span class="badge gray" style="margin-left:6px">you</span></td><td><span class="badge blue">Admin</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td>dana@contoso.com</td><td><span class="badge purple">Author</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td>lee@contoso.com</td><td><span class="badge gray">Operator</span></td><td><a href="#">Edit</a></td></tr>
+          </tbody>
+        </table>
+        <div class="pill-row" style="margin-top:12px"><button class="btn sm">＋ Invite member</button></div>
+        <p class="hint">Roles: <strong>Admin</strong> (all) · <strong>Author</strong> (edit agents) · <strong>Operator</strong> (monitor, deploy).</p>
+      </div>
+
+      <div class="card">
+        <h3>Observability</h3>
+        <div class="field">
+          <label class="toggle"><span class="switch"></span> Enable OpenTelemetry export</label>
+          <div class="hint">Uses the runtime's <span class="mono">[monitor]</span> Azure Monitor exporter.</div>
+        </div>
+        <div class="field">
+          <label>Application Insights connection</label>
+          <input type="text" value="InstrumentationKey=•••••••; masked">
+        </div>
+        <div class="field">
+          <label class="toggle"><span class="switch off"></span> Capture sensitive data in traces</label>
+          <div class="hint"><span class="mono">ENABLE_SENSITIVE_DATA</span> — off by default; keep off in prod.</div>
+        </div>
+        <div class="field">
+          <label class="toggle"><span class="switch"></span> Audit portal actions</label>
+          <div class="hint">Log edits, deploys, and connection changes.</div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Portal preferences</h3>
+        <div class="field">
+          <label>Theme</label>
+          <select><option>Light</option><option>Dark</option><option>System</option></select>
+        </div>
+        <div class="field">
+          <label>Default landing page</label>
+          <select><option>Dashboard</option><option>Agents</option><option>Monitoring</option></select>
+        </div>
+        <div class="field">
+          <label>Session transcript retention</label>
+          <select><option>30 days</option><option>7 days</option><option>90 days</option></select>
+        </div>
+        <div class="divider"></div>
+        <h3 style="color:var(--red)">Danger zone</h3>
+        <div class="pill-row"><button class="btn" style="border-color:var(--red);color:var(--red)">Disconnect project</button></div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

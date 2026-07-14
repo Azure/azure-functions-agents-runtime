@@ -1,0 +1,108 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Dashboard</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item active" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
+    <div class="breadcrumb">Home / Dashboard</div>
+    <div class="page-title"><h1>Dashboard</h1></div>
+    <p class="page-sub">Fleet overview for the <strong>serverless-agent</strong> project · environment <span class="badge blue"><span class="dot"></span>dev</span></p>
+
+    <div class="grid cols-4">
+      <div class="card stat">
+        <span class="ico-badge">🤖</span>
+        <div class="label">Agents</div>
+        <div class="value">6</div>
+        <div class="delta up">4 deployed · 2 draft</div>
+      </div>
+      <div class="card stat">
+        <span class="ico-badge">▶️</span>
+        <div class="label">Invocations (24h)</div>
+        <div class="value">1,284</div>
+        <div class="delta up">▲ 12% vs. prev day</div>
+      </div>
+      <div class="card stat">
+        <span class="ico-badge" style="background:var(--red-soft);color:var(--red)">⚠️</span>
+        <div class="label">Errors (24h)</div>
+        <div class="value">17</div>
+        <div class="delta down">1.3% error rate</div>
+      </div>
+      <div class="card stat">
+        <span class="ico-badge" style="background:var(--green-soft);color:var(--green)">⏱️</span>
+        <div class="label">p95 latency</div>
+        <div class="value">2.4s</div>
+        <div class="delta up">▼ 0.3s vs. prev day</div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-head"><h3>Agent health</h3><a class="btn sm ghost" href="agents.html">View all →</a></div>
+        <table>
+          <thead><tr><th>Agent</th><th>Status</th><th>Success</th><th>p95</th><th>Last run</th></tr></thead>
+          <tbody>
+            <tr><td class="cell-title">main <span class="cell-sub">basic-chat</span></td><td><span class="badge green"><span class="dot"></span>Healthy</span></td><td>99.2%</td><td>2.1s</td><td>2m ago</td></tr>
+            <tr><td class="cell-title">daily-report <span class="cell-sub">timer</span></td><td><span class="badge green"><span class="dot"></span>Healthy</span></td><td>100%</td><td>8.4s</td><td>3h ago</td></tr>
+            <tr><td class="cell-title">outlook-reply <span class="cell-sub">O365</span></td><td><span class="badge amber"><span class="dot"></span>Degraded</span></td><td>94.1%</td><td>3.9s</td><td>12m ago</td></tr>
+            <tr><td class="cell-title">incident-triage <span class="cell-sub">workflow</span></td><td><span class="badge red"><span class="dot"></span>Failing</span></td><td>71.0%</td><td>—</td><td>26m ago</td></tr>
+            <tr><td class="cell-title">tech-news-email <span class="cell-sub">timer</span></td><td><span class="badge gray"><span class="dot"></span>Idle</span></td><td>—</td><td>—</td><td>1d ago</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Invocations · last 14 days</h3><span class="muted" style="font-size:12px">HTTP + triggers</span></div>
+        <div class="spark" style="height:120px; align-items:flex-end;">
+          <span style="height:40%"></span><span style="height:55%"></span><span style="height:48%"></span>
+          <span style="height:70%"></span><span style="height:62%"></span><span style="height:80%"></span>
+          <span style="height:58%"></span><span style="height:90%"></span><span style="height:72%"></span>
+          <span style="height:65%"></span><span style="height:100%"></span><span style="height:78%"></span>
+          <span style="height:85%"></span><span style="height:60%"></span>
+        </div>
+        <div class="divider"></div>
+        <h3>Recent failures</h3>
+        <table>
+          <thead><tr><th>Agent</th><th>Error</th><th>When</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="cell-title">incident-triage</td><td class="cell-sub">Tool timeout: azure_rest</td><td>26m ago</td><td><a href="agent-detail.html">Trace →</a></td></tr>
+            <tr><td class="cell-title">outlook-reply</td><td class="cell-sub">MCP 429 throttled</td><td>1h ago</td><td><a href="agent-detail.html">Trace →</a></td></tr>
+            <tr><td class="cell-title">main</td><td class="cell-sub">Model 400: API version</td><td>3h ago</td><td><a href="agent-detail.html">Trace →</a></td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

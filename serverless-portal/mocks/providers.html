@@ -1,0 +1,126 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Providers</title>
+<link rel="stylesheet" href="styles.css">
+<style>
+  .prov-card { border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; background: var(--surface); box-shadow: var(--shadow); }
+  .prov-card.selected { border-color: var(--brand); box-shadow: 0 0 0 2px var(--brand-soft); }
+  .prov-head { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .prov-head .glyph { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; font-size: 17px; background: var(--brand-soft); color: var(--brand-dark); }
+  .prov-head h3 { margin: 0; font-size: 14px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item active" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
+    <div class="breadcrumb">Home / Providers</div>
+    <div class="page-title"><h1>Model providers</h1></div>
+    <p class="page-sub">Configure inference back-ends. Matches <span class="mono">AZURE_FUNCTIONS_AGENTS_PROVIDER</span> and the runtime's provider precedence.</p>
+
+    <div class="grid cols-3" style="margin-bottom:22px">
+      <div class="prov-card selected">
+        <div class="prov-head"><span class="glyph">🧠</span><h3>Microsoft Foundry</h3><span class="badge green" style="margin-left:auto"><span class="dot"></span>Active</span></div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">Recommended path. Uses <span class="mono">DefaultAzureCredential</span>.</p>
+        <dl class="kv" style="grid-template-columns:130px 1fr">
+          <dt>Model</dt><dd class="mono">gpt-5.4</dd>
+          <dt>Provider key</dt><dd class="mono">foundry</dd>
+        </dl>
+      </div>
+      <div class="prov-card">
+        <div class="prov-head"><span class="glyph">☁️</span><h3>Azure OpenAI</h3><span class="badge gray" style="margin-left:auto">Configured</span></div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">Alternative Azure-hosted provider.</p>
+        <dl class="kv" style="grid-template-columns:130px 1fr">
+          <dt>Deployment</dt><dd class="mono">gpt-4o</dd>
+          <dt>Provider key</dt><dd class="mono">azure_openai</dd>
+        </dl>
+      </div>
+      <div class="prov-card">
+        <div class="prov-head"><span class="glyph">🔷</span><h3>OpenAI</h3><span class="badge gray" style="margin-left:auto">Not configured</span></div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">Non-Azure provider via API key.</p>
+        <dl class="kv" style="grid-template-columns:130px 1fr">
+          <dt>Model</dt><dd class="muted">—</dd>
+          <dt>Provider key</dt><dd class="mono">openai</dd>
+        </dl>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-head"><h3>Edit · Microsoft Foundry</h3><span class="badge green"><span class="dot"></span>Active provider</span></div>
+        <div class="field">
+          <label>Provider</label>
+          <select><option>Microsoft Foundry</option><option>Azure OpenAI</option><option>OpenAI</option></select>
+          <div class="hint">Sets <span class="mono">AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry</span>.</div>
+        </div>
+        <div class="field">
+          <label>Project endpoint</label>
+          <input type="url" value="https://myproj.eastus2.services.ai.azure.com/api/projects/myproj">
+          <div class="hint"><span class="mono">FOUNDRY_PROJECT_ENDPOINT</span></div>
+        </div>
+        <div class="field">
+          <label>Model / deployment</label>
+          <input type="text" value="gpt-5.4">
+          <div class="hint"><span class="mono">FOUNDRY_MODEL</span></div>
+        </div>
+        <div class="field">
+          <label>Credential</label>
+          <select><option>DefaultAzureCredential (recommended)</option><option>Managed identity (client ID)</option></select>
+          <div class="hint">Run <span class="mono">az login</span> locally; set <span class="mono">AZURE_CLIENT_ID</span> for multi-identity apps.</div>
+        </div>
+        <div class="pill-row">
+          <button class="btn primary">Save</button>
+          <button class="btn">🔌 Test connection</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Model resolution precedence</h3>
+        <p class="muted" style="font-size:12.5px">How the runtime picks the model for a given call, highest first:</p>
+        <ol style="padding-left:18px;line-height:2;font-size:13.5px">
+          <li>Explicit requested model (agent frontmatter <span class="mono">model:</span>)</li>
+          <li>Provider env (<span class="mono">FOUNDRY_MODEL</span> / <span class="mono">AZURE_OPENAI_DEPLOYMENT</span>)</li>
+          <li><span class="mono">AZURE_FUNCTIONS_AGENTS_MODEL</span></li>
+          <li>Provider default</li>
+        </ol>
+        <div class="divider"></div>
+        <h3>Auto-detection order</h3>
+        <p class="muted" style="font-size:12.5px">When <span class="mono">AZURE_FUNCTIONS_AGENTS_PROVIDER</span> is unset:</p>
+        <div class="pill-row">
+          <span class="badge blue">1 · AZURE_OPENAI_ENDPOINT</span>
+          <span class="badge blue">2 · FOUNDRY_PROJECT_ENDPOINT</span>
+          <span class="badge blue">3 · OPENAI_API_KEY</span>
+        </div>
+        <div class="note" style="margin-top:16px">🔒 Secrets (<span class="mono">*_API_KEY</span>) are write-only in the portal and stored in the secret store. Prefer identity-based auth where possible.</div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
