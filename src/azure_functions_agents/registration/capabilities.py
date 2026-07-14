@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from importlib import import_module
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,7 @@ class AgentCapabilities:
     filtered_workflow_tools: list[WorkflowTool] = field(default_factory=list)
     filtered_mcp_tools: list[MCPTool] | None = None
     enabled_skill_paths: list[Path] = field(default_factory=list)
+    web_request_tools: list[Any] | None = None
 
 
 def _tool_name(tool: object) -> str:
@@ -45,6 +47,15 @@ def _workflow_exclude_names(resolved: ResolvedAgent) -> set[str]:
     if not isinstance(raw, list):
         return set()
     return {name for name in raw if isinstance(name, str)}
+
+
+def _build_web_request_tools(resolved: ResolvedAgent) -> list[Any]:
+    """Build the (stateless) ``web_request`` tool once per agent, or ``[]`` when disabled."""
+    if resolved.tools_disabled or resolved.web_request_config is None:
+        return []
+    # Imported lazily so registration import cost stays low when the tool is unused.
+    web_request_module = import_module("azure_functions_agents.system_tools.web_request")
+    return list(web_request_module.create_web_request_tools(resolved.web_request_config))
 
 
 def build_capabilities(
@@ -96,4 +107,5 @@ def build_capabilities(
         filtered_workflow_tools=filtered_workflow_tools,
         filtered_mcp_tools=filtered_mcp_tools,
         enabled_skill_paths=enabled_skill_paths,
+        web_request_tools=_build_web_request_tools(resolved),
     )

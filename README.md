@@ -179,6 +179,7 @@ my-app/
 - **Connector-backed MCP tools** — call Office 365, Teams, SQL, Salesforce, SAP, and other connectors through HTTP MCP servers
 - **MCP servers** — connect to external remote HTTP MCP servers for additional tools
 - **Sandbox** — Python code execution via Azure Container Apps dynamic sessions; if no explicit sandbox session id is supplied, each invocation gets a fresh GUID-backed session
+- **Web request** — built-in, default-on `web_request` tool for outbound HTTP(S) calls to public hosts, guarded by an always-on SSRF security floor; no Azure resource required. Disable app-wide with `system_tools.web_request: false`, or per-agent with `system_tools.web_request: false` in that agent's front matter
 
 ## Agent File Format (`.agent.md`)
 
@@ -482,9 +483,10 @@ When the agent uses connector-backed MCP servers, connector triggers, or `dynami
 Install `azurefunctions-agents-runtime[monitor]` to export the runtime's OpenTelemetry spans and
 metrics to Application Insights. Enablement is simply the `[monitor]` extra plus
 `APPLICATIONINSIGHTS_CONNECTION_STRING`; sensitive content stays off by default and is included only
-when `ENABLE_SENSITIVE_DATA=true`. The runtime emits an `agent.run` span for each invocation and a
-`dynamic_session.execute` span for sandbox calls, adds `af.*` attributes, marks failures with
-`af.fault_domain`, and quiets noisy third-party loggers. For full setup and the span/attribute
+when `ENABLE_SENSITIVE_DATA=true`. The runtime emits an `agent.run` span for each invocation, a
+`dynamic_session.execute` span for sandbox calls, and a `web_request` span for outbound HTTP calls
+(host only — never the full URL with query string or secrets), adds `af.*` attributes, marks failures
+with `af.fault_domain`, and quiets noisy third-party loggers. For full setup and the span/attribute
 reference, see [`docs/observability.md`](docs/observability.md). If you also want host↔worker
 correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive.
 

@@ -30,6 +30,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "__version__",
         "create_function_app",
         "create_sandbox_tools",
+        "create_web_request_tools",
         "get_client_manager",
         "resolve_config_dir",
         "run_agent",

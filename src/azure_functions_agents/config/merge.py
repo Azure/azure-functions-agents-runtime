@@ -12,6 +12,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     SkillsFilter,
     ToolsFilter,
+    WebRequestConfig,
 )
 
 DEFAULT_TIMEOUT = 900.0
@@ -53,6 +54,27 @@ def _resolve_sandbox(
     if global_config.system_tools:
         return global_config.system_tools.dynamic_sessions_code_interpreter
     return None
+
+
+def _resolve_web_request(
+    spec: AgentSpec, global_config: GlobalConfig
+) -> WebRequestConfig | None:
+    """Resolve the (default-on) ``web_request`` system tool config.
+
+    Unlike the opt-in sandbox, ``web_request`` is enabled unless explicitly
+    disabled: per-agent ``false`` opts out; global ``false`` disables it
+    app-wide; anything else (absent/``True``/an object) leaves it enabled,
+    using the global object's fields when one is given.
+    """
+    if spec.system_tools and spec.system_tools.web_request is False:
+        return None
+
+    global_value = global_config.system_tools.web_request if global_config.system_tools else None
+    if global_value is False:
+        return None
+    if isinstance(global_value, WebRequestConfig):
+        return global_value
+    return WebRequestConfig()
 
 
 def apply_mcp_filter(
@@ -138,6 +160,7 @@ def compose(
         skills_disabled=skills_disabled,
         mcp_disabled=mcp_disabled,
         sandbox_config=_resolve_sandbox(spec, global_config),
+        web_request_config=_resolve_web_request(spec, global_config),
         input_schema=spec.input_schema,
         response_schema=spec.response_schema,
         response_example=spec.response_example,

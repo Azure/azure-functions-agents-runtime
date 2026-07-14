@@ -1,0 +1,11 @@
+model: gpt-4o
+timeout: 900
+
+system_tools:
+  web_request:
+    allowed_hosts:
+      - api.example.test
+    require_https: true
+    timeout_seconds: 10
+    max_response_bytes: 1000000
+    max_request_bytes: 200000

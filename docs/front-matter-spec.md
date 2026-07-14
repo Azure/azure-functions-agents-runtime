@@ -16,6 +16,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - Custom tools (auto-discovered from `tools/` directory)
 - System tools (`system_tools`)
   - Code execution sandbox configuration
+  - Outbound web request tool (`web_request`) — enabled by default, SSRF-guarded
 - Default runtime settings (model, timeout)
 
 **MCP server discovery:**
@@ -61,6 +62,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 **Supported properties:**
 - `system_tools` — Object containing system-level tools configuration
   - `dynamic_sessions_code_interpreter` — Object with ACA Dynamic Sessions code interpreter configuration
+  - `web_request` — Object or boolean configuring the built-in outbound HTTP request tool (enabled by default; `false` disables app-wide)
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
@@ -124,6 +126,7 @@ Fields are organized into categories based on how they can be used:
 - `workflows` — Dynamic Workflow enablement and workflow-tool excludes (`main.agent.md` only)
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
   - `dynamic_sessions_code_interpreter` — ACA Dynamic Sessions code interpreter
+  - `web_request` — Built-in outbound HTTP request tool (default-on, SSRF-guarded)
 
 **Runtime Settings (Global defaults, overridable in agents):**
 - `model` — LLM selection
@@ -391,6 +394,12 @@ system_tools:
   dynamic_sessions_code_interpreter:      # ACA Dynamic Sessions code interpreter
     endpoint: string
     client_id: string | null
+  web_request:                            # Outbound HTTP request tool (default-on)
+    allowed_hosts: string[] | null
+    require_https: boolean
+    timeout_seconds: number | null
+    max_response_bytes: integer | null
+    max_request_bytes: integer | null
 ```
 
 ---
@@ -421,6 +430,61 @@ system_tools:
 **Note:** When the runtime has no explicit session id to bind to the ACA dynamic session, each invocation gets a fresh GUID-backed sandbox session instead of sharing a default session. Managed identity auth for ACA sessions honors `client_id` for this tool when set, otherwise `AZURE_CLIENT_ID` in multi-identity Function Apps.
 
 **Note:** Future versions may support multiple sandbox types with exclude lists similar to MCP servers, skills, and tools.
+
+---
+
+##### `system_tools.web_request`
+- **Type:** `object` or `boolean` (global), `boolean` (agent)
+- **Description:** Configures the built-in `web_request` tool, which lets an agent make a single outbound HTTP(S) request to a public host. Unlike the sandbox, **it requires no Azure resource and is enabled by default** for every agent — no configuration is needed to turn it on. An always-on SSRF security floor validates every request (blocking loopback/private/link-local/CGNAT/metadata-service addresses, etc.) regardless of configuration.
+
+**All fields are optional** and clamped to runtime-defined ceilings (not operator-configurable):
+
+| Field | Default | Ceiling | Notes |
+|-------|---------|---------|-------|
+| `allowed_hosts` | `null` (any public host) | — | Exact hostname match only — no wildcards or suffix matching in v1 |
+| `require_https` | `true` | — | Set `false` to also allow `http://` |
+| `timeout_seconds` | `30` | `120` s | Per-request timeout |
+| `max_response_bytes` | `5,000,000` | `10,000,000` (10 MB) | Response is truncated (not an error) past this size |
+| `max_request_bytes` | `1,000,000` | `10,000,000` (10 MB) | Request body size cap |
+
+**Default behavior (no configuration needed):**
+```yaml
+# web_request is already available to every agent with these defaults —
+# no agents.config.yaml entry required.
+```
+
+**Global configuration — restrict to specific hosts (in `agents.config.yaml`):**
+```yaml
+system_tools:
+  web_request:
+    allowed_hosts:
+      - api.example.com
+      - api.github.com
+    require_https: true
+    timeout_seconds: 15
+    max_response_bytes: 2000000
+```
+
+**Disable app-wide (in `agents.config.yaml`):**
+```yaml
+system_tools:
+  web_request: false
+```
+
+**Agent opt-out (in agent front matter):**
+```yaml
+---
+name: Offline Agent
+description: An agent that must not make outbound network calls
+
+system_tools:
+  web_request: false
+---
+```
+
+**Model-facing tool surface:** `web_request(method, url, headers?, query?, body?|json?)` — `method` defaults to `GET`; `body` (raw string) and `json` (arbitrary JSON) are mutually exclusive. Timeouts and size limits are operator configuration, not model-controlled parameters. The tool never follows redirects (`redirect_count` is always `0` in v1) and strips query strings/userinfo from the echoed `url` in its response.
+
+**Note:** Per-host credential injection (`auth`), redirect following, wildcard/suffix host matching, and a per-agent override *object* (as opposed to a plain boolean) are planned for a future version — see [FRD 0005](./frds/0005-web-request-system-tool.md) for the full target design. v1 is intentionally exact-host-only and unauthenticated.
 
 ---
 
@@ -992,6 +1056,7 @@ This uses explicit built-in chat UI and chat APIs, inherited capabilities, and m
 **Global Configuration (`agents.config.yaml`) — Exact property names:**
 - `system_tools` (object)
   - `dynamic_sessions_code_interpreter` (object)
+  - `web_request` (object or boolean)
 - `model` (string)
 - `timeout` (number)
 - `tools` (object)

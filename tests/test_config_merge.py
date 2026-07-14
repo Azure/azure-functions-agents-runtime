@@ -11,6 +11,7 @@ from azure_functions_agents.config.merge import (
     _resolve_model,
     _resolve_sandbox,
     _resolve_timeout,
+    _resolve_web_request,
     apply_mcp_filter,
     apply_skills_filter,
     apply_tools_filter,
@@ -27,6 +28,7 @@ from azure_functions_agents.config.schema import (
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
+    WebRequestConfig,
 )
 from azure_functions_agents.config.validation import validate_resolved_agent
 
@@ -244,6 +246,69 @@ def test_resolve_sandbox_no_global_returns_none() -> None:
     """Defensive: when the global config has no system_tools block, sandbox is None."""
     spec = AgentSpec(name="A", description="d")
     assert _resolve_sandbox(spec, GlobalConfig()) is None
+
+
+def test_resolve_web_request_default_on_absent() -> None:
+    """Default-on: no system_tools block anywhere -> enabled with default config."""
+    spec = AgentSpec(name="A", description="B")
+    assert _resolve_web_request(spec, GlobalConfig()) == WebRequestConfig()
+
+
+def test_resolve_web_request_default_on_global_none() -> None:
+    """Default-on: global system_tools present but web_request unset (None) -> still enabled."""
+    spec = AgentSpec(name="A", description="B")
+    global_config = GlobalConfig(system_tools=SystemToolsConfig())
+    assert _resolve_web_request(spec, global_config) == WebRequestConfig()
+
+
+def test_resolve_web_request_default_on_global_true() -> None:
+    """Default-on: global web_request explicitly True -> enabled with default config."""
+    spec = AgentSpec(name="A", description="B")
+    global_config = GlobalConfig(system_tools=SystemToolsConfig(web_request=True))
+    assert _resolve_web_request(spec, global_config) == WebRequestConfig()
+
+
+def test_resolve_web_request_global_false_disables_app_wide() -> None:
+    """global system_tools.web_request: false disables it for every agent."""
+    spec = AgentSpec(name="A", description="B")
+    global_config = GlobalConfig(system_tools=SystemToolsConfig(web_request=False))
+    assert _resolve_web_request(spec, global_config) is None
+
+
+def test_resolve_web_request_per_agent_false_opts_out() -> None:
+    """Per-agent `web_request: false` opts out even when globally enabled."""
+    spec = AgentSpec(
+        name="A", description="B", system_tools=SystemToolsAgentOverride(web_request=False)
+    )
+    assert _resolve_web_request(spec, GlobalConfig()) is None
+
+
+def test_resolve_web_request_per_agent_true_or_absent_inherits_global() -> None:
+    """Per-agent `web_request: true`/absent inherits whatever the global config resolves to."""
+    global_config = GlobalConfig(
+        system_tools=SystemToolsConfig(web_request=WebRequestConfig(require_https=False))
+    )
+    spec_absent = AgentSpec(name="A", description="B")
+    spec_true = AgentSpec(
+        name="A", description="B", system_tools=SystemToolsAgentOverride(web_request=True)
+    )
+    assert _resolve_web_request(spec_absent, global_config) == WebRequestConfig(
+        require_https=False
+    )
+    assert _resolve_web_request(spec_true, global_config) == WebRequestConfig(require_https=False)
+
+
+def test_resolve_web_request_global_object_is_used_verbatim() -> None:
+    """A configured global WebRequestConfig object is returned as-is (not defaulted)."""
+    configured = WebRequestConfig(
+        allowed_hosts=["api.example.com"],
+        timeout_seconds=5,
+        max_response_bytes=1000,
+        max_request_bytes=500,
+    )
+    global_config = GlobalConfig(system_tools=SystemToolsConfig(web_request=configured))
+    spec = AgentSpec(name="A", description="B")
+    assert _resolve_web_request(spec, global_config) is configured
 
 
 def test_apply_tools_filter_inherits_global_when_agent_unset() -> None:
