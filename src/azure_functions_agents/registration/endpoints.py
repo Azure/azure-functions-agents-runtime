@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +36,10 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
 )
 
 _BUILTIN_SLUG_ATTR = "_afa_builtin_slug_names"
+
+type ChatHandler = Callable[[Request, Any | None], Awaitable[Response]]
+type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[StreamingResponse]]
+type McpAgentChatHandler = Callable[[str, Any | None], Awaitable[str]]
 
 
 def _format_exception_message(exc: Exception) -> str:
@@ -96,6 +100,56 @@ def _index_path() -> Path:
 
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
+
+
+def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, Any | None], Awaitable[Response]]:
+    async def chat(req: Request, client: Any | None = None) -> Response:
+        return await handle_chat(req, client)
+
+    return chat
+
+
+def _chat_handler_without_client(handle_chat: ChatHandler) -> Callable[[Request], Awaitable[Response]]:
+    async def chat(req: Request) -> Response:
+        return await handle_chat(req, None)
+
+    return chat
+
+
+def _chat_stream_handler_with_client(
+    handle_chat_stream: ChatStreamHandler,
+) -> Callable[[Request, Any | None], Awaitable[StreamingResponse]]:
+    async def chat_stream(req: Request, client: Any | None = None) -> StreamingResponse:
+        return await handle_chat_stream(req, client)
+
+    return chat_stream
+
+
+def _chat_stream_handler_without_client(
+    handle_chat_stream: ChatStreamHandler,
+) -> Callable[[Request], Awaitable[StreamingResponse]]:
+    async def chat_stream(req: Request) -> StreamingResponse:
+        return await handle_chat_stream(req, None)
+
+    return chat_stream
+
+
+def _mcp_agent_chat_handler_with_client(
+    handle_mcp_agent_chat: McpAgentChatHandler,
+) -> Callable[[str, Any | None], Awaitable[str]]:
+    async def mcp_agent_chat(context: str, client: Any | None = None) -> str:
+        return await handle_mcp_agent_chat(context, client)
+
+    return mcp_agent_chat
+
+
+def _mcp_agent_chat_handler_without_client(
+    handle_mcp_agent_chat: McpAgentChatHandler,
+) -> Callable[[str], Awaitable[str]]:
+    async def mcp_agent_chat(context: str) -> str:
+        return await handle_mcp_agent_chat(context, None)
+
+    return mcp_agent_chat
 
 
 async def _run_builtin_agent(
@@ -217,7 +271,7 @@ def _register_http_chat(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> None:
-    async def chat(req: Request, client: Any | None = None) -> Response:
+    async def handle_chat(req: Request, durable_client: Any | None) -> Response:
         try:
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
@@ -229,7 +283,7 @@ def _register_http_chat(
                 session_id=session_id,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
-                durable_client=client if workflows_enabled else None,
+                durable_client=durable_client,
             )
             return Response(
                 json.dumps(
@@ -253,9 +307,13 @@ def _register_http_chat(
             )
             return _json_error(error_msg)
 
-    decorated = chat
+    decorated: Any
     if workflows_enabled:
+        decorated = _chat_handler_with_client(handle_chat)
         decorated = app.durable_client_input(client_name="client")(decorated)
+    else:
+        decorated = _chat_handler_without_client(handle_chat)
+
     decorated = app.route(route=route, methods=["POST"])(decorated)
     app.function_name(name=function_name)(decorated)
 
@@ -270,7 +328,10 @@ def _register_http_chat_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> None:
-    async def chat_stream(req: Request, client: Any | None = None) -> StreamingResponse:
+    async def handle_chat_stream(
+        req: Request,
+        durable_client: Any | None,
+    ) -> StreamingResponse:
         try:
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
@@ -283,7 +344,7 @@ def _register_http_chat_stream(
                     session_id=session_id,
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
-                    durable_client=client if workflows_enabled else None,
+                    durable_client=durable_client,
                 ),
                 media_type="text/event-stream",
             )
@@ -298,9 +359,13 @@ def _register_http_chat_stream(
             )
             return _sse_error_response(error_msg, status_code=500)
 
-    decorated = chat_stream
+    decorated: Any
     if workflows_enabled:
+        decorated = _chat_stream_handler_with_client(handle_chat_stream)
         decorated = app.durable_client_input(client_name="client")(decorated)
+    else:
+        decorated = _chat_stream_handler_without_client(handle_chat_stream)
+
     decorated = app.route(route=route, methods=["POST"])(decorated)
     app.function_name(name=function_name)(decorated)
 
@@ -315,7 +380,7 @@ def _register_mcp_endpoint(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> None:
-    async def mcp_agent_chat(context: str, client: Any | None = None) -> str:
+    async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         try:
             payload = json.loads(context) if context else {}
             arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
@@ -331,7 +396,7 @@ def _register_mcp_endpoint(
                 session_id=session_id,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
-                durable_client=client if workflows_enabled else None,
+                durable_client=durable_client,
             )
             return json.dumps(
                 {
@@ -349,9 +414,13 @@ def _register_mcp_endpoint(
             )
             return json.dumps({"error": error_msg})
 
-    decorated = mcp_agent_chat
+    decorated: Any
     if workflows_enabled:
+        decorated = _mcp_agent_chat_handler_with_client(handle_mcp_agent_chat)
         decorated = app.durable_client_input(client_name="client")(decorated)
+    else:
+        decorated = _mcp_agent_chat_handler_without_client(handle_mcp_agent_chat)
+
     decorated = app.mcp_tool_trigger(
         arg_name="context",
         tool_name=tool_name,
