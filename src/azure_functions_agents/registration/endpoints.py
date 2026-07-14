@@ -102,8 +102,8 @@ def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
 
-def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, Any | None], Awaitable[Response]]:
-    async def chat(req: Request, client: Any | None = None) -> Response:
+def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, str], Awaitable[Response]]:
+    async def chat(req: Request, client: str) -> Response:
         return await handle_chat(req, client)
 
     return chat
@@ -118,8 +118,8 @@ def _chat_handler_without_client(handle_chat: ChatHandler) -> Callable[[Request]
 
 def _chat_stream_handler_with_client(
     handle_chat_stream: ChatStreamHandler,
-) -> Callable[[Request, Any | None], Awaitable[StreamingResponse]]:
-    async def chat_stream(req: Request, client: Any | None = None) -> StreamingResponse:
+) -> Callable[[Request, str], Awaitable[StreamingResponse]]:
+    async def chat_stream(req: Request, client: str) -> StreamingResponse:
         return await handle_chat_stream(req, client)
 
     return chat_stream
@@ -136,8 +136,8 @@ def _chat_stream_handler_without_client(
 
 def _mcp_agent_chat_handler_with_client(
     handle_mcp_agent_chat: McpAgentChatHandler,
-) -> Callable[[str, Any | None], Awaitable[str]]:
-    async def mcp_agent_chat(context: str, client: Any | None = None) -> str:
+) -> Callable[[str, str], Awaitable[str]]:
+    async def mcp_agent_chat(context: str, client: str) -> str:
         return await handle_mcp_agent_chat(context, client)
 
     return mcp_agent_chat
@@ -443,7 +443,7 @@ def _register_workflow_status_endpoints(
         fetch_session_workflows,
     )
 
-    async def list_session_workflows(req: Request, client: Any) -> Response:
+    async def list_session_workflows(req: Request, client: str) -> Response:
         session_id = req.headers.get("x-ms-session-id") or ""
         if not session_id:
             return Response(
@@ -470,7 +470,7 @@ def _register_workflow_status_endpoints(
     decorated_list = app.durable_client_input(client_name="client")(decorated_list)
     app.route(route=f"agents/{slug}/workflows", methods=["GET"])(decorated_list)
 
-    async def get_session_workflow_status(req: Request, client: Any) -> Response:
+    async def get_session_workflow_status(req: Request, client: str) -> Response:
         session_id = req.headers.get("x-ms-session-id") or ""
         workflow_id = (req.query_params or {}).get("workflow_id", "") or ""
         if not session_id or not workflow_id:
