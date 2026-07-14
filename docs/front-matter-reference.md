@@ -24,6 +24,7 @@ Optional file in the root directory. All properties are optional.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `dynamic_sessions_code_interpreter` | object | No | `{}` | ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter) |
+| `web_request` | WebRequestConfig \| boolean | No | `null` | Outbound HTTP request tool configuration. Enabled by default; set to `false` to disable app-wide. [Details](#global-system_tools-web_request) |
 
 ### Global: `system_tools.dynamic_sessions_code_interpreter`
 
@@ -31,6 +32,16 @@ Optional file in the root directory. All properties are optional.
 |----------|------|----------|---------|-------------|
 | `endpoint` | string | **Yes** | N/A | ACA session pool endpoint URL. Supports env var substitution. |
 | `client_id` | string | No | `null` | Optional managed identity client ID for multi-identity Function Apps |
+
+### Global: `system_tools.web_request`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `allowed_hosts` | string[] | No | `null` | Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor). |
+| `require_https` | boolean | No | `true` | Require `https://` URLs. Set to `false` to also allow `http://`. |
+| `timeout_seconds` | number | No | `null` | Per-request timeout in seconds, clamped to a runtime-defined ceiling (120 s). |
+| `max_response_bytes` | integer | No | `null` | Maximum response body size read before truncating, clamped to a runtime-defined ceiling (10 MB). |
+| `max_request_bytes` | integer | No | `null` | Maximum request body size accepted, clamped to a runtime-defined ceiling (10 MB). |
 
 ### Global: `tools`
 
@@ -118,6 +129,7 @@ Opt out of system-level tools configured globally.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `dynamic_sessions_code_interpreter` | boolean | No | `null` | Set to `false` to opt out of code execution capabilities |
+| `web_request` | boolean | No | `null` | Set to `false` to opt out of the default-on `web_request` tool for this agent |
 
 **See:** [Front Matter Spec - system_tools](./front-matter-spec.md#system_tools)
 

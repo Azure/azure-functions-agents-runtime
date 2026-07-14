@@ -208,6 +208,7 @@ async def _build_agent_session_history(
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
     agent_name: str | None,
+    web_request_tools: list[Any] | None = None,
 ) -> tuple[Any, Any, str]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
@@ -244,6 +245,9 @@ async def _build_agent_session_history(
 
     if sandbox_tools:
         resolved_tools.extend(sandbox_tools)
+
+    if web_request_tools:
+        resolved_tools.extend(web_request_tools)
 
     if workflow_enabled:
         from .workflows.tools import build_workflow_tools
@@ -359,6 +363,7 @@ async def run_agent(
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
     agent_name: str | None = None,
+    web_request_tools: list[Any] | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -396,11 +401,16 @@ async def run_agent(
         bound to a specific ACA session pool. ``None`` adds no sandbox tools;
         pass a list to enable them. Per-call because the ACA session id is
         baked into each tool's closure.
+    web_request_tools:
+        Optional list of tools created via :func:`create_web_request_tools` —
+        a dedicated channel parallel to ``sandbox_tools``, built once per
+        agent at registration (stateless, no per-session binding needed).
+        ``None``/``[]`` adds no ``web_request`` tool.
 
     Notes
     -----
     To fully disable all tools from a direct API call, pass
-    ``tools=[], mcp_tools=[], sandbox_tools=None``.
+    ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
@@ -416,6 +426,7 @@ async def run_agent(
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
         agent_name=agent_name,
+        web_request_tools=web_request_tools,
     )
 
     lock = await _get_session_lock(resolved_id)
@@ -495,6 +506,7 @@ async def run_agent_stream(
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
     agent_name: str | None = None,
+    web_request_tools: list[Any] | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -507,10 +519,13 @@ async def run_agent_stream(
       from ``mcp.json``; pass ``[]`` to disable MCP tools.
     * ``sandbox_tools`` separately controls sandbox tools. ``None`` adds no
       sandbox tools; pass a list to enable them.
+    * ``web_request_tools`` separately controls the ``web_request`` tool —
+      a dedicated channel parallel to ``sandbox_tools``. ``None`` adds no
+      ``web_request`` tool; pass a list to enable it.
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
     * To fully disable all tools from a direct API call, pass
-      ``tools=[], mcp_tools=[], sandbox_tools=None``.
+      ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
 
     Event vocabulary (kept stable for the chat UI):
 
@@ -539,6 +554,7 @@ async def run_agent_stream(
             workflow_enabled=workflow_enabled,
             workflow_durable_client=workflow_durable_client,
             agent_name=agent_name,
+            web_request_tools=web_request_tools,
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)

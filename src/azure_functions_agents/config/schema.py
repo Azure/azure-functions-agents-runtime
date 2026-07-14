@@ -73,12 +73,30 @@ class DynamicSessionsCodeInterpreterConfig(BaseModel):
     client_id: str | None = None
 
 
+class WebRequestConfig(BaseModel):
+    """Configuration for the built-in, default-on ``web_request`` system tool.
+
+    v1 is intentionally minimal: an exact-host allowlist plus operator caps.
+    See ``docs/frds/0005-web-request-system-tool.md`` for the full (future)
+    surface — per-host auth, wildcard hosts, and redirect following are v2.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    allowed_hosts: list[str] | None = None
+    require_https: bool = True
+    timeout_seconds: float | None = None
+    max_response_bytes: int | None = None
+    max_request_bytes: int | None = None
+
+
 class SystemToolsConfig(BaseModel):
     """Global system tool configuration shared across agents."""
 
     model_config = ConfigDict(extra="forbid")
 
     dynamic_sessions_code_interpreter: DynamicSessionsCodeInterpreterConfig | None = None
+    web_request: WebRequestConfig | bool | None = None
 
 
 class SystemToolsAgentOverride(BaseModel):
@@ -87,6 +105,7 @@ class SystemToolsAgentOverride(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     dynamic_sessions_code_interpreter: bool | None = None
+    web_request: bool | None = None
 
 
 class GlobalConfig(BaseModel):
@@ -151,6 +170,7 @@ class ResolvedAgent(BaseModel):
     skills_disabled: bool = False
     mcp_disabled: bool = False
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None
+    web_request_config: WebRequestConfig | None = None
     input_schema: dict[str, Any] | None
     response_schema: dict[str, Any] | None
     response_example: str | None
