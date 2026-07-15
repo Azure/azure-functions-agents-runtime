@@ -35,7 +35,7 @@
     <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
     <div class="breadcrumb"><a href="agents.html">Agents</a> / Create</div>
     <div class="page-title"><h1>Create agent</h1></div>
-    <p class="page-sub">Scaffold a new <span class="mono">*.agent.md</span> and its supporting config.</p>
+    <p class="page-sub">Describe your agent and pick where it runs — we provision the Function App for you.</p>
 
     <div class="grid cols-2">
       <div class="card">
@@ -80,6 +80,27 @@
           <div class="hint">Attaches the ACA Dynamic Sessions <span class="mono">execute_python</span> tool.</div>
         </div>
 
+        <h3 style="margin-top:22px">4 · Deployment target</h3>
+        <div class="field">
+          <label>Subscription</label>
+          <select><option>Private Test Sub SWAPNILNAGAR</option><option>Visual Studio Enterprise</option><option>Contoso Production</option></select>
+          <div class="hint">We provision the Function App and its resources here, on your behalf.</div>
+        </div>
+        <div class="field">
+          <label>Resource group</label>
+          <div class="pill-row" style="margin-bottom:8px">
+            <label><input type="radio" name="rg" checked style="width:auto;margin-right:6px">Use existing</label>
+            <label><input type="radio" name="rg" style="width:auto;margin-right:6px">Create new</label>
+          </div>
+          <select><option>ServerlessAgent</option><option>rg-support</option><option>rg-ops</option></select>
+          <div class="hint">Agents in the same subscription + resource group share one Function App (multi-agent).</div>
+        </div>
+        <div class="field">
+          <label>Region</label>
+          <select><option>eastus2</option><option>eastus</option><option>westus3</option><option>centralus</option><option>canadacentral</option></select>
+          <div class="hint">Limited to regions supporting Flex Consumption + Foundry gpt-5.4.</div>
+        </div>
+
         <div class="pill-row" style="margin-top:8px">
           <button class="btn primary">Create &amp; open in editor</button>
           <a class="btn" href="agents.html">Cancel</a>
@@ -107,7 +128,14 @@ details when needed.</div>
           <dt>function_app.py</dt><dd class="muted">if missing — <span class="mono">create_function_app()</span></dd>
           <dt>host.json</dt><dd class="muted">if missing — extension bundle</dd>
         </dl>
-        <div class="note" style="margin-top:14px">The generated file is validated against the schema before it lands in the <strong>Authoring</strong> tab.</div>
+        <div class="divider"></div>
+        <h3>Provisions for you</h3>
+        <dl class="kv">
+          <dt>Function App</dt><dd class="muted">Flex Consumption in your Sub / RG</dd>
+          <dt>Storage + App Insights</dt><dd class="muted">working copy, sessions, traces</dd>
+          <dt>Managed identity</dt><dd class="muted">Foundry + storage access (no keys)</dd>
+        </dl>
+        <div class="note" style="margin-top:14px">First agent in a Sub / RG provisions the Function App (~1–2 min); later agents reuse it. <span class="mono">host.json</span> &amp; <span class="mono">requirements.txt</span> stay editable under Advanced files.</div>
       </div>
     </div>
   </main>
