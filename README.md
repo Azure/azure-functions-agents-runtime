@@ -154,6 +154,10 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
+#### Securing endpoints
+
+By default the chat API requires a function/host key (`auth: function`). Configure `builtin_endpoints.auth` to change the policy — `admin` (system key), `anonymous`, or `entra` (Entra ID / Azure AD). In `entra` mode the runtime validates each chat request in-app via platform Easy Auth (`x-ms-client-principal`) or a bearer JWT, with optional tenant/audience/client-id allowlists. The MCP webhook (`/runtime/webhooks/mcp`) is owned by the Functions host, so protect it with a system key or platform-level Easy Auth. See [`docs/front-matter-spec.md#auth--endpoint-authentication`](docs/front-matter-spec.md#auth--endpoint-authentication).
+
 ### Event-driven agents (`<name>.agent.md`)
 
 Define event-triggered agents with `.agent.md` files. Each file corresponds to a single Azure Function. Supported trigger types:

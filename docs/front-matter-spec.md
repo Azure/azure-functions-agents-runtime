@@ -262,9 +262,34 @@ builtin_endpoints:
   debug_chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
   chat_api: boolean  # Enable REST API endpoints even without the chat UI
   mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
+  auth: string | object  # Inbound authentication policy (see below); default "function"
 ```
 
 `debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints: `debug_chat_ui`, `chat_api`, and `mcp`.
+
+##### `auth` — Endpoint authentication
+
+Controls how the chat API (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) and MCP endpoints authenticate inbound requests. Accepts a shorthand string (`auth: entra`) or an object.
+
+```yaml
+builtin_endpoints:
+  chat_api: true
+  auth:
+    mode: entra          # function | admin | anonymous | entra
+    entra:               # only used when mode == "entra"
+      tenant_id: "<tenant-guid>"           # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID
+      allowed_audiences: ["api://agents"]  # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES
+      allowed_client_ids: ["<app-id>"]     # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS
+```
+
+| Mode | Behavior |
+| --- | --- |
+| `function` (default) | API key required — a valid function/host key (`AuthLevel.FUNCTION`). |
+| `admin` | System/host key required (`AuthLevel.ADMIN`). |
+| `anonymous` | No auth — open endpoint (`AuthLevel.ANONYMOUS`). |
+| `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions layer, then each request is validated in-app: platform Easy Auth (`x-ms-client-principal`) if present, otherwise a bearer JWT verified against the tenant's JWKS. Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid identity, 403 on allowlist mismatch). |
+
+**MCP note:** The MCP endpoint (`/runtime/webhooks/mcp`) is owned by the Functions MCP extension and does not receive HTTP headers in-app, so `entra` cannot be validated in-process for MCP. For `auth.mode: entra` with `mcp` enabled, protect the MCP webhook with platform-level Easy Auth; use a system key for API-key protection. A one-time log message is emitted at registration to surface this.
 
 **Endpoint Details:**
 

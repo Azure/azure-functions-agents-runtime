@@ -307,6 +307,9 @@ def test_builtin_endpoint_variants() -> None:
     assert mixed.builtin_endpoints.debug_chat_ui is True
     assert mixed.builtin_endpoints.chat_api is True
     assert mixed.builtin_endpoints.mcp is False
+    assert mixed.builtin_endpoints.auth.mode == "entra"
+    assert mixed.builtin_endpoints.auth.entra is not None
+    assert mixed.builtin_endpoints.auth.entra.allowed_audiences == ["api://agents"]
 
 
 # ---------------------------------------------------------------------------

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+
+type EndpointAuthMode = Literal["function", "admin", "anonymous", "entra"]
 
 
 class McpFilter(BaseModel):
@@ -31,6 +33,40 @@ class ToolsFilter(BaseModel):
     exclude: list[str] = Field(default_factory=list)
 
 
+class EntraAuthConfig(BaseModel):
+    """Entra ID (Azure AD) validation settings for built-in endpoint auth.
+
+    Every field is optional; each falls back to an environment variable at
+    enforcement time so secrets stay out of source
+    (``AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID`` / ``…_ENTRA_AUDIENCES`` /
+    ``…_ENTRA_CLIENT_IDS``). A configured allow-list must contain the caller's
+    matching claim; an empty/unset allow-list skips that check.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    tenant_id: str | None = None
+    allowed_audiences: list[str] = Field(default_factory=list)
+    allowed_client_ids: list[str] = Field(default_factory=list)
+
+
+class EndpointAuthConfig(BaseModel):
+    """Inbound authentication policy for an agent's built-in endpoints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: EndpointAuthMode = "function"
+    entra: EntraAuthConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _coerce_shorthand(cls, value: Any) -> Any:
+        # Accept a bare string shorthand, e.g. ``auth: entra`` -> ``{mode: entra}``.
+        if isinstance(value, str):
+            return {"mode": value}
+        return value
+
+
 class BuiltinEndpointsConfig(BaseModel):
     """Concrete built-in endpoint toggles for debug chat UI, chat API, and MCP exposure."""
 
@@ -39,6 +75,20 @@ class BuiltinEndpointsConfig(BaseModel):
     debug_chat_ui: bool = False
     chat_api: bool = False
     mcp: bool = False
+    auth: EndpointAuthConfig = Field(
+        default_factory=EndpointAuthConfig,
+        description=(
+            "Inbound authentication policy for the chat API and MCP endpoints. "
+            "Modes: function (API key, default), admin (system key), anonymous, entra (Entra ID)."
+        ),
+    )
+
+    @field_validator("auth", mode="before")
+    @classmethod
+    def _default_auth(cls, value: Any) -> Any:
+        if value is None:
+            return EndpointAuthConfig()
+        return value
 
     @model_validator(mode="after")
     def debug_chat_ui_requires_chat_api(self) -> BuiltinEndpointsConfig:

@@ -65,6 +65,10 @@ These Azure Functions Python decorators are intentionally not supported as `.age
 | `mcp_prompt_trigger` | Runtime MCP prompts are not authored as `.agent.md` triggers. | Built-in MCP surfaces. |
 | Dotted connector trigger types such as `teams.new_channel_message_trigger` or `connectors.generic_trigger` | Dotted connector trigger resolution is not supported. | `connector_trigger` |
 
+### Built-in endpoint authentication
+
+The chat API and MCP endpoints registered by `builtin_endpoints` are protected via `builtin_endpoints.auth`. Modes: `function` (API key, default), `admin` (system key), `anonymous`, and `entra` (Entra ID / Azure AD). For `entra`, the chat routes are validated in-app (Easy Auth `x-ms-client-principal` or a bearer JWT), while the MCP webhook relies on platform-level Easy Auth. See [`front-matter-spec.md`](front-matter-spec.md#auth--endpoint-authentication) for the full schema and examples.
+
 ## HTTP Trigger
 
 `http_trigger` exposes the agent as a REST API endpoint. It maps to Azure Functions `app.route(...)`, but the agent runtime owns the handler, prompt construction, session id, and response validation.

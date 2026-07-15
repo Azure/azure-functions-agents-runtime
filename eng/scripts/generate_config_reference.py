@@ -71,6 +71,8 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
     model_class_names = [
         "BuiltinEndpointsConfig", "BuiltinEndpointegersConfig",  # Handle both (typo variant too)
         "DynamicSessionsCodeInterpreterConfig",
+        "EndpointAuthConfig",
+        "EntraAuthConfig",
         "McpFilter",
         "SkillsFilter",
         "ToolsFilter",

@@ -117,6 +117,7 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 | `debug_chat_ui` | boolean | No | `false` | Enable browser-based chat UI at `/agents/{slug}/` plus backing chat APIs |
 | `chat_api` | boolean | No | `false` | Enable REST API endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) |
 | `mcp` | boolean | No | `false` | Expose agent as MCP tool on shared runtime MCP transport |
+| `auth` | object | No | `{}` | Inbound authentication policy for the chat API and MCP endpoints. Modes: function (API key, default), admin (system key), anonymous, entra (Entra ID). |
 
 **Note:** `debug_chat_ui: true` automatically enables `chat_api: true`
 

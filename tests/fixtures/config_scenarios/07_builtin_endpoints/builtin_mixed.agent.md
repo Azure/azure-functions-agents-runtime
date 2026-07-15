@@ -9,6 +9,12 @@ builtin_endpoints:
   debug_chat_ui: true
   chat_api: true
   mcp: false
+  auth:
+    mode: entra
+    entra:
+      tenant_id: "00000000-0000-0000-0000-000000000000"
+      allowed_audiences:
+        - "api://agents"
 ---
 
 You are an agent with debug chat UI and HTTP chat API enabled but MCP exposure off.

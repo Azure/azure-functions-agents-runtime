@@ -44,6 +44,49 @@ def test_builtin_endpoints_debug_chat_ui_enables_chat_api() -> None:
     assert config.chat_api is True
 
 
+def test_builtin_endpoints_auth_defaults_to_function() -> None:
+    config = BuiltinEndpointsConfig(chat_api=True)
+    assert config.auth.mode == "function"
+    assert config.auth.entra is None
+
+
+def test_builtin_endpoints_auth_string_shorthand() -> None:
+    config = BuiltinEndpointsConfig.model_validate({"chat_api": True, "auth": "entra"})
+    assert config.auth.mode == "entra"
+
+
+def test_builtin_endpoints_auth_full_object() -> None:
+    config = BuiltinEndpointsConfig.model_validate(
+        {
+            "chat_api": True,
+            "auth": {
+                "mode": "entra",
+                "entra": {
+                    "tenant_id": "t-1",
+                    "allowed_audiences": ["api://app"],
+                    "allowed_client_ids": ["caller"],
+                },
+            },
+        }
+    )
+    assert config.auth.mode == "entra"
+    assert config.auth.entra is not None
+    assert config.auth.entra.tenant_id == "t-1"
+    assert config.auth.entra.allowed_audiences == ["api://app"]
+
+
+def test_builtin_endpoints_auth_rejects_unknown_mode() -> None:
+    with pytest.raises(ValidationError):
+        BuiltinEndpointsConfig.model_validate({"chat_api": True, "auth": "basic"})
+
+
+def test_builtin_endpoints_auth_rejects_extra_keys() -> None:
+    with pytest.raises(ValidationError):
+        BuiltinEndpointsConfig.model_validate(
+            {"chat_api": True, "auth": {"mode": "entra", "bogus": 1}}
+        )
+
+
 @pytest.mark.parametrize(
     "value",
     [False, None, McpFilter(exclude=["x"])],
