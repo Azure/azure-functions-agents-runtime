@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Create agent</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env" id="env-badge">loading…</span>
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Build</div>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item active" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+  </nav>
+
+  <main class="main">
+    <div class="breadcrumb"><a href="agents.html">Agents</a> / Create</div>
+    <div class="page-title"><h1>Create agent</h1></div>
+    <p class="page-sub">Generates a valid <span class="mono">&lt;name&gt;.agent.md</span> and stores it in blob.</p>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Basics</h3>
+        <div class="field">
+          <label for="name">Name</label>
+          <input type="text" id="name" placeholder="support-triage" autocomplete="off">
+          <div class="hint">Lowercase letters, digits, hyphens. Becomes <span class="mono" id="filename">&lt;name&gt;.agent.md</span>.</div>
+        </div>
+        <div class="field">
+          <label for="description">Description</label>
+          <input type="text" id="description" placeholder="Triages inbound support tickets.">
+        </div>
+        <div class="field">
+          <label for="instructions">Instructions</label>
+          <textarea id="instructions" rows="6" placeholder="You are a support triage assistant…"></textarea>
+          <div class="hint">Markdown body of the agent — its system instructions.</div>
+        </div>
+        <div class="field">
+          <label><input type="checkbox" id="builtin" checked style="width:auto;margin-right:8px">Expose built-in endpoints</label>
+          <div class="hint">Adds chat UI, chat API, SSE stream, and an MCP tool (<span class="mono">builtin_endpoints: true</span>).</div>
+        </div>
+        <div class="pill-row">
+          <button class="btn primary" id="create">Create &amp; edit</button>
+          <a class="btn" href="agents.html">Cancel</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Preview</h3><span class="badge blue" id="pv-file">&lt;name&gt;.agent.md</span></div>
+        <div class="code" id="preview">---
+name: &lt;name&gt;
+description:
+
+builtin_endpoints: true
+---
+
+You are a helpful assistant. Answer concisely.</div>
+        <p class="hint">This is exactly what gets written to storage. You can refine it in the editor after creating.</p>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script src="app.js"></script>
+<script>
+  const $ = id => document.getElementById(id);
+
+  function buildPreview() {
+    const name = ($('name').value || '<name>').trim();
+    const desc = $('description').value.trim();
+    const instr = $('instructions').value.trim() || 'You are a helpful assistant. Answer concisely.';
+    const builtin = $('builtin').checked;
+    let fm = `name: ${name}\ndescription: ${desc}`;
+    if (builtin) fm += `\nbuiltin_endpoints: true`;
+    $('preview').textContent = `---\n${fm}\n---\n\n${instr}`;
+    const fileName = `${name}.agent.md`;
+    $('filename').textContent = fileName;
+    $('pv-file').textContent = fileName;
+  }
+
+  ['name', 'description', 'instructions'].forEach(id => $(id).addEventListener('input', buildPreview));
+  $('builtin').addEventListener('change', buildPreview);
+
+  $('create').addEventListener('click', async () => {
+    const name = $('name').value.trim().toLowerCase();
+    if (!/^[a-z0-9]([a-z0-9-]{0,38}[a-z0-9])?$/.test(name)) {
+      toast('Name must be lowercase letters, digits, or hyphens (1-40 chars).', 'err');
+      return;
+    }
+    $('create').disabled = true;
+    try {
+      await api.create({
+        name,
+        description: $('description').value.trim(),
+        instructions: $('instructions').value,
+        builtin_endpoints: $('builtin').checked,
+      });
+      toast(`Created ${name}.agent.md`, 'ok');
+      location.href = `edit-agent.html?name=${encodeURIComponent(name)}`;
+    } catch (e) {
+      toast(e.message, 'err');
+      $('create').disabled = false;
+    }
+  });
+
+  showBackend();
+  buildPreview();
+</script>
+</body>
+</html>
