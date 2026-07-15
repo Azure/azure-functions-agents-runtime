@@ -30,7 +30,7 @@ shared item affects every agent that uses it.
 | Dimension | Why it matters | Function App | **Agent** (proposed) | Project |
 | --- | --- | --- | --- | --- |
 | **Primary object** | What the customer navigates and reasons about | Function App — an Azure/infra noun | **Agent — the thing customers actually want** | Project — a workspace concept |
-| **Front-door intuitiveness** | How fast a new user "gets it" | Medium — must learn the app is the container | **High — "I want to create an agent"** | Medium — must learn a new grouping first |
+| **Front-door intuitiveness** | How fast a new user "gets it" | Medium — must learn the app is the function app | **High — "I want to create an agent"** | Medium — must learn a new grouping first |
 | **Maps to runtime reality** | Risk of a leaky/again-translated abstraction | **Exact — 1:1 with the deployed app** | Indirect — agent sits one level above the app | Abstraction layered on top of apps |
 | **Shared tools/skills visibility** | Tools/skills are physically shared per app | **Explicit — sharing is shown** | Hidden by default — needs "used by N agents" cues | Visible, scoped to the project |
 | **Safe edits (blast radius)** | Editing a shared tool affects every agent using it | **High — impact is obvious** | Low unless we add warnings + copy-on-edit | High — bounded by the project |
