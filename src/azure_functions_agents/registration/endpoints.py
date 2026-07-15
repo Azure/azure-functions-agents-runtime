@@ -454,13 +454,19 @@ def _register_workflow_status_endpoints(
     *,
     slug: str,
     base_function_name: str,
+    auth: EndpointAuthConfig,
 ) -> None:
     from ..workflows.tools import (
         fetch_session_workflow_status,
         fetch_session_workflows,
     )
 
+    auth_level = resolve_endpoint_auth_level(auth)
+
     async def list_session_workflows(req: Request, client: Any) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
         session_id = req.headers.get("x-ms-session-id") or ""
         if not session_id:
             return Response(
@@ -485,9 +491,14 @@ def _register_workflow_status_endpoints(
         list_session_workflows
     )
     decorated_list = app.durable_client_input(client_name="client")(decorated_list)
-    app.route(route=f"agents/{slug}/workflows", methods=["GET"])(decorated_list)
+    app.route(route=f"agents/{slug}/workflows", methods=["GET"], auth_level=auth_level)(
+        decorated_list
+    )
 
     async def get_session_workflow_status(req: Request, client: Any) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
         session_id = req.headers.get("x-ms-session-id") or ""
         workflow_id = (req.query_params or {}).get("workflow_id", "") or ""
         if not session_id or not workflow_id:
@@ -517,7 +528,9 @@ def _register_workflow_status_endpoints(
         get_session_workflow_status
     )
     decorated_status = app.durable_client_input(client_name="client")(decorated_status)
-    app.route(route=f"agents/{slug}/workflow-status", methods=["GET"])(decorated_status)
+    app.route(route=f"agents/{slug}/workflow-status", methods=["GET"], auth_level=auth_level)(
+        decorated_status
+    )
 
 
 def register_builtin_endpoints(
@@ -579,6 +592,7 @@ def register_builtin_endpoints(
                 app,
                 slug=slug,
                 base_function_name=base_function_name,
+                auth=auth,
             )
 
     if builtin_endpoints.mcp:

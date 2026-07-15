@@ -758,10 +758,49 @@ def test_entra_chat_with_easy_auth_principal_proceeds(
     chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
 
     principal = base64.b64encode(
-        _json.dumps({"claims": [{"typ": "tid", "val": "t-1"}]}).encode("utf-8")
+        _json.dumps(
+            {"auth_typ": "aad", "claims": [{"typ": "tid", "val": "t-1"}]}
+        ).encode("utf-8")
     ).decode("ascii")
     request = DummyRequest({"prompt": "hello"}, headers={"x-ms-client-principal": principal})
     response = asyncio.run(chat_route["handler"](request))
 
     assert response.status_code == 200
+
+
+def test_workflow_endpoints_default_to_function_auth_level(tmp_path: Path) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+
+    for name in ("agents/test_agent/workflows", "agents/test_agent/workflow-status"):
+        route = next(route for route in app.routes if route["route"] == name)
+        assert route["auth_level"] == func.AuthLevel.FUNCTION
+
+
+def test_workflow_endpoints_apply_configured_auth_level(tmp_path: Path) -> None:
+    for mode, expected in (
+        ("admin", func.AuthLevel.ADMIN),
+        ("anonymous", func.AuthLevel.ANONYMOUS),
+        ("entra", func.AuthLevel.ANONYMOUS),
+    ):
+        app = FakeFunctionApp()
+        resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode=mode))  # type: ignore[arg-type]
+        register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+        for name in ("agents/test_agent/workflows", "agents/test_agent/workflow-status"):
+            route = next(route for route in app.routes if route["route"] == name)
+            assert route["auth_level"] == expected
+
+
+def test_entra_workflow_endpoints_without_identity_are_unauthorized(tmp_path: Path) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+
+    for name in ("agents/test_agent/workflows", "agents/test_agent/workflow-status"):
+        route = next(route for route in app.routes if route["route"] == name)
+        response = asyncio.run(route["handler"](DummyRequest({}), client=object()))
+        assert response.status_code == 401
 
