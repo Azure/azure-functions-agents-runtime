@@ -29,6 +29,18 @@ Live Preview** (or **Reveal in File Explorer** and double-click).
 | `monitoring.html` | Fleet monitoring | FR-1–FR-3, FR-12 |
 | `styles.css` | Shared styling | — |
 
+## Concept explorer — mental models
+
+Three candidate mental models for how customers organize agents/tools/skills/hosting,
+with a full write-up in [`../proposals/mental-models.md`](../proposals/mental-models.md):
+
+| File | Model |
+| --- | --- |
+| `concepts/index.html` | Side-by-side chooser + recommendation |
+| `concepts/model1-functionapp.html` | Function App-centric (sharing visible) |
+| `concepts/model2-agent.html` | Agent-centric (front-facing; shared-edit warnings) |
+| `concepts/model3-project.html` | Project-centric (groups resources; needs a store) |
+
 ## Notes for reviewers
 
 - The **agent-detail** tabs are interactive (click to switch panes).
