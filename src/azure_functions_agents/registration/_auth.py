@@ -141,7 +141,7 @@ def _check_allowlists(
 
 def _decode_easy_auth_principal(header_value: str) -> dict[str, Any] | None:
     try:
-        raw = base64.b64decode(header_value)
+        raw = base64.b64decode(header_value, validate=True)
         data = json.loads(raw)
     except (binascii.Error, ValueError):
         return None
@@ -191,8 +191,8 @@ def _validate_bearer_token(
     try:
         signing_key = _get_signing_key(token, tenant_id)
         claims = jwt.decode(token, signing_key, **decode_kwargs)
-    except Exception as exc:
-        return None, AuthError(401, f"Invalid bearer token: {exc}")
+    except Exception:
+        return None, AuthError(401, "Invalid bearer token.")
 
     if not isinstance(claims, dict):
         return None, AuthError(401, "Invalid bearer token payload.")
@@ -217,6 +217,9 @@ def authorize_entra_request(
         principal = _decode_easy_auth_principal(principal_header)
         if principal is None:
             return AuthError(401, "Invalid client principal header.")
+        auth_typ = principal.get("auth_typ")
+        if not isinstance(auth_typ, str) or auth_typ.lower() not in {"aad", "azureactivedirectory"}:
+            return AuthError(401, "Entra authentication required.")
         return _check_allowlists(_flatten_claims(principal), entra)
 
     authorization = get_header(_AUTHORIZATION_HEADER)
