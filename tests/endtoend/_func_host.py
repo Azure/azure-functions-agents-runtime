@@ -15,10 +15,12 @@ import os
 import queue
 import shutil
 import signal
+import socket
 import subprocess
 import threading
 import time
-from dataclasses import dataclass
+from collections.abc import Iterator, Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 
 # Substrings (matched case-insensitively) that indicate the host finished
@@ -50,6 +52,37 @@ class FuncStartResult:
     started: bool
     reason: str
     output: str
+
+
+@dataclass
+class HostHandle:
+    """A live ``func start`` host that stays up for HTTP invocations."""
+
+    base_url: str
+    port: int
+    _host: _HostProcess | None = field(default=None, repr=False, compare=False)
+
+    @property
+    def admin_url(self) -> str:
+        """Base URL of the Functions admin API (no trailing slash)."""
+        return f"{self.base_url}/admin"
+
+    def read_output(self) -> str:
+        """Return everything the host has logged so far (drains pending output)."""
+        if self._host is None:
+            return ""
+        _drain(self._host)
+        return "".join(self._host.lines)
+
+    def wait_for_log(self, needle: str, *, timeout: float = 30.0, poll: float = 0.25) -> bool:
+        """Poll host output until ``needle`` appears (case-insensitive) or timeout."""
+        needle_lower = needle.lower()
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if needle_lower in self.read_output().lower():
+                return True
+            time.sleep(poll)
+        return needle_lower in self.read_output().lower()
 
 
 def ensure_local_settings(app_dir: Path) -> None:
@@ -113,6 +146,133 @@ def _terminate(proc: subprocess.Popen[str]) -> None:
         proc.wait(timeout=5)
 
 
+def _free_port() -> int:
+    """Reserve an ephemeral localhost port for a ``func start`` instance."""
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
+        sock.bind(("127.0.0.1", 0))
+        return int(sock.getsockname()[1])
+
+
+@dataclass
+class _HostProcess:
+    """A launched ``func`` process plus the machinery to read its output."""
+
+    proc: subprocess.Popen[str]
+    line_queue: queue.Queue[str | None]
+    reader: threading.Thread
+    lines: list[str]
+
+
+def _spawn(
+    func_exe: str,
+    app_dir: Path,
+    *,
+    port: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> _HostProcess:
+    """Launch ``func start`` and start a background thread draining its output."""
+    creationflags = 0
+    preexec = None
+    if os.name == "nt":
+        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        preexec = os.setsid
+
+    cmd = [func_exe, "start"]
+    if port is not None:
+        cmd += ["--port", str(port)]
+
+    proc_env: dict[str, str] | None = None
+    if env is not None:
+        proc_env = {**os.environ, **env}
+
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(app_dir),
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        text=True,
+        bufsize=1,
+        creationflags=creationflags,
+        preexec_fn=preexec,  # type: ignore[arg-type]
+        env=proc_env,
+    )
+
+    lines: list[str] = []
+    line_queue: queue.Queue[str | None] = queue.Queue()
+
+    def _reader() -> None:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            line_queue.put(line)
+        line_queue.put(None)
+
+    reader = threading.Thread(target=_reader, daemon=True)
+    reader.start()
+    return _HostProcess(proc=proc, line_queue=line_queue, reader=reader, lines=lines)
+
+
+def _await_ready(
+    host: _HostProcess,
+    *,
+    timeout: float,
+    ready_grace: float,
+) -> tuple[bool, bool, str]:
+    """Scan host output until it reports readiness, a failure, or times out.
+
+    Returns ``(ready, failed, reason)``. The process is left running; callers are
+    responsible for terminating it.
+    """
+    deadline = time.monotonic() + timeout
+    ready = False
+    failed = False
+    ready_deadline: float | None = None
+    reason = f"timed out after {timeout:.0f}s waiting for the host to start"
+
+    while True:
+        now = time.monotonic()
+        if now > deadline:
+            break
+        if ready and ready_deadline is not None and now > ready_deadline:
+            reason = "host started"
+            break
+
+        try:
+            item = host.line_queue.get(timeout=0.5)
+        except queue.Empty:
+            continue
+
+        if item is None:
+            # Output stream closed => the process exited on its own.
+            reason = "host started" if ready else "func exited before the host started"
+            break
+
+        host.lines.append(item)
+        lowered = item.lower()
+
+        if any(marker in lowered for marker in FAILURE_MARKERS):
+            failed = True
+            reason = f"detected failure marker: {item.strip()}"
+            break
+
+        if not ready and any(marker in lowered for marker in READY_MARKERS):
+            ready = True
+            ready_deadline = time.monotonic() + ready_grace
+
+    return ready, failed, reason
+
+
+def _drain(host: _HostProcess) -> None:
+    """Append any queued output produced between the last read and shutdown."""
+    while True:
+        try:
+            item = host.line_queue.get_nowait()
+        except queue.Empty:
+            break
+        if item is not None:
+            host.lines.append(item)
+
+
 def start_and_verify(
     app_dir: Path,
     *,
@@ -132,84 +292,58 @@ def start_and_verify(
     if func_exe is None:
         return FuncStartResult(False, "`func` executable not found on PATH", "")
 
-    creationflags = 0
-    preexec = None
-    if os.name == "nt":
-        creationflags = subprocess.CREATE_NEW_PROCESS_GROUP
-    else:
-        preexec = os.setsid
+    host = _spawn(func_exe, app_dir)
+    try:
+        ready, failed, reason = _await_ready(host, timeout=timeout, ready_grace=ready_grace)
+    finally:
+        _terminate(host.proc)
+        host.reader.join(timeout=5)
 
-    proc = subprocess.Popen(
-        [func_exe, "start"],
-        cwd=str(app_dir),
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        bufsize=1,
-        creationflags=creationflags,
-        preexec_fn=preexec,  # type: ignore[arg-type]
+    _drain(host)
+
+    return FuncStartResult(
+        started=ready and not failed,
+        reason=reason,
+        output="".join(host.lines),
     )
 
-    lines: list[str] = []
-    line_queue: queue.Queue[str | None] = queue.Queue()
 
-    def _reader() -> None:
-        assert proc.stdout is not None
-        for line in proc.stdout:
-            line_queue.put(line)
-        line_queue.put(None)
+@contextlib.contextmanager
+def running_host(
+    app_dir: Path,
+    *,
+    timeout: float = 150.0,
+    ready_grace: float = 3.0,
+    func_path: str | None = None,
+    port: int | None = None,
+    env: Mapping[str, str] | None = None,
+) -> Iterator[HostHandle]:
+    """Start ``func start`` for ``app_dir`` and keep it running for invocations.
 
-    reader = threading.Thread(target=_reader, daemon=True)
-    reader.start()
+    Yields a :class:`HostHandle` pointing at the live host once it reports a clean
+    startup. The host is always terminated on exit. Raises :class:`RuntimeError`
+    if ``func`` is unavailable or the host fails to start.
+    """
+    ensure_local_settings(app_dir)
 
-    deadline = time.monotonic() + timeout
-    ready = False
-    failed = False
-    ready_deadline: float | None = None
-    reason = f"timed out after {timeout:.0f}s waiting for the host to start"
+    func_exe = func_path or shutil.which("func")
+    if func_exe is None:
+        raise RuntimeError("`func` executable not found on PATH")
 
+    chosen_port = port if port is not None else _free_port()
+    host = _spawn(func_exe, app_dir, port=chosen_port, env=env)
     try:
-        while True:
-            now = time.monotonic()
-            if now > deadline:
-                break
-            if ready and ready_deadline is not None and now > ready_deadline:
-                reason = "host started"
-                break
-
-            try:
-                item = line_queue.get(timeout=0.5)
-            except queue.Empty:
-                continue
-
-            if item is None:
-                # Output stream closed => the process exited on its own.
-                reason = "host started" if ready else "func exited before the host started"
-                break
-
-            lines.append(item)
-            lowered = item.lower()
-
-            if any(marker in lowered for marker in FAILURE_MARKERS):
-                failed = True
-                reason = f"detected failure marker: {item.strip()}"
-                break
-
-            if not ready and any(marker in lowered for marker in READY_MARKERS):
-                ready = True
-                ready_deadline = time.monotonic() + ready_grace
+        ready, failed, reason = _await_ready(host, timeout=timeout, ready_grace=ready_grace)
+        if not ready or failed:
+            _terminate(host.proc)
+            host.reader.join(timeout=5)
+            _drain(host)
+            raise RuntimeError(
+                f"host for {app_dir.name} failed to start ({reason}):\n{''.join(host.lines)}"
+            )
+        yield HostHandle(base_url=f"http://localhost:{chosen_port}", port=chosen_port, _host=host)
     finally:
-        _terminate(proc)
-        reader.join(timeout=5)
+        _terminate(host.proc)
+        host.reader.join(timeout=5)
+        _drain(host)
 
-    # Drain anything the reader queued between the last read and shutdown so the
-    # captured output is complete for diagnostics.
-    while True:
-        try:
-            item = line_queue.get_nowait()
-        except queue.Empty:
-            break
-        if item is not None:
-            lines.append(item)
-
-    return FuncStartResult(started=ready and not failed, reason=reason, output="".join(lines))

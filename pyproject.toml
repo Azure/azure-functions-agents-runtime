@@ -52,6 +52,9 @@ dev = [
     # every sample against the editable repo install (no per-sample requirements.txt install).
     # daily-azure-report:
     "jmespath==1.0.*",
+    # E2E storage-trigger tests: write blobs/queue messages to Azurite to fire blob/queue triggers.
+    # (azure-storage-blob is already a core runtime dependency above.)
+    "azure-storage-queue==12.13.*",
 ]
 
 [tool.setuptools.packages.find]
