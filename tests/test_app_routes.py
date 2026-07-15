@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from typing import get_type_hints
 
 import azure.durable_functions as df
 import pytest
@@ -136,6 +137,7 @@ def test_workflow_routes_register_durable_client_binding(tmp_path: Path):
         "get_session_workflow_status",
     ]:
         assert "durableClient" in _binding_types(function_app, function_name)
+        assert get_type_hints(_registered_function(function_app, function_name))["client"] is str
 
 
 def test_workflow_mcp_endpoint_keeps_function_name_and_trigger_binding(tmp_path: Path):

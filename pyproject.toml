@@ -49,6 +49,10 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
+    # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
+    # every sample against the editable repo install (no per-sample requirements.txt install).
+    # daily-azure-report:
+    "jmespath==1.0.*",
 ]
 
 [tool.setuptools.packages.find]
@@ -128,3 +132,11 @@ ignore_errors = true
 init_forbid_extra = true
 init_typed = true
 warn_required_dynamic_aliases = true
+
+[tool.pytest.ini_options]
+# E2E tests require Core Tools (func) + Azurite, so they are deselected from the
+# default unit-test run. The E2E pipeline opts back in with `-m e2e`.
+addopts = "-m 'not e2e'"
+markers = [
+    "e2e: end-to-end tests that boot sample apps with `func start` (require func + Azurite).",
+]

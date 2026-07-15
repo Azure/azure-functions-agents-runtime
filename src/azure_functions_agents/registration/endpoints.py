@@ -103,8 +103,8 @@ def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
 
 
-def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, Any | None], Awaitable[Response]]:
-    async def chat(req: Request, client: Any | None = None) -> Response:
+def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, str], Awaitable[Response]]:
+    async def chat(req: Request, client: str) -> Response:
         return await handle_chat(req, client)
 
     return chat
@@ -119,8 +119,8 @@ def _chat_handler_without_client(handle_chat: ChatHandler) -> Callable[[Request]
 
 def _chat_stream_handler_with_client(
     handle_chat_stream: ChatStreamHandler,
-) -> Callable[[Request, Any | None], Awaitable[StreamingResponse]]:
-    async def chat_stream(req: Request, client: Any | None = None) -> StreamingResponse:
+) -> Callable[[Request, str], Awaitable[StreamingResponse]]:
+    async def chat_stream(req: Request, client: str) -> StreamingResponse:
         return await handle_chat_stream(req, client)
 
     return chat_stream
@@ -137,8 +137,8 @@ def _chat_stream_handler_without_client(
 
 def _mcp_agent_chat_handler_with_client(
     handle_mcp_agent_chat: McpAgentChatHandler,
-) -> Callable[[str, Any | None], Awaitable[str]]:
-    async def mcp_agent_chat(context: str, client: Any | None = None) -> str:
+) -> Callable[[str, str], Awaitable[str]]:
+    async def mcp_agent_chat(context: str, client: str) -> str:
         return await handle_mcp_agent_chat(context, client)
 
     return mcp_agent_chat
@@ -463,7 +463,7 @@ def _register_workflow_status_endpoints(
 
     auth_level = resolve_endpoint_auth_level(auth)
 
-    async def list_session_workflows(req: Request, client: Any) -> Response:
+    async def list_session_workflows(req: Request, client: str) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
@@ -495,7 +495,7 @@ def _register_workflow_status_endpoints(
         decorated_list
     )
 
-    async def get_session_workflow_status(req: Request, client: Any) -> Response:
+    async def get_session_workflow_status(req: Request, client: str) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth)
         if auth_error is not None:
             return _json_error(auth_error.message, status_code=auth_error.status_code)
