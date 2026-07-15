@@ -27,16 +27,26 @@ shared item affects every agent that uses it.
 
 ## 3. Comparison
 
-| Dimension | Function App | **Agent** | Project |
-| --- | --- | --- | --- |
-| Primary object | Function App | Agent | Project |
-| Intuitive front door | Medium | **High** | Medium |
-| Maps to runtime | **Exact** | Indirect | Abstraction |
-| Sharing visible / safe edits | **Yes** | No (needs warnings) | Yes (project scope) |
-| Groups many resources | Weak | Weak | **Strong** |
-| New persistence needed | No | No | **Yes** |
-| Added cost / moving parts | None | None | **High** |
-| Build effort (v1) | Low | **Low–Med** | High |
+| Dimension | Why it matters | Function App | **Agent** (proposed) | Project |
+| --- | --- | --- | --- | --- |
+| **Primary object** | What the customer navigates and reasons about | Function App — an Azure/infra noun | **Agent — the thing customers actually want** | Project — a workspace concept |
+| **Front-door intuitiveness** | How fast a new user "gets it" | Medium — must learn the app is the container | **High — "I want to create an agent"** | Medium — must learn a new grouping first |
+| **Maps to runtime reality** | Risk of a leaky/again-translated abstraction | **Exact — 1:1 with the deployed app** | Indirect — agent sits one level above the app | Abstraction layered on top of apps |
+| **Shared tools/skills visibility** | Tools/skills are physically shared per app | **Explicit — sharing is shown** | Hidden by default — needs "used by N agents" cues | Visible, scoped to the project |
+| **Safe edits (blast radius)** | Editing a shared tool affects every agent using it | **High — impact is obvious** | Low unless we add warnings + copy-on-edit | High — bounded by the project |
+| **Grouping many resources** | Real orgs span multiple apps, storage, Foundry, connectors | Weak — one app only | Weak — one app per agent-group | **Strong — many resources in one workspace** |
+| **Isolation between agents** | Noisy-neighbor, scaling, quota, secrets | App-shared | App-shared | Project-scoped |
+| **New persistence needed** | Extra stateful service to build + operate | No — files are the source of truth | No — same blob working copy | **Yes — a project store to track membership/resources** |
+| **Added cost / moving parts** | Ongoing $$ and complexity | None | None | **High — store + sync + lifecycle + RBAC** |
+| **Build effort (v1)** | Time to a working create→edit→deploy loop | Low | **Low–Med** | High |
+| **Path to scale later** | Can it grow without a rewrite? | Add an agent-first face | **Add Projects on top when needed** | Already the end state |
+
+**Reading the table:** Function App is the most *honest* (matches the runtime) but
+leads with infra vocabulary. Project is the *cleanest at scale* but is the only
+option needing a new, always-on persistence layer. **Agent** wins the front door
+and needs **no new state** — its one weakness (hidden sharing) is fixable in the UI
+with "used by N agents", edit warnings, and copy-on-edit, which is why it's the v1
+proposal.
 
 ## 4. Why Project-centric is costly
 
