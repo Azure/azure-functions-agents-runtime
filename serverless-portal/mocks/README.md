@@ -15,9 +15,9 @@ Live Preview** (or **Reveal in File Explorer** and double-click).
 | File | Screen | Requirements |
 | --- | --- | --- |
 | `index.html` | Dashboard (fleet overview) | FR-1–FR-3 |
-| `agents.html` | Agents catalog | FR-4–FR-6 |
+| `agents.html` | Agents list + optional Advanced files (host.json, requirements.txt, config) | FR-4–FR-6 |
 | `agent-detail.html` | Agent detail (tabbed: Overview, Authoring, Tools & MCP, Triggers, Sessions, Monitoring) | FR-7–FR-12 |
-| `create-agent.html` | Create agent (live preview) | FR-13–FR-14 |
+| `create-agent.html` | Create agent — frictionless; hosting provisioned & managed for you (live preview) | FR-13–FR-14 |
 | `playground.html` | Chat / test playground | FR-15–FR-17 |
 | `source-control.html` | Source & history (blob working copy → Publish → Push to GitHub) | FR-33–FR-38 |
 | `connectors.html` | Connectors hub (SRE Agent–inspired) | FR-18–FR-21 |

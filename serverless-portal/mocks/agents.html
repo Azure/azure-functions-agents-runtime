@@ -35,7 +35,7 @@
     <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
     <div class="breadcrumb">Home / Agents</div>
     <div class="page-title"><h1>Agents</h1></div>
-    <p class="page-sub">Every <span class="mono">*.agent.md</span> discovered in this project.</p>
+    <p class="page-sub">Create and manage agents — hosting is provisioned and managed for you.</p>
 
     <div class="toolbar">
       <a class="btn primary" href="create-agent.html">＋ Create agent</a>
@@ -110,7 +110,24 @@
         </tbody>
       </table>
     </div>
+
+    <div class="divider"></div>
+    <div class="card">
+      <div class="card-head"><h3>Advanced files</h3><span class="badge gray">optional — hosting is managed for you</span></div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 12px">You don't need these to ship an agent. They're the escape hatch when you need finer control over the underlying Function App.</p>
+      <table>
+        <thead><tr><th>File</th><th>Purpose</th><th></th></tr></thead>
+        <tbody>
+          <tr><td class="mono">requirements.txt</td><td class="cell-sub">Python packages your agents need</td><td><a href="agent-detail.html">Edit →</a></td></tr>
+          <tr><td class="mono">host.json</td><td class="cell-sub">Functions host configuration</td><td><a href="agent-detail.html">Edit →</a></td></tr>
+          <tr><td class="mono">agents.config.yaml</td><td class="cell-sub">Global defaults (model, timeout, system tools)</td><td><a href="agent-detail.html">Edit →</a></td></tr>
+          <tr><td class="mono">function_app.py</td><td class="cell-sub">Entry point — managed by the platform</td><td><span class="muted">read-only</span></td></tr>
+        </tbody>
+      </table>
+      <p class="hint">Edits to <span class="mono">requirements.txt</span> and <span class="mono">host.json</span> are validated before Publish (packages affect build time &amp; supply-chain risk).</p>
+    </div>
   </main>
 </div>
 </body>
 </html>
+
