@@ -20,6 +20,7 @@
     <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
     <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
     <div class="group-label">Build</div>
+    <a class="item" href="function-apps.html"><span class="ico">📦</span> Function Apps</a>
     <a class="item active" href="agents.html"><span class="ico">🤖</span> Agents</a>
     <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
     <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
@@ -33,11 +34,12 @@
 
   <main class="main">
     <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
-    <div class="breadcrumb">Home / Agents</div>
-    <div class="page-title"><h1>Agents</h1></div>
-    <p class="page-sub">Create and manage agents — hosting is provisioned and managed for you.</p>
+    <div class="breadcrumb"><a href="function-apps.html">Function Apps</a> / func-support-team</div>
+    <div class="page-title"><h1>Agents</h1><span class="badge blue">func-support-team</span></div>
+    <p class="page-sub">Agents hosted in this Function App · <span class="muted">rg-support · eastus2</span> · one app can host many agents.</p>
 
     <div class="toolbar">
+      <select style="width:auto"><option>func-support-team (3 agents)</option><option>func-agent-func-nldwouneaobbm (1 agent)</option><option>func-ops-bots (2 agents)</option></select>
       <a class="btn primary" href="create-agent.html">＋ Create agent</a>
       <button class="btn">⟳ Refresh</button>
       <div class="spacer" style="flex:1"></div>
@@ -113,8 +115,8 @@
 
     <div class="divider"></div>
     <div class="card">
-      <div class="card-head"><h3>Advanced files</h3><span class="badge gray">optional — hosting is managed for you</span></div>
-      <p class="muted" style="font-size:12.5px;margin:0 0 12px">You don't need these to ship an agent. They're the escape hatch when you need finer control over the underlying Function App.</p>
+      <div class="card-head"><h3>App files</h3><span class="badge gray">shared by all agents in this Function App</span></div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 12px">Advanced — the underlying Function App's config. Not required to ship an agent.</p>
       <table>
         <thead><tr><th>File</th><th>Purpose</th><th></th></tr></thead>
         <tbody>

@@ -20,6 +20,7 @@
     <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
     <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
     <div class="group-label">Build</div>
+    <a class="item" href="function-apps.html"><span class="ico">📦</span> Function Apps</a>
     <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
     <a class="item active" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
     <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
@@ -35,7 +36,7 @@
     <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
     <div class="breadcrumb"><a href="agents.html">Agents</a> / Create</div>
     <div class="page-title"><h1>Create agent</h1></div>
-    <p class="page-sub">Describe your agent and pick where it runs — we provision the Function App for you.</p>
+    <p class="page-sub">Add an agent to one of your Function Apps — or spin up a new one.</p>
 
     <div class="grid cols-2">
       <div class="card">
@@ -80,25 +81,19 @@
           <div class="hint">Attaches the ACA Dynamic Sessions <span class="mono">execute_python</span> tool.</div>
         </div>
 
-        <h3 style="margin-top:22px">4 · Deployment target</h3>
+        <h3 style="margin-top:22px">4 · Function App</h3>
         <div class="field">
-          <label>Subscription</label>
-          <select><option>Private Test Sub SWAPNILNAGAR</option><option>Visual Studio Enterprise</option><option>Contoso Production</option></select>
-          <div class="hint">We provision the Function App and its resources here, on your behalf.</div>
-        </div>
-        <div class="field">
-          <label>Resource group</label>
+          <label>Host this agent in</label>
           <div class="pill-row" style="margin-bottom:8px">
-            <label><input type="radio" name="rg" checked style="width:auto;margin-right:6px">Use existing</label>
-            <label><input type="radio" name="rg" style="width:auto;margin-right:6px">Create new</label>
+            <label><input type="radio" name="app" checked style="width:auto;margin-right:6px">Existing Function App</label>
+            <label><input type="radio" name="app" style="width:auto;margin-right:6px">New Function App</label>
           </div>
-          <select><option>ServerlessAgent</option><option>rg-support</option><option>rg-ops</option></select>
-          <div class="hint">Agents in the same subscription + resource group share one Function App (multi-agent).</div>
-        </div>
-        <div class="field">
-          <label>Region</label>
-          <select><option>eastus2</option><option>eastus</option><option>westus3</option><option>centralus</option><option>canadacentral</option></select>
-          <div class="hint">Limited to regions supporting Flex Consumption + Foundry gpt-5.4.</div>
+          <select>
+            <option>func-support-team — rg-support · eastus2 (3 agents)</option>
+            <option>func-agent-func-nldwouneaobbm — ServerlessAgent · eastus2 (1 agent)</option>
+            <option>func-ops-bots — rg-ops · westus3 (2 agents)</option>
+          </select>
+          <div class="hint">One Function App can host many agents. Need a new one? <a href="create-function-app.html">Create a Function App →</a> (asks Subscription + Resource Group).</div>
         </div>
 
         <div class="pill-row" style="margin-top:8px">
@@ -135,7 +130,7 @@ details when needed.</div>
           <dt>Storage + App Insights</dt><dd class="muted">working copy, sessions, traces</dd>
           <dt>Managed identity</dt><dd class="muted">Foundry + storage access (no keys)</dd>
         </dl>
-        <div class="note" style="margin-top:14px">First agent in a Sub / RG provisions the Function App (~1–2 min); later agents reuse it. <span class="mono">host.json</span> &amp; <span class="mono">requirements.txt</span> stay editable under Advanced files.</div>
+        <div class="note" style="margin-top:14px">Adding to an existing app drops the file in and re-publishes. A new app provisions a Function App in your Subscription / Resource group (~1–2 min). <span class="mono">host.json</span> &amp; <span class="mono">requirements.txt</span> stay editable at the app level.</div>
       </div>
     </div>
   </main>

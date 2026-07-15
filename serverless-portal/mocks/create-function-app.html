@@ -1,0 +1,123 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Serverless Agent Portal — Create Function App</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, sessions, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Overview</div>
+    <a class="item" href="index.html"><span class="ico">▤</span> Dashboard</a>
+    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
+    <div class="group-label">Build</div>
+    <a class="item active" href="function-apps.html"><span class="ico">📦</span> Function Apps</a>
+    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
+    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
+    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
+    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
+    <div class="breadcrumb"><a href="function-apps.html">Function Apps</a> / Create</div>
+    <div class="page-title"><h1>Create Function App</h1></div>
+    <p class="page-sub">Pick a subscription and resource group — we provision a Flex Consumption Function App on your behalf. Add agents to it afterward.</p>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>1 · Azure target</h3>
+        <div class="field">
+          <label>Subscription</label>
+          <select>
+            <option>Private Test Sub SWAPNILNAGAR</option>
+            <option>Visual Studio Enterprise</option>
+            <option>Contoso Production</option>
+          </select>
+          <div class="hint">The Function App and its resources are billed here.</div>
+        </div>
+        <div class="field">
+          <label>Resource group</label>
+          <div class="pill-row" style="margin-bottom:8px">
+            <label><input type="radio" name="rg" checked style="width:auto;margin-right:6px">Use existing</label>
+            <label><input type="radio" name="rg" style="width:auto;margin-right:6px">Create new</label>
+          </div>
+          <select>
+            <option>ServerlessAgent</option>
+            <option>rg-support</option>
+            <option>rg-ops</option>
+          </select>
+          <div class="hint">Or type a name when "Create new" is selected.</div>
+        </div>
+        <div class="field">
+          <label>Region</label>
+          <select>
+            <option>eastus2</option><option>eastus</option><option>westus3</option>
+            <option>centralus</option><option>canadacentral</option>
+          </select>
+          <div class="hint">Limited to regions supporting Flex Consumption + Foundry gpt-5.4.</div>
+        </div>
+
+        <h3 style="margin-top:22px">2 · App</h3>
+        <div class="field">
+          <label>Function App name</label>
+          <input type="text" value="func-support-team" oninput="document.getElementById('pv-name').textContent=this.value||'func-my-app'; document.getElementById('pv-name2').textContent=this.value||'func-my-app';">
+          <div class="hint">Must be globally unique across <span class="mono">*.azurewebsites.net</span>.</div>
+        </div>
+        <div class="field">
+          <label>Model provider</label>
+          <select>
+            <option>Reuse Foundry (ServerlessAgent · gpt-5.4)</option>
+            <option>Provision new Foundry project</option>
+            <option>Azure OpenAI</option>
+          </select>
+          <div class="hint">Reusing the existing Foundry account is fastest and cheapest.</div>
+        </div>
+
+        <div class="pill-row" style="margin-top:8px">
+          <button class="btn primary">Create Function App</button>
+          <a class="btn" href="function-apps.html">Cancel</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>What gets created</h3><span class="badge blue" id="pv-name">func-support-team</span></div>
+        <table>
+          <tbody>
+            <tr><td>Resource group</td><td class="mono">ServerlessAgent</td></tr>
+            <tr><td>Function App</td><td class="mono" id="pv-name2">func-support-team</td></tr>
+            <tr><td>Hosting plan</td><td>Flex Consumption (FC1)</td></tr>
+            <tr><td>Storage account</td><td class="cell-sub">working copy + deployment package + sessions</td></tr>
+            <tr><td>Application Insights</td><td class="cell-sub">traces &amp; metrics</td></tr>
+            <tr><td>Managed identity</td><td class="cell-sub">Foundry + storage access (no keys)</td></tr>
+            <tr><td>Foundry</td><td class="cell-sub">reused: ServerlessAgent · gpt-5.4</td></tr>
+          </tbody>
+        </table>
+        <div class="divider"></div>
+        <h3>Scaffolded files</h3>
+        <div class="code">function_app.py
+host.json
+requirements.txt
+agents.config.yaml
+agents/            <span class="c"># many agents live here</span></div>
+        <div class="note" style="margin-top:14px">After creation you land on this app's <strong>Agents</strong> view — add one or more <span class="mono">*.agent.md</span> files. <span class="mono">host.json</span> and <span class="mono">requirements.txt</span> are editable at the app level.</div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
