@@ -509,7 +509,7 @@ handoff participant may itself use `as_tool()` specialists.
 | 2 | Target interaction | "one assistant throughout" vs "specialist takes over" | **One assistant throughout** (→ delegation) | Human (user) | 2026-07-14 |
 | 3 | Dependency for v1 | none (`as_tool` in core 1.3.x) / orchestrations beta / orchestrations stable + core bump | **None** (use `as_tool`, no new dep) | Agent (proposed) | 2026-07-14 |
 | 4 | Handoff disposition | drop / "maybe later" / committed fast-follow / v1 preview | **Committed fast-follow, chat-scoped, designed-for in v1** | Human (user) | 2026-07-14 |
-| 5 | Authoring field name | `subagents` / `delegates_to` / `agents` / reuse `workflows` | **`subagents`** (avoids `workflows` collision) | Agent (proposed — confirm) | 2026-07-14 |
+| 5 | Authoring field name | `subagents` / `delegates_to` / `agents` / reuse `workflows` | **`subagents`** (avoids `workflows` collision) | Human (user) | 2026-07-15 |
 | 6 | Mutual / peer references (A↔B) | reject cycles / single-level (structural) / nested + depth cap | **Single-level in v1**, enforced structurally (a delegated specialist has no `delegate_*` tools wired), so mutual refs are benign and no cycle detection is needed; nesting is a later extension | Human (user) | 2026-07-14 |
 | 7 | Delegation vs handoff coexistence | either-or / both coexist + compose | **Coexist + compose** (a handoff participant may hold `as_tool` sub-agents) | Human (user) | 2026-07-14 |
 | 8 | HITL in v1 | support / none | **None** — no HITL/approval exists in the runtime today (verified); v1 sub-agents run autonomously; HITL is net-new and lands with the handoff fast-follow | Agent (proposed — confirm) | 2026-07-14 |
@@ -522,6 +522,7 @@ handoff participant may itself use `as_tool()` specialists.
 | 15 | Delegated-role capability scope, re-examined via cross-framework research | keep original restrictive framing / drop restrictions / reframe | **Reframe** — a survey of MAF + OpenAI, Anthropic, LangGraph, AutoGen, CrewAI, and Google ADK confirmed MAF imposes *none* of the originally-drafted restrictions and that a delegated sub-agent running with its own tools is the universal norm. Dropped the "workflow-tool strip" (redundant with FRD 0004's main-only gating); reframed sandbox/context as request-scoped defaults, not restrictions; kept **single-level** (#6) as the one real delegation rule — enforced structurally (a delegated specialist has no `delegate_*` tools wired), precedented (ADK task-mode, CrewAI), with bounded nesting left as a localized future change | Human (user) | 2026-07-15 |
 | 16 | Drop `id` and `tool_name` for v1 (simplicity) | keep both / drop both / drop one | **Drop both** — identity is the file-stem slug (collisions fail fast app-wide — see #17); the delegated tool is always `delegate_<slug>`. Removes a field and the id/name/slug confusion; both are re-addable later as non-breaking additions if a real need appears | Human (user) | 2026-07-15 |
 | 17 | Same-stem slug collision handling (base runtime) | keep auto-suffix+warn / fail-fast app-wide / open separate issue | **Fail-fast app-wide** — replace `_naming.py`'s silent auto-suffix with a startup error, unifying the contract with duplicate skill/workflow-tool handling and guaranteeing unique slugs for `subagents` references. **Breaking**: existing apps with same-stem files must rename one (release-note item) | Human (user) | 2026-07-15 |
+| 18 | Who may declare `subagents` | any independently runnable agent / main-agent-only (mirror FRD 0004 `workflows.enabled`) | **Any independently runnable agent** may declare `subagents`. Single-level (#6) still applies, so when that agent is itself invoked as a sub-agent its `subagents` are not wired and it cannot delegate onward. Simpler than a main/non-main split and matches the cross-framework norm (#15) | Human (user) | 2026-07-15 |
 
 ## 6. Test plan
 
@@ -600,18 +601,23 @@ handoff participant may itself use `as_tool()` specialists.
   fail-fast app-wide (#17), so identity is simply a globally-unique file-stem
   slug. Single-level delegation remains the one real rule and is enforced
   structurally.
-  **No mechanical blockers remain; the final verdict is Go.** The two product
-  choices below remain for a human reviewer.
-- **Human sign-off: Pending.** `status` remains `Draft` until the human reviewer
-  resolves the open questions and records sign-off here. It then moves to
-  `Finalized`.
+  **No mechanical blockers remain; the final verdict is Go.** Both product
+  choices previously open here are now decided by the reviewer (#5, #18).
+- **Human sign-off: Pending.** No open questions remain. `status` stays `Draft`
+  until the reviewer records final sign-off here; it then moves to `Finalized`.
 
-### Open questions
+### Resolved product questions
 
-- **Field name:** `subagents` (proposed, #5) vs. `delegates_to` vs. `agents`.
-- **Who may declare `subagents`:** any independently runnable agent (proposed;
-  when called as a sub-agent it still cannot delegate onward) vs. main-only,
-  matching the Dynamic Workflows rule for `workflows.enabled` in FRD 0004.
+Both questions previously open here were decided on 2026-07-15:
+
+- **Field name → `subagents`** (Decision #5) — chosen over `delegates_to` /
+  `agents` / reusing `workflows`, to avoid colliding with FRD 0004's `workflows`
+  field.
+- **Who may declare `subagents` → any independently runnable agent**
+  (Decision #18). Single-level delegation (#6) still holds: when such an agent is
+  itself invoked as a sub-agent, its `subagents` are not wired and it cannot
+  delegate onward. Simpler than a main-only rule and consistent with the
+  cross-framework norm (#15).
 
 ### Deferred wording and fast-follow notes
 
