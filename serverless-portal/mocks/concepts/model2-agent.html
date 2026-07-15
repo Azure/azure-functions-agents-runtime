@@ -1,0 +1,79 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Model 2 — Agent-centric</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 26px 48px; }
+  .ctabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; flex-wrap: wrap; }
+  .ctabs a { padding: 10px 14px; font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+  .ctabs a.active { color: var(--purple); border-bottom-color: var(--purple); font-weight: 600; }
+  .concept-banner { border-left: 4px solid #6b3fa0; background: #efe7f8; color: #6b3fa0; padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env">Concept · Model 2</span>
+  </header>
+
+  <div class="wrap">
+    <div class="ctabs">
+      <a href="index.html">Overview</a>
+      <a href="model1-functionapp.html">1 · Function App</a>
+      <a class="active" href="model2-agent.html">2 · Agent</a>
+      <a href="model3-project.html">3 · Project</a>
+      <a href="../index.html" style="margin-left:auto">← Back to portal mocks</a>
+    </div>
+
+    <div class="concept-banner">🧭 <strong>Model 2 — Agent-centric.</strong> The agent is the front door. On create you pick/create a Function App; then you only see <strong>this agent's</strong> tools/skills. Clean — but sharing is hidden, so we add impact warnings.</div>
+
+    <div class="breadcrumb">Agents / triage</div>
+    <div class="page-title"><h1>triage</h1><span class="badge green"><span class="dot"></span>Deployed</span></div>
+    <p class="page-sub">Triages inbound support tickets · <span class="muted">hosted in</span> <span class="badge gray">func-support-team</span></p>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>This agent's tools &amp; skills</h3>
+        <table>
+          <thead><tr><th>Item</th><th>Type</th><th>Scope</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="mono">lookup_ticket</td><td><span class="badge gray">tool</span></td><td><span class="badge amber">shared</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td class="mono">classify_severity</td><td><span class="badge gray">tool</span></td><td><span class="badge green">private</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td class="mono">tone-guide</td><td><span class="badge purple">skill</span></td><td><span class="badge amber">shared</span></td><td><a href="#">Edit</a></td></tr>
+          </tbody>
+        </table>
+        <p class="hint">Only what <strong>triage</strong> uses is shown — the rest of the app is hidden for focus.</p>
+      </div>
+
+      <div class="card">
+        <h3>Editing a shared item</h3>
+        <div class="note" style="margin-bottom:14px">⚠️ <strong>Heads-up:</strong> <span class="mono">lookup_ticket</span> is <strong>shared with 1 other agent</strong> (reply-draft). Editing its code changes behavior for them too.</div>
+        <div class="pill-row" style="margin-bottom:12px">
+          <button class="btn">Edit shared (affects all)</button>
+          <button class="btn primary">Make a private copy for triage</button>
+        </div>
+        <p class="hint muted">Copy-on-edit turns a risky shared change into a safe per-agent fork. Filter changes (which tools this agent uses) are always safe.</p>
+        <div class="divider"></div>
+        <div class="pill-row"><button class="btn sm">💬 Playground</button><button class="btn sm">Instructions</button><button class="btn sm">Triggers</button></div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="card">
+      <div class="card-head"><h3>Create agent (Model 2 flow)</h3></div>
+      <div class="pill-row">
+        <span class="badge blue">1 · Name &amp; instructions</span>
+        <span class="muted">→</span>
+        <span class="badge blue">2 · Tools &amp; skills</span>
+        <span class="muted">→</span>
+        <span class="badge blue">3 · Host in: existing app / new app</span>
+      </div>
+      <p class="hint">The Function App is a step in the agent flow, not the primary object.</p>
+    </div>
+  </div>
+</body>
+</html>

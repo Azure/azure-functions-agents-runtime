@@ -15,9 +15,11 @@ Live Preview** (or **Reveal in File Explorer** and double-click).
 | File | Screen | Requirements |
 | --- | --- | --- |
 | `index.html` | Dashboard (fleet overview) | FR-1–FR-3 |
-| `agents.html` | Agents list + optional Advanced files (host.json, requirements.txt, config) | FR-4–FR-6 |
+| `function-apps.html` | Function Apps — a customer's many apps, each hosting many agents | Option B |
+| `create-function-app.html` | Create Function App (Subscription + Resource Group + region → provisioned for you) | Option B |
+| `agents.html` | Agents within a Function App + app files (host.json, requirements.txt) | FR-4–FR-6 |
 | `agent-detail.html` | Agent detail (tabbed: Overview, Authoring, Tools & MCP, Triggers, Sessions, Monitoring) | FR-7–FR-12 |
-| `create-agent.html` | Create agent — frictionless; hosting provisioned & managed for you (live preview) | FR-13–FR-14 |
+| `create-agent.html` | Create agent — pick target Function App (existing or new), then author | FR-13–FR-14 |
 | `playground.html` | Chat / test playground | FR-15–FR-17 |
 | `source-control.html` | Source & history (blob working copy → Publish → Push to GitHub) | FR-33–FR-38 |
 | `connectors.html` | Connectors hub (SRE Agent–inspired) | FR-18–FR-21 |

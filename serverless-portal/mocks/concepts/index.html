@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mental Models — Concept Explorer</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 26px 48px; }
+  .ctabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 8px 0 24px; flex-wrap: wrap; }
+  .ctabs a { padding: 10px 14px; font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+  .ctabs a.active { color: var(--brand-dark); border-bottom-color: var(--brand); font-weight: 600; }
+  .model-card { display: flex; flex-direction: column; height: 100%; }
+  .model-card .num { width: 34px; height: 34px; border-radius: 8px; display: grid; place-items: center; font-weight: 700; color: #fff; margin-bottom: 10px; }
+  .model-card ul { margin: 10px 0 0; padding-left: 18px; font-size: 13px; color: var(--text-muted); line-height: 1.9; }
+  .model-card .foot { margin-top: auto; padding-top: 14px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env">Concept explorer</span>
+  </header>
+
+  <div class="wrap">
+    <div class="ctabs">
+      <a class="active" href="index.html">Overview</a>
+      <a href="model1-functionapp.html">1 · Function App</a>
+      <a href="model2-agent.html">2 · Agent</a>
+      <a href="model3-project.html">3 · Project</a>
+      <a href="../index.html" style="margin-left:auto">← Back to portal mocks</a>
+    </div>
+
+    <div class="page-title"><h1>Three mental models</h1></div>
+    <p class="page-sub">Same runtime, three ways to frame it for customers. Full write-up: <a href="../../proposals/mental-models.md">proposals/mental-models.md</a>.</p>
+
+    <div class="note" style="margin-bottom:20px">🧠 <strong>Shared reality:</strong> in the runtime, <span class="mono">tools/</span>, <span class="mono">skills/</span> and <span class="mono">mcp.json</span> live at the <strong>Function App</strong> level and are shared across its agents; each agent just <em>filters</em> which ones it uses. Every model must handle this.</div>
+
+    <div class="grid cols-3">
+      <div class="card model-card">
+        <div class="num" style="background:#0f6cbd">1</div>
+        <h3>Function App-centric</h3>
+        <p class="muted" style="font-size:13px">The Function App is the object. Agents + shared tools/skills live inside it, and sharing is visible.</p>
+        <ul>
+          <li>✅ Matches runtime exactly</li>
+          <li>✅ Shared edits are safe (visible)</li>
+          <li>⚠️ "Function App" is infra vocabulary</li>
+        </ul>
+        <div class="foot"><a class="btn primary" href="model1-functionapp.html">Open concept →</a></div>
+      </div>
+
+      <div class="card model-card">
+        <div class="num" style="background:#6b3fa0">2</div>
+        <h3>Agent-centric</h3>
+        <p class="muted" style="font-size:13px">The Agent is the front door. Pick/create a Function App on create; see only this agent's tools/skills.</p>
+        <ul>
+          <li>✅ Most intuitive front door</li>
+          <li>✅ Focused per-agent view</li>
+          <li>⚠️ Hides shared-edit impact</li>
+        </ul>
+        <div class="foot"><a class="btn primary" href="model2-agent.html">Open concept →</a></div>
+      </div>
+
+      <div class="card model-card">
+        <div class="num" style="background:#107c41">3</div>
+        <h3>Project-centric</h3>
+        <p class="muted" style="font-size:13px">A Project holds agents + shared tools/triggers + many resources. Cleanest, but needs its own store.</p>
+        <ul>
+          <li>✅ Cleanest grouping of resources</li>
+          <li>✅ Bounded blast radius</li>
+          <li>⚠️ New persistence layer + cost</li>
+        </ul>
+        <div class="foot"><a class="btn primary" href="model3-project.html">Open concept →</a></div>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="card">
+      <h3>Recommendation (see proposal)</h3>
+      <p class="muted" style="font-size:13.5px">Start with <strong>Model 1's truth</strong>, wear <strong>Model 2's face</strong> (agent-first create), defuse the shared-edit footgun with <strong>"used by N agents"</strong> + impact warnings + copy-on-edit, and keep <strong>Model 3 (Projects)</strong> in reserve for multi-resource grouping.</p>
+    </div>
+  </div>
+</body>
+</html>

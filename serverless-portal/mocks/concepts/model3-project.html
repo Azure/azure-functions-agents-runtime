@@ -1,0 +1,84 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Model 3 — Project-centric</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 26px 48px; }
+  .ctabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; flex-wrap: wrap; }
+  .ctabs a { padding: 10px 14px; font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+  .ctabs a.active { color: var(--green); border-bottom-color: var(--green); font-weight: 600; }
+  .concept-banner { border-left: 4px solid #107c41; background: var(--green-soft); color: var(--green); padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env">Concept · Model 3</span>
+  </header>
+
+  <div class="wrap">
+    <div class="ctabs">
+      <a href="index.html">Overview</a>
+      <a href="model1-functionapp.html">1 · Function App</a>
+      <a href="model2-agent.html">2 · Agent</a>
+      <a class="active" href="model3-project.html">3 · Project</a>
+      <a href="../index.html" style="margin-left:auto">← Back to portal mocks</a>
+    </div>
+
+    <div class="concept-banner">🧭 <strong>Model 3 — Project-centric.</strong> A Project is a workspace that holds agents, shared tools/triggers, <strong>and</strong> the Azure resources they use (one or more Function Apps, storage, Foundry, connectors). Cleanest grouping — but a Project is a new entity needing its own store.</div>
+
+    <div class="breadcrumb">Projects / Customer Support</div>
+    <div class="page-title"><h1>Customer Support</h1><span class="badge green"><span class="dot"></span>Active</span></div>
+    <p class="page-sub">A project grouping everything for the support scenario · <span class="muted">3 agents · 2 Function Apps · shared tools/triggers</span></p>
+
+    <div class="grid cols-3">
+      <div class="card">
+        <div class="card-head"><h3>Agents</h3><button class="btn sm primary">＋</button></div>
+        <table><tbody>
+          <tr><td class="cell-title">triage</td><td class="cell-sub">HTTP</td></tr>
+          <tr><td class="cell-title">reply-draft</td><td class="cell-sub">O365</td></tr>
+          <tr><td class="cell-title">escalation</td><td class="cell-sub">Queue</td></tr>
+        </tbody></table>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Shared tools &amp; triggers</h3><span class="badge gray">project scope</span></div>
+        <table><tbody>
+          <tr><td class="mono">lookup_ticket</td><td class="cell-sub">tool</td></tr>
+          <tr><td class="mono">send_email</td><td class="cell-sub">tool</td></tr>
+          <tr><td class="mono">tickets-queue</td><td class="cell-sub">trigger</td></tr>
+          <tr><td class="mono">tone-guide</td><td class="cell-sub">skill</td></tr>
+        </tbody></table>
+      </div>
+      <div class="card">
+        <div class="card-head"><h3>Resources</h3><span class="badge gray">in this project</span></div>
+        <table><tbody>
+          <tr><td class="mono">func-support-team</td><td class="cell-sub">Function App</td></tr>
+          <tr><td class="mono">func-support-batch</td><td class="cell-sub">Function App</td></tr>
+          <tr><td class="mono">Foundry gpt-5.4</td><td class="cell-sub">model</td></tr>
+          <tr><td class="mono">O365 connector</td><td class="cell-sub">connector</td></tr>
+        </tbody></table>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>Why it's clean</h3>
+        <ul style="margin:0;padding-left:18px;font-size:13.5px;line-height:1.9;color:var(--text-muted)">
+          <li>One workspace spans <strong>multiple apps &amp; resources</strong></li>
+          <li>Shared tools/triggers have a clear <strong>project boundary</strong></li>
+          <li>Add heterogeneous resources without leaving the model</li>
+        </ul>
+      </div>
+      <div class="card">
+        <h3>What it costs</h3>
+        <div class="note">💾 A Project has <strong>no runtime counterpart</strong>, so it needs a <strong>persistence layer</strong> (e.g. Cosmos DB / Table / blob index) to track membership, apps, and shared resources — an extra always-on, billable component to keep in sync with the files.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

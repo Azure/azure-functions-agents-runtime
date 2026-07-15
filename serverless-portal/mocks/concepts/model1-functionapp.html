@@ -1,0 +1,80 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Model 1 — Function App-centric</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 26px 48px; }
+  .ctabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; flex-wrap: wrap; }
+  .ctabs a { padding: 10px 14px; font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+  .ctabs a.active { color: var(--brand-dark); border-bottom-color: var(--brand); font-weight: 600; }
+  .concept-banner { border-left: 4px solid #0f6cbd; background: var(--brand-soft); color: var(--brand-dark); padding: 12px 16px; border-radius: 8px; margin-bottom: 20px; font-size: 13px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env">Concept · Model 1</span>
+  </header>
+
+  <div class="wrap">
+    <div class="ctabs">
+      <a href="index.html">Overview</a>
+      <a class="active" href="model1-functionapp.html">1 · Function App</a>
+      <a href="model2-agent.html">2 · Agent</a>
+      <a href="model3-project.html">3 · Project</a>
+      <a href="../index.html" style="margin-left:auto">← Back to portal mocks</a>
+    </div>
+
+    <div class="concept-banner">🧭 <strong>Model 1 — Function App-centric.</strong> The app is the object you manage. Agents and the <strong>shared</strong> tools/skills/triggers sit side by side, so the blast radius of any change is visible.</div>
+
+    <div class="breadcrumb">Function Apps / func-support-team</div>
+    <div class="page-title"><h1>func-support-team</h1><span class="badge green"><span class="dot"></span>Deployed</span><span class="badge gray">rg-support · eastus2</span></div>
+    <p class="page-sub">One Function App · <strong>3 agents</strong> sharing the tools, skills and triggers below.</p>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="card-head"><h3>Agents in this app</h3><button class="btn sm primary">＋ Add agent</button></div>
+        <table>
+          <thead><tr><th>Agent</th><th>Trigger</th><th>Uses</th></tr></thead>
+          <tbody>
+            <tr><td class="cell-title">triage</td><td><span class="badge blue">HTTP</span></td><td class="cell-sub">2 tools · 1 skill</td></tr>
+            <tr><td class="cell-title">reply-draft</td><td><span class="badge amber">O365</span></td><td class="cell-sub">1 tool · 2 skills</td></tr>
+            <tr><td class="cell-title">escalation</td><td><span class="badge purple">Queue</span></td><td class="cell-sub">3 tools</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Shared tools &amp; skills</h3><span class="badge amber">edits affect all agents</span></div>
+        <table>
+          <thead><tr><th>Item</th><th>Type</th><th>Used by</th><th></th></tr></thead>
+          <tbody>
+            <tr><td class="mono">lookup_ticket</td><td><span class="badge gray">tool</span></td><td><span class="badge blue">2 agents</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td class="mono">send_email</td><td><span class="badge gray">tool</span></td><td><span class="badge blue">1 agent</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td class="mono">azure-resources</td><td><span class="badge purple">skill</span></td><td><span class="badge blue">3 agents</span></td><td><a href="#">Edit</a></td></tr>
+            <tr><td class="mono">tone-guide</td><td><span class="badge purple">skill</span></td><td><span class="badge blue">2 agents</span></td><td><a href="#">Edit</a></td></tr>
+          </tbody>
+        </table>
+        <p class="hint">Because tools/skills are shared, the portal shows <strong>who uses each</strong> before you change it.</p>
+      </div>
+    </div>
+
+    <div class="divider"></div>
+    <div class="card">
+      <div class="card-head"><h3>App files &amp; playground</h3><button class="btn sm">Open playground</button></div>
+      <div class="pill-row">
+        <span class="badge gray mono">host.json</span>
+        <span class="badge gray mono">requirements.txt</span>
+        <span class="badge gray mono">agents.config.yaml</span>
+        <span class="badge gray mono">tools/</span>
+        <span class="badge gray mono">skills/</span>
+      </div>
+      <p class="hint">Customer works at the app level and edits shared config/code with full context of impact.</p>
+    </div>
+  </div>
+</body>
+</html>
