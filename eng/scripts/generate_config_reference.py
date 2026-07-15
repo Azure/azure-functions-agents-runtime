@@ -41,6 +41,7 @@ SystemToolsConfig = schema.SystemToolsConfig
 ToolsFilter = schema.ToolsFilter
 TriggerSpec = schema.TriggerSpec
 TRIGGER_TYPES = schema.TRIGGER_TYPES
+WebRequestConfig = schema.WebRequestConfig
 
 # Extract description and default value dictionaries
 GLOBAL_CONFIG_DESCRIPTIONS = schema.GLOBAL_CONFIG_DESCRIPTIONS
@@ -253,11 +254,20 @@ GLOBAL_CONFIG_DEFAULTS = {
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS = {
     "dynamic_sessions_code_interpreter": "ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter)",
+    "web_request": "Outbound HTTP request tool configuration. Enabled by default; set to `false` to disable app-wide. [Details](#global-system_tools-web_request)",
 }
 
 DYNAMIC_SESSIONS_DESCRIPTIONS = {
     "endpoint": "ACA session pool endpoint URL. Supports env var substitution.",
     "client_id": "Optional managed identity client ID for multi-identity Function Apps",
+}
+
+WEB_REQUEST_DESCRIPTIONS = {
+    "allowed_hosts": "Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor).",
+    "require_https": "Require `https://` URLs. Set to `false` to also allow `http://`.",
+    "timeout_seconds": "Per-request timeout in seconds, clamped to a runtime-defined ceiling (120 s).",
+    "max_response_bytes": "Maximum response body size read before truncating, clamped to a runtime-defined ceiling (10 MB).",
+    "max_request_bytes": "Maximum request body size accepted, clamped to a runtime-defined ceiling (10 MB).",
 }
 
 TOOLS_FILTER_DESCRIPTIONS = {
@@ -300,6 +310,7 @@ BUILTIN_ENDPOINTS_DESCRIPTIONS = {
 
 SYSTEM_TOOLS_AGENT_DESCRIPTIONS = {
     "dynamic_sessions_code_interpreter": "Set to `false` to opt out of code execution capabilities",
+    "web_request": "Set to `false` to opt out of the default-on `web_request` tool for this agent",
 }
 
 MCP_FILTER_DESCRIPTIONS = {
@@ -340,6 +351,9 @@ def generate_markdown() -> str:
     lines.extend(generate_model_table(SystemToolsConfig, descriptions=SYSTEM_TOOLS_CONFIG_DESCRIPTIONS))
     lines.extend(["", "### Global: `system_tools.dynamic_sessions_code_interpreter`", ""])
     lines.extend(generate_model_table(DynamicSessionsCodeInterpreterConfig, descriptions=DYNAMIC_SESSIONS_DESCRIPTIONS))
+    lines.extend(["", "### Global: `system_tools.web_request`", ""])
+    lines.extend(generate_model_table(WebRequestConfig, descriptions=WEB_REQUEST_DESCRIPTIONS,
+                                      custom_defaults={"allowed_hosts": "`null`"}))
     lines.extend(["", "### Global: `tools`", ""])
     lines.extend(generate_model_table(ToolsFilter, descriptions=TOOLS_FILTER_DESCRIPTIONS))
 

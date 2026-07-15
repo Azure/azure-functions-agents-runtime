@@ -1,0 +1,34 @@
+# Install Azure Functions Core Tools
+# Uses a pinned version with direct GitHub download (no API call).
+# Falls back to npm install if the download fails (e.g., GitHub outage).
+parameters:
+  - name: version
+    type: string
+    default: '4.12.0'
+
+steps:
+  - bash: |
+      VERSION="${{ parameters.version }}"
+      ZIP_NAME="Azure.Functions.Cli.linux-x64.$VERSION.zip"
+      URL="https://github.com/Azure/azure-functions-core-tools/releases/download/$VERSION/$ZIP_NAME"
+
+      echo "Downloading Core Tools version $VERSION from: $URL"
+      HTTP_CODE=$(curl -L -o coretools.zip -w "%{http_code}" "$URL" 2>/dev/null)
+
+      if [ "$HTTP_CODE" -eq 200 ] && [ -f coretools.zip ] && [ "$(stat -c%s coretools.zip 2>/dev/null || echo 0)" -gt 1000 ]; then
+        sudo mkdir -p /opt/coretools
+        sudo unzip -o coretools.zip -d /opt/coretools
+        sudo chmod +x /opt/coretools/func
+        echo "Installed to /opt/coretools via zip download"
+        echo "##vso[task.prependpath]/opt/coretools"
+      else
+        echo "##[warning]Zip download failed (HTTP $HTTP_CODE). Falling back to npm install..."
+        rm -f coretools.zip
+        sudo npm install -g azure-functions-core-tools@$VERSION --unsafe-perm true
+      fi
+    displayName: "Install Azure Functions Core Tools (zip)"
+
+  - bash: |
+      which func
+      func --version
+    displayName: "Verify Core Tools"
