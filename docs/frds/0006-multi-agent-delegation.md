@@ -121,8 +121,12 @@ The three routing patterns are:
   workflow-tool names. *(Breaking change — see §4 Compatibility and Decisions
   log #17.)*
 - Use the existing `tool_start` and `tool_end` SSE events for delegated calls.
-  The tool name is the `as_tool()` name. Do not add an event type or require a
+  The tool name is `delegate_<slug>`. Do not add an event type or require a
   client/UI change.
+- Emit correlated, nested telemetry for delegated calls automatically (the
+  runtime already enables MAF instrumentation), and add delegation-specific
+  `af.*` attributes, metrics, and error accounting for parity with the existing
+  system tools. *(See §4.12 and Decisions log #19.)*
 - Establish reusable groundwork for the handoff fast-follow: stable participant
   identities, an immutable catalog, and role-based agent construction. Avoid
   coordinator-only APIs that handoff would have to replace.
@@ -189,7 +193,7 @@ an explicit multi-pass order.
 | discover | — | No change. Coordinators and specialists are ordinary `*.agent.md` files found by the existing top-level and `agents/` folder scan (FRD 0001). Discovery stays read-only. |
 | translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Add `SubagentRef` (`{agent, when?}`) and `AgentSpec.subagents: list[SubagentRef] \| None`. Carry `subagents` and the resolved identity (`agent_id`, the file-stem slug) onto `ResolvedAgent`. `merge.py` normalizes and validates each reference, and derives canonical identity from the file-stem slug. `validation.py` uses the complete global index. It rejects **duplicate agent slugs (app-wide, fail-fast)**, unknown/duplicate/self references, and tool-name collisions. It relaxes the trigger-or-`builtin_endpoints` rule for a referenced internal specialist. |
 | register | `app.py`, `registration/_handlers.py`, `registration/endpoints.py`, `registration/_naming.py` | `app.py` becomes the composition root. It builds the identity index (slug → agent) and **fails fast if two agents share a slug** (`_naming.py` now rejects duplicates instead of auto-suffixing). After capabilities and capability-aware validation, it builds the immutable `AgentCatalog` (`agent_id -> (ResolvedAgent, AgentCapabilities)`) and the global referenced-subagent set. All of this happens before any `FunctionApp` mutation. `_handlers.py` and `endpoints.py` pass immutable catalog data, not live MAF agents, into `run_agent` and `run_agent_stream` for coordinators with `subagents`. Registration parses no YAML/front matter and resolves no references; it consumes validated data. |
-| execute | `runner.py` | Add `build_subagent_tools(subagents, catalog)`. For each reference, build the specialist's MAF `Agent` in the `delegated` role through the shared role-based client/tool assembly path. `ClientManager` creates the chat client for the specialist's own resolved model while reusing provider and credential state process-wide. Expose the agent with `.as_tool(name=delegate_<slug>, description=<when \| specialist description>, arg_name="task", arg_description=…, approval_mode="never_require", propagate_session=False)` and a thin adapter for failure and concurrency rules. Append the resulting tools to the coordinator's `resolved_tools`. Build the tool eagerly, but run the specialist model only if the coordinator selects it. |
+| execute | `runner.py`, `_observability.py` | Add `build_subagent_tools(subagents, catalog)`. For each reference, build the specialist's MAF `Agent` in the `delegated` role through the shared role-based client/tool assembly path. `ClientManager` creates the chat client for the specialist's own resolved model while reusing provider and credential state process-wide. Expose the agent with `.as_tool(name=delegate_<slug>, description=<when \| specialist description>, arg_name="task", arg_description=…, approval_mode="never_require", propagate_session=False)` and a thin adapter for failure and concurrency rules. Append the resulting tools to the coordinator's `resolved_tools`. Build the tool eagerly, but run the specialist model only if the coordinator selects it. The adapter also emits `af.delegate.*` span attributes and delegate call/error metrics, and marks a recoverable delegated failure for correct tool-error accounting (see §4.12). |
 
 The ordered composition pipeline is:
 
@@ -457,15 +461,71 @@ repeated calls to one specialist.
 
 ### 4.12 Observability
 
-**TL;DR:** Existing SSE shows the outer delegated call; correlated telemetry shows the specialist run.
+**TL;DR:** Tracing is automatic — the runtime already enables MAF instrumentation, so a delegated call emits a nested span tree under one App Insights `OperationId` with no new tracing code. v1 adds delegation-specific `af.*` attributes, metrics, and correct error accounting; token totals still do not roll up across the boundary, and the SSE stream shows the delegate call as a black box.
 
-The coordinator's SSE stream exposes only the outer `as_tool()` boundary through
-`tool_start` and `tool_end`. Specialist token deltas and internal tool calls do
-not appear unless `stream_callback` is wired, which is out of scope for v1.
-This is an accepted limitation.
+**Automatic today.** The runtime bootstraps OpenTelemetry once
+(`_observability.py`, from `create_function_app()`): it calls MAF's
+`enable_instrumentation()` and, when `APPLICATIONINSIGHTS_CONNECTION_STRING` and
+the `[monitor]` extra are present, wires the Azure Monitor exporter (a no-op
+otherwise). Every run is already wrapped in a runtime `agent.run {name}` span
+with `af.*` attributes. Because `as_tool()` just calls the specialist's `.run()`,
+and MAF traces every `Agent.run()` and every `FunctionTool.invoke()`, a delegated
+call produces this tree with **no new tracing code**:
 
-Existing observability must record correlated logs/traces for the delegated
-run: coordinator slug, specialist slug, delegated tool name, duration, and outcome.
+```
+agent.run {coordinator}              runtime span (af.*)
+└─ invoke_agent {coordinator}        MAF
+   ├─ chat {model}                   the routing decision
+   └─ execute_tool delegate_<slug>   the delegation (an ordinary tool span)
+      └─ invoke_agent {specialist}   auto-nested
+         └─ chat {model}             the specialist's own model call
+```
+
+All spans share one trace, so Application Insights ties the chain under a single
+`OperationId`. Nesting is by in-process OpenTelemetry context (`contextvars`):
+the Functions Python worker attaches the invocation's `traceparent` before the
+handler runs, and `asyncio.gather` copies the current context into each task, so
+**concurrent specialists nest correctly** as long as `gather` runs while the
+coordinator span is current (it does — delegation happens inside `agent.run`).
+The only requirement is that a specialist is a real `agent_framework.Agent`; the
+`delegated`-role builder path already constructs one (a `RawAgent` would carry no
+telemetry layer). Correlating attributes come for free: `gen_ai.agent.name` (the
+specialist slug), `gen_ai.tool.name` (`delegate_<slug>`), model, per-span token
+usage, and duration. (Runtime logs go to the `azure.functions.AgentRuntime`
+system logger, which the Functions worker does not surface in App Insights
+`traces`; spans, not logs, are the debugging surface.)
+
+**Added in v1.** For parity with the existing system tools (sandbox,
+web_request), the `delegated`-role adapter enriches the delegate call:
+- `af.delegate.*` span attributes (at least the specialist slug and outcome) on
+  the `execute_tool delegate_<slug>` span, a dedicated `FaultDomain` value for a
+  failed delegated call, and delegate call/error **metrics** parallel to
+  `record_sandbox_execution` / `record_web_request`.
+- Correct error accounting: today `_looks_like_tool_error` expects a JSON
+  `{"error": …}` / `stderr` envelope (the sandbox/web_request shape) and would
+  mis-count a specialist's sanitized free-text failure (§4.6, Decision #12). The
+  delegated adapter marks a recoverable delegated failure explicitly so it lands
+  in `af.agent.tool_error_count` rather than relying on that heuristic.
+
+**Accepted limitations.**
+- **SSE is a black box at the boundary.** The coordinator stream emits
+  `tool_start`/`tool_end` for the `delegate_<slug>` call (task in, final text
+  out), exactly like the sandbox/web_request tools. The specialist's internal
+  deltas and nested tool calls do not surface unless a MAF `stream_callback` is
+  wired into `run_agent_stream` — out of scope for v1.
+- **Token usage does not roll up across the boundary.** MAF records usage
+  per-run on each `invoke_agent`/`chat` span; the `execute_tool` span carries no
+  usage, and a specialist's tokens are not merged into the coordinator's span. A
+  combined per-request total must be summed from the child spans in the backend
+  (by trace). Documented, not changed in v1.
+
+**Sampling guidance (docs).** For delegation-heavy apps, prefer
+`OTEL_TRACES_SAMPLER=parentbased_traceidratio` with an explicit
+`OTEL_TRACES_SAMPLER_ARG`. Azure Monitor's default rate-limited sampler counts
+spans, and one fan-out turn (coordinator + N specialists + MAF's own child spans)
+can exhaust the budget and drop whole traces under load. Its sampler is
+trace-id-deterministic, so a decision applies consistently across the whole
+nested trace (no half-traces); logs on a dropped trace are dropped with it.
 
 ### 4.13 Compatibility and handoff groundwork
 
@@ -523,6 +583,7 @@ handoff participant may itself use `as_tool()` specialists.
 | 16 | Drop `id` and `tool_name` for v1 (simplicity) | keep both / drop both / drop one | **Drop both** — identity is the file-stem slug (collisions fail fast app-wide — see #17); the delegated tool is always `delegate_<slug>`. Removes a field and the id/name/slug confusion; both are re-addable later as non-breaking additions if a real need appears | Human (user) | 2026-07-15 |
 | 17 | Same-stem slug collision handling (base runtime) | keep auto-suffix+warn / fail-fast app-wide / open separate issue | **Fail-fast app-wide** — replace `_naming.py`'s silent auto-suffix with a startup error, unifying the contract with duplicate skill/workflow-tool handling and guaranteeing unique slugs for `subagents` references. **Breaking**: existing apps with same-stem files must rename one (release-note item) | Human (user) | 2026-07-15 |
 | 18 | Who may declare `subagents` | any independently runnable agent / main-agent-only (mirror FRD 0004 `workflows.enabled`) | **Any independently runnable agent** may declare `subagents`. Single-level (#6) still applies, so when that agent is itself invoked as a sub-agent its `subagents` are not wired and it cannot delegate onward. Simpler than a main/non-main split and matches the cross-framework norm (#15) | Human (user) | 2026-07-15 |
+| 19 | Observability approach | new bespoke tracing / rely on existing auto-instrumentation + add delegation enrichment / defer all enrichment | **Rely on auto-instrumentation, add delegation enrichment** — the runtime already enables MAF `gen_ai` spans and Azure Monitor export (`_observability.py`), and `as_tool()`→`run()` + `FunctionTool.invoke()` auto-nest a delegated call under one trace/`OperationId` with no new tracing code (verified against MAF tag `python-1.3.0` and the Functions Python worker's context attach). v1 additionally adds `af.delegate.*` attributes, delegate metrics, and explicit delegated-error accounting for parity with sandbox/web_request. Token roll-up across the boundary and SSE stream-through of specialist internals are documented limitations | Human (user) | 2026-07-15 |
 
 ## 6. Test plan
 
@@ -554,6 +615,15 @@ handoff participant may itself use `as_tool()` specialists.
       `min(specialist, coordinator remaining)` timeout.
 - [ ] Unit: concurrency — serialize concurrent calls to one specialist; run
       calls to different specialists in parallel; verify every result.
+- [ ] Observability — with instrumentation enabled, one delegated call produces
+      nested `execute_tool delegate_<slug>` and `invoke_agent {specialist}` spans
+      under the coordinator's `agent.run` span, all sharing one trace id;
+      specialists dispatched via `asyncio.gather` nest under the coordinator span
+      (context captured at gather time).
+- [ ] Observability — a recoverable delegated failure increments
+      `af.agent.tool_error_count`, sets the delegate `af.*`/`FaultDomain`
+      attributes, and is not mis-classified by `_looks_like_tool_error`; delegate
+      call/error metrics are recorded.
 - [ ] Fixture: add
       `tests/fixtures/config_scenarios/<nn_delegation>/` with one coordinator
       and two specialists, including one endpoint-less internal specialist.
@@ -575,6 +645,9 @@ handoff participant may itself use `as_tool()` specialists.
       `AgentCatalog`, and `direct`/`delegated` roles in the module map and
       pipeline. Add the coordination concept and distinguish it from Dynamic
       Workflows (FRD 0004).
+- [ ] `docs/observability.md` — document the delegated-call span tree and
+      `af.delegate.*` conventions, the token-rollup limitation, and sampling
+      guidance (`parentbased_traceidratio`) for delegation-heavy apps.
 - [ ] `docs/triggers.md` — explain that an otherwise triggerless/endpoint-less
       agent is valid only when another agent globally references it as an
       internal specialist.
