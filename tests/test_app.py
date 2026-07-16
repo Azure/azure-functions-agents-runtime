@@ -9,6 +9,13 @@ import pytest
 
 from azure_functions_agents.app import create_function_app
 
+# On-disk fixtures shared with test_config_fixtures.py's loader-level tests
+# (see FIXTURES_ROOT there). Used here for end-to-end create_function_app()
+# regression tests where a fresh tmp_path-built fixture wouldn't be as
+# convincing a proof — e.g. "this fixture registers identically to before"
+# needs a fixture that already existed pre-change.
+FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
+
 
 def _write_agent(
     tmp_path: Path,
@@ -292,6 +299,101 @@ def test_create_function_app_skips_malformed_yaml_but_registers_valid(tmp_path: 
     app = create_function_app(tmp_path)
 
     assert _function_names(app.get_functions()) == ["good"]
+
+
+# ---------------------------------------------------------------------------
+# End-to-end delegation regressions through the real create_function_app()
+# pipeline (FRD 0006 §6 test plan) — on-disk fixtures, not manually
+# reconstructed catalogs.
+# ---------------------------------------------------------------------------
+
+
+def test_create_function_app_accepts_endpoint_less_specialist_referenced_only_via_subagents() -> None:
+    """An internal-only specialist (no trigger, no builtin_endpoints) must be
+    accepted end-to-end when it is reachable solely through another agent's
+    ``subagents:`` — and must register *zero* external entry points of its
+    own (FRD 0006 Decision #18).
+
+    ``test_multi_agent_delegation_fixture`` in test_config_fixtures.py
+    already covers this fixture at the loader/validation layer by calling
+    ``validate_resolved_agent(shipping, ..., is_referenced_as_subagent=True)``
+    directly. That does not exercise the real two-pass composition root
+    (``create_function_app`` -> ``validate_subagent_references`` ->
+    ``build_capabilities``/``build_catalog`` -> per-agent registration) at
+    all, so a wiring bug in *that* pipeline (e.g. the endpoint-less-agent
+    carve-out only applying to the manually-called validator, not to the
+    real startup path) would not be caught. This test drives the same
+    on-disk fixture through the real pipeline instead.
+    """
+    fixture = FIXTURES_ROOT / "15_multi_agent_delegation"
+
+    app = create_function_app(fixture)
+    functions = app.get_functions()
+
+    # Exactly billing's and coordinator's builtin chat_api endpoints — no
+    # error was raised despite "shipping" having neither a trigger nor
+    # builtin_endpoints, and critically, no function was registered for it.
+    assert _function_names(functions) == [
+        "agent_billing_builtin_chat",
+        "agent_billing_builtin_chatstream",
+        "agent_coordinator_builtin_chat",
+        "agent_coordinator_builtin_chatstream",
+    ]
+    assert not any("shipping" in name for name in _function_names(functions))
+    assert _http_routes(functions) == [
+        "agents/billing/chat",
+        "agents/billing/chatstream",
+        "agents/coordinator/chat",
+        "agents/coordinator/chatstream",
+    ]
+
+
+def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffected_by_two_pass_composition() -> (
+    None
+):
+    """A collision-free, pre-FRD-0006-style multi-agent fixture (none of its
+    agents declare ``subagents:``) must register identical function names,
+    routes, and tool assembly under the new two-pass composition
+    (``validate_subagent_references``/``build_catalog`` added ahead of
+    per-agent registration) as it would have before FRD 0006.
+
+    None of the pre-existing fixtures under ``fixtures/config_scenarios/``
+    (01-14) can actually run through ``create_function_app()`` as-is: they
+    were built only for the loader-level tests in test_config_fixtures.py
+    (see that module's docstring) and several have unrelated, pre-existing
+    bugs that predate this PR (confirmed via ``git log`` / ``git blame`` —
+    e.g. ``05_multi_trigger``'s ``main.agent.md`` has neither a ``trigger``
+    nor ``builtin_endpoints``, and its ``queue_worker.agent.md`` uses a
+    trigger arg name ``TriggerApi.queue_trigger()`` does not accept;
+    ``06_capability_filtering``'s ``selective.agent.md`` references MCP
+    server names with no corresponding ``mcp.json`` in the fixture). Rather
+    than risk destabilizing those fixtures/tests (which are exercised only
+    at the loader layer and depend on their exact current shape), this adds
+    a new, genuinely full-pipeline-runnable fixture,
+    ``16_no_subagent_regression`` (three agents, zero ``subagents:``
+    references between them, mirroring the *spirit* of the older
+    multi-agent fixtures), and proves it composes and registers exactly as
+    a delegation-unaware pipeline would have.
+    """
+    fixture = FIXTURES_ROOT / "16_no_subagent_regression"
+
+    app = create_function_app(fixture)
+    functions = app.get_functions()
+
+    assert _function_names(functions) == [
+        "agent_main_builtin_chat_page",
+        "agent_main_builtin_chat",
+        "agent_main_builtin_chatstream",
+        "agent_main_builtin_mcp",
+        "nightly_report",
+        "resource_summary",
+    ]
+    assert _http_routes(functions) == [
+        "agents/main/",
+        "agents/main/chat",
+        "agents/main/chatstream",
+        "resource-summary",
+    ]
 
 
 class TestStructuredIndexingLog:
