@@ -181,6 +181,51 @@ my-app/
 - **Sandbox** — Python code execution via Azure Container Apps dynamic sessions; if no explicit sandbox session id is supplied, each invocation gets a fresh GUID-backed session
 - **Web request** — built-in, default-on `web_request` tool for outbound HTTP(S) calls to public hosts, guarded by an always-on SSRF security floor; no Azure resource required. Disable app-wide with `system_tools.web_request: false`, or per-agent with `system_tools.web_request: false` in that agent's front matter
 
+### Multi-agent delegation (`subagents`)
+
+Any independently runnable agent can declare `subagents:` to call other agents as chat-time tools —
+no `HandoffBuilder`, no HITL, no new dependency ([FRD 0006](docs/frds/0006-multi-agent-delegation.md)):
+
+```yaml
+---
+name: Support Coordinator
+subagents:
+  - agent: billing               # references agents/billing.agent.md (or billing.agent.md) by slug
+    when: "Billing, invoices, refunds, or subscription questions"
+  - agent: tech-support
+    when: "Technical troubleshooting or product bugs"
+---
+
+Route the user's request to the right specialist, or answer directly for anything general.
+```
+
+Each entry becomes a `delegate_<slug>` function tool (via MAF's `BaseAgent.as_tool()`) on the
+coordinator, built eagerly at startup but only *run* if the coordinator's model selects it. A few
+rules to know before you reach for this:
+
+- **Trust boundary**: `subagents` is an authoring-time capability grant. One app is one trust
+  domain — a specialist's own `builtin_endpoints`/auth level is never consulted when it is invoked as
+  a sub-agent; if a coordinator lists it, its full capability set is reachable through that
+  coordinator (Decision #10).
+- **Write a self-contained `task`**: the specialist does not see the coordinator's conversation
+  history, session, or any other request context (`propagate_session=False`) — it only receives the
+  `task` string the coordinator's model passes to the tool. Instruct the coordinator (via
+  `when:` / its own instructions) to pass every fact the specialist needs, not just a short pointer.
+- **Single-level only**: delegation does not chain. A specialist invoked via `delegate_<slug>` runs
+  with its own instructions/model/tools, but its *own* `subagents:` (if it declares any) are not wired
+  up for that call — only a top-level coordinator gets `delegate_*` tools (Decision #6).
+- **Slugs must be globally unique**: a `subagents` reference resolves by file-stem slug, the same
+  identity used for `builtin_endpoints` routes — see the breaking-change note under
+  [Multiple functions from markdown](#multiple-functions-from-markdown) below.
+- An agent referenced only as a specialist may skip `trigger` and `builtin_endpoints` entirely — see
+  [`docs/triggers.md#endpoint-less-internal-specialists`](docs/triggers.md#endpoint-less-internal-specialists).
+
+See [`docs/front-matter-spec.md#subagents`](docs/front-matter-spec.md#subagents) for the full field
+reference, [`docs/architecture.md`](docs/architecture.md#5-multi-agent-delegation-subagents) for how
+this fits into the composition pipeline, and
+[`samples/multi-agent-delegation/`](samples/multi-agent-delegation/) for a runnable coordinator +
+two-specialist example.
+
 ## Agent File Format (`.agent.md`)
 
 Agent files use YAML frontmatter + markdown body:
@@ -220,7 +265,16 @@ Agent instructions in markdown...
 ### Multiple functions from markdown
 
 - **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
-- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name and endpoint slug. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the built-in endpoint slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+- **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name, endpoint slug, and the agent's global identity (its slug — also used for `delegate_<slug>` tool names, see [Multi-agent delegation](#multi-agent-delegation-subagents) above). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+
+> **⚠️ Breaking change**: Earlier releases silently auto-suffixed (`_2`, `_3`, ...) when two agent files
+> sanitized to the same name. **Slugs are now required to be globally unique across the whole app.** A
+> collision (for example `daily-report.agent.md` and `daily_report.agent.md`, which both sanitize to
+> `daily_report`) now **fails fast at startup** with an actionable error telling you which files
+> collided, instead of silently registering a `_2`-suffixed duplicate. Rename one of the colliding
+> files to fix it. This also applies to `.agent.md` files that only participate as
+> [delegation specialists](#multi-agent-delegation-subagents) and never register their own trigger or
+> endpoints — every agent's slug is checked against the same app-wide index.
 
 When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
 
@@ -469,6 +523,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`daily-azure-report`](samples/daily-azure-report) — timer-triggered agent that emails a daily Azure status report
 - [`daily-tech-news-email`](samples/daily-tech-news-email) — timer-triggered agent that scrapes news and emails a digest
 - [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
+- [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
 
 ## Deployment Notes
 
