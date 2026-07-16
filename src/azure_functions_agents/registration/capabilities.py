@@ -129,6 +129,18 @@ def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities
     -specialist tools must be rejected during capability-aware validation).
     Skill tools are intentionally excluded: they are not exposed as
     top-level agent tools by name at this layer.
+
+    Scope note — for MCP, this reads each connected server's own configured
+    ``.name`` (e.g. "billing-mcp-server"), not the individual remote
+    tools/functions that server exposes once connected
+    (``agent_framework.MCPTool.functions``, populated dynamically by
+    ``MCPTool.load_tools()``). Those remote tool names are unknown at this,
+    composition time; ``runner._check_delegate_tool_name_collisions`` runs a
+    later, equally name-only re-check right before final tool assembly, and
+    MAF's own ``Agent.run()`` independently rejects any remaining collision
+    once it actually expands ``MCPTool.functions`` — see that function's
+    docstring in ``runner.py`` for the full picture and a pointer to the test
+    that proves it against real ``agent_framework`` code.
     """
     names = {_tool_name(tool) for tool in capabilities.filtered_user_tools or []}
     names.update(_tool_name(tool) for tool in capabilities.filtered_mcp_tools or [])

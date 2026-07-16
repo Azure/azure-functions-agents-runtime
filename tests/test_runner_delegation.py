@@ -25,11 +25,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
-from agent_framework import BaseAgent
+from agent_framework import BaseAgent, MCPStreamableHTTPTool, tool
 
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
@@ -433,6 +434,105 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
     # never accepts a catalog at all, so it has no way to build delegate_*
     # tools for "billing" regardless of what it declares.
     assert not any(name.startswith("delegate_") for name in _tool_names(agent))
+
+
+def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and_skills_not_coordinators(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """"Runs as itself" (FRD 0006 §5 Decisions #13/#15) — a deeper, end-to-end check.
+
+    ``test_build_delegated_agent_never_wires_its_own_declared_subagents``
+    above proves the *no-subagents-leak* half of "runs as itself". It does
+    not, however, prove the other half the FRD's §6 test plan explicitly
+    calls for: that a delegated specialist's *own* model/instructions/tools/
+    skills are what actually land on the built ``Agent`` — as opposed to,
+    say, a coordinator's values leaking in via a wiring mistake in
+    ``build_subagent_tools``/``_build_delegate_tool``. Every ``model=``
+    passed to ``_make_resolved()`` elsewhere in this file is the default
+    ``None``, so no prior test could have caught that kind of regression.
+
+    This builds two roles with deliberately *different* model/instructions/
+    tool/skill values — a specialist via the real ``_build_delegated_agent``
+    and a contrasting "coordinator" via the same ``_build_role_agent`` tail
+    that ``_build_agent_session_history`` uses for the direct role — and
+    asserts the specialist's build reflects only its own values.
+    """
+    set_client_manager(_FakeClientManager())
+
+    # `_build_skills_provider` requires real `SKILL.md`-bearing directories
+    # on disk (it is MAF's `SkillsProvider.from_paths`, an I/O-touching,
+    # experimental API) — irrelevant to what we're proving here, which is
+    # only that `enabled_skill_paths` is threaded through unchanged and
+    # per-role. Monkeypatched to a pure, side-effect-free recorder.
+    captured_skill_paths: list[list[Path] | None] = []
+
+    def _fake_build_skills_provider(skill_paths: list[Path] | None) -> Any:
+        captured_skill_paths.append(skill_paths)
+        return f"skills-provider:{skill_paths}" if skill_paths else None
+
+    monkeypatch.setattr(runner, "_build_skills_provider", _fake_build_skills_provider)
+
+    coordinator_only_tool = tool(lambda: "ignored", name="coordinator_only_tool")
+    billing_only_tool = tool(lambda: "ignored", name="billing_only_tool")
+    coordinator_skill_path = Path("coordinator-skills")
+    billing_skill_path = Path("billing-skills")
+
+    billing_resolved = _make_resolved(
+        slug="billing",
+        model="billing-model",
+        instructions="handle billing precisely",
+    )
+    billing_capabilities = AgentCapabilities(
+        filtered_user_tools=[billing_only_tool],
+        enabled_skill_paths=[billing_skill_path],
+    )
+
+    # A contrasting "coordinator" build via the exact same shared tail
+    # (`_build_role_agent`) that `_build_agent_session_history` uses for the
+    # `direct` role — not a hardcoded second value, but a second concrete,
+    # independently-built artifact to compare against.
+    coordinator_chat_client = get_client_manager().build_chat_client("coordinator-model")
+    coordinator_agent = runner._build_role_agent(
+        coordinator_chat_client,
+        instructions="be a coordinator",
+        tools=[coordinator_only_tool],
+        mcp_tools=[],
+        skill_paths=[coordinator_skill_path],
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        agent_name="coordinator",
+        resolved_id=None,
+        history_provider=None,
+        delegate_tools=None,
+    )
+
+    billing_agent = runner._build_delegated_agent(billing_resolved, billing_capabilities)
+
+    # Model: the specialist's chat client resolves to *its own* model.
+    # (MAF's `Agent` stores the client passed to its constructor as
+    # `.client` — the `chat_client` name above is only this test's/
+    # `_build_role_agent`'s local variable name for it.)
+    assert billing_agent.client.model == "billing-model"
+    assert billing_agent.client.model != coordinator_agent.client.model
+
+    # Instructions: its own text only.
+    assert billing_agent.default_options["instructions"] == "handle billing precisely"
+    assert billing_agent.default_options["instructions"] != coordinator_agent.default_options["instructions"]
+
+    # Tools: only the specialist's own filtered_user_tools — never the
+    # coordinator's, and vice versa.
+    assert _tool_names(billing_agent) == {"billing_only_tool"}
+    assert _tool_names(coordinator_agent) == {"coordinator_only_tool"}
+
+    # Skills: `_build_skills_provider` was called once per role, each with
+    # that role's own `enabled_skill_paths` — never swapped.
+    assert [billing_skill_path] in captured_skill_paths
+    assert [coordinator_skill_path] in captured_skill_paths
+    assert captured_skill_paths.count([billing_skill_path]) == 1
+    assert captured_skill_paths.count([coordinator_skill_path]) == 1
 
 
 @pytest.mark.asyncio
@@ -973,3 +1073,110 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
     assert invoke_span.attributes is not None
     assert invoke_span.attributes.get("gen_ai.agent.name") == "billing"
     assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.name
+
+
+# ---------------------------------------------------------------------------
+# MCP dynamic tool-name collisions against real `agent_framework` MCP shape
+# (FRD 0006 §4.2 re-check-at-assembly-time requirement) — S5
+# ---------------------------------------------------------------------------
+#
+# `_check_delegate_tool_name_collisions` (like `registration.capabilities
+# .existing_tool_names`, its composition-time counterpart) only inspects an
+# MCP tool object's own `.name` — the *server connection's* name, set once
+# at `discover_mcp_servers()` time (see `discovery/mcp.py`). The individual
+# remote tools/functions a connected MCP server exposes are a completely
+# different, dynamically-populated collection: `agent_framework.MCPTool
+# .functions` (a property backed by `._functions`, filled in by
+# `MCPTool.load_tools()` — see `agent_framework/_mcp.py`). A remote tool
+# literally named e.g. "delegate_billing" therefore cannot be seen by this
+# repo's own guard at all: it inspects the server object, never its
+# eventual `.functions`.
+#
+# The two tests below use a fake MCP server subclassing the real
+# `agent_framework.MCPStreamableHTTPTool` (marked pre-connected, with
+# `._functions` pre-populated to stand in for a completed `load_tools()`
+# round-trip, so no real network server is needed) to prove, against real
+# `agent_framework` code rather than a guess about its behavior: (1) this
+# repo's own guard really does miss the collision (documenting its actual,
+# narrower-than-the-old-docstring-implied scope), and (2) this is not a
+# silent hole in practice — MAF's own `Agent.run()` independently re-checks
+# tool-name uniqueness once it expands `MCPTool.functions` into the final
+# tool list (`agent_framework._agents.BaseAgent._prepare_run_context` ->
+# `agent_framework._tools._append_unique_tools`), raising `ValueError`
+# before any model or tool call happens. Given that backstop already exists
+# in MAF and fires with a clear, if differently-worded, error, the guard
+# here is kept as a best-effort, earlier check for the cases it *does* see
+# (a colliding MCP server connection name, or any non-MCP tool) rather than
+# duplicated/expanded to replicate MAF's own runtime check.
+
+
+class _FakeMCPServerWithExpandedFunctions(MCPStreamableHTTPTool):
+    """A stand-in for an already-*connected* MCP server (see module comment above).
+
+    Its own connection ``.name`` ("billing-mcp-server") deliberately does
+    NOT collide with anything; only one of its *expanded* ``.functions``
+    does. ``load_tools=False`` plus manually setting ``is_connected``/
+    ``._functions`` skips the real network handshake `MCPTool.load_tools()`
+    would otherwise perform, while still using the real ``MCPTool.functions``
+    property (unmodified) to expose them.
+    """
+
+    def __init__(self, colliding_function_name: str) -> None:
+        super().__init__(name="billing-mcp-server", url="https://example.invalid/mcp", load_tools=False)
+        self.is_connected = True
+        self._functions = [tool(lambda: "ignored", name=colliding_function_name)]
+
+
+def test_check_delegate_tool_name_collisions_misses_expanded_mcp_remote_function_names() -> None:
+    """Documents the guard's real scope: it does not see expanded remote tool names.
+
+    ``mcp_server.name`` ("billing-mcp-server") does not collide with
+    "delegate_billing", and the guard never looks at ``.functions`` — so it
+    does not raise even though a real connected server here would expose a
+    colliding remote tool once loaded. See the test immediately below for
+    why this is not a silent gap in practice.
+    """
+    mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
+
+    runner._check_delegate_tool_name_collisions([mcp_server], ["delegate_billing"])  # does not raise
+
+
+@pytest.mark.asyncio
+async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() -> None:
+    """MAF's own tool assembly is the actual backstop for the gap documented above.
+
+    Builds a real ``agent_framework.Agent`` through the real
+    ``_build_role_agent`` (construction itself does not raise — confirming
+    the previous test's finding holds through the full path a coordinator
+    actually goes through) with a fake, pre-connected MCP server whose one
+    expanded remote function is named ``delegate_billing`` — the exact same
+    name as the coordinator's own ``delegate_billing`` tool. Running the
+    agent (the point at which MAF expands ``MCPTool.functions`` into the
+    final tool list) must raise ``ValueError`` from MAF's own
+    ``_append_unique_tools``, proving the system fails loudly with an
+    actionable message rather than silently double-registering the name or
+    letting one tool shadow the other.
+    """
+    mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
+    delegate_tool = tool(lambda: "ignored", name="delegate_billing")
+
+    agent = runner._build_role_agent(
+        _RunnableFakeChatClient(),
+        instructions="be a coordinator",
+        tools=[],
+        mcp_tools=[mcp_server],
+        skill_paths=None,
+        sandbox_tools=None,
+        web_request_tools=None,
+        system_addendum=None,
+        workflow_enabled=False,
+        workflow_durable_client=None,
+        agent_name="coordinator",
+        resolved_id=None,
+        history_provider=None,
+        delegate_tools=[delegate_tool],
+    )
+
+    stream = agent.run("hello", stream=True)
+    with pytest.raises(ValueError, match="Duplicate tool name 'delegate_billing'"):
+        await stream.get_final_response()

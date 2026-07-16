@@ -262,17 +262,33 @@ class _DelegateErrorTracker:
 def _check_delegate_tool_name_collisions(
     resolved_tools: list[Any], delegate_tool_names: list[str]
 ) -> None:
-    """Fail fast when a ``delegate_<slug>`` name collides with a live tool.
+    """Fail fast when a ``delegate_<slug>`` name collides with a known tool name.
 
     ``registration.capabilities.validate_subagent_tool_names`` already runs
-    this check at composition time, but only against *statically known* tool
-    names. MCP server connections expose their actual tool names dynamically
-    (discovered via the server's own ``tools/list``, invisible to any
-    composition-time analysis — see ``discovery/mcp.py``), so the runtime
-    re-checks collisions against the actual live tool list right before final
-    assembly (FRD 0006 §4.2: "The runtime checks tool-name collisions again
-    during final tool assembly because MCP and sandbox tool names may not be
-    known earlier").
+    an equivalent check at composition time; this is the runtime's re-check
+    right before final tool assembly (FRD 0006 §4.2: "The runtime checks
+    tool-name collisions again during final tool assembly because MCP and
+    sandbox tool names may not be known earlier"), covering sandbox/workflow
+    tool names this repo only finalizes at this point.
+
+    Scope note — this only inspects each tool object's own ``.name`` (e.g. an
+    MCP server *connection's* configured name from ``mcp.json``, such as
+    "billing-mcp-server"). It does **not** see the individual remote
+    tools/functions an MCP server exposes once connected: those are a
+    dynamically-populated, separate collection
+    (``agent_framework.MCPTool.functions``, populated by ``MCPTool
+    .load_tools()`` — see ``discovery/mcp.py``) that this repo never expands
+    itself, and this check runs before any such connection happens. A remote
+    tool literally named e.g. ``delegate_billing`` is therefore invisible to
+    this guard. That gap is not a silent hole in practice: MAF's own
+    ``Agent.run()`` independently re-checks tool-name uniqueness once it
+    expands ``MCPTool.functions`` into its final tool list
+    (``agent_framework._agents.BaseAgent._prepare_run_context`` ->
+    ``agent_framework._tools._append_unique_tools``), raising ``ValueError``
+    before any model or tool call happens — see
+    ``test_real_maf_agent_run_raises_on_expanded_mcp_function_collision`` in
+    ``tests/test_runner_delegation.py`` for a real (non-mocked) proof of that
+    backstop.
     """
     existing = {str(getattr(tool, "name", "") or "") for tool in resolved_tools}
     existing.discard("")
