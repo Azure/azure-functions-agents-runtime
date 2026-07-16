@@ -26,7 +26,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
 
 import pytest
 from agent_framework import BaseAgent
@@ -89,6 +89,54 @@ class _FakeClientManager(ClientManager):
         return SimpleNamespace(model=self.resolve_model(model))
 
 
+class _RunnableFakeChatClient:
+    """A minimal chat client that actually satisfies ``agent_framework``'s
+    ``SupportsChatGetResponse`` protocol, unlike ``_FakeClientManager``'s bare
+    ``SimpleNamespace`` (good enough for construction/tool-listing assertions,
+    but not runnable).
+
+    ``BaseAgent.as_tool()``'s wrapper always calls ``Agent.run(stream=True,
+    ...)`` (never ``stream=False``), which calls
+    ``self.client.get_response(stream=True, ...)`` and expects a real
+    ``ResponseStream`` back — so only the ``stream=True`` branch needs to work
+    for a REAL ``agent_framework.Agent`` to be driven end to end through
+    MAF's own machinery (including ``AgentTelemetryLayer``, which is what
+    actually stamps ``gen_ai.agent.name`` on the ``invoke_agent`` span).
+    """
+
+    additional_properties: ClassVar[dict[str, Any]] = {}
+
+    def __init__(self, text: str = "specialist response") -> None:
+        self._text = text
+
+    def get_response(self, messages: Any, *, stream: bool = False, **kwargs: Any) -> Any:
+        from agent_framework import ChatResponseUpdate, Content, ResponseStream
+
+        if not stream:
+            raise NotImplementedError("only the stream=True branch is exercised by as_tool()")
+
+        async def _stream() -> Any:
+            yield ChatResponseUpdate(contents=[Content.from_text(self._text)], role="assistant")
+
+        return ResponseStream(_stream())
+
+
+class _RunnableFakeClientManager(ClientManager):
+    """A ``ClientManager`` whose chat client can actually run a real ``Agent``.
+
+    Used only by the real-instrumentation test below — everything else in
+    this module uses ``_FakeClientManager``, which is sufficient for the
+    construction/tool-listing assertions the other tests make but cannot
+    drive a real ``Agent.run()``.
+    """
+
+    def resolve_model(self, requested: str | None) -> str:
+        return requested or "fake-model"
+
+    def build_chat_client(self, model: str | None) -> Any:
+        return _RunnableFakeChatClient()
+
+
 @pytest.fixture(autouse=True)
 def _restore_client_manager() -> Any:
     """Snapshot/restore the process-wide ``ClientManager`` singleton around every test.
@@ -114,6 +162,11 @@ class _RecordingSpan:
     def __init__(self) -> None:
         self.attributes: dict[str, Any] = {}
         self.errors: list[tuple[str, str]] = []
+        # Populated only via `record_exception` — kept separate from
+        # `errors` (which any `set_error` call also appends to) so tests can
+        # assert the *actual* exception object/type was captured (B4:
+        # structured exception detail, not just a flattened string).
+        self.exceptions: list[tuple[BaseException, str | None]] = []
 
     def set_attribute(self, key: str, value: Any) -> None:
         if value is not None:
@@ -129,7 +182,18 @@ class _RecordingSpan:
         self.errors.append((message, fault_domain))
 
     def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
-        pass
+        """Mirror the real ``RuntimeSpan.record_exception``: sets status + fault domain too.
+
+        The real implementation calls the OTel span's ``record_exception``
+        (attaching type/traceback as a span event) *and* sets an error
+        status carrying ``str(exc)`` plus the fault domain — i.e. a strict
+        superset of what ``set_error`` records. Mirrored here so existing
+        assertions against ``errors`` keep working regardless of which
+        method produced the entry, while ``exceptions`` lets a test assert
+        the real exception object was preserved.
+        """
+        self.exceptions.append((exc, fault_domain))
+        self.errors.append((str(exc), fault_domain or obs.FaultDomain.UNKNOWN))
 
 
 def _install_span_capture(monkeypatch: pytest.MonkeyPatch) -> _RecordingSpan:
@@ -210,12 +274,31 @@ def test_delegate_error_tracker_starts_at_zero_and_increments() -> None:
     assert tracker.count == 2
 
 
-def test_sanitize_delegate_failure_includes_slug_and_type_not_raw_detail() -> None:
+def test_sanitize_delegate_failure_includes_slug_but_not_type_or_raw_detail() -> None:
+    """The model-facing message must be class-independent (FRD 0006 Decision #12).
+
+    Neither the raw exception detail NOR ``type(exc).__name__`` may leak
+    into the string returned to the coordinator's model context — only the
+    specialist's slug and a generic phrasing. The exception type/detail are
+    telemetry-only, via ``RuntimeSpan.record_exception``.
+    """
     message = runner._sanitize_delegate_failure("billing", RuntimeError("db password is hunter2"))
 
     assert "billing" in message
-    assert "RuntimeError" in message
+    assert "RuntimeError" not in message
     assert "hunter2" not in message  # raw exception detail must never leak to the model
+
+
+def test_sanitize_delegate_failure_message_identical_across_exception_classes() -> None:
+    """Two different exception classes must produce the exact same message shape.
+
+    A reviewer must never be able to distinguish which internal exception
+    class failed by reading the model-facing string alone.
+    """
+    message_value_error = runner._sanitize_delegate_failure("billing", ValueError("boom"))
+    message_runtime_error = runner._sanitize_delegate_failure("billing", RuntimeError("kaboom"))
+
+    assert message_value_error == message_runtime_error
 
 
 def test_check_delegate_tool_name_collisions_raises_on_collision() -> None:
@@ -550,10 +633,71 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
 
 
 @pytest.mark.asyncio
+async def test_delegate_adapter_counts_lock_wait_time_against_coordinator_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 regression: time spent waiting for the per-specialist lock (Decision
+    #14 — concurrent calls to the *same* specialist are serialized) must count
+    against the coordinator's *absolute* deadline, not be measured from a
+    stale pre-lock snapshot.
+
+    Two concurrent calls to the same specialist: the first holds the lock
+    until the coordinator's deadline is already exhausted (its own
+    ``wait_for`` cancels it right at the deadline); the second is queued
+    behind the lock for that entire time. If ``remaining``/``effective_
+    timeout`` were computed *before* acquiring the lock (the pre-fix bug),
+    the second call would see a stale, still-positive budget and actually
+    attempt (and here, complete) its specialist call well past the
+    coordinator's real deadline. With the fix, the second call recomputes
+    ``remaining`` *after* the lock and finds it already <= 0, so it never
+    even attempts the call.
+    """
+    _install_span_capture(monkeypatch)
+    _install_counter_capture(monkeypatch)
+
+    call_n = 0
+    second_call_body_ran = False
+
+    async def respond(task: str) -> str:
+        # `_delegate_adapter` closes over one `specialist_lock` per
+        # `build_subagent_tools()` call, so both concurrent invocations must
+        # go through the *same* built tool (hence the shared `respond`,
+        # routed by call order) to actually exercise lock serialization.
+        nonlocal call_n, second_call_body_ran
+        call_n += 1
+        if call_n == 1:
+            # Never completes on its own — only the coordinator deadline
+            # (via this call's own `wait_for`) ends it, at t ~= deadline.
+            await asyncio.sleep(5.0)
+            return "unreachable"
+        second_call_body_ran = True
+        return "second should never get here"
+
+    loop = asyncio.get_event_loop()
+    tool, tracker = await _build_single_delegate_tool(
+        monkeypatch,
+        slug="billing",
+        respond=respond,
+        resolved_timeout=60.0,
+        coordinator_deadline=loop.time() + 0.2,
+    )
+
+    first_call = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="first"))
+    second_call = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="second"))
+
+    first_result, second_result = await asyncio.gather(first_call, second_call)
+
+    assert "did not respond in time" in first_result
+    assert "did not respond in time" in second_result
+    assert second_call_body_ran is False  # never attempted: budget was already gone post-lock
+    assert tracker.count == 2  # both calls recorded a (timeout) delegate error
+
+
+@pytest.mark.asyncio
 async def test_delegate_adapter_propagates_cancellation_without_recording_a_delegate_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    _install_span_capture(monkeypatch)
+    span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)
 
     async def respond(task: str) -> str:
@@ -573,6 +717,12 @@ async def test_delegate_adapter_propagates_cancellation_without_recording_a_dele
     # never mistaken for a recoverable specialist failure.
     assert tracker.count == 0
     assert calls == []
+    # ... but it IS still annotated on the span (B4): telemetry should be
+    # able to tell a cancelled delegate call apart from one that simply
+    # never got another outcome recorded.
+    assert span.attributes["af.delegate.outcome"] == "cancelled"
+    assert span.errors == []  # cancellation is not an "error" outcome
+    assert span.exceptions == []  # nor a `record_exception` call
 
 
 # ---------------------------------------------------------------------------
@@ -725,3 +875,101 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
     assert by_name["execute_tool delegate_a"].attributes["af.delegate.outcome"] == "success"
     assert by_name["execute_tool delegate_b"].attributes["af.delegate.specialist"] == "b"
     assert by_name["execute_tool delegate_b"].attributes["af.delegate.outcome"] == "success"
+
+
+# ---------------------------------------------------------------------------
+# Real MAF `Agent` instrumentation (FRD 0006 §5 Decision #19) — B2
+# ---------------------------------------------------------------------------
+#
+# Every other test in this module that inspects delegate telemetry uses
+# `_FakeSpecialistAgent`, a hand-rolled `BaseAgent` subclass that never mixes
+# in `agent_framework.observability.AgentTelemetryLayer` and therefore never
+# actually creates MAF's own `invoke_agent` span. Those tests prove this
+# repo's *own* `af.delegate.*` span attributes are correct, but they cannot
+# prove the separate MAF-side contract this file's other assertions rely on:
+# that `_build_delegated_agent` wires a real `Agent`'s `name=` so MAF's
+# `AgentTelemetryLayer` stamps `gen_ai.agent.name` with the specialist's
+# *slug*. The test below goes through the real (unmocked)
+# `_build_delegated_agent` -> `_build_role_agent` -> `Agent(...)` path with a
+# real `agent_framework.Agent` and a minimal-but-protocol-correct fake chat
+# client, and inspects the actual span MAF's `AgentTelemetryLayer` produces.
+
+
+@pytest.mark.asyncio
+async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A REAL ``agent_framework.Agent`` specialist's own ``invoke_agent`` OTel
+    span (created by MAF's ``AgentTelemetryLayer``, not by any code in this
+    repo) must carry the specialist's *slug* as ``gen_ai.agent.name`` — proving
+    ``_build_delegated_agent`` passes ``agent_name=resolved.slug`` (not
+    ``resolved.name``, the human-facing display name) all the way into MAF's
+    ``Agent(name=...)`` constructor call in ``_build_role_agent``.
+
+    Goes through the real ``build_subagent_tools`` -> ``_build_delegate_tool``
+    -> ``_build_delegated_agent`` -> ``_build_role_agent`` chain (no
+    monkeypatching of any of those, unlike every other test in this module)
+    so the specialist really is a MAF ``Agent`` instance, and invokes the
+    resulting ``delegate_billing`` tool's adapter exactly as the coordinator's
+    model would. ``_RunnableFakeClientManager`` supplies the only fake in this
+    test: a chat client, standing in for the network call to a real model
+    provider.
+    """
+    import agent_framework.observability as maf_observability
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    # MAF's own get_tracer() (used by AgentTelemetryLayer to create the
+    # invoke_agent span) is a thin wrapper over
+    # opentelemetry.trace.get_tracer_provider() with no per-call injection
+    # point, so the provider has to be swapped globally for the duration of
+    # this test — the same technique test_observability.py already uses for
+    # this repo's own get_tracer(), which resolves through the identical
+    # opentelemetry.trace.get_tracer_provider() call.
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    # MAF only creates spans at all when this (module-level singleton)
+    # instance attribute is truthy; it is read fresh on every invocation, so
+    # a plain monkeypatch (auto-restored) is sufficient — no need to touch
+    # this repo's own (separate) `_observability._enabled` flag, since this
+    # test only needs to prove MAF's span, not this repo's.
+    monkeypatch.setattr(maf_observability.OBSERVABILITY_SETTINGS, "enable_instrumentation", True)
+
+    set_client_manager(_RunnableFakeClientManager())
+
+    resolved = _make_resolved(
+        name="Billing Specialist",
+        slug="billing",
+        instructions="Handle billing questions.",
+    )
+    catalog = _catalog_of(("billing", resolved))
+    loop = asyncio.get_event_loop()
+    tools, _tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
+    )
+    assert len(tools) == 1
+    tool = tools[0]
+    assert tool.name == "delegate_billing"
+
+    ctx = SimpleNamespace(kwargs={})
+    result = await tool.func(ctx, task="Explain this month's invoice.")
+
+    assert result == "specialist response"
+
+    finished = exporter.get_finished_spans()
+    invoke_spans = [span for span in finished if span.name.startswith("invoke_agent")]
+    assert len(invoke_spans) == 1, f"expected exactly one invoke_agent span, got: {[s.name for s in finished]}"
+    invoke_span = invoke_spans[0]
+
+    # The slug — never the display name `resolved.name` ("Billing
+    # Specialist") — is what MAF's AgentTelemetryLayer must see as
+    # `Agent.name`, since it is what both the span name and the
+    # `gen_ai.agent.name` attribute are derived from.
+    assert invoke_span.name == "invoke_agent billing"
+    assert invoke_span.attributes is not None
+    assert invoke_span.attributes.get("gen_ai.agent.name") == "billing"
+    assert invoke_span.attributes.get("gen_ai.agent.name") != resolved.name

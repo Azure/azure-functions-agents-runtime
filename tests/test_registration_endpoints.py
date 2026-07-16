@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import logging
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_type_hints
@@ -112,6 +114,62 @@ def _resolved_agent(
 def _response_text(response: func.HttpResponse) -> str:
     body = response.body
     return body.decode("utf-8") if isinstance(body, bytes) else str(body)
+
+
+class _CapturedSpan:
+    """Fake ``RuntimeSpan`` for asserting on built-in endpoints' own ``agent.run`` span (B3).
+
+    Mirrors ``test_web_request.py``'s ``_CapturedSpan``. The built-in chat/MCP
+    endpoints call ``run_agent``/``run_agent_stream`` directly rather than
+    going through ``_handlers.py``'s trigger-registered handlers, so they now
+    open their *own* ``agent.run {name}`` span (see the comment above
+    ``start_span`` in ``handle_chat``/``handle_mcp_agent_chat``) instead of
+    relying on a caller to have opened one.
+    """
+
+    def __init__(self, attributes: dict[str, Any]) -> None:
+        self.attributes: dict[str, Any] = dict(attributes)
+        self.errors: list[tuple[str, str]] = []
+        self.exceptions: list[BaseException] = []
+        self.content: dict[str, str] = {}
+
+    def set_attribute(self, key: str, value: Any) -> None:
+        if value is not None:
+            self.attributes[key] = value
+
+    def set_content(self, key: str, value: str) -> None:
+        self.content[key] = value
+
+    def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
+        pass
+
+    def set_error(self, message: str, *, fault_domain: str) -> None:
+        self.errors.append((message, fault_domain))
+
+    def record_exception(self, exc: BaseException, *, fault_domain: str | None = None) -> None:
+        self.exceptions.append(exc)
+        self.errors.append((str(exc), fault_domain or "unknown"))
+
+
+def _install_start_span_capture(monkeypatch: Any) -> list[_CapturedSpan]:
+    spans: list[_CapturedSpan] = []
+
+    @contextlib.contextmanager
+    def _fake_start_span(
+        name: str,
+        *,
+        fault_domain: str | None = None,
+        lifecycle_stage: str | None = None,
+        attributes: dict[str, Any] | None = None,
+    ) -> Iterator[_CapturedSpan]:
+        span = _CapturedSpan(attributes or {})
+        spans.append(span)
+        yield span
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.start_span", _fake_start_span
+    )
+    return spans
 
 
 def test_register_builtin_endpoints_serves_agent_aware_debug_chat_ui(
@@ -468,6 +526,107 @@ def test_debug_chat_stream_endpoint_skips_input_schema_validation(
     assert response.status_code == 200
     assert response.media_type == "text/event-stream"
     assert run_calls["prompt"] == "hello"
+
+
+def test_handle_chat_reports_delegate_error_count_on_span(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """B3 (built-in chat endpoint): a recoverable delegate failure must land on this endpoint's own span.
+
+    ``handle_chat`` calls ``run_agent`` directly rather than going through
+    ``_handlers.py``'s trigger-registered handlers, so nothing upstream
+    applies ``_set_run_result_attributes``/``af.agent.tool_error_count`` for
+    it. This asserts the endpoint now opens its own span and folds
+    ``AgentResult.delegate_error_count`` into that span's
+    ``af.agent.tool_error_count``, exactly like `_handlers.py` does for
+    trigger-registered agents.
+    """
+    app = FakeFunctionApp()
+    source_file = tmp_path / "secondary_agent.agent.md"
+    source_file.write_text("---\nname: Secondary Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Secondary Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+        source_file=source_file,
+    )
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            session_id="session-123",
+            content="ok, but the billing specialist failed",
+            tool_calls=[{"name": "delegate_billing", "result": "ok"}],
+            delegate_error_count=2,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(
+        route for route in app.routes if route["route"] == "agents/secondary_agent/chat"
+    )
+
+    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    [span] = spans
+    assert span.attributes["af.agent.outcome"] == "success"
+    # `_tool_error_count`'s JSON-envelope heuristic finds nothing wrong with
+    # the one recorded tool call (`result: "ok"`) — the whole count of 2
+    # comes from `delegate_error_count`, proving it is the piece that was
+    # previously dropped on this surface.
+    assert span.attributes["af.agent.tool_error_count"] == 2
+
+
+def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """B3 (built-in MCP endpoint): same contract as the chat endpoint, for the MCP surface."""
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        source_file=source_file,
+    )
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            session_id="session-456",
+            content="ok, but the shipping specialist failed",
+            tool_calls=[],
+            delegate_error_count=1,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=False)
+    mcp_routes = [route for route in app.routes if route.get("mcp_tool_trigger")]
+    assert len(mcp_routes) == 1
+    mcp_handler = mcp_routes[0]["handler"]
+
+    result = asyncio.run(
+        mcp_handler(json.dumps({"arguments": {"prompt": "hello"}, "sessionId": "session-456"}))
+    )
+
+    assert json.loads(result) == {
+        "session_id": "session-456",
+        "response": "ok, but the shipping specialist failed",
+        "tool_calls": [],
+    }
+    [span] = spans
+    assert span.attributes["af.agent.outcome"] == "success"
+    assert span.attributes["af.agent.tool_error_count"] == 1
 
 
 def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(

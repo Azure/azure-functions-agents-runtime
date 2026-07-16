@@ -58,7 +58,13 @@ from typing import Any
 
 from ._blob_history import build_blob_provider_from_environment
 from ._logger import logger
-from ._observability import FaultDomain, current_span, record_delegate_call
+from ._observability import (
+    FaultDomain,
+    LifecycleStage,
+    current_span,
+    record_delegate_call,
+    start_span,
+)
 from ._slug import delegate_tool_name
 from .client_manager import get_client_manager
 from .config import ResolvedAgent, SubagentRef
@@ -364,6 +370,7 @@ def _build_role_agent(
 
     return Agent(
         chat_client,
+        name=agent_name,
         instructions=effective_instructions,
         tools=resolved_tools,
         context_providers=context_providers,
@@ -397,7 +404,14 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
-        agent_name=resolved.name,
+        # The *slug* (not `resolved.name`, the display name) — this becomes
+        # the MAF `Agent`'s `name=`, which MAF uses for its `invoke_agent`
+        # OTel span attribution (`gen_ai.agent.name`). The delegate tool is
+        # named `delegate_<slug>` (see `_build_delegate_tool`), so using the
+        # slug here lets a trace viewer correlate "the tool call named
+        # `delegate_<slug>`" with "the nested `invoke_agent {slug}` span it
+        # produced" (FRD 0006 §5 Decision #19) without a name/slug lookup.
+        agent_name=resolved.slug,
         resolved_id=None,
         history_provider=None,
         delegate_tools=None,
@@ -407,14 +421,19 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
 def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
     """Sanitized, model-facing message for a recovered delegate failure.
 
-    Deliberately generic — the *real* exception detail goes to telemetry via
-    :meth:`RuntimeSpan.set_error` (in the ``execute_tool delegate_<slug>``
-    span) and :func:`record_delegate_call`, never to the coordinator's model
-    context (FRD 0006 Decision #12: "full detail to telemetry, sanitized
-    string to the model").
+    Deliberately generic *and class-independent* — this string must not vary
+    by the internal exception type (e.g. it must read identically whether
+    the specialist raised a ``ValueError`` or a ``ConnectionError``), so the
+    coordinator's model never learns anything about the specialist's
+    internals from wording alone. The *real* exception detail (type,
+    message, traceback) goes only to telemetry, via
+    :meth:`RuntimeSpan.record_exception` (in the ``execute_tool
+    delegate_<slug>`` span) and :func:`record_delegate_call` — never to the
+    coordinator's model context (FRD 0006 Decision #12: "full detail to
+    telemetry, sanitized string to the model").
     """
     return (
-        f"The '{slug}' specialist could not complete this task ({type(exc).__name__}). "
+        f"The '{slug}' specialist could not complete this task. "
         "Consider trying again, rephrasing the request, or proceeding without it."
     )
 
@@ -474,8 +493,6 @@ def _build_delegate_tool(
 
     async def _delegate_adapter(ctx: Any, **kwargs: Any) -> str:
         loop = asyncio.get_event_loop()
-        remaining = max(0.0, coordinator_deadline - loop.time())
-        effective_timeout = min(specialist_timeout, remaining)
         task_text = str(kwargs.get("task", "") or "")
 
         span = current_span()
@@ -486,8 +503,23 @@ def _build_delegate_tool(
         # Only the actual specialist run is serialized per-specialist
         # (Decision #14): different specialists always run in parallel;
         # concurrent calls to the *same* specialist wait their turn here.
-        async with specialist_lock:
-            try:
+        # `remaining`/`effective_timeout` are deliberately computed *inside*
+        # the lock (B1) — the coordinator's deadline is an absolute wall-clock
+        # point, so time spent queued behind a concurrent call to this same
+        # specialist must count against it too. Computing them before the
+        # lock (the pre-fix bug) would let a call that waited out the whole
+        # budget still see a stale, still-positive snapshot and attempt the
+        # underlying call anyway, well past the coordinator's real deadline.
+        try:
+            async with specialist_lock:
+                remaining = max(0.0, coordinator_deadline - loop.time())
+                effective_timeout = min(specialist_timeout, remaining)
+                if effective_timeout <= 0:
+                    # Budget is already exhausted post-lock: treat exactly
+                    # like a timeout, but skip the call entirely rather than
+                    # relying on `wait_for(timeout<=0)`'s cancel-before-first-
+                    # step behavior to prevent it from ever starting.
+                    raise TimeoutError
                 # `original_func` is MAF's own `_agent_wrapper` (from
                 # `as_tool()`), which always resolves to a `str`
                 # (`AgentRunResponse.text`); the explicit `str(...)` only
@@ -495,30 +527,42 @@ def _build_delegate_tool(
                 result = str(
                     await asyncio.wait_for(original_func(ctx, **kwargs), timeout=effective_timeout)
                 )
-            except TimeoutError:
-                # Specialist-local timeout: recoverable — the coordinator
-                # continues (Decision #12). A propagated ambient/request
-                # cancellation is `asyncio.CancelledError`, a BaseException
-                # that this `except TimeoutError` (and the `except Exception`
-                # below) never catches, so it is left to propagate untouched.
-                tracker.record_error()
-                record_delegate_call(error=True)
-                span.set_attribute("af.delegate.outcome", "timeout")
-                span.set_error(
-                    f"delegate_{slug} timed out after {effective_timeout:.1f}s",
-                    fault_domain=FaultDomain.DELEGATE,
-                )
-                return (
-                    f"The '{slug}' specialist did not respond in time and was "
-                    "stopped. Consider a narrower request, trying again, or "
-                    "proceeding without it."
-                )
-            except Exception as exc:
-                tracker.record_error()
-                record_delegate_call(error=True)
-                span.set_attribute("af.delegate.outcome", "error")
-                span.set_error(f"delegate_{slug} failed: {exc}", fault_domain=FaultDomain.DELEGATE)
-                return _sanitize_delegate_failure(slug, exc)
+        except asyncio.CancelledError:
+            # Parent/request cancellation, not a specialist-local timeout —
+            # never recorded as a (recoverable) delegate error (Decision #12
+            # and `_DelegateErrorTracker`'s docstring are explicit that only
+            # *recoverable* failures count). Annotate the outcome for
+            # telemetry's sake only, then re-raise immediately so the
+            # cancellation still propagates and aborts the run — this is an
+            # observability side-effect on the way out, never a swallow.
+            span.set_attribute("af.delegate.outcome", "cancelled")
+            raise
+        except TimeoutError:
+            # Specialist-local (or coordinator-budget) timeout: recoverable —
+            # the coordinator continues (Decision #12).
+            tracker.record_error()
+            record_delegate_call(error=True)
+            span.set_attribute("af.delegate.outcome", "timeout")
+            span.record_exception(
+                TimeoutError(f"delegate_{slug} timed out after {effective_timeout:.1f}s"),
+                fault_domain=FaultDomain.DELEGATE,
+            )
+            return (
+                f"The '{slug}' specialist did not respond in time and was "
+                "stopped. Consider a narrower request, trying again, or "
+                "proceeding without it."
+            )
+        except Exception as exc:
+            tracker.record_error()
+            record_delegate_call(error=True)
+            span.set_attribute("af.delegate.outcome", "error")
+            # `record_exception` is a strict superset of `set_error` (status
+            # + fault domain + the actual exception object/traceback) — using
+            # it here (B4) preserves the real exception type/detail in
+            # telemetry instead of a flattened string, without double-setting
+            # status.
+            span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+            return _sanitize_delegate_failure(slug, exc)
 
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
@@ -936,10 +980,11 @@ async def run_agent_stream(
     * ``subagents``/``catalog`` add ``delegate_<slug>`` tools (FRD 0006), one
       per reference — see :func:`run_agent`. Delegate calls surface through
       the same ``tool_start``/``tool_end`` events as any other tool call; the
-      per-run delegate-error count is not currently surfaced in the SSE
-      vocabulary (only in :class:`AgentResult` for the non-streaming path),
-      since telemetry (spans/metrics) already captures it identically
-      regardless of whether the coordinator's own run is streamed.
+      per-run delegate-error count is not surfaced in the SSE vocabulary
+      itself (only in :class:`AgentResult` for the non-streaming path), but
+      it IS applied to this run's own ``agent.run {name}`` span as
+      ``af.agent.tool_error_count`` once the stream completes, mirroring
+      what the non-streaming path does for :class:`AgentResult`.
     * To fully disable all tools from a direct API call, pass
       ``tools=[], mcp_tools=[], sandbox_tools=None, web_request_tools=None``.
 
@@ -964,7 +1009,7 @@ async def run_agent_stream(
     deadline = loop.time() + timeout
 
     try:
-        agent, session, resolved_id, _delegate_error_tracker = await _build_agent_session_history(
+        agent, session, resolved_id, delegate_error_tracker = await _build_agent_session_history(
             instructions=instructions,
             session_id=session_id,
             tools=tools,
@@ -988,97 +1033,152 @@ async def run_agent_stream(
 
     yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
 
-    lock = await _get_session_lock(resolved_id)
-    async with lock:
-        pending_tool_calls: dict[str, dict[str, Any]] = {}
-        emitted_tool_calls: set[str] = set()
-
-        def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
-            event = _function_call_event(item)
-            call_id = event.get("tool_call_id")
-            if not isinstance(call_id, str) or not call_id:
-                return None, event
-
-            pending = pending_tool_calls.setdefault(
-                call_id,
-                {
-                    "type": "tool_start",
-                    "tool_call_id": call_id,
-                    "tool_name": event.get("tool_name"),
-                    "arguments": None,
-                },
-            )
-            if event.get("tool_name"):
-                pending["tool_name"] = event["tool_name"]
-            pending["arguments"] = _merge_tool_arguments(
-                pending.get("arguments"),
-                event.get("arguments"),
-            )
-            return call_id, pending
-
-        async def emit_tool_start_if_ready(
-            call_id: str, event: dict[str, Any]
-        ) -> AsyncIterator[str]:
-            if call_id in emitted_tool_calls:
-                return
-            if not _is_complete_json_argument(event.get("arguments")):
-                return
-            emitted_tool_calls.add(call_id)
-            yield f"data: {json.dumps(event)}\n\n"
-
-        async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
-            if call_id is None or call_id in emitted_tool_calls:
-                return
-            event = pending_tool_calls.get(call_id)
-            if event is None:
-                return
-            emitted_tool_calls.add(call_id)
-            yield f"data: {json.dumps(event)}\n\n"
-
+    # `run_agent_stream` opens its *own* run-level span rather than relying on
+    # a caller-provided one (B3): unlike the non-streaming path — where
+    # `run_agent` returns synchronously and callers such as
+    # `registration/_handlers.py`/`registration/endpoints.py` wrap the whole
+    # call in an `agent.run {name}` span before it returns — a caller of this
+    # generator (e.g. `handle_chat_stream`) typically just constructs the
+    # generator and hands it to a `StreamingResponse` without ever driving it
+    # itself, so no ambient span from the caller is active while this body
+    # actually runs. Opening one here ensures delegate-error accounting (and
+    # timeout/exception outcomes) always lands somewhere for the streaming
+    # surface too, matching the non-streaming path's `AgentResult.delegate_error_count`.
+    with start_span(
+        f"agent.run {agent_name or 'agent'}",
+        lifecycle_stage=LifecycleStage.AGENT_RUN,
+        attributes={
+            "af.agent.name": agent_name,
+            "af.agent.trigger_type": "stream",
+            "af.agent.session_id": resolved_id,
+            "af.agent.model": model,
+        },
+    ) as span:
         try:
-            stream = agent.run(
-                prompt,
-                stream=True,
-                session=session,
-                options=_build_chat_options_from_environment(),
-            )
-            async for update in stream:
-                if loop.time() > deadline:
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
-                    return
-                for item in getattr(update, "contents", None) or []:
-                    ctype = _content_type(item)
-                    if ctype == "text":
-                        text = _content_text(item)
-                        if text:
-                            yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
-                    elif ctype == "text_reasoning":
-                        text = _content_text(item)
-                        if text:
-                            yield f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
-                    elif ctype == "function_call":
-                        call_id, event = buffer_function_call(item)
-                        if call_id is None:
-                            yield f"data: {json.dumps(event)}\n\n"
-                        else:
-                            async for output in emit_tool_start_if_ready(call_id, event):
-                                yield output
-                    elif ctype == "function_result":
-                        call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
-                        async for output in emit_tool_start_before_result(
-                            call_id if isinstance(call_id, str) else None
-                        ):
-                            yield output
-                        yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
-                    # Unknown content types are intentionally ignored — the
-                    # SSE vocabulary is fixed and the UI doesn't render them.
-            for call_id, event in pending_tool_calls.items():
-                if call_id not in emitted_tool_calls:
+            lock = await _get_session_lock(resolved_id)
+            async with lock:
+                pending_tool_calls: dict[str, dict[str, Any]] = {}
+                emitted_tool_calls: set[str] = set()
+
+                def buffer_function_call(item: Any) -> tuple[str | None, dict[str, Any]]:
+                    event = _function_call_event(item)
+                    call_id = event.get("tool_call_id")
+                    if not isinstance(call_id, str) or not call_id:
+                        return None, event
+
+                    pending = pending_tool_calls.setdefault(
+                        call_id,
+                        {
+                            "type": "tool_start",
+                            "tool_call_id": call_id,
+                            "tool_name": event.get("tool_name"),
+                            "arguments": None,
+                        },
+                    )
+                    if event.get("tool_name"):
+                        pending["tool_name"] = event["tool_name"]
+                    pending["arguments"] = _merge_tool_arguments(
+                        pending.get("arguments"),
+                        event.get("arguments"),
+                    )
+                    return call_id, pending
+
+                async def emit_tool_start_if_ready(
+                    call_id: str, event: dict[str, Any]
+                ) -> AsyncIterator[str]:
+                    if call_id in emitted_tool_calls:
+                        return
+                    if not _is_complete_json_argument(event.get("arguments")):
+                        return
                     emitted_tool_calls.add(call_id)
                     yield f"data: {json.dumps(event)}\n\n"
-            yield f"data: {json.dumps({'type': 'done'})}\n\n"
-        except TimeoutError:
-            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
-        except Exception as exc:
-            logger.error("Agent stream failed: %s", exc, exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+
+                async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                    if call_id is None or call_id in emitted_tool_calls:
+                        return
+                    event = pending_tool_calls.get(call_id)
+                    if event is None:
+                        return
+                    emitted_tool_calls.add(call_id)
+                    yield f"data: {json.dumps(event)}\n\n"
+
+                try:
+                    stream = agent.run(
+                        prompt,
+                        stream=True,
+                        session=session,
+                        options=_build_chat_options_from_environment(),
+                    )
+                    # Each iteration's wait for the *next* update is itself
+                    # bounded by the coordinator's remaining budget (B1): the
+                    # previous code only checked `loop.time() > deadline`
+                    # *after* `async for` had already yielded an update, so a
+                    # hung tool/model call producing no update at all could
+                    # block past the deadline indefinitely. Wrapping
+                    # `__anext__()` in `asyncio.wait_for` bounds that wait
+                    # directly, so a stalled generator cannot exceed the
+                    # absolute deadline either.
+                    stream_iter = stream.__aiter__()
+                    while True:
+                        remaining = max(0.0, deadline - loop.time())
+                        if remaining <= 0:
+                            raise TimeoutError
+                        try:
+                            update = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
+                        except StopAsyncIteration:
+                            break
+                        for item in getattr(update, "contents", None) or []:
+                            ctype = _content_type(item)
+                            if ctype == "text":
+                                text = _content_text(item)
+                                if text:
+                                    yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                            elif ctype == "text_reasoning":
+                                text = _content_text(item)
+                                if text:
+                                    yield (
+                                        f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
+                                    )
+                            elif ctype == "function_call":
+                                call_id, event = buffer_function_call(item)
+                                if call_id is None:
+                                    yield f"data: {json.dumps(event)}\n\n"
+                                else:
+                                    async for output in emit_tool_start_if_ready(call_id, event):
+                                        yield output
+                            elif ctype == "function_result":
+                                call_id = getattr(item, "call_id", None) or getattr(item, "id", None)
+                                async for output in emit_tool_start_before_result(
+                                    call_id if isinstance(call_id, str) else None
+                                ):
+                                    yield output
+                                yield f"data: {json.dumps(_function_result_event(item), default=str)}\n\n"
+                            # Unknown content types are intentionally ignored — the
+                            # SSE vocabulary is fixed and the UI doesn't render them.
+                    for call_id, event in pending_tool_calls.items():
+                        if call_id not in emitted_tool_calls:
+                            emitted_tool_calls.add(call_id)
+                            yield f"data: {json.dumps(event)}\n\n"
+                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    span.set_attribute("af.agent.outcome", "success")
+                except TimeoutError:
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.record_exception(
+                        TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
+                    )
+                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                except Exception as exc:
+                    logger.error("Agent stream failed: %s", exc, exc_info=True)
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        finally:
+            # Retained through generator completion regardless of outcome
+            # (success/timeout/error) so the streaming surface's delegate
+            # errors are always accounted for, matching what
+            # `AgentResult.delegate_error_count` does for the non-streaming
+            # path (B3).
+            span.set_attribute(
+                "af.agent.tool_error_count",
+                delegate_error_tracker.count if delegate_error_tracker else 0,
+            )

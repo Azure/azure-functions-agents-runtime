@@ -17,9 +17,10 @@ import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
+from .._observability import FaultDomain, LifecycleStage, start_span
 from .._source_marker import source_marker
 from ..config import ResolvedAgent
-from ._handlers import build_sandbox_tools_for_session
+from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
@@ -282,41 +283,66 @@ def _register_http_chat(
     catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
-        try:
-            body = await req.json()
-            prompt = _extract_prompt_from_body(body)
-            session_id = req.headers.get("x-ms-session-id")
-            result = await _run_builtin_agent(
-                prompt,
-                resolved=resolved,
-                capabilities=capabilities,
-                session_id=session_id,
-                workflows_enabled=workflows_enabled,
-                workflow_system_addendum=workflow_system_addendum,
-                durable_client=durable_client,
-                catalog=catalog,
-            )
-            return Response(
-                json.dumps(
-                    {
-                        "session_id": result.session_id,
-                        "response": result.content,
-                        "tool_calls": result.tool_calls,
-                    }
-                ),
-                media_type="application/json",
-                headers={"x-ms-session-id": result.session_id},
-            )
-        except ValueError as exc:
-            return _json_error(str(exc), status_code=400)
-        except Exception as exc:
-            error_msg = _format_exception_message(exc)
-            logger.error(
-                "Built-in chat API error: source_file=%s error=%s",
-                source_marker(resolved.source_file),
-                error_msg,
-            )
-            return _json_error(error_msg)
+        resolved_session_id = _resolve_builtin_endpoints_session_id(
+            req.headers.get("x-ms-session-id")
+        )
+        # This endpoint calls `run_agent` directly rather than going through
+        # `_handlers.py`'s trigger-registered handlers, so — unlike a
+        # user-defined `trigger:` agent — nothing upstream opens an
+        # `agent.run {name}` span for it. Opened here so this built-in
+        # surface gets the same run-level span/attributes (including B3's
+        # `af.agent.tool_error_count`, which folds in delegate errors) that
+        # `make_agent_handler`/`make_http_agent_handler` already provide.
+        with start_span(
+            f"agent.run {resolved.name}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.name,
+                "af.agent.trigger_type": "builtin_chat",
+                "af.agent.session_id": resolved_session_id,
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
+            try:
+                body = await req.json()
+                prompt = _extract_prompt_from_body(body)
+                result = await _run_builtin_agent(
+                    prompt,
+                    resolved=resolved,
+                    capabilities=capabilities,
+                    session_id=resolved_session_id,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    durable_client=durable_client,
+                    catalog=catalog,
+                )
+                _set_run_result_attributes(span, result)
+                span.set_attribute("af.agent.outcome", "success")
+                return Response(
+                    json.dumps(
+                        {
+                            "session_id": result.session_id,
+                            "response": result.content,
+                            "tool_calls": result.tool_calls,
+                        }
+                    ),
+                    media_type="application/json",
+                    headers={"x-ms-session-id": result.session_id},
+                )
+            except ValueError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.set_error(str(exc), fault_domain=FaultDomain.APP)
+                return _json_error(str(exc), status_code=400)
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                error_msg = _format_exception_message(exc)
+                logger.error(
+                    "Built-in chat API error: source_file=%s error=%s",
+                    source_marker(resolved.source_file),
+                    error_msg,
+                )
+                return _json_error(error_msg)
 
     decorated: Any
     if workflows_enabled:
@@ -395,39 +421,61 @@ def _register_mcp_endpoint(
     catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
-        try:
-            payload = json.loads(context) if context else {}
-            arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
-            prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
-            if not isinstance(prompt, str) or not prompt.strip():
-                return json.dumps({"error": "Missing 'prompt'"})
+        # Same rationale as `handle_chat` above: this built-in MCP surface
+        # calls `run_agent` directly, so nothing upstream opens an
+        # `agent.run {name}` span for it — open one here to get the same
+        # run-level attributes (including B3's `af.agent.tool_error_count`).
+        with start_span(
+            f"agent.run {resolved.name}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.name,
+                "af.agent.trigger_type": "builtin_mcp",
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
+            try:
+                payload = json.loads(context) if context else {}
+                arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
+                prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
+                if not isinstance(prompt, str) or not prompt.strip():
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_error("Missing 'prompt'", fault_domain=FaultDomain.APP)
+                    return json.dumps({"error": "Missing 'prompt'"})
 
-            session_id = _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
-            result = await _run_builtin_agent(
-                prompt.strip(),
-                resolved=resolved,
-                capabilities=capabilities,
-                session_id=session_id,
-                workflows_enabled=workflows_enabled,
-                workflow_system_addendum=workflow_system_addendum,
-                durable_client=durable_client,
-                catalog=catalog,
-            )
-            return json.dumps(
-                {
-                    "session_id": result.session_id,
-                    "response": result.content,
-                    "tool_calls": result.tool_calls,
-                }
-            )
-        except Exception as exc:
-            error_msg = _format_exception_message(exc)
-            logger.error(
-                "Built-in MCP error: source_file=%s error=%s",
-                source_marker(resolved.source_file),
-                error_msg,
-            )
-            return json.dumps({"error": error_msg})
+                session_id = (
+                    _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
+                )
+                span.set_attribute("af.agent.session_id", session_id)
+                result = await _run_builtin_agent(
+                    prompt.strip(),
+                    resolved=resolved,
+                    capabilities=capabilities,
+                    session_id=session_id,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    durable_client=durable_client,
+                    catalog=catalog,
+                )
+                _set_run_result_attributes(span, result)
+                span.set_attribute("af.agent.outcome", "success")
+                return json.dumps(
+                    {
+                        "session_id": result.session_id,
+                        "response": result.content,
+                        "tool_calls": result.tool_calls,
+                    }
+                )
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                error_msg = _format_exception_message(exc)
+                logger.error(
+                    "Built-in MCP error: source_file=%s error=%s",
+                    source_marker(resolved.source_file),
+                    error_msg,
+                )
+                return json.dumps({"error": error_msg})
 
     decorated: Any
     if workflows_enabled:
