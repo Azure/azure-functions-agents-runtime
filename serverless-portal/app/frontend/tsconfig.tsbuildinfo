@@ -1,0 +1,1 @@
+{"root":["./src/app.tsx","./src/api.ts","./src/main.tsx","./src/toast.tsx","./src/components/shell.tsx","./src/pages/agentspage.tsx","./src/pages/createagentpage.tsx","./src/pages/editagentpage.tsx","./src/pages/functionappspage.tsx","./src/pages/toolspage.tsx"],"version":"5.9.3"}

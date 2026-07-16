@@ -1,0 +1,88 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Create flow — Function App-centric</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 26px 48px; }
+  .ctabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; flex-wrap: wrap; }
+  .ctabs a { padding: 10px 14px; font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+  .ctabs a.active { color: var(--brand-dark); border-bottom-color: var(--brand); font-weight: 600; }
+  .concept-banner { border-left: 4px solid #0f6cbd; background: var(--brand-soft); color: var(--brand-dark); padding: 12px 16px; border-radius: 8px; margin-bottom: 18px; font-size: 13px; }
+  .flow { display: flex; align-items: stretch; gap: 0; margin-bottom: 22px; flex-wrap: wrap; }
+  .flow .stage { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); padding: 10px 14px; font-size: 12.5px; }
+  .flow .stage.on { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-dark); font-weight: 600; }
+  .flow .stage.ctx { background: var(--surface-2); color: var(--text-muted); }
+  .flow .arrow { display: grid; place-items: center; color: var(--text-faint); padding: 0 10px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env">Create flow · Model 1</span>
+  </header>
+
+  <div class="wrap">
+    <div class="ctabs">
+      <a href="index.html">Overview</a>
+      <a class="active" href="create-flow-model1.html">Create flow · Function App</a>
+      <a href="create-flow-model2.html">Create flow · Agent</a>
+      <a href="create-flow-model3.html">Create flow · Project</a>
+      <a href="model1-functionapp.html" style="margin-left:auto">Concept →</a>
+    </div>
+
+    <div class="concept-banner">🧭 <strong>Model 1 — you start inside a Function App.</strong> "Create agent" is really "add an agent to <em>this</em> app." Hosting is already decided; you pick from the app's <strong>shared</strong> tools/skills.</div>
+
+    <div class="breadcrumb">Function Apps / func-support-team / Add agent</div>
+    <div class="page-title"><h1>Add agent</h1><span class="badge gray">func-support-team · rg-support · eastus2</span></div>
+
+    <div class="flow">
+      <div class="stage ctx">📦 In app: func-support-team</div>
+      <div class="arrow">→</div>
+      <div class="stage on">1 · Describe</div>
+      <div class="arrow">→</div>
+      <div class="stage">2 · Pick shared tools/skills</div>
+      <div class="arrow">→</div>
+      <div class="stage">3 · Trigger</div>
+      <div class="arrow">→</div>
+      <div class="stage">Add to app</div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>1 · Describe</h3>
+        <div class="field"><label>Agent name</label><input type="text" value="escalation"></div>
+        <div class="field"><label>Instructions</label><textarea rows="3">You escalate high-severity tickets to on-call.</textarea></div>
+
+        <h3 style="margin-top:22px">2 · Tools &amp; skills <span class="badge amber" style="margin-left:6px">shared pool</span></h3>
+        <p class="muted" style="font-size:12.5px">Choose from what this app already exposes. Sharing is visible up front.</p>
+        <table>
+          <tbody>
+            <tr><td><input type="checkbox" checked> <span class="mono">lookup_ticket</span></td><td><span class="badge blue">used by 2</span></td></tr>
+            <tr><td><input type="checkbox" checked> <span class="mono">send_email</span></td><td><span class="badge blue">used by 1</span></td></tr>
+            <tr><td><input type="checkbox"> <span class="mono">azure-resources</span> (skill)</td><td><span class="badge blue">used by 3</span></td></tr>
+          </tbody>
+        </table>
+
+        <h3 style="margin-top:22px">3 · Trigger</h3>
+        <div class="field"><select><option>Queue</option><option>HTTP</option><option>Timer</option></select></div>
+
+        <div class="pill-row" style="margin-top:8px"><button class="btn primary">Add to func-support-team</button></div>
+      </div>
+
+      <div class="card">
+        <h3>What happens</h3>
+        <dl class="kv">
+          <dt>Hosting</dt><dd class="muted">Already decided — this app</dd>
+          <dt>Provisioning</dt><dd class="muted">None — just adds a file &amp; re-publishes</dd>
+          <dt>Tools/skills</dt><dd class="muted">Reuses the app's shared pool</dd>
+        </dl>
+        <div class="note" style="margin-top:14px">✅ <strong>Strength:</strong> sharing and blast radius are obvious. <br>⚠️ <strong>Cost:</strong> you must first navigate into an app — the agent isn't the front door.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

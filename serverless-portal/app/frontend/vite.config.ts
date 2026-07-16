@@ -1,7 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
-// The FastAPI backend runs on :8080. Proxy /api there during dev.
+// The Node.js backend runs on :8080. Proxy /api there during dev.
 export default defineConfig({
   plugins: [react()],
   server: {
