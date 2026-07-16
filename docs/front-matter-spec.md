@@ -177,18 +177,38 @@ trigger:
   args:
     route: string          # Required. URL path for the endpoint
     methods: string[]      # Optional. Array of HTTP methods. Defaults to ["POST"]
-    auth_level: string     # Optional. One of: anonymous, function, admin. Defaults to function
+    auth:                  # Optional. Inbound auth policy (same model as builtin_endpoints.auth).
+                           #   String shorthand: function | admin | anonymous | entra
+                           #   Object form: { mode: <mode>, entra: { tenant_id, allowed_audiences, allowed_client_ids } }
+                           #   Defaults to function.
+    auth_level: string     # Deprecated. Use `auth` instead. One of: anonymous, function, admin.
+                           #   If both are set, `auth` wins and this is ignored with a warning.
 ```
 
-**Example:**
+**Example (default key auth):**
 ```yaml
 trigger:
   type: http_trigger
   args:
     route: "resource-summary"
     methods: ["POST"]
-    auth_level: function
+    auth: function
 ```
+
+**Example (Entra ID enforcement):**
+```yaml
+trigger:
+  type: http_trigger
+  args:
+    route: "secured"
+    auth:
+      mode: entra
+      entra:
+        tenant_id: "<tenant-guid>"
+        allowed_audiences: ["api://my-app"]
+```
+
+`http_trigger` `auth` reuses the same [`auth` endpoint-authentication model](#auth--endpoint-authentication) as the built-in chat/MCP endpoints. `entra` mode registers the route anonymous at the Functions key layer and enforces the App Service Authentication (Easy Auth) `x-ms-client-principal` header in-app, rejecting requests without a validated principal before the agent runs. The legacy flat `auth_level` string remains supported for backward compatibility but is deprecated.
 
 #### **Timer Trigger**
 ```yaml

@@ -79,14 +79,37 @@ trigger:
   args:
     route: my-endpoint
     methods: ["POST"]
-    auth_level: function
+    auth: function
 ```
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `route` | Yes | - | URL path for the endpoint. |
 | `methods` | No | `["POST"]` | HTTP methods to accept. |
-| `auth_level` | No | `function` | `anonymous`, `function`, or `admin`. |
+| `auth` | No | `function` | Inbound auth policy, the same model as `builtin_endpoints.auth`. Accepts a string (`function`, `admin`, `anonymous`, `entra`) or an object with `mode` + optional `entra` allow-lists. |
+| `auth_level` | No | `function` | **Deprecated** — use `auth` instead. Still accepted (`anonymous`, `function`, or `admin`); if both are set, `auth` wins and `auth_level` is ignored with a warning. |
+
+### HTTP trigger authentication
+
+`auth` reuses the same `EndpointAuthConfig` model as the built-in chat/MCP endpoints, so HTTP-triggered agents get identical enforcement:
+
+- `function` (default) / `admin` — Azure Functions host key check (function or system key).
+- `anonymous` — no auth.
+- `entra` — the route is registered anonymous at the key layer and identity is enforced in-app against the App Service Authentication (Easy Auth) `x-ms-client-principal` header, with optional tenant/audience/client-id allow-lists. Requests without a validated principal (or without verifiable Easy Auth enforcement) are rejected before the agent runs.
+
+```yaml
+trigger:
+  type: http_trigger
+  args:
+    route: secured
+    auth:
+      mode: entra
+      entra:
+        tenant_id: <tenant-guid>
+        allowed_audiences: ["api://my-app"]
+```
+
+See [`front-matter-spec.md`](front-matter-spec.md#auth--endpoint-authentication) for the full auth schema and semantics.
 
 By default, the handler returns the agent response as `text/plain`. When `response_example` or `response_schema` is configured at the top level, the runtime instructs the model to return JSON, validates the result, and returns `application/json`.
 

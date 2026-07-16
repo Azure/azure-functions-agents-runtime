@@ -22,7 +22,8 @@ from .._observability import (
     start_span,
 )
 from .._source_marker import source_marker
-from ..config import ResolvedAgent, _to_bool
+from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ._auth import authorize_entra_request
 from .capabilities import AgentCapabilities
 
 AUTH_LEVEL_MAP = {
@@ -311,10 +312,26 @@ def make_agent_handler(
 def make_http_agent_handler(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
+    auth: EndpointAuthConfig | None = None,
 ) -> Callable[[Request], Any]:
-    """Create an async handler for an HTTP-triggered agent."""
+    """Create an async handler for an HTTP-triggered agent.
+
+    ``auth`` is the resolved inbound authentication policy. In ``entra`` mode the
+    request is authorized (App Service Authentication principal + allow-lists)
+    before the runner is ever invoked; the other modes are enforced by the
+    Functions host key check via the route's ``AuthLevel``.
+    """
+    auth_policy = auth or EndpointAuthConfig()
 
     async def _handler(req: Request) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth_policy)
+        if auth_error is not None:
+            return Response(
+                content=json.dumps({"error": auth_error.message}),
+                status_code=auth_error.status_code,
+                media_type="application/json",
+            )
+
         logger.info(
             "HTTP agent triggered: source_file=%s",
             source_marker(resolved.source_file),
