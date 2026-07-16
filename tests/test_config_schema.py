@@ -11,6 +11,7 @@ from azure_functions_agents.config.schema import (
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
+    SubagentRef,
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
@@ -90,3 +91,59 @@ def test_system_tools_config_parses() -> None:
     assert config.dynamic_sessions_code_interpreter == DynamicSessionsCodeInterpreterConfig(
         endpoint="https://example.test"
     )
+
+
+def test_subagent_ref_object_form_parses() -> None:
+    ref = SubagentRef.model_validate({"agent": "billing-specialist"})
+    assert ref.agent == "billing-specialist"
+    assert ref.when is None
+
+
+def test_subagent_ref_object_form_with_when_parses() -> None:
+    ref = SubagentRef.model_validate(
+        {"agent": "billing-specialist", "when": "Route billing questions here."}
+    )
+    assert ref.agent == "billing-specialist"
+    assert ref.when == "Route billing questions here."
+
+
+def test_subagent_ref_rejects_empty_agent() -> None:
+    with pytest.raises(ValidationError):
+        SubagentRef(agent="   ")
+
+
+@pytest.mark.parametrize("forbidden_field", ["id", "tool_name"])
+def test_subagent_ref_extra_forbidden(forbidden_field: str) -> None:
+    """No `id` or `tool_name` override field exists — identity is the slug only (FRD 0006 §5 Decision #16)."""
+    with pytest.raises(ValidationError):
+        SubagentRef.model_validate({"agent": "billing-specialist", forbidden_field: "x"})
+
+
+def test_agent_spec_subagents_object_form_parses() -> None:
+    spec = AgentSpec.model_validate(
+        {
+            "name": "Coordinator",
+            "description": "desc",
+            "subagents": [{"agent": "billing-specialist", "when": "Billing questions."}],
+        }
+    )
+    assert spec.subagents == [
+        SubagentRef(agent="billing-specialist", when="Billing questions.")
+    ]
+
+
+def test_agent_spec_subagents_rejects_string_shorthand() -> None:
+    """String shorthand (`subagents: [billing-specialist]`) is rejected — object form only."""
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(
+            {
+                "name": "Coordinator",
+                "description": "desc",
+                "subagents": ["billing-specialist"],
+            }
+        )
+
+
+def test_agent_spec_subagents_defaults_to_none() -> None:
+    spec = AgentSpec(name="X", description="Y")
+    assert spec.subagents is None

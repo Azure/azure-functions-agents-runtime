@@ -40,15 +40,29 @@ def validate_resolved_agent(
     *,
     discovered_mcp_names: list[str],
     discovered_skills: list[str],
+    is_referenced_as_subagent: bool = False,
 ) -> None:
-    """Run post-merge sanity checks for a resolved agent."""
+    """Run post-merge sanity checks for a resolved agent.
+
+    ``is_referenced_as_subagent`` relaxes the trigger/``builtin_endpoints``
+    requirement below: an agent that is reachable only as another agent's
+    delegation target (declared in that agent's ``subagents:`` list) does
+    not need its own external entry point. See FRD 0006 §4.3 and Decision
+    #18 ("any independently runnable agent may declare subagents" implies
+    the reverse is also true — an agent referenced only as a specialist
+    does not itself need to be independently runnable).
+    """
     source_file = resolved.source_file or "<unknown>"
 
     builtin_endpoints = resolved.builtin_endpoints
     has_builtin_endpoints = bool(
         builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
     )
-    if resolved.trigger is None and not has_builtin_endpoints:
+    if (
+        resolved.trigger is None
+        and not has_builtin_endpoints
+        and not is_referenced_as_subagent
+    ):
         raise ValueError(
             _format_error(
                 source_file,
@@ -107,3 +121,50 @@ def validate_resolved_agent(
             source_file,
             name,
         )
+
+
+def validate_subagent_references(
+    resolved: Any,
+    *,
+    known_slugs: set[str],
+) -> None:
+    """Reject self, unknown, and duplicate ``subagents:`` references.
+
+    Must run only after the app-wide identity-slug index (``known_slugs``)
+    has been built and checked for duplicates — see the composition root
+    in ``app.py`` (FRD 0006 §4.2 two-pass composition, §4.3, and the
+    Decisions log: unknown/duplicate/self references are fail-fast
+    configuration errors, never silently dropped or ignored).
+    """
+    source_file = resolved.source_file or "<unknown>"
+    seen: set[str] = set()
+    for ref in resolved.subagents:
+        if ref.agent == resolved.slug:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "subagents",
+                    f"An agent cannot delegate to itself (`agent: {ref.agent}`).",
+                    "#subagents",
+                )
+            )
+        if ref.agent not in known_slugs:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "subagents",
+                    f"Unknown agent reference `{ref.agent}`. No agent with that "
+                    "identity slug (file stem) was discovered in this app.",
+                    "#subagents",
+                )
+            )
+        if ref.agent in seen:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "subagents",
+                    f"Duplicate reference to agent `{ref.agent}` in `subagents`.",
+                    "#subagents",
+                )
+            )
+        seen.add(ref.agent)

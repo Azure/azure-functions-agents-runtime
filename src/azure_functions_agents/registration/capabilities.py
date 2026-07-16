@@ -8,8 +8,17 @@ from pathlib import Path
 from typing import Any
 
 from .._function_tool import WorkflowTool
+from .._slug import delegate_tool_name
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPTool
+
+# The Azure Container Apps dynamic-sessions sandbox tool is unconditionally
+# named "execute_python" (see system_tools/sandbox.py's `@tool(name=...)`
+# decorator). Hardcoded locally rather than imported: `system_tools.sandbox`
+# pulls in heavy optional deps (aiohttp, azure.identity) and this module
+# otherwise avoids eagerly importing `system_tools.*` (see
+# `_build_web_request_tools` below for the same convention).
+_SANDBOX_TOOL_NAME = "execute_python"
 
 
 @dataclass
@@ -109,3 +118,48 @@ def build_capabilities(
         enabled_skill_paths=enabled_skill_paths,
         web_request_tools=_build_web_request_tools(resolved),
     )
+
+
+def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> set[str]:
+    """Collect every tool name already in play for ``resolved`` before delegation.
+
+    Used by :func:`validate_subagent_tool_names` to fail fast on
+    ``delegate_<slug>`` name collisions (FRD 0006 §4.9, §5 Decision log:
+    tool-name collisions with user/MCP/sandbox/workflow-management/other
+    -specialist tools must be rejected during capability-aware validation).
+    Skill tools are intentionally excluded: they are not exposed as
+    top-level agent tools by name at this layer.
+    """
+    names = {_tool_name(tool) for tool in capabilities.filtered_user_tools or []}
+    names.update(_tool_name(tool) for tool in capabilities.filtered_mcp_tools or [])
+    names.update(_tool_name(tool) for tool in capabilities.filtered_workflow_tools or [])
+    names.update(_tool_name(tool) for tool in capabilities.web_request_tools or [])
+    if resolved.sandbox_config is not None and not resolved.tools_disabled:
+        names.add(_SANDBOX_TOOL_NAME)
+    names.discard("")
+    return names
+
+
+def validate_subagent_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> None:
+    """Fail fast when a ``delegate_<slug>`` tool name would collide.
+
+    Collisions between two different specialists' own ``delegate_<slug>``
+    names are structurally impossible (agent slugs are globally unique —
+    FRD 0006 §5 Decision #17), so this only needs to check the auto-derived
+    name against the coordinator's *own* other tools.
+    """
+    if not resolved.subagents:
+        return
+    taken = existing_tool_names(resolved, capabilities)
+    source_file = resolved.source_file or "<unknown>"
+    for ref in resolved.subagents:
+        tool_name = delegate_tool_name(ref.agent)
+        if tool_name in taken:
+            raise ValueError(
+                f"{Path(source_file)}: field `subagents`: The auto-derived "
+                f"tool name `{tool_name}` (for delegating to `{ref.agent}`) "
+                "collides with an existing tool of the same name on this "
+                "agent. Rename the colliding tool, or remove/rename the "
+                "conflicting agent's source file, to resolve this. See "
+                "docs/front-matter-spec.md#subagents."
+            )

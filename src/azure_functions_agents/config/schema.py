@@ -64,6 +64,31 @@ class TriggerSpec(BaseModel):
         return trimmed
 
 
+class SubagentRef(BaseModel):
+    """A coordinator's reference to one specialist agent it may delegate to.
+
+    Object form only (no string shorthand) — see FRD 0006 §5 Decision #16.
+    ``agent`` is the specialist's identity slug (its file stem, sanitized;
+    see :mod:`azure_functions_agents._slug`). ``when`` is an optional
+    routing hint surfaced to the coordinator model as the ``delegate_<slug>``
+    tool's description; if omitted, the specialist's own ``description`` is
+    used instead (resolved once the specialist is known, not here).
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    agent: str
+    when: str | None = None
+
+    @field_validator("agent")
+    @classmethod
+    def validate_agent(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("agent must be non-empty")
+        return trimmed
+
+
 class DynamicSessionsCodeInterpreterConfig(BaseModel):
     """Configuration for the ACA Dynamic Sessions-backed code interpreter."""
 
@@ -137,6 +162,7 @@ class AgentSpec(BaseModel):
     skills: bool | SkillsFilter | None = None
     tools: bool | ToolsFilter | None = None
     workflows: dict[str, Any] | None = None
+    subagents: list[SubagentRef] | None = None
     input_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
     response_example: str | None = None
@@ -152,6 +178,11 @@ class ResolvedAgent(BaseModel):
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
     name: str
+    # Identity slug (derived from source_file's stem; see _slug.py). Defaulted
+    # rather than required because many tests construct ResolvedAgent directly,
+    # bypassing config.merge.compose(), which is the only code path that
+    # actually computes it.
+    slug: str = ""
     description: str
     trigger: TriggerSpec | None
     instructions: str
@@ -166,6 +197,7 @@ class ResolvedAgent(BaseModel):
     tool_exclude_names: list[str] = Field(default_factory=list)
     tool_filter: ToolsFilter
     workflows: dict[str, Any] | None = None
+    subagents: list[SubagentRef] = Field(default_factory=list)
     tools_disabled: bool = False
     skills_disabled: bool = False
     mcp_disabled: bool = False

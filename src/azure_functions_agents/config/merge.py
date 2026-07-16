@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from azure_functions_agents._slug import _function_name_from_source
 from azure_functions_agents.config.env import runtime_env_value
 from azure_functions_agents.config.schema import (
     AgentSpec,
@@ -11,6 +12,7 @@ from azure_functions_agents.config.schema import (
     McpFilter,
     ResolvedAgent,
     SkillsFilter,
+    SubagentRef,
     ToolsFilter,
     WebRequestConfig,
 )
@@ -116,6 +118,33 @@ def apply_tools_filter(
     return ToolsFilter(exclude=sorted(merged_excludes)), False
 
 
+def _resolve_slug(spec: AgentSpec) -> str:
+    """Compute the agent's stable identity slug from its source file stem.
+
+    This is the same sanitization used for function names and built-in
+    endpoint routes (see ``_slug.py``), so an agent's slug, function name,
+    and ``/agents/<slug>/`` route are always identical. It is also the
+    identifier ``subagents[].agent`` references point at and the suffix of
+    the ``delegate_<slug>`` tool name (FRD 0006 §4.8).
+
+    ``compose()`` must stay warning-free (validation-time concerns belong
+    to ``config.validation``), so a missing ``source_file`` — common for
+    directly-constructed ``AgentSpec``s in unit tests — silently falls
+    back to a sanitized version of ``spec.name`` rather than warning.
+    """
+    return _function_name_from_source(spec.source_file, spec.name, warn_on_missing=False)
+
+
+def _normalize_subagents(spec: AgentSpec) -> list[SubagentRef]:
+    """Copy the spec's ``subagents`` list, defaulting to empty.
+
+    Reference validation (unknown/duplicate/self, tool-name collisions) is
+    intentionally deferred to ``config.validation``, which runs once the
+    full slug index is available; ``compose()`` only normalizes shape.
+    """
+    return [ref.model_copy() for ref in (spec.subagents or [])]
+
+
 def compose(
     spec: AgentSpec,
     global_config: GlobalConfig,
@@ -140,6 +169,7 @@ def compose(
 
     resolved = ResolvedAgent(
         name=spec.name,
+        slug=_resolve_slug(spec),
         description=spec.description,
         trigger=spec.trigger,
         instructions=spec.instructions,
@@ -156,6 +186,7 @@ def compose(
         tool_exclude_names=list(tool_filter.exclude),
         tool_filter=tool_filter,
         workflows=spec.workflows,
+        subagents=_normalize_subagents(spec),
         tools_disabled=tools_disabled,
         skills_disabled=skills_disabled,
         mcp_disabled=mcp_disabled,

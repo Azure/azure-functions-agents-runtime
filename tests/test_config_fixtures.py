@@ -19,7 +19,12 @@ from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     McpFilter,
     SkillsFilter,
+    SubagentRef,
     ToolsFilter,
+)
+from azure_functions_agents.config.validation import (
+    validate_resolved_agent,
+    validate_subagent_references,
 )
 from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
 
@@ -547,3 +552,65 @@ def test_web_request_fixture() -> None:
     assert opted_out_spec.system_tools.web_request is False
     resolved_opted_out = compose(opted_out_spec, global_config)
     assert resolved_opted_out.web_request_config is None
+
+
+# ---------------------------------------------------------------------------
+# 15 — multi-agent delegation: coordinator + specialists via `subagents:`
+# (FRD 0006). One specialist (billing) is independently runnable; the other
+# (shipping) is endpoint-less and reachable only as an internal specialist.
+# ---------------------------------------------------------------------------
+
+
+def test_multi_agent_delegation_fixture() -> None:
+    fixture = FIXTURES_ROOT / "15_multi_agent_delegation"
+
+    global_config = load_global_config(fixture)
+    specs = load_agent_specs(fixture, strict=True)
+    by_name = _specs_by_name(specs)
+
+    assert len(specs) == 3
+    assert set(by_name) == {"Support Coordinator", "Billing Specialist", "Shipping Specialist"}
+
+    coordinator_spec = by_name["Support Coordinator"]
+    assert coordinator_spec.subagents == [
+        SubagentRef(agent="billing", when="Route billing, invoicing, and payment questions here."),
+        SubagentRef(agent="shipping"),
+    ]
+
+    coordinator = compose(coordinator_spec, global_config)
+    billing = compose(by_name["Billing Specialist"], global_config)
+    shipping = compose(by_name["Shipping Specialist"], global_config)
+
+    # Identity slugs are derived from the file stem, independent of display name.
+    assert coordinator.slug == "coordinator"
+    assert billing.slug == "billing"
+    assert shipping.slug == "shipping"
+    assert coordinator.subagents == [
+        SubagentRef(agent="billing", when="Route billing, invoicing, and payment questions here."),
+        SubagentRef(agent="shipping"),
+    ]
+
+    known_slugs = {coordinator.slug, billing.slug, shipping.slug}
+
+    # Every subagents: reference on the coordinator resolves to a known,
+    # non-self, non-duplicate slug.
+    validate_subagent_references(coordinator, known_slugs=known_slugs)
+    # Specialists themselves declare no subagents, so this is a no-op for them.
+    validate_subagent_references(billing, known_slugs=known_slugs)
+    validate_subagent_references(shipping, known_slugs=known_slugs)
+
+    # Coordinator and billing are independently runnable (builtin_endpoints.chat_api).
+    validate_resolved_agent(coordinator, discovered_mcp_names=[], discovered_skills=[])
+    validate_resolved_agent(billing, discovered_mcp_names=[], discovered_skills=[])
+
+    # Shipping has no trigger and no builtin_endpoints: on its own this is an
+    # error, but once it is known to be referenced as a subagent the
+    # requirement relaxes (FRD 0006 Decision #18).
+    with pytest.raises(ValueError, match="field `trigger`"):
+        validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
+    validate_resolved_agent(
+        shipping,
+        discovered_mcp_names=[],
+        discovered_skills=[],
+        is_referenced_as_subagent=True,
+    )

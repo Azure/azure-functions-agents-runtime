@@ -24,6 +24,7 @@ from azure_functions_agents.config.schema import (
     GlobalConfig,
     McpFilter,
     SkillsFilter,
+    SubagentRef,
     SystemToolsAgentOverride,
     SystemToolsConfig,
     ToolsFilter,
@@ -296,6 +297,75 @@ def test_resolve_web_request_per_agent_true_or_absent_inherits_global() -> None:
         require_https=False
     )
     assert _resolve_web_request(spec_true, global_config) == WebRequestConfig(require_https=False)
+
+
+def test_compose_derives_slug_from_source_file_stem() -> None:
+    """Identity slug = sanitized file stem, same derivation as function/endpoint names (FRD 0006 §4.2)."""
+    spec = AgentSpec(
+        name="Billing Specialist",
+        description="d",
+        source_file=str(Path("agents") / "billing-specialist.agent.md"),
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == "billing_specialist"
+
+
+def test_compose_slug_matches_function_name_derivation() -> None:
+    """The slug must equal exactly what `_naming.py`'s function-name allocator would compute
+    for the same source file — this equivalence is load-bearing for FRD 0006 Decision #17."""
+    from azure_functions_agents._slug import _function_name_from_source
+
+    spec = AgentSpec(
+        name="Weird Name!!",
+        description="d",
+        source_file=str(Path(r"C:\agents\my-cool.agent.md")),
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == _function_name_from_source(resolved.source_file, resolved.name)
+
+
+def test_compose_slug_missing_source_file_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Directly-constructed AgentSpecs (common in tests) may omit source_file; compose() must
+    silently fall back rather than warn (validation-time concerns belong elsewhere)."""
+    spec = AgentSpec(name="No Source File", description="d")
+    with caplog.at_level(logging.WARNING):
+        resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == "No_Source_File"
+    assert caplog.records == []
+
+
+def test_compose_normalizes_subagents() -> None:
+    spec = AgentSpec(
+        name="Coordinator",
+        description="d",
+        subagents=[
+            SubagentRef(agent="billing-specialist", when="Billing questions."),
+            SubagentRef(agent="shipping-specialist"),
+        ],
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents == [
+        SubagentRef(agent="billing-specialist", when="Billing questions."),
+        SubagentRef(agent="shipping-specialist"),
+    ]
+
+
+def test_compose_subagents_defaults_to_empty_list() -> None:
+    spec = AgentSpec(name="Coordinator", description="d")
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents == []
+
+
+def test_compose_normalized_subagents_are_independent_copies() -> None:
+    """`compose()` must copy SubagentRef entries, not alias the spec's own list/objects."""
+    ref = SubagentRef(agent="billing-specialist")
+    spec = AgentSpec(name="Coordinator", description="d", subagents=[ref])
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents[0] == ref
+    assert resolved.subagents[0] is not ref
+    assert resolved.subagents is not spec.subagents
 
 
 def test_resolve_web_request_global_object_is_used_verbatim() -> None:
