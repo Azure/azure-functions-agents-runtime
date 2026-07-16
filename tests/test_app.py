@@ -38,10 +38,11 @@ def _http_routes(functions: list[Any]) -> list[str]:
     return routes
 
 
-def test_create_function_app_auto_suffixes_duplicate_function_names(
+def test_create_function_app_fails_fast_on_duplicate_function_names(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
+    """Same-slug collisions fail fast at composition time (FRD 0006 Decision #17)."""
     _write_agent(
         tmp_path,
         "daily-report.agent.md",
@@ -67,20 +68,23 @@ def test_create_function_app_auto_suffixes_duplicate_function_names(
         """,
     )
 
-    with caplog.at_level(logging.WARNING):
-        app = create_function_app(tmp_path)
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ValueError, match=r"[Dd]uplicate agent slug") as exc_info,
+    ):
+        create_function_app(tmp_path)
 
-    functions = app.get_functions()
+    message = str(exc_info.value)
+    assert "daily_report" in message
+    assert "daily-report.agent.md" in message
+    assert "daily_report.agent.md" in message
 
-    assert _function_names(functions) == ["daily_report", "daily_report_2"]
-    assert "Function name collision" in caplog.text
-    assert "daily_report.agent.md" in caplog.text
 
-
-def test_create_function_app_pairs_builtin_slugs_with_auto_suffixed_function_names(
+def test_create_function_app_fails_fast_on_duplicate_slugs_with_builtin_endpoints(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
+    """Same-slug collisions fail fast even when builtin_endpoints are also involved."""
     _write_agent(
         tmp_path,
         "daily-report.agent.md",
@@ -110,30 +114,96 @@ def test_create_function_app_pairs_builtin_slugs_with_auto_suffixed_function_nam
         """,
     )
 
-    with caplog.at_level(logging.WARNING):
-        app = create_function_app(tmp_path)
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ValueError, match=r"[Dd]uplicate agent slug") as exc_info,
+    ):
+        create_function_app(tmp_path)
 
-    functions = app.get_functions()
+    message = str(exc_info.value)
+    assert "daily_report" in message
+    assert "daily-report.agent.md" in message
+    assert "daily_report.agent.md" in message
 
-    assert _function_names(functions) == [
-        "daily_report",
-        "agent_daily_report_builtin_chat_page",
-        "agent_daily_report_builtin_chat",
-        "agent_daily_report_builtin_chatstream",
-        "daily_report_2",
-        "agent_daily_report_2_builtin_chat_page",
-        "agent_daily_report_2_builtin_chat",
-        "agent_daily_report_2_builtin_chatstream",
-    ]
-    assert _http_routes(functions) == [
-        "agents/daily_report/",
-        "agents/daily_report/chat",
-        "agents/daily_report/chatstream",
-        "agents/daily_report_2/",
-        "agents/daily_report_2/chat",
-        "agents/daily_report_2/chatstream",
-    ]
-    assert "Function name collision" in caplog.text
+
+def test_create_function_app_fails_fast_on_duplicate_slug_across_root_and_agents_folder(
+    caplog: pytest.LogCaptureFixture,
+    tmp_path: Path,
+) -> None:
+    """Same-stem collisions fail fast even when one file is at the root and the
+    other lives in the agents/ subfolder (FRD 0006 Decision #17)."""
+    (tmp_path / "agents").mkdir()
+    _write_agent(
+        tmp_path,
+        "report.agent.md",
+        """
+        name: Root Report
+        description: Desc
+        trigger:
+          type: timer_trigger
+          args:
+            schedule: "0 0 * * * *"
+        """,
+    )
+    _write_agent(
+        tmp_path,
+        "agents/report.agent.md",
+        """
+        name: Agents Folder Report
+        description: Desc
+        trigger:
+          type: timer_trigger
+          args:
+            schedule: "0 5 * * * *"
+        """,
+    )
+
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(ValueError, match=r"[Dd]uplicate agent slug") as exc_info,
+    ):
+        create_function_app(tmp_path)
+
+    message = str(exc_info.value)
+    assert "report" in message
+    assert "report.agent.md" in message
+    assert "agents_report.agent.md" in message
+
+
+def test_create_function_app_registers_distinct_slugs_without_collision(
+    tmp_path: Path,
+) -> None:
+    """Regression: genuinely distinct slugs (no subagents involved) continue to
+    register exactly as before the app-wide fail-fast slug-uniqueness check was
+    added (FRD 0006 Decision #17) — the check must be a no-op for the happy path."""
+    _write_agent(
+        tmp_path,
+        "report-alpha.agent.md",
+        """
+        name: Report Alpha
+        description: Desc
+        trigger:
+          type: timer_trigger
+          args:
+            schedule: "0 0 * * * *"
+        """,
+    )
+    _write_agent(
+        tmp_path,
+        "report-beta.agent.md",
+        """
+        name: Report Beta
+        description: Desc
+        trigger:
+          type: timer_trigger
+          args:
+            schedule: "0 5 * * * *"
+        """,
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert _function_names(app.get_functions()) == ["report_alpha", "report_beta"]
 
 
 def test_create_function_app_allows_endpoint_agent_without_trigger(

@@ -22,6 +22,7 @@ from ..config import ResolvedAgent
 from ._handlers import build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
 from .capabilities import AgentCapabilities
+from .catalog import AgentCatalog
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     [
@@ -161,6 +162,7 @@ async def _run_builtin_agent(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -179,6 +181,8 @@ async def _run_builtin_agent(
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
         agent_name=resolved.name,
+        subagents=resolved.subagents,
+        catalog=catalog,
     )
 
 
@@ -191,6 +195,7 @@ def _run_builtin_agent_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -209,6 +214,8 @@ def _run_builtin_agent_stream(
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
         agent_name=resolved.name,
+        subagents=resolved.subagents,
+        catalog=catalog,
     )
 
 
@@ -272,6 +279,7 @@ def _register_http_chat(
     function_name: str,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
         try:
@@ -286,6 +294,7 @@ def _register_http_chat(
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
                 durable_client=durable_client,
+                catalog=catalog,
             )
             return Response(
                 json.dumps(
@@ -329,6 +338,7 @@ def _register_http_chat_stream(
     function_name: str,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_chat_stream(
         req: Request,
@@ -347,6 +357,7 @@ def _register_http_chat_stream(
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
+                    catalog=catalog,
                 ),
                 media_type="text/event-stream",
             )
@@ -381,6 +392,7 @@ def _register_mcp_endpoint(
     function_name: str,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         try:
@@ -399,6 +411,7 @@ def _register_mcp_endpoint(
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
                 durable_client=durable_client,
+                catalog=catalog,
             )
             return json.dumps(
                 {
@@ -511,6 +524,7 @@ def register_builtin_endpoints(
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
@@ -544,6 +558,7 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_chat",
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
         )
         _register_http_chat_stream(
             app,
@@ -553,6 +568,7 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_chatstream",
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
@@ -570,4 +586,5 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_mcp",
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
         )

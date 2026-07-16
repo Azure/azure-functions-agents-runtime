@@ -188,17 +188,18 @@ def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_nam
     ]
 
 
-def test_register_builtin_endpoints_auto_suffixes_sanitized_slug_collisions(
+def test_register_builtin_endpoints_fails_fast_on_sanitized_slug_collisions(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
+    """Same-slug collisions fail fast instead of auto-suffixing (FRD 0006 Decision #17)."""
     app = FakeFunctionApp()
     source_a = tmp_path / "daily-report.agent.md"
     source_b = tmp_path / "daily_report.agent.md"
     source_a.write_text("---\nname: Daily Report Dash\n---\n", encoding="utf-8")
     source_b.write_text("---\nname: Daily Report Underscore\n---\n", encoding="utf-8")
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.ERROR):
         register_builtin_endpoints(
             app,
             _resolved_agent(
@@ -209,28 +210,25 @@ def test_register_builtin_endpoints_auto_suffixes_sanitized_slug_collisions(
             ),
             AgentCapabilities(),
         )
-        register_builtin_endpoints(
-            app,
-            _resolved_agent(
-                name="Daily Report Underscore",
-                is_main=False,
-                builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
-                source_file=source_b,
-            ),
-            AgentCapabilities(),
-        )
+        with pytest.raises(ValueError, match="Built-in endpoint slug collision"):
+            register_builtin_endpoints(
+                app,
+                _resolved_agent(
+                    name="Daily Report Underscore",
+                    is_main=False,
+                    builtin_endpoints=BuiltinEndpointsConfig(debug_chat_ui=True),
+                    source_file=source_b,
+                ),
+                AgentCapabilities(),
+            )
 
     assert [route["route"] for route in app.routes] == [
         "agents/daily_report/",
         "agents/daily_report/chat",
         "agents/daily_report/chatstream",
-        "agents/daily_report_2/",
-        "agents/daily_report_2/chat",
-        "agents/daily_report_2/chatstream",
     ]
     assert "Built-in endpoint slug collision" in caplog.text
     assert "'daily_report.agent.md' would register at '/agents/daily_report/'" in caplog.text
-    assert "Registering at '/agents/daily_report_2/'" in caplog.text
 
 
 def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(

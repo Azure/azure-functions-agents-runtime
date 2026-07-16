@@ -15,12 +15,12 @@ from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
-from .config.validation import validate_resolved_agent
+from .config.validation import validate_resolved_agent, validate_subagent_references
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
-from .registration._naming import allocate_unique_function_name
-from .registration.capabilities import build_capabilities
+from .registration.capabilities import build_capabilities, validate_subagent_tool_names
+from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
 from .workflows import build_workflow_integration
@@ -57,19 +57,61 @@ def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
     return isinstance(workflows, dict) and workflows.get("enabled") is True
 
 
+def _fail_on_duplicate_slugs(resolved_agents: list[Any]) -> set[str]:
+    """Fail fast on colliding agent identity slugs and return the known-slug set.
+
+    An agent's identity slug (its source file's stem, sanitized — see
+    ``_slug.py``) doubles as the registered Azure Functions function name,
+    the ``/agents/<slug>/`` built-in endpoint route, and the ``agent:``
+    value other agents reference in their ``subagents:`` list (and thus the
+    ``delegate_<slug>`` tool name). FRD 0006 §5 Decision #17 requires slugs
+    to be globally unique across the whole app; two source files that
+    sanitize to the same slug used to be silently disambiguated with an
+    auto-suffix (``registration/_naming.py``'s old behavior) — that is now
+    a hard startup error so ``subagents:`` references are never ambiguous.
+
+    Must run before any other per-agent validation (FRD 0006 §4.2's
+    "two-pass composition": this *is* the first pass) so the resulting
+    ``known_slugs`` set can be handed to ``validate_subagent_references``.
+    """
+    sources_by_slug: dict[str, list[str]] = {}
+    for resolved in resolved_agents:
+        sources_by_slug.setdefault(resolved.slug, []).append(source_marker(resolved.source_file))
+
+    for slug, sources in sorted(sources_by_slug.items()):
+        if len(sources) > 1:
+            listed = ", ".join(sorted(sources))
+            raise ValueError(
+                f"Duplicate agent slug {slug!r} is used by {len(sources)} source "
+                f"files: {listed}. Agent identity slugs must be globally unique "
+                "across the app (a slug doubles as the registered function "
+                "name, the `/agents/<slug>/` built-in endpoint route, and the "
+                "`delegate_<slug>` tool name). Rename one of the colliding "
+                "source files (e.g. its file stem) to resolve this. See "
+                "docs/front-matter-spec.md#subagents."
+            )
+
+    return set(sources_by_slug)
+
+
 def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     """Build and return a fully-configured Azure Functions app.
 
-    Pipeline:
+    Pipeline (FRD 0006 §4.2 "two-pass composition"):
       1. Resolve app root (explicit > AZURE_FUNCTIONS_AGENTS_APP_ROOT > AzureWebJobsScriptRoot > cwd).
       2. Load global agents.config.yaml (optional).
       3. Load all *.agent.md frontmatter into AgentSpec objects.
       4. Discover user tools, skills, and MCP servers from disk.
       5. Compose a ResolvedAgent per spec (apply global defaults + agent overrides).
-      6. Validate each ResolvedAgent (required fields, MCP exclude references, etc.).
-      7. Build AgentCapabilities per agent (apply mcp/skills/tools filters).
+      6. Fail fast on duplicate identity slugs, then validate every
+         `subagents:` reference against the resulting slug index.
+      7. Pass 1 (pure): validate each ResolvedAgent and build its
+         AgentCapabilities; freeze both into an immutable AgentCatalog.
+         No FunctionApp exists yet and nothing is mutated.
       8. Create the FunctionApp (DFApp when the main agent opts into workflows).
-      9. Register each agent's trigger (if any) and built-in endpoints (if any).
+      9. Pass 2: register each agent's trigger (if any) and built-in
+         endpoints (if any), threading the frozen AgentCatalog through so
+         `delegate_<slug>` tools can resolve specialists at request time.
     """
     if app_root is not None:
         set_app_root(app_root)
@@ -111,6 +153,18 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
         for spec in agent_specs
     ]
+
+    # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0006 §4.2). ---
+    # Must run before any other cross-agent validation: `validate_subagent_references`
+    # needs a collision-free slug set, and nothing below may assume slugs are unique
+    # until this has actually verified it.
+    known_slugs = _fail_on_duplicate_slugs(resolved_agents)
+
+    referenced_slugs: set[str] = set()
+    for resolved in resolved_agents:
+        validate_subagent_references(resolved, known_slugs=known_slugs)
+        referenced_slugs.update(ref.agent for ref in resolved.subagents)
+
     workflows_requested = any(
         resolved.is_main and _workflows_requested(resolved.workflows)
         for resolved in resolved_agents
@@ -120,7 +174,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         if workflows_requested
         else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     )
-    registered_names: set[str] = set()
 
     # Collect indexing summary for structured logging
     agents_summary: list[dict[str, Any]] = []
@@ -135,12 +188,20 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if not (global_config.system_tools and global_config.system_tools.web_request is False):
         system_tools_used.add("web_request")
 
+    # --- Two-pass composition, pass 1b (FRD 0006 §4.2): validate + build capabilities ---
+    # for every agent and freeze the result into an immutable AgentCatalog. Nothing here
+    # touches `app` — a coordinator's `delegate_<slug>` tools must be able to resolve
+    # *any* specialist by slug at request time, including ones registered later in
+    # `resolved_agents` than the coordinator itself, so the full catalog has to exist
+    # before pass 2 (FunctionApp registration) begins.
+    catalog_entries: dict[str, CatalogEntry] = {}
     for resolved in resolved_agents:
         # Validation is owned by the app factory; compose() stays a pure translation step.
         validate_resolved_agent(
             resolved,
             discovered_mcp_names=mcp_names,
             discovered_skills=skill_names,
+            is_referenced_as_subagent=resolved.slug in referenced_slugs,
         )
         capabilities = build_capabilities(
             resolved,
@@ -149,6 +210,15 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_mcp_tools=mcp_tools,
             discovered_skills=skills,
         )
+        validate_subagent_tool_names(resolved, capabilities)
+        catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
+
+    catalog: AgentCatalog = build_catalog(catalog_entries)
+
+    # --- Two-pass composition, pass 2 (FRD 0006 §4.2): mutate `app` --------------------
+    for resolved in resolved_agents:
+        capabilities = catalog[resolved.slug].capabilities
+
         workflows_enabled = False
         workflow_system_addendum: str | None = None
         if resolved.is_main:
@@ -178,29 +248,26 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             capability_names["mcp_servers"],
             capability_names["skills"],
         )
-        allocated_name: str | None = None
-        if resolved.trigger is not None or _builtin_endpoints_enabled(resolved.builtin_endpoints):
-            allocated_name = allocate_unique_function_name(
-                resolved.source_file,
-                resolved.name,
-                registered_names,
-            )
+        # The identity slug (pass 1a) is already guaranteed globally unique, so it is
+        # used directly as the registered function name / built-in endpoint slug —
+        # no allocator or de-duplication pass is needed here anymore.
         if resolved.trigger is not None:
             register_agent(
                 app,
                 resolved,
                 capabilities,
-                registered_names=registered_names if allocated_name is None else None,
-                function_name=allocated_name,
+                function_name=resolved.slug,
+                catalog=catalog,
             )
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
             register_builtin_endpoints(
                 app,
                 resolved,
                 capabilities,
-                slug=allocated_name,
+                slug=resolved.slug,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
+                catalog=catalog,
             )
 
         # Collect agent summary info
