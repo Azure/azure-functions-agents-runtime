@@ -222,7 +222,7 @@ Agent instructions in markdown...
 - **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
 - **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name and endpoint slug. If two agent files sanitize to the same name (for example, `daily-report.agent.md` and `daily_report.agent.md`), the runtime auto-suffixes both the Azure Function name and the built-in endpoint slug (`_2`, `_3`, ...), keeping them paired in practice (`daily_report_2` ↔ `/agents/daily_report_2/`). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
-When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
+When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and JSON-safe binding data:
 
 ```
 Triggered by: service_bus_queue_trigger
@@ -233,9 +233,15 @@ Trigger data:
 ```​
 ```
 
-This applies to all trigger types, including timers (whose data includes fields like `past_due`).
+For non-HTTP Azure Functions bindings, the runtime serializes public binding fields instead of the
+binding object's Python representation: Queue, Service Bus, Event Hubs, and Kafka bodies include
+an encoding marker; Event Grid includes its parsed `data`; timers include `past_due`,
+`schedule_status`, and `schedule`; and Cosmos DB/SQL batches become JSON arrays. Blob triggers
+include blob name, URI, properties, and metadata only--they do not read blob content, so provide a
+tool when an agent must fetch it. HTTP request-body handling remains separate.
 
-For a complete reference of all supported triggers and their parameters, see [docs/triggers.md](docs/triggers.md).
+For concrete payload examples and a complete reference of supported triggers and parameters, see
+[docs/triggers.md](docs/triggers.md).
 
 ### Trigger type resolution
 
