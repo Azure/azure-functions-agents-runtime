@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
@@ -296,6 +297,9 @@ class UserContext:
     claims: dict[str, Any] = field(default_factory=dict)
     """Decoded claims from the access token."""
 
+    forwardable_headers: dict[str, str] = field(default_factory=dict)
+    """Inbound headers to forward downstream (resolved via the header whitelist)."""
+
     _obo_provider: OboTokenProvider | None = field(default=None, repr=False)
     """The OBO token provider for exchanging tokens."""
 
@@ -420,6 +424,7 @@ def create_user_context(
     user_id: str | None = None,
     claims: dict[str, Any] | None = None,
     obo_provider: OboTokenProvider | None = None,
+    forwardable_headers: dict[str, str] | None = None,
 ) -> UserContext:
     """Create a UserContext for the current request.
 
@@ -435,6 +440,8 @@ def create_user_context(
         Decoded claims from the access token.
     obo_provider:
         The OBO token provider instance.
+    forwardable_headers:
+        Inbound headers to forward downstream, resolved via the header whitelist.
 
     Returns
     -------
@@ -446,6 +453,7 @@ def create_user_context(
         hooks_session_token=hooks_session_token,
         user_id=user_id,
         claims=claims or {},
+        forwardable_headers=forwardable_headers or {},
         _obo_provider=obo_provider,
     )
 
@@ -465,6 +473,17 @@ EASYAUTH_PRINCIPAL_NAME_HEADER = "X-MS-CLIENT-PRINCIPAL-NAME"
 # Standard Authorization header
 AUTHORIZATION_HEADER = "Authorization"
 BEARER_PREFIX = "Bearer "
+
+# Environment variable holding a comma-separated list of inbound header names to
+# forward downstream. When unset or empty, the runtime falls back to the trusted
+# BigMac headers below.
+AGENTS_HEADER_WHITELIST_ENV = "AGENTS_HEADER_WHITELIST"
+
+# Default trusted headers forwarded downstream when no whitelist is configured.
+DEFAULT_FORWARDED_HEADERS: tuple[str, ...] = (
+    BIGMAC_ACCESS_TOKEN_HEADER,
+    BIGMAC_HOOKS_SESSION_TOKEN_HEADER,
+)
 
 
 def extract_user_token_from_headers(headers: dict[str, str] | Any) -> str | None:
@@ -578,3 +597,82 @@ def extract_user_id_from_headers(headers: dict[str, str] | Any) -> str | None:
                 if key.lower() == EASYAUTH_PRINCIPAL_ID_HEADER.lower():
                     return val.strip() if isinstance(val, str) else None
     return None
+
+
+def _get_header_value(headers: dict[str, str] | Any, name: str) -> str | None:
+    """Case-insensitively read a single header value."""
+    if not hasattr(headers, "get"):
+        return None
+    value = headers.get(name)
+    if value:
+        return value.strip() if isinstance(value, str) else None
+    if hasattr(headers, "items"):
+        for key, val in headers.items():
+            if key.lower() == name.lower():
+                return val.strip() if isinstance(val, str) else None
+    return None
+
+
+def get_forwarded_header_names() -> list[str]:
+    """Return the configured header whitelist, or the default trusted headers.
+
+    Reads the ``AGENTS_HEADER_WHITELIST`` environment variable, which holds a
+    comma-separated list of header names to forward downstream. When the variable
+    is unset or empty, falls back to :data:`DEFAULT_FORWARDED_HEADERS`.
+    """
+    raw = os.environ.get(AGENTS_HEADER_WHITELIST_ENV, "")
+    names = [part.strip() for part in raw.split(",") if part.strip()]
+    if names:
+        return names
+    return list(DEFAULT_FORWARDED_HEADERS)
+
+
+def extract_forwardable_headers(
+    headers: dict[str, str] | Any,
+    access_token: str | None = None,
+    hooks_session_token: str | None = None,
+) -> dict[str, str]:
+    """Resolve the set of headers to forward downstream for this request.
+
+    When ``AGENTS_HEADER_WHITELIST`` is configured, each whitelisted header is
+    read from the inbound request (case-insensitively) and forwarded under its
+    configured name.
+
+    When no whitelist is configured, the default trusted BigMac headers are
+    forwarded using the already-resolved ``access_token`` and
+    ``hooks_session_token`` values (which honor EasyAuth/Authorization
+    normalization) rather than a raw header lookup.
+
+    Parameters
+    ----------
+    headers:
+        The inbound request headers (dict-like or object with ``get``).
+    access_token:
+        The resolved user access token, used for the default header set.
+    hooks_session_token:
+        The resolved hooks session token, used for the default header set.
+
+    Returns
+    -------
+    dict[str, str]
+        A mapping of header name to value to forward downstream.
+    """
+    raw = os.environ.get(AGENTS_HEADER_WHITELIST_ENV, "")
+    names = [part.strip() for part in raw.split(",") if part.strip()]
+
+    if not names:
+        # Default: forward the trusted headers using resolved token values.
+        result: dict[str, str] = {}
+        if access_token:
+            result[BIGMAC_ACCESS_TOKEN_HEADER] = access_token
+        if hooks_session_token:
+            result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = hooks_session_token
+        return result
+
+    # Custom whitelist: forward each configured header found on the request.
+    forwarded: dict[str, str] = {}
+    for name in names:
+        value = _get_header_value(headers, name)
+        if value:
+            forwarded[name] = value
+    return forwarded

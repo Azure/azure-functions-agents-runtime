@@ -8,17 +8,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from azure_functions_agents._obo import (
+    AGENTS_HEADER_WHITELIST_ENV,
     BIGMAC_ACCESS_TOKEN_HEADER,
     BIGMAC_HOOKS_SESSION_TOKEN_HEADER,
+    DEFAULT_FORWARDED_HEADERS,
     EASYAUTH_ID_TOKEN_HEADER,
     InteractionRequiredError,
     OboError,
     OboTokenProvider,
     clear_token_cache,
     create_user_context,
+    extract_forwardable_headers,
     extract_hooks_session_token_from_headers,
     extract_user_id_from_headers,
     extract_user_token_from_headers,
+    get_forwarded_header_names,
     get_obo_provider,
     reset_obo_provider,
 )
@@ -179,6 +183,86 @@ class TestHeaderExtraction:
         headers = {}
         user_id = extract_user_id_from_headers(headers)
         assert user_id is None
+
+
+# ---------------------------------------------------------------------------
+# Header whitelist tests
+# ---------------------------------------------------------------------------
+
+
+class TestHeaderWhitelist:
+    """Tests for the AGENTS_HEADER_WHITELIST forwarding behavior."""
+
+    def test_default_when_env_missing(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Should fall back to the trusted headers when the env var is unset."""
+        monkeypatch.delenv(AGENTS_HEADER_WHITELIST_ENV, raising=False)
+        assert get_forwarded_header_names() == list(DEFAULT_FORWARDED_HEADERS)
+
+    def test_default_when_env_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Should fall back to the trusted headers when the env var is empty."""
+        monkeypatch.setenv(AGENTS_HEADER_WHITELIST_ENV, "  , ,")
+        assert get_forwarded_header_names() == list(DEFAULT_FORWARDED_HEADERS)
+
+    def test_parses_custom_whitelist(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Should parse a comma-separated whitelist and trim whitespace."""
+        monkeypatch.setenv(AGENTS_HEADER_WHITELIST_ENV, "X-Custom-One , X-Custom-Two")
+        assert get_forwarded_header_names() == ["X-Custom-One", "X-Custom-Two"]
+
+    def test_extract_default_uses_resolved_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default set should forward resolved tokens under canonical names."""
+        monkeypatch.delenv(AGENTS_HEADER_WHITELIST_ENV, raising=False)
+        headers = {"X-MS-TOKEN-AAD-ACCESS-TOKEN": "easyauth-token"}
+        forwarded = extract_forwardable_headers(
+            headers,
+            access_token="resolved-access",
+            hooks_session_token="resolved-hooks",
+        )
+        assert forwarded == {
+            BIGMAC_ACCESS_TOKEN_HEADER: "resolved-access",
+            BIGMAC_HOOKS_SESSION_TOKEN_HEADER: "resolved-hooks",
+        }
+
+    def test_extract_default_omits_missing_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Default set should omit headers whose resolved token is absent."""
+        monkeypatch.delenv(AGENTS_HEADER_WHITELIST_ENV, raising=False)
+        forwarded = extract_forwardable_headers(
+            {}, access_token="resolved-access", hooks_session_token=None
+        )
+        assert forwarded == {BIGMAC_ACCESS_TOKEN_HEADER: "resolved-access"}
+
+    def test_extract_custom_reads_request_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custom whitelist should forward matching inbound headers case-insensitively."""
+        monkeypatch.setenv(
+            AGENTS_HEADER_WHITELIST_ENV, "X-Custom-One,X-Custom-Two"
+        )
+        headers = {"x-custom-one": "value-1", "X-Custom-Two": "value-2"}
+        forwarded = extract_forwardable_headers(
+            headers, access_token="ignored", hooks_session_token="ignored"
+        )
+        assert forwarded == {"X-Custom-One": "value-1", "X-Custom-Two": "value-2"}
+
+    def test_extract_custom_omits_absent_headers(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Custom whitelist should skip headers not present on the request."""
+        monkeypatch.setenv(AGENTS_HEADER_WHITELIST_ENV, "X-Present,X-Absent")
+        headers = {"X-Present": "here"}
+        forwarded = extract_forwardable_headers(headers)
+        assert forwarded == {"X-Present": "here"}
+
+    def test_create_user_context_stores_forwardable_headers(self) -> None:
+        """UserContext should retain the resolved forwardable headers."""
+        context = create_user_context(
+            access_token="t",
+            forwardable_headers={"X-Custom": "v"},
+        )
+        assert context.forwardable_headers == {"X-Custom": "v"}
 
 
 # ---------------------------------------------------------------------------

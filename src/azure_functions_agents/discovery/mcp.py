@@ -133,7 +133,7 @@ def _build_obo_header_provider(scope: str, static_headers: dict[str, str]) -> An
     def obo_header_provider(_ctx: Any) -> dict[str, str]:
         user_context = get_current_user_context()
 
-        # BigMac callback flow: forward hooks/access headers and always use MI auth.
+        # BigMac callback flow: forward whitelisted headers and always use MI auth.
         if (
             user_context is not None
             and user_context.hooks_session_token
@@ -141,8 +141,13 @@ def _build_obo_header_provider(scope: str, static_headers: dict[str, str]) -> An
         ):
             mi_token = _get_or_refresh_managed_identity_token()
             result = dict(static_headers)
-            result[BIGMAC_ACCESS_TOKEN_HEADER] = user_context.access_token
-            result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = user_context.hooks_session_token
+            forwardable = getattr(user_context, "forwardable_headers", None) or {}
+            if forwardable:
+                result.update(forwardable)
+            else:
+                # Fall back to the trusted headers currently implemented.
+                result[BIGMAC_ACCESS_TOKEN_HEADER] = user_context.access_token
+                result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = user_context.hooks_session_token
             result["Authorization"] = f"Bearer {mi_token}"
             logger.debug("MCP: Using BigMac hook-session callback headers for scope %s", scope)
             return result

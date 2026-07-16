@@ -439,6 +439,63 @@ def test_discover_mcp_servers_obo_bigmac_flow_uses_mi_and_passthrough_headers(
     assert credential.calls == 1
 
 
+def test_discover_mcp_servers_obo_bigmac_flow_forwards_whitelisted_headers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeCredential:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def get_token(self, scope: str) -> SimpleNamespace:
+            self.calls += 1
+            return SimpleNamespace(token=f"mi-token-{self.calls}", expires_on=9999999999)
+
+    credential = FakeCredential()
+    monkeypatch.setattr(mcp_discovery, "build_credential", lambda: credential)
+    monkeypatch.setattr(
+        mcp_discovery, "MCPStreamableHTTPTool", _CapturedMCPStreamableHTTPTool
+    )
+    monkeypatch.setattr(
+        mcp_discovery,
+        "get_current_user_context",
+        lambda: SimpleNamespace(
+            access_token="user-access-token",
+            hooks_session_token="hooks-session-token",
+            has_obo_support=True,
+            forwardable_headers={
+                "X-Custom-One": "custom-1",
+                "X-Custom-Two": "custom-2",
+            },
+        ),
+    )
+    _write_mcp_json(
+        tmp_path,
+        {
+            "servers": {
+                "office365": {
+                    "type": "http",
+                    "url": "https://example.com/mcp",
+                    "auth": {
+                        "type": "obo",
+                        "scope": "https://apihub.azure.com/.default",
+                    },
+                }
+            }
+        },
+    )
+
+    tool = discover_mcp_servers(tmp_path)["office365"]
+
+    assert isinstance(tool, _CapturedMCPStreamableHTTPTool)
+    assert tool.header_provider is not None
+    assert tool.header_provider(None) == {
+        "Authorization": "Bearer mi-token-1",
+        "X-Custom-One": "custom-1",
+        "X-Custom-Two": "custom-2",
+    }
+    assert credential.calls == 1
+
+
 def test_discover_mcp_servers_obo_without_hooks_uses_obo_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
