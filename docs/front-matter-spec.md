@@ -287,7 +287,7 @@ builtin_endpoints:
 | `function` (default) | API key required — a valid function/host key (`AuthLevel.FUNCTION`). |
 | `admin` | System/host key required (`AuthLevel.ADMIN`). |
 | `anonymous` | No auth — open endpoint (`AuthLevel.ANONYMOUS`). |
-| `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions layer, then each request is validated in-app: platform Easy Auth (`x-ms-client-principal`) if present, otherwise a bearer JWT verified against the tenant's JWKS. Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid identity or JWT validation failure, 403 on allowlist mismatch). |
+| `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions key layer; each request is then enforced against the platform-injected Easy Auth `x-ms-client-principal` header (App Service Authentication validates the token — the runtime never validates JWTs itself). Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid principal, 403 on allowlist mismatch). Requires Easy Auth to be enabled on the Function App. |
 
 **MCP note:** The MCP endpoint (`/runtime/webhooks/mcp`) is owned by the Functions MCP extension and does not receive HTTP headers in-app, so `entra` cannot be validated in-process for MCP. For `auth.mode: entra` with `mcp` enabled, protect the MCP webhook with platform-level Easy Auth; use a system key for API-key protection. A one-time log message is emitted at registration to surface this.
 

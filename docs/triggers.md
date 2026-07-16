@@ -67,7 +67,7 @@ These Azure Functions Python decorators are intentionally not supported as `.age
 
 ### Built-in endpoint authentication
 
-The chat API and MCP endpoints registered by `builtin_endpoints` are protected via `builtin_endpoints.auth`. Modes: `function` (API key, default), `admin` (system key), `anonymous`, and `entra` (Entra ID / Azure AD). For `entra`, the chat routes are validated in-app (Easy Auth `x-ms-client-principal` or a bearer JWT), while the MCP webhook relies on platform-level Easy Auth. See [`front-matter-spec.md`](front-matter-spec.md#auth--endpoint-authentication) for the full schema and examples.
+The chat API and MCP endpoints registered by `builtin_endpoints` are protected via `builtin_endpoints.auth`. Modes: `function` (API key, default), `admin` (system key), `anonymous`, and `entra` (Entra ID / Azure AD). For `entra`, both the chat routes and the MCP webhook rely on platform-level App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal`. See [`front-matter-spec.md`](front-matter-spec.md#auth--endpoint-authentication) for the full schema and examples.
 
 ## HTTP Trigger
 

@@ -3,16 +3,15 @@
 This module is the only place that reasons about *who* may call an agent's
 built-in HTTP endpoints. It maps the authoring-level ``builtin_endpoints.auth``
 policy onto an Azure Functions ``AuthLevel`` (for native function/system-key
-"API key" auth) and, for Entra ID, validates the caller's identity before the
+"API key" auth) and, for Entra ID, checks the caller's identity before the
 runner is ever invoked.
 
-Two proofs of an Entra identity are accepted, in order:
-
-1. **Easy Auth** — an ``X-MS-CLIENT-PRINCIPAL`` header injected by App Service
-   Authentication after the platform has already validated the token.
-2. **Bearer token** — an ``Authorization: Bearer <jwt>`` validated in-app against
-   Entra ID (JWKS signature + ``exp`` + optional audience), then filtered by the
-   configured tenant/audience/client-id allow-lists.
+Entra ID enforcement is delegated entirely to **App Service Authentication
+(Easy Auth)**. The platform validates the Entra-issued token (bearer or cookie),
+and injects a validated ``X-MS-CLIENT-PRINCIPAL`` header. The runtime trusts that
+header and applies the configured tenant/audience/client-id allow-lists as
+defense-in-depth. The runtime never parses or validates a JWT itself; a request
+in ``entra`` mode without a validated principal is rejected (fail closed).
 """
 
 from __future__ import annotations
@@ -30,15 +29,14 @@ from ..config import EndpointAuthConfig, EntraAuthConfig
 from ..config.env import runtime_env_value
 
 _EASY_AUTH_PRINCIPAL_HEADER = "x-ms-client-principal"
-_AUTHORIZATION_HEADER = "authorization"
-_BEARER_PREFIX = "bearer "
 
 _AUTH_LEVEL_BY_MODE: dict[str, func.AuthLevel] = {
     "function": func.AuthLevel.FUNCTION,
     "admin": func.AuthLevel.ADMIN,
     "anonymous": func.AuthLevel.ANONYMOUS,
-    # entra replaces the function-key gate with the runtime's identity check,
-    # so the Functions level is anonymous and enforcement happens in-app.
+    # entra replaces the function-key gate with an Easy Auth identity check, so
+    # the Functions level is anonymous and the platform-injected principal is
+    # validated in-app against the configured allow-lists.
     "entra": func.AuthLevel.ANONYMOUS,
 }
 
@@ -148,57 +146,6 @@ def _decode_easy_auth_principal(header_value: str) -> dict[str, Any] | None:
     return data if isinstance(data, dict) else None
 
 
-def _jwks_uri(tenant_id: str | None) -> str:
-    tenant = tenant_id or "common"
-    return f"https://login.microsoftonline.com/{tenant}/discovery/v2.0/keys"
-
-
-_jwks_clients: dict[str, Any] = {}
-
-
-def _get_signing_key(token: str, tenant_id: str | None) -> Any:
-    """Resolve the Entra signing key for ``token`` (cached per JWKS URI).
-
-    Isolated so tests can patch it and avoid any network access.
-    """
-    import jwt
-
-    uri = _jwks_uri(tenant_id)
-    client = _jwks_clients.get(uri)
-    if client is None:
-        client = jwt.PyJWKClient(uri)
-        _jwks_clients[uri] = client
-    return client.get_signing_key_from_jwt(token).key
-
-
-def _validate_bearer_token(
-    token: str, entra: EntraAuthConfig | None
-) -> tuple[dict[str, Any] | None, AuthError | None]:
-    try:
-        import jwt
-    except ImportError:  # pragma: no cover - dependency is declared in pyproject
-        return None, AuthError(500, "Bearer token validation requires PyJWT.")
-
-    tenant_id = _resolved_tenant_id(entra)
-    audiences = _resolved_audiences(entra)
-    options: dict[str, Any] = {"require": ["exp"]}
-    decode_kwargs: dict[str, Any] = {"algorithms": ["RS256"], "options": options}
-    if audiences:
-        decode_kwargs["audience"] = audiences
-    else:
-        options["verify_aud"] = False
-
-    try:
-        signing_key = _get_signing_key(token, tenant_id)
-        claims = jwt.decode(token, signing_key, **decode_kwargs)
-    except Exception:
-        return None, AuthError(401, "Invalid bearer token.")
-
-    if not isinstance(claims, dict):
-        return None, AuthError(401, "Invalid bearer token payload.")
-    return claims, None
-
-
 def authorize_entra_request(
     get_header: HeaderGetter, auth: EndpointAuthConfig
 ) -> AuthError | None:
@@ -207,28 +154,26 @@ def authorize_entra_request(
     Returns ``None`` when the request is authorized (including for the
     non-``entra`` modes, whose enforcement is handled by the Functions host key
     check), or an :class:`AuthError` describing why it was rejected.
+
+    In ``entra`` mode the request must carry a validated App Service
+    Authentication (Easy Auth) ``X-MS-CLIENT-PRINCIPAL`` header. The runtime does
+    not validate tokens itself; a request without a validated Entra principal is
+    rejected (fail closed).
     """
     if auth.mode != "entra":
         return None
     entra = auth.entra
 
     principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
-    if principal_header:
-        principal = _decode_easy_auth_principal(principal_header)
-        if principal is None:
-            return AuthError(401, "Invalid client principal header.")
-        auth_typ = principal.get("auth_typ")
-        if not isinstance(auth_typ, str) or auth_typ.lower() not in {"aad", "azureactivedirectory"}:
-            return AuthError(401, "Entra authentication required.")
-        return _check_allowlists(_flatten_claims(principal), entra)
+    if not principal_header:
+        return AuthError(401, "Entra authentication required (App Service Authentication).")
 
-    authorization = get_header(_AUTHORIZATION_HEADER)
-    if authorization and authorization.lower().startswith(_BEARER_PREFIX):
-        token = authorization[len(_BEARER_PREFIX) :].strip()
-        claims, error = _validate_bearer_token(token, entra)
-        if error is not None:
-            return error
-        assert claims is not None
-        return _check_allowlists(_flatten_claims(claims), entra)
+    principal = _decode_easy_auth_principal(principal_header)
+    if principal is None:
+        return AuthError(401, "Invalid client principal header.")
 
-    return AuthError(401, "Authentication required.")
+    auth_typ = principal.get("auth_typ")
+    if not isinstance(auth_typ, str) or auth_typ.lower() not in {"aad", "azureactivedirectory"}:
+        return AuthError(401, "Entra authentication required.")
+
+    return _check_allowlists(_flatten_claims(principal), entra)

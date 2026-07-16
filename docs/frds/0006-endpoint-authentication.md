@@ -4,7 +4,7 @@ title: Endpoint authentication (API key + Entra ID)
 status: Finalized            # Draft → In review → Finalized  (→ Implemented after merge)
 author: victoriahall
 created: 2026-07-14
-updated: 2026-07-14
+updated: 2026-07-16
 issues: []
 pull_requests: []
 branch: victoriahall/endpoint-auth
@@ -20,13 +20,17 @@ tool surface (`/runtime/webhooks/mcp`). Authoring gains a single new key —
 `builtin_endpoints.auth` — that selects one of four modes: `function` (Azure
 Functions **API key**, the default), `admin` (system key), `anonymous`
 (unauthenticated, dev-only), or `entra` (Microsoft **Entra ID**). In `entra`
-mode the runtime accepts a request only when it carries a validated identity:
-either an App Service Authentication (**Easy Auth**) `X-MS-CLIENT-PRINCIPAL`
-header injected by the platform, or a **validated bearer token** (`Authorization:
-Bearer <jwt>`) checked in-app against Entra ID. Optional `tenant_id`,
-`allowed_audiences`, and `allowed_client_ids` allow-lists narrow which callers
-are accepted. This makes the built-in endpoints safe to expose in production
-without hand-rolling auth per app.
+mode the runtime accepts a request only when it carries a validated identity: an
+App Service Authentication (**Easy Auth**) `X-MS-CLIENT-PRINCIPAL` header
+injected by the platform. Optional `tenant_id`, `allowed_audiences`, and
+`allowed_client_ids` allow-lists narrow which callers are accepted. This makes
+the built-in endpoints safe to expose in production without hand-rolling auth per
+app.
+
+> **Amendment A (§9, 2026-07-16):** the original design also validated raw bearer
+> tokens in-app against Entra JWKS. That path was removed — the runtime now
+> delegates all Entra token validation to Easy Auth and fails closed when no
+> platform-validated principal is present.
 
 ## 2. Motivation / problem
 
@@ -99,18 +103,23 @@ token (or arrives through Easy Auth) rather than a key.
 
 ### Entra identity resolution (chat API)
 
-For each request in `entra` mode, `authorize_entra_request()` accepts the request
-if **either** proof succeeds, else returns `401`:
+> **Superseded by Amendment A (§9).** The two-proof model below was replaced: the
+> runtime no longer validates bearer tokens in-app. Entra tokens are validated by
+> App Service Authentication (Easy Auth) at the platform, and the runtime trusts
+> only the injected `X-MS-CLIENT-PRINCIPAL`. Missing/invalid principal ⇒ `401`
+> (fail closed). The allow-list behavior below still applies to the principal's
+> claims.
+
+For each request in `entra` mode, `authorize_entra_request()` requires a
+validated Easy Auth principal, else returns `401`:
 
 1. **Easy Auth principal** — if `X-MS-CLIENT-PRINCIPAL` is present, the App
    Service Authentication layer has already validated the token; the runtime
-   base64-decodes the principal JSON and reads its claims.
-2. **Bearer token** — otherwise, if `Authorization: Bearer <jwt>` is present, the
-   runtime validates the JWT signature (Entra JWKS for the tenant), `iss`, `aud`,
-   and `exp` via PyJWT.
+   base64-decodes the principal JSON, confirms `auth_typ` is Entra (`aad`), and
+   reads its claims.
 
-After a proof succeeds, optional allow-lists are enforced (a configured list must
-contain the claim): `tenant_id` vs `tid`, `allowed_audiences` vs `aud`,
+After the principal is accepted, optional allow-lists are enforced (a configured
+list must contain the claim): `tenant_id` vs `tid`, `allowed_audiences` vs `aud`,
 `allowed_client_ids` vs `appid`/`azp`. Each config value falls back to an env var
 (`AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID`, `…_ENTRA_AUDIENCES`,
 `…_ENTRA_CLIENT_IDS`) so credentials stay out of source.
@@ -163,6 +172,9 @@ endpoints with default (`function`) auth.
 | 5 | MCP webhook Entra enforcement | in-app / platform (Easy Auth) | Platform (Easy Auth) — extension owns the HTTP surface; runtime can't see it | Agent | 2026-07-14 |
 | 6 | JWT library | hand-rolled / `pyjwt[crypto]` | `pyjwt[crypto]` (already transitively present via `azure-identity`→`msal`); declared explicitly | Agent | 2026-07-14 |
 | 7 | Secrets in config | inline only / env fallback | Allow inline **and** env fallback for tenant/audience/client-id | Agent | 2026-07-14 |
+| 8 | Entra bearer-token validation (revises #3) | keep in-app JWT / **Easy Auth only** | **Easy Auth only** — the platform validates Entra bearer tokens and injects `X-MS-CLIENT-PRINCIPAL`; the runtime never validates JWTs itself. See Amendment A. | Human + Agent | 2026-07-16 |
+| 9 | JWT library (revises #6) | keep `pyjwt[crypto]` / drop it | **Drop** the explicit `pyjwt[crypto]` dependency — no in-app token validation remains | Human + Agent | 2026-07-16 |
+| 10 | No validated principal in `entra` mode | allow / **fail closed** | **Fail closed** — with `auth_level: ANONYMOUS`, a missing/invalid principal returns `401`; Easy Auth is a required deployment step for `entra` | Human + Agent | 2026-07-16 |
 
 ## 6. Test plan
 
@@ -199,3 +211,102 @@ endpoints with default (`function`) auth.
   stays consistent with `docs/front-matter-spec.md` (`builtin_endpoints` object).
 - **Human sign-off:** Requested and approved by the user via the task instruction
   to implement endpoint authentication (API key + Entra ID). → `status: Finalized`.
+
+## 9. Amendment A — Standardize Entra bearer tokens on Easy Auth (2026-07-16)
+
+### Context
+
+The original design (Decisions #3, #6) accepted **two** proofs of an Entra
+identity in `entra` mode: an Easy Auth `X-MS-CLIENT-PRINCIPAL` header **or** an
+in-app validated bearer token (`Authorization: Bearer <jwt>`, verified with
+`pyjwt[crypto]` against Entra JWKS). PR review raised that hand-rolling
+bearer-token validation is risky and does not meet the bar enterprises (and 1P
+workloads in particular) expect from Entra integration.
+
+The concern is well-founded, and the shipped in-app path already showed the
+hazard: it verified `exp` and signature but **never validated `iss`**, and when
+`allowed_audiences` was unset it disabled audience verification
+(`verify_aud: False`) — so any RS256 token resolvable from the tenant's JWKS
+(e.g. a token minted for a different resource) would authenticate. App Service
+Authentication (**Easy Auth**) already validates Entra-issued bearer tokens at
+the platform, is security-hardened, audited, and is the sanctioned mechanism for
+1P workloads; it injects the same `X-MS-CLIENT-PRINCIPAL` the runtime already
+trusts as proof (1).
+
+### Decision
+
+Standardize **all** Entra enforcement on Easy Auth. Remove in-app JWT validation
+entirely. In `entra` mode the runtime trusts only the platform-injected
+`X-MS-CLIENT-PRINCIPAL` header, then applies the existing claim allow-lists as
+defense-in-depth. This also unifies chat with MCP, which already delegated Entra
+enforcement to Easy Auth (Decision #5).
+
+### Flow change
+
+Before (per request, `entra` mode):
+
+```
+Functions host (ANONYMOUS) → handler → authorize_entra_request:
+    (a) X-MS-CLIENT-PRINCIPAL present? → decode + allow-lists
+    (b) else Authorization: Bearer?    → in-app JWKS/JWT validate + allow-lists
+    (c) else                           → 401
+```
+
+After:
+
+```
+App Service Easy Auth (validates bearer/cookie, injects X-MS-CLIENT-PRINCIPAL,
+    401s unauthenticated per config)
+  → Functions host (ANONYMOUS) → handler → authorize_entra_request:
+      principal present? → decode + auth_typ == aad + allow-lists
+      else               → 401 (fail closed; Easy Auth required)
+```
+
+### Scope of changes
+
+- **`registration/_auth.py`** — delete `_validate_bearer_token`,
+  `_get_signing_key`, `_jwks_uri`, and the module-global `_jwks_clients`; remove
+  the bearer branch from `authorize_entra_request`. Keep the principal decode,
+  `auth_typ` check, and `_check_allowlists`. Missing/invalid principal ⇒ `401`
+  (fail closed, per Decision #10).
+- **`pyproject.toml`** — drop the explicit `pyjwt[crypto]` dependency
+  (Decision #9).
+- **Schema / env** — no change. `EntraAuthConfig` (`tenant_id`,
+  `allowed_audiences`, `allowed_client_ids`) and env fallbacks remain as
+  allow-lists layered over the Easy-Auth-validated claims.
+- **Infra / sample** — `samples/secured-endpoints` gains a
+  `Microsoft.Web/sites/config@authsettingsV2` resource (Entra provider,
+  `allowedAudiences`, `unauthenticatedClientAction`) so the deployable sample
+  demonstrates the sanctioned path instead of implying direct bearer calls.
+- **Docs** — update §4 "Entra identity resolution", `front-matter-spec.md`,
+  `architecture.md` (note `_auth.py` no longer validates JWTs), and the README
+  "securing endpoints" note. Messaging: *the runtime trusts the
+  platform-validated principal; enabling Entra is an Easy Auth deployment step.*
+
+### Revised Non-goals
+
+- **In-app JWT / bearer-token validation for any endpoint.** Entra tokens are
+  validated by Easy Auth at the platform for both chat and MCP. The runtime never
+  parses or verifies a JWT.
+
+### Tradeoff (recorded)
+
+`entra` now **requires** Easy Auth, which is a cloud/App Service capability not
+available under the local Core Tools host. Local exercise of `entra` therefore
+relies on injecting a mock `X-MS-CLIENT-PRINCIPAL` header (tests) or using
+`anonymous` mode for local runs. This is an accepted cost of removing the
+hand-rolled path.
+
+### Test-plan delta
+
+- Remove the RS256 signing-key / bearer-token cases from
+  `tests/test_registration_auth.py`; keep principal happy-path, `auth_typ != aad`
+  ⇒ 401, allow-list mismatch ⇒ 401, and missing principal ⇒ 401 (fail closed).
+- In `tests/test_registration_endpoints.py`, drop bearer variants; keep
+  principal-based 200 and no-identity 401 for chat, chatstream, and the workflow
+  routes.
+
+### Sign-off
+
+- **Raised by:** PR reviewer. **Decided by:** Human + Agent, 2026-07-16.
+- Status remains `Finalized`; this amendment supersedes Decisions #3 and #6.

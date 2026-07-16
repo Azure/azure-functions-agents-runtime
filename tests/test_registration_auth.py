@@ -1,20 +1,20 @@
-"""Tests for built-in endpoint authentication enforcement."""
+"""Tests for built-in endpoint authentication enforcement.
+
+Entra enforcement is delegated to App Service Authentication (Easy Auth); the
+runtime only trusts the platform-injected ``X-MS-CLIENT-PRINCIPAL`` header and
+applies the configured allow-lists. There is no in-app token validation.
+"""
 
 from __future__ import annotations
 
 import base64
-import datetime
 import json
 from typing import Any
 
 import azure.functions as func
-import jwt
 import pytest
-from cryptography.hazmat.primitives import serialization
-from cryptography.hazmat.primitives.asymmetric import rsa
 
 from azure_functions_agents.config.schema import EndpointAuthConfig, EntraAuthConfig
-from azure_functions_agents.registration import _auth
 from azure_functions_agents.registration._auth import (
     authorize_entra_request,
     resolve_endpoint_auth_level,
@@ -38,47 +38,9 @@ def _header_getter(headers: dict[str, str]) -> Any:
     return lambda name: lowered.get(name.lower())
 
 
-def _principal_header(claims: list[dict[str, str]]) -> str:
-    payload = json.dumps({"auth_typ": "aad", "claims": claims})
+def _principal_header(claims: list[dict[str, str]], *, auth_typ: str = "aad") -> str:
+    payload = json.dumps({"auth_typ": auth_typ, "claims": claims})
     return base64.b64encode(payload.encode("utf-8")).decode("ascii")
-
-
-class _RsaKeys:
-    def __init__(self) -> None:
-        self._private = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        self.private_pem = self._private.private_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PrivateFormat.PKCS8,
-            encryption_algorithm=serialization.NoEncryption(),
-        )
-        self.public_pem = self._private.public_key().public_bytes(
-            encoding=serialization.Encoding.PEM,
-            format=serialization.PublicFormat.SubjectPublicKeyInfo,
-        )
-
-    def token(self, **claims: Any) -> str:
-        return jwt.encode(claims, self.private_pem, algorithm="RS256")
-
-
-@pytest.fixture
-def rsa_keys() -> _RsaKeys:
-    return _RsaKeys()
-
-
-@pytest.fixture
-def stub_signing_key(monkeypatch: pytest.MonkeyPatch, rsa_keys: _RsaKeys) -> _RsaKeys:
-    monkeypatch.setattr(_auth, "_get_signing_key", lambda token, tenant_id: rsa_keys.public_pem)
-    return rsa_keys
-
-
-def _future_exp(minutes: int = 10) -> int:
-    now = datetime.datetime.now(tz=datetime.UTC)
-    return int((now + datetime.timedelta(minutes=minutes)).timestamp())
-
-
-def _past_exp(minutes: int = 10) -> int:
-    now = datetime.datetime.now(tz=datetime.UTC)
-    return int((now - datetime.timedelta(minutes=minutes)).timestamp())
 
 
 # --- resolve_endpoint_auth_level --------------------------------------------
@@ -106,12 +68,21 @@ def test_non_entra_modes_are_not_enforced_in_app(mode: str) -> None:
     assert authorize_entra_request(_header_getter({}), auth) is None
 
 
-# --- entra: missing credentials ---------------------------------------------
+# --- entra: fail closed without a validated principal -----------------------
 
 
-def test_entra_missing_credentials_is_unauthorized() -> None:
+def test_entra_missing_principal_is_unauthorized() -> None:
     auth = EndpointAuthConfig(mode="entra")
     error = authorize_entra_request(_header_getter({}), auth)
+    assert error is not None
+    assert error.status_code == 401
+
+
+def test_entra_bearer_token_alone_is_unauthorized() -> None:
+    # A raw bearer token is not trusted: only Easy Auth-validated principals are.
+    auth = EndpointAuthConfig(mode="entra")
+    headers = {"Authorization": "Bearer some.jwt.token"}
+    error = authorize_entra_request(_header_getter(headers), auth)
     assert error is not None
     assert error.status_code == 401
 
@@ -133,6 +104,18 @@ def test_entra_easy_auth_invalid_principal_header_is_unauthorized() -> None:
     assert error.status_code == 401
 
 
+def test_entra_easy_auth_non_aad_principal_is_unauthorized() -> None:
+    auth = EndpointAuthConfig(mode="entra")
+    headers = {
+        "X-MS-CLIENT-PRINCIPAL": _principal_header(
+            [{"typ": "tid", "val": "t-1"}], auth_typ="google"
+        )
+    }
+    error = authorize_entra_request(_header_getter(headers), auth)
+    assert error is not None
+    assert error.status_code == 401
+
+
 def test_entra_easy_auth_tenant_allowlist_match() -> None:
     auth = EndpointAuthConfig(mode="entra", entra=EntraAuthConfig(tenant_id="t-1"))
     claims = [
@@ -145,6 +128,15 @@ def test_entra_easy_auth_tenant_allowlist_match() -> None:
 def test_entra_easy_auth_tenant_allowlist_mismatch_is_forbidden() -> None:
     auth = EndpointAuthConfig(mode="entra", entra=EntraAuthConfig(tenant_id="t-1"))
     claims = [{"typ": "tid", "val": "other-tenant"}]
+    headers = {"X-MS-CLIENT-PRINCIPAL": _principal_header(claims)}
+    error = authorize_entra_request(_header_getter(headers), auth)
+    assert error is not None
+    assert error.status_code == 403
+
+
+def test_entra_easy_auth_audience_allowlist_mismatch_is_forbidden() -> None:
+    auth = EndpointAuthConfig(mode="entra", entra=EntraAuthConfig(allowed_audiences=["api://app"]))
+    claims = [{"typ": "aud", "val": "api://other"}]
     headers = {"X-MS-CLIENT-PRINCIPAL": _principal_header(claims)}
     error = authorize_entra_request(_header_getter(headers), auth)
     assert error is not None
@@ -170,63 +162,3 @@ def test_entra_allowlists_fall_back_to_env(monkeypatch: pytest.MonkeyPatch) -> N
     assert error is not None
     assert error.status_code == 403
 
-
-# --- entra: bearer token ----------------------------------------------------
-
-
-def test_entra_bearer_token_authorized(stub_signing_key: _RsaKeys) -> None:
-    auth = EndpointAuthConfig(mode="entra")
-    token = stub_signing_key.token(tid="t-1", exp=_future_exp())
-    headers = {"Authorization": f"Bearer {token}"}
-    assert authorize_entra_request(_header_getter(headers), auth) is None
-
-
-def test_entra_bearer_token_tenant_mismatch_is_forbidden(stub_signing_key: _RsaKeys) -> None:
-    auth = EndpointAuthConfig(mode="entra", entra=EntraAuthConfig(tenant_id="t-1"))
-    token = stub_signing_key.token(tid="t-2", exp=_future_exp())
-    headers = {"Authorization": f"Bearer {token}"}
-    error = authorize_entra_request(_header_getter(headers), auth)
-    assert error is not None
-    assert error.status_code == 403
-
-
-def test_entra_bearer_token_audience_match(stub_signing_key: _RsaKeys) -> None:
-    auth = EndpointAuthConfig(
-        mode="entra", entra=EntraAuthConfig(allowed_audiences=["api://app"])
-    )
-    token = stub_signing_key.token(aud="api://app", exp=_future_exp())
-    headers = {"Authorization": f"Bearer {token}"}
-    assert authorize_entra_request(_header_getter(headers), auth) is None
-
-
-def test_entra_bearer_token_audience_mismatch_is_unauthorized(stub_signing_key: _RsaKeys) -> None:
-    auth = EndpointAuthConfig(
-        mode="entra", entra=EntraAuthConfig(allowed_audiences=["api://app"])
-    )
-    token = stub_signing_key.token(aud="api://other", exp=_future_exp())
-    headers = {"Authorization": f"Bearer {token}"}
-    error = authorize_entra_request(_header_getter(headers), auth)
-    assert error is not None
-    assert error.status_code == 401
-
-
-def test_entra_bearer_token_expired_is_unauthorized(stub_signing_key: _RsaKeys) -> None:
-    auth = EndpointAuthConfig(mode="entra")
-    token = stub_signing_key.token(tid="t-1", exp=_past_exp())
-    headers = {"Authorization": f"Bearer {token}"}
-    error = authorize_entra_request(_header_getter(headers), auth)
-    assert error is not None
-    assert error.status_code == 401
-
-
-def test_entra_bearer_token_wrong_signature_is_unauthorized(
-    monkeypatch: pytest.MonkeyPatch, rsa_keys: _RsaKeys
-) -> None:
-    other = _RsaKeys()
-    monkeypatch.setattr(_auth, "_get_signing_key", lambda token, tenant_id: other.public_pem)
-    auth = EndpointAuthConfig(mode="entra")
-    token = rsa_keys.token(tid="t-1", exp=_future_exp())
-    headers = {"Authorization": f"Bearer {token}"}
-    error = authorize_entra_request(_header_getter(headers), auth)
-    assert error is not None
-    assert error.status_code == 401

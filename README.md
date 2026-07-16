@@ -156,7 +156,7 @@ If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint
 
 #### Securing endpoints
 
-By default the chat API requires a function/host key (`auth: function`). Configure `builtin_endpoints.auth` to change the policy — `admin` (system key), `anonymous`, or `entra` (Entra ID / Azure AD). In `entra` mode the runtime validates each chat request in-app via platform Easy Auth (`x-ms-client-principal`) or a bearer JWT, with optional tenant/audience/client-id allowlists. The MCP webhook (`/runtime/webhooks/mcp`) is owned by the Functions host, so protect it with a system key or platform-level Easy Auth. See [`docs/front-matter-spec.md#auth--endpoint-authentication`](docs/front-matter-spec.md#auth--endpoint-authentication).
+By default the chat API requires a function/host key (`auth: function`). Configure `builtin_endpoints.auth` to change the policy — `admin` (system key), `anonymous`, or `entra` (Entra ID / Azure AD). In `entra` mode the runtime relies on platform App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal` (with optional tenant/audience/client-id allowlists), failing closed when no validated principal is present. The MCP webhook (`/runtime/webhooks/mcp`) is owned by the Functions host, so protect it with a system key or platform-level Easy Auth. See [`docs/front-matter-spec.md#auth--endpoint-authentication`](docs/front-matter-spec.md#auth--endpoint-authentication).
 
 ### Event-driven agents (`<name>.agent.md`)
 
