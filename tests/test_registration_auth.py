@@ -24,13 +24,19 @@ _ENV_KEYS = (
     "AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID",
     "AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES",
     "AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS",
+    "AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH",
+    "WEBSITE_AUTH_ENABLED",
 )
 
 
 @pytest.fixture(autouse=True)
-def _clear_entra_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _entra_env(monkeypatch: pytest.MonkeyPatch) -> None:
     for key in _ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
+    # Default posture for these tests: Easy Auth is enforced in front of the app,
+    # so the injected principal header is trusted. Tests covering the fail-closed
+    # gate clear this explicitly.
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
 
 
 def _header_getter(headers: dict[str, str]) -> Any:
@@ -85,6 +91,35 @@ def test_entra_bearer_token_alone_is_unauthorized() -> None:
     error = authorize_entra_request(_header_getter(headers), auth)
     assert error is not None
     assert error.status_code == 401
+
+
+# --- entra: refuse to trust the principal header without Easy Auth -----------
+
+
+def test_entra_without_easy_auth_rejects_spoofed_principal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # When Easy Auth is not enforced, X-MS-CLIENT-PRINCIPAL is caller-controlled
+    # and must not be trusted even if it is a well-formed aad principal.
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+    auth = EndpointAuthConfig(mode="entra")
+    headers = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-1"}])}
+    error = authorize_entra_request(_header_getter(headers), auth)
+    assert error is not None
+    assert error.status_code == 401
+
+
+def test_entra_explicit_easy_auth_assertion_enables_trust(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The platform signal is absent, but the operator asserts Easy Auth via the
+    # app setting, so the injected principal is trusted.
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", "true")
+    auth = EndpointAuthConfig(mode="entra")
+    headers = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-1"}])}
+    assert authorize_entra_request(_header_getter(headers), auth) is None
 
 
 # --- entra: Easy Auth principal ---------------------------------------------

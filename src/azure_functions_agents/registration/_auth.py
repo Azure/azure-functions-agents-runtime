@@ -12,6 +12,16 @@ and injects a validated ``X-MS-CLIENT-PRINCIPAL`` header. The runtime trusts tha
 header and applies the configured tenant/audience/client-id allow-lists as
 defense-in-depth. The runtime never parses or validates a JWT itself; a request
 in ``entra`` mode without a validated principal is rejected (fail closed).
+
+Because ``entra`` routes are registered anonymous at the Functions key layer, the
+injected principal header is only trustworthy when Easy Auth is guaranteed to sit
+in front of the app (Easy Auth strips any client-supplied ``X-MS-CLIENT-PRINCIPAL``
+header before injecting its own). If Easy Auth is disabled, that header is just
+caller-controlled input, which would be an authentication bypass. The runtime
+therefore refuses to trust the header unless it has positive, non-spoofable
+evidence that Easy Auth is enforced -- the platform-injected
+``WEBSITE_AUTH_ENABLED`` environment variable, or an explicit operator assertion
+via ``AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`` -- and fails closed otherwise.
 """
 
 from __future__ import annotations
@@ -29,6 +39,16 @@ from ..config import EndpointAuthConfig, EntraAuthConfig
 from ..config.env import runtime_env_value
 
 _EASY_AUTH_PRINCIPAL_HEADER = "x-ms-client-principal"
+
+# Non-spoofable signals that App Service Authentication (Easy Auth) is enforced in
+# front of the app. Both are process environment variables (not request headers),
+# so a caller cannot forge them. ``WEBSITE_AUTH_ENABLED`` is injected by the App
+# Service platform when Easy Auth is enabled; the ``..._ENTRA_EASY_AUTH`` app
+# setting lets operators assert enforcement where the platform signal is absent.
+_PLATFORM_EASY_AUTH_ENV = "WEBSITE_AUTH_ENABLED"
+_EASY_AUTH_ASSERTION_ENV = "AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH"
+
+_TRUTHY_VALUES = frozenset({"true", "1", "yes", "y"})
 
 _AUTH_LEVEL_BY_MODE: dict[str, func.AuthLevel] = {
     "function": func.AuthLevel.FUNCTION,
@@ -67,6 +87,20 @@ def _env_list(name: str) -> list[str]:
     if not raw:
         return []
     return [item.strip() for item in raw.split(",") if item.strip()]
+
+
+def _easy_auth_enforced() -> bool:
+    """Return True only with positive evidence that Easy Auth is enforced.
+
+    Either the platform-injected ``WEBSITE_AUTH_ENABLED`` variable or the explicit
+    ``AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`` operator assertion is sufficient.
+    Both are environment variables, so they cannot be spoofed by a caller. When
+    neither is truthy the injected principal header must not be trusted.
+    """
+    return (
+        runtime_env_value(_PLATFORM_EASY_AUTH_ENV).lower() in _TRUTHY_VALUES
+        or runtime_env_value(_EASY_AUTH_ASSERTION_ENV).lower() in _TRUTHY_VALUES
+    )
 
 
 def _resolved_tenant_id(entra: EntraAuthConfig | None) -> str | None:
@@ -158,11 +192,24 @@ def authorize_entra_request(
     In ``entra`` mode the request must carry a validated App Service
     Authentication (Easy Auth) ``X-MS-CLIENT-PRINCIPAL`` header. The runtime does
     not validate tokens itself; a request without a validated Entra principal is
-    rejected (fail closed).
+    rejected (fail closed). The header is only trusted when Easy Auth is
+    verifiably enforced (see :func:`_easy_auth_enforced`); otherwise the request
+    is rejected rather than trusting a potentially caller-supplied header.
     """
     if auth.mode != "entra":
         return None
     entra = auth.entra
+
+    # The route is anonymous at the Functions key layer, so the injected principal
+    # header is only trustworthy when Easy Auth is guaranteed to have stripped any
+    # client-supplied copy. Without that guarantee, fail closed rather than trust
+    # spoofable input.
+    if not _easy_auth_enforced():
+        return AuthError(
+            401,
+            "Entra authentication requires App Service Authentication (Easy Auth) "
+            "to be enabled in front of this app.",
+        )
 
     principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
     if not principal_header:

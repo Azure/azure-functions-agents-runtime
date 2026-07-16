@@ -449,6 +449,47 @@ def _register_mcp_endpoint(
     app.function_name(name=function_name)(decorated)
 
 
+def _log_mcp_auth_policy(
+    auth: EndpointAuthConfig,
+    *,
+    resolved: ResolvedAgent,
+    slug: str,
+) -> None:
+    """Surface how the host-owned MCP webhook is actually authenticated.
+
+    ``builtin_endpoints.auth`` configures the runtime-owned chat routes, but the
+    MCP webhook (``/runtime/webhooks/mcp``) is owned by the Functions MCP
+    extension: the runtime only registers ``mcp_tool_trigger`` tools on it and
+    never sees its HTTP request, so it cannot apply the authored ``auth.mode``
+    there. The webhook always requires the MCP extension **system key**
+    (``x-functions-key``); ``entra`` additionally relies on platform Easy Auth.
+    Emit a one-time message per agent so a mode the webhook cannot honor is
+    explicit rather than silently diverging from the authored policy.
+    """
+    marker = source_marker(resolved.source_file)
+    if auth.mode == "entra":
+        logger.info(
+            "MCP endpoint Entra auth is enforced at the platform (App Service "
+            "Authentication / Easy Auth), not in-app; the webhook itself is "
+            "owned by the Functions MCP extension and still requires its system "
+            "key (x-functions-key): source_file=%s tool=%s",
+            marker,
+            slug,
+        )
+    elif auth.mode in ("function", "anonymous"):
+        logger.warning(
+            "auth.mode=%s does not apply to the host-owned MCP webhook "
+            "(/runtime/webhooks/mcp): it is owned by the Functions MCP extension "
+            "and always requires the MCP extension system key (x-functions-key), "
+            "regardless of the authored auth mode. source_file=%s tool=%s",
+            auth.mode,
+            marker,
+            slug,
+        )
+    # auth.mode == "admin" aligns with the extension's system-key policy, so the
+    # authored intent is already honored and no divergence message is needed.
+
+
 def _register_workflow_status_endpoints(
     app: func.FunctionApp,
     *,
@@ -596,13 +637,7 @@ def register_builtin_endpoints(
             )
 
     if builtin_endpoints.mcp:
-        if auth.mode == "entra":
-            logger.info(
-                "MCP endpoint Entra auth is enforced at the platform (App Service "
-                "Authentication / Easy Auth), not in-app: source_file=%s tool=%s",
-                source_marker(resolved.source_file),
-                slug,
-            )
+        _log_mcp_auth_policy(auth, resolved=resolved, slug=slug)
         _register_mcp_endpoint(
             app,
             resolved,

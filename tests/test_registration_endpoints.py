@@ -609,6 +609,74 @@ def test_register_builtin_endpoints_mcp_with_workflows_has_client_parameter(
     assert mcp_routes[0]["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
 
+def _mcp_agent(tmp_path: Path, auth: EndpointAuthConfig) -> ResolvedAgent:
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    return _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True, auth=auth),
+        source_file=source_file,
+    )
+
+
+def test_mcp_entra_auth_logs_platform_enforcement(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """entra + mcp surfaces that the webhook is enforced at the platform (Easy Auth)."""
+    app = FakeFunctionApp()
+    resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    with caplog.at_level(logging.INFO):
+        register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    assert any(
+        "enforced at the platform" in record.getMessage()
+        and record.levelno == logging.INFO
+        for record in caplog.records
+    )
+
+
+@pytest.mark.parametrize("mode", ["function", "anonymous"])
+def test_mcp_non_system_key_mode_warns_that_auth_mode_is_ignored(
+    mode: str, caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """function/anonymous + mcp warn that the host-owned webhook ignores auth.mode."""
+    app = FakeFunctionApp()
+    resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode=mode))
+
+    with caplog.at_level(logging.WARNING):
+        register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert any(
+        f"auth.mode={mode}" in message
+        and "does not apply to the host-owned MCP webhook" in message
+        and "x-functions-key" in message
+        for message in warnings
+    )
+
+
+def test_mcp_admin_mode_does_not_warn(
+    caplog: pytest.LogCaptureFixture, tmp_path: Path
+) -> None:
+    """admin aligns with the extension system-key policy, so no divergence message."""
+    app = FakeFunctionApp()
+    resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode="admin"))
+
+    with caplog.at_level(logging.INFO):
+        register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    assert not any(
+        "MCP webhook" in record.getMessage() or "enforced at the platform" in record.getMessage()
+        for record in caplog.records
+    )
+
+
 def test_workflows_enabled_passes_client_to_run_builtin_agent(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -714,7 +782,10 @@ def test_chat_routes_admin_and_anonymous_auth_levels(tmp_path: Path) -> None:
         assert route["auth_level"] == expected
 
 
-def test_entra_chat_without_identity_is_unauthorized(tmp_path: Path) -> None:
+def test_entra_chat_without_identity_is_unauthorized(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
 
@@ -726,7 +797,10 @@ def test_entra_chat_without_identity_is_unauthorized(tmp_path: Path) -> None:
     assert response.status_code == 401
 
 
-def test_entra_chatstream_without_identity_emits_sse_error(tmp_path: Path) -> None:
+def test_entra_chatstream_without_identity_emits_sse_error(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
 
@@ -746,6 +820,7 @@ def test_entra_chat_with_easy_auth_principal_proceeds(
     import base64
     import json as _json
 
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
 
@@ -771,7 +846,32 @@ def test_entra_chat_with_easy_auth_principal_proceeds(
     assert response.status_code == 200
 
 
-def test_workflow_endpoints_default_to_function_auth_level(tmp_path: Path) -> None:
+def test_entra_chat_without_easy_auth_rejects_principal(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    import base64
+    import json as _json
+
+    # Easy Auth is NOT enforced, so a client-supplied principal header must be
+    # rejected rather than trusted (authentication-bypass guard).
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    principal = base64.b64encode(
+        _json.dumps(
+            {"auth_typ": "aad", "claims": [{"typ": "tid", "val": "t-1"}]}
+        ).encode("utf-8")
+    ).decode("ascii")
+    request = DummyRequest({"prompt": "hello"}, headers={"x-ms-client-principal": principal})
+    response = asyncio.run(chat_route["handler"](request))
+
+    assert response.status_code == 401
+
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
 
@@ -796,7 +896,10 @@ def test_workflow_endpoints_apply_configured_auth_level(tmp_path: Path) -> None:
             assert route["auth_level"] == expected
 
 
-def test_entra_workflow_endpoints_without_identity_are_unauthorized(tmp_path: Path) -> None:
+def test_entra_workflow_endpoints_without_identity_are_unauthorized(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
     app = FakeFunctionApp()
     resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
 

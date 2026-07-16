@@ -136,6 +136,13 @@ registers tools on it but never handles its HTTP request, so:
   `mcp_tool_trigger` handler. `entra` + `mcp` therefore logs a one-time info
   message pointing to the Easy Auth guidance; it is not an error.
 
+Because `auth.mode` cannot be applied to the host-owned webhook at all,
+registration surfaces the divergence for every enabled `mcp` agent instead of
+staying silent (Decision #12): `function` and `anonymous` emit a one-time
+**warning** that the authored mode is ignored and the system key still applies;
+`entra` emits the info message above; `admin` aligns with the system-key policy
+and is not flagged.
+
 ### Authoring / API surface
 
 ```yaml
@@ -175,6 +182,9 @@ endpoints with default (`function`) auth.
 | 8 | Entra bearer-token validation (revises #3) | keep in-app JWT / **Easy Auth only** | **Easy Auth only** — the platform validates Entra bearer tokens and injects `X-MS-CLIENT-PRINCIPAL`; the runtime never validates JWTs itself. See Amendment A. | Human + Agent | 2026-07-16 |
 | 9 | JWT library (revises #6) | keep `pyjwt[crypto]` / drop it | **Drop** the explicit `pyjwt[crypto]` dependency — no in-app token validation remains | Human + Agent | 2026-07-16 |
 | 10 | No validated principal in `entra` mode | allow / **fail closed** | **Fail closed** — with `auth_level: ANONYMOUS`, a missing/invalid principal returns `401`; Easy Auth is a required deployment step for `entra` | Human + Agent | 2026-07-16 |
+| 11 | Trusting `X-MS-CLIENT-PRINCIPAL` on an anonymous route | trust unconditionally / **gate on Easy Auth evidence** | **Gate** — trust the injected principal only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` assertion); else fail closed (401). Closes an auth-bypass where a caller forges the header when Easy Auth is off. See Amendment A. | Human + Agent | 2026-07-16 |
+| 12 | Authored `auth.mode` vs. host-owned MCP webhook | reject unsupported combos / **surface the divergence** | **Surface** — the MCP webhook always requires the extension system key and cannot honor `auth.mode`; log a one-time message per agent (`function`/`anonymous` ⇒ warning, `entra` ⇒ info, `admin` aligns) instead of silently diverging or rejecting backward-compatible configs (default is `function`). | Human + Agent | 2026-07-16 |
+| 13 | Architecture sign-off (phase 2) for the original design (Decisions #1–#7) | keep in review / **approve + finalize** | **Approve** — human reviewed the registration-stage placement, pipeline boundaries, and public surface (`builtin_endpoints.auth`) and signed off to move the FRD to `Finalized`. Recorded here explicitly rather than inferred from the implementation request. | Human | 2026-07-16 |
 
 ## 6. Test plan
 
@@ -182,9 +192,11 @@ endpoints with default (`function`) auth.
       object, default), rejects unknown modes and extra keys.
 - [ ] Unit `tests/test_registration_auth.py` (new): `resolve_endpoint_auth_level`
       mapping; `authorize_entra_request` — Easy Auth principal happy path,
-      bearer-token happy path (RS256 with an injected signing key), missing
-      credential ⇒ 401, tenant/audience/appid allow-list mismatch ⇒ 401,
-      expired/invalid token ⇒ 401.
+      `auth_typ != aad` ⇒ 401, missing principal ⇒ 401 (fail closed),
+      tenant/audience/appid allow-list mismatch ⇒ 403, and the Easy Auth
+      enforcement gate (no evidence ⇒ 401 even with a principal; assertion ⇒
+      trusted). *(Superseded by Amendment A §9 — the bearer-token cases were
+      removed.)*
 - [ ] Unit `tests/test_registration_endpoints.py`: chat routes carry the resolved
       `auth_level` per mode; `entra` handler returns 401 without identity and 200
       with a valid principal; chatstream returns an SSE `error` frame on 401.
@@ -209,8 +221,10 @@ endpoints with default (`function`) auth.
   Azure-aware stage), enforced before the lazy runner is invoked; discovery and
   translation are untouched except for the additive schema field. Public surface
   stays consistent with `docs/front-matter-spec.md` (`builtin_endpoints` object).
-- **Human sign-off:** Requested and approved by the user via the task instruction
-  to implement endpoint authentication (API key + Entra ID). → `status: Finalized`.
+- **Human sign-off:** Recorded as an explicit architecture decision in the
+  append-only Decisions log (Decision #13, Human, 2026-07-16): the human reviewed
+  the registration-stage placement, pipeline boundaries, and public surface and
+  approved the design. → `status: Finalized`.
 
 ## 9. Amendment A — Standardize Entra bearer tokens on Easy Auth (2026-07-16)
 
@@ -289,6 +303,29 @@ App Service Easy Auth (validates bearer/cookie, injects X-MS-CLIENT-PRINCIPAL,
   validated by Easy Auth at the platform for both chat and MCP. The runtime never
   parses or verifies a JWT.
 
+### Enforcement gate (authentication-bypass guard)
+
+Because `entra` routes are anonymous at the Functions key layer, a naive "trust
+`X-MS-CLIENT-PRINCIPAL`" would be an **authentication bypass** if Easy Auth is not
+actually deployed: an attacker could base64-encode `{"auth_typ":"aad", ...}` and
+skip all validation. Easy Auth, when enabled, strips any client-supplied
+`X-MS-CLIENT-PRINCIPAL` before injecting its own, so the header is only safe when
+the platform boundary is present.
+
+The runtime therefore trusts the injected principal only with **non-spoofable**
+evidence that Easy Auth is enforced (both are process environment variables, not
+request headers):
+
+- `WEBSITE_AUTH_ENABLED` — injected by the App Service platform when Easy Auth is
+  enabled; or
+- `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` — an explicit operator assertion (app
+  setting) for environments where the platform signal is unavailable. The
+  `secured-endpoints` Bicep sets this to `true` in the same module that provisions
+  `authsettingsV2`, so it cannot drift from the actual Easy Auth config.
+
+With neither present, `entra` requests fail closed (`401`) even when a principal
+header is supplied (Decision #11).
+
 ### Tradeoff (recorded)
 
 `entra` now **requires** Easy Auth, which is a cloud/App Service capability not
@@ -305,6 +342,9 @@ hand-rolled path.
 - In `tests/test_registration_endpoints.py`, drop bearer variants; keep
   principal-based 200 and no-identity 401 for chat, chatstream, and the workflow
   routes.
+- Add enforcement-gate coverage: with Easy Auth evidence absent, a well-formed
+  `aad` principal is still rejected (401); with the
+  `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` assertion set, it is trusted.
 
 ### Sign-off
 
