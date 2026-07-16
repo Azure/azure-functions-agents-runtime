@@ -1,0 +1,93 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Create flow — Agent-centric</title>
+<link rel="stylesheet" href="../styles.css">
+<style>
+  .wrap { max-width: 1120px; margin: 0 auto; padding: 24px 26px 48px; }
+  .ctabs { display: flex; gap: 2px; border-bottom: 1px solid var(--border); margin: 8px 0 20px; flex-wrap: wrap; }
+  .ctabs a { padding: 10px 14px; font-size: 13.5px; color: var(--text-muted); border-bottom: 2px solid transparent; }
+  .ctabs a.active { color: var(--purple); border-bottom-color: var(--purple); font-weight: 600; }
+  .concept-banner { border-left: 4px solid #6b3fa0; background: #efe7f8; color: #6b3fa0; padding: 12px 16px; border-radius: 8px; margin-bottom: 18px; font-size: 13px; }
+  .flow { display: flex; align-items: stretch; gap: 0; margin-bottom: 22px; flex-wrap: wrap; }
+  .flow .stage { border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface); box-shadow: var(--shadow); padding: 10px 14px; font-size: 12.5px; }
+  .flow .stage.on { border-color: var(--purple); background: #efe7f8; color: var(--purple); font-weight: 600; }
+  .flow .arrow { display: grid; place-items: center; color: var(--text-faint); padding: 0 10px; }
+</style>
+</head>
+<body>
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <span class="env">Create flow · Model 2 (proposed)</span>
+  </header>
+
+  <div class="wrap">
+    <div class="ctabs">
+      <a href="index.html">Overview</a>
+      <a href="create-flow-model1.html">Create flow · Function App</a>
+      <a class="active" href="create-flow-model2.html">Create flow · Agent</a>
+      <a href="create-flow-model3.html">Create flow · Project</a>
+      <a href="model2-agent.html" style="margin-left:auto">Concept →</a>
+    </div>
+
+    <div class="concept-banner">🧭 <strong>Model 2 (proposed) — the agent is the front door.</strong> You describe the agent first; picking or creating a Function App is just a step in the flow.</div>
+
+    <div class="breadcrumb">Agents / Create</div>
+    <div class="page-title"><h1>Create agent</h1></div>
+
+    <div class="flow">
+      <div class="stage on">1 · Describe</div>
+      <div class="arrow">→</div>
+      <div class="stage">2 · Tools &amp; skills</div>
+      <div class="arrow">→</div>
+      <div class="stage">3 · Host in app</div>
+      <div class="arrow">→</div>
+      <div class="stage">Create</div>
+    </div>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <h3>1 · Describe</h3>
+        <div class="field"><label>Agent name</label><input type="text" value="support-triage"></div>
+        <div class="field"><label>Instructions</label><textarea rows="3">You triage inbound support tickets and propose a first response.</textarea></div>
+
+        <h3 style="margin-top:22px">2 · Tools &amp; skills</h3>
+        <p class="muted" style="font-size:12.5px">Only what this agent uses. Shared items are flagged so edits stay safe.</p>
+        <table>
+          <tbody>
+            <tr><td><input type="checkbox" checked> <span class="mono">lookup_ticket</span></td><td><span class="badge amber">shared</span></td></tr>
+            <tr><td><input type="checkbox" checked> <span class="mono">classify_severity</span></td><td><span class="badge green">private</span></td></tr>
+            <tr><td><input type="checkbox"> <span class="mono">tone-guide</span> (skill)</td><td><span class="badge amber">shared</span></td></tr>
+          </tbody>
+        </table>
+
+        <h3 style="margin-top:22px">3 · Host in app</h3>
+        <div class="pill-row" style="margin-bottom:8px">
+          <label><input type="radio" name="app" checked> Existing app</label>
+          <label><input type="radio" name="app"> New app</label>
+        </div>
+        <div class="field"><select><option>func-support-team — rg-support · eastus2 (3 agents)</option><option>func-agent-func-nldwouneaobbm — ServerlessAgent · eastus2 (1)</option></select></div>
+        <p class="hint">New app → asks Subscription + Resource Group and provisions it for you.</p>
+
+        <div class="pill-row" style="margin-top:8px"><button class="btn primary">Create &amp; open in editor</button></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Preview</h3><span class="badge blue mono">support-triage.agent.md</span></div>
+        <div class="code"><span class="frontmatter">---
+name: support-triage
+description: Triages inbound support tickets
+builtin_endpoints: true
+---</span>
+
+You triage inbound support tickets and
+propose a first response.</div>
+        <div class="note" style="margin-top:14px">✅ <strong>Strength:</strong> most intuitive front door, no new state. <br>⚠️ <strong>Risk handled:</strong> shared tools show <span class="mono">shared</span> + get edit warnings + copy-on-edit.</div>
+      </div>
+    </div>
+  </div>
+</body>
+</html>

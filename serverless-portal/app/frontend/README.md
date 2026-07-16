@@ -1,7 +1,7 @@
 # Serverless Agent Portal — React frontend
 
-Vite + React + TypeScript UI for the portal. Talks to the FastAPI backend
-([../backend](../backend)) via a dev proxy.
+Vite + React + TypeScript UI for the portal. Talks to the Node.js + Express
+backend ([../server](../server)) via a dev proxy.
 
 ## Screens
 
@@ -14,8 +14,9 @@ Vite + React + TypeScript UI for the portal. Talks to the FastAPI backend
 The backend must be running on `http://127.0.0.1:8080` first:
 
 ```powershell
-# terminal 1 — backend (from serverless-portal/app)
-uvicorn backend.main:app --port 8080
+# terminal 1 — backend (from serverless-portal/app/server)
+npm install
+npm run dev
 
 # terminal 2 — frontend (from serverless-portal/app/frontend)
 npm install

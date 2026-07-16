@@ -1,57 +1,65 @@
-# Serverless Agent Portal — app (v0.1)
+# Serverless Agent Portal — app
 
-A minimal, runnable slice of the [portal requirements](../requirements.md): the
-**create-agent flow** with **Azure Blob Storage** persistence and an **editor**
-for the generated `*.agent.md` file.
+A runnable slice of the [portal requirements](../requirements.md): a read-only
+control plane that scans Azure for **serverless agents** built on
+`azurefunctions-agents-runtime` and lists them per subscription.
 
-- Backend: FastAPI (`backend/`)
-- Frontend: static HTML/CSS/JS (`static/`), served by the same app
-- Persistence: agent files stored as blobs — the *working copy* from
-  requirements §5.3
+- **Backend:** Node.js + Express (`server/`)
+- **Frontend:** a single **React + TypeScript** app (`frontend/`, Vite). The Node
+  server serves the built app in production; Vite serves it in dev.
+- **Auth:** `DefaultAzureCredential` (run `az login`) — no persistence, all data
+  is discovered live from Azure.
 
-## Storage backends
+## How it works
 
-The persistence layer ([backend/storage.py](backend/storage.py)) picks a backend
-in this order:
+The portal authenticates with the signed-in identity, lists the user's
+subscriptions (top-bar picker), and scans the selected subscription for agents —
+see [server/src/azure.js](server/src/azure.js). It defaults to a subscription
+(`1a839f1f-10b2-4613-95ad-0800a22abbf2`, override with `PORTAL_SUBSCRIPTION_ID`);
+the signed-in identity needs **Reader** on the subscriptions it scans.
 
-1. `PORTAL_STORAGE_CONNECTION` — a storage connection string
-2. `PORTAL_STORAGE_ACCOUNT_URL` — e.g. `https://stnldwouneaobbm.blob.core.windows.net`
-   (uses `DefaultAzureCredential`; run `az login`, needs *Storage Blob Data
-   Contributor*)
-3. **Fallback:** Azurite (`UseDevelopmentStorage=true`) — zero-config local dev
-
-Blob layout: `agent-projects/<project>/<environment>/agents/<name>.agent.md`.
+- **Agent apps** — a Function App IS a serverless agent app if — and only if — it
+  carries the app-setting marker `AZURE_FUNCTIONS_AGENTS_PROVIDER` (its value is
+  the model provider, e.g. `foundry`).
+- **Agents** inside an app are recovered from the runtime's function naming
+  convention (`agent_<name>_builtin_*`, routes `agents/<name>/…`) — no need to
+  invoke the running app. If none can be parsed, the app itself is surfaced.
 
 ## Run locally
 
+**Backend** (terminal 1):
+
 ```powershell
-cd serverless-portal/app
-python -m venv .venv
-.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-
-# Option A — local Azurite (default). Start it in another terminal:
-#   azurite --skipApiVersionCheck --location $env:TEMP\azurite-portal
-# Option B — the deployed app's storage account:
-#   $env:PORTAL_STORAGE_ACCOUNT_URL = "https://stnldwouneaobbm.blob.core.windows.net"
-
-uvicorn backend.main:app --reload --port 8080
+cd serverless-portal/app/server
+npm install
+npm run dev      # http://127.0.0.1:8080/  (node --watch)
 ```
 
-Open <http://localhost:8080/> → Agents list. Use **Create agent** to author a
-new `*.agent.md`, then edit and save it.
+**Frontend** — dev (terminal 2, hot reload, proxies `/api` → :8080):
+
+```powershell
+cd serverless-portal/app/frontend
+npm install
+npm run dev      # http://localhost:5173/
+```
+
+**Frontend** — production (single origin, served by the Node server at :8080):
+
+```powershell
+cd serverless-portal/app/frontend
+npm run build    # emits dist/, which the Node server serves at http://localhost:8080/
+```
 
 ## API
 
 | Method | Route | Purpose |
 | --- | --- | --- |
-| GET | `/api/health` | Active storage backend + project/env |
-| GET | `/api/agents` | List agents (working copy) |
-| POST | `/api/agents` | Create an agent (`name`, `description`, `instructions`, `builtin_endpoints`) |
-| GET | `/api/agents/{name}` | Raw `*.agent.md` + parsed front matter |
-| PUT | `/api/agents/{name}` | Overwrite the raw `*.agent.md` |
+| GET | `/api/health` | Liveness check |
+| GET | `/api/identity` | Signed-in user + the default subscription |
+| GET | `/api/subscriptions` | Subscriptions visible to the signed-in identity |
+| GET | `/api/live/agents` | Scan a subscription (`?subscription=<id or name>`, defaults to the configured one) and list every serverless agent |
 
 ## Not yet included (next slices)
 
-Publish to the running app, versioning/history, Push to GitHub, providers,
-connectors, monitoring — see [requirements.md](../requirements.md).
+Agent detail, playground, providers, connectors, monitoring — see
+[requirements.md](../requirements.md).

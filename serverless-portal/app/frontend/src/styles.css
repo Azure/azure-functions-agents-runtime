@@ -22,6 +22,14 @@ a:hover { text-decoration: underline; }
 .header .spacer { flex: 1; }
 .header .env { background: rgba(255,255,255,.12); border: 1px solid rgba(255,255,255,.18);
   color: #fff; border-radius: 6px; padding: 5px 10px; font-size: 12px; }
+.header .sub-picker { display: flex; align-items: center; gap: 8px; }
+.header .sub-picker-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  color: rgba(255,255,255,.7); }
+.header .sub-picker select { background: rgba(255,255,255,.12); color: #fff; font-size: 13px;
+  border: 1px solid rgba(255,255,255,.22); border-radius: 6px; padding: 5px 8px; max-width: 260px;
+  cursor: pointer; }
+.header .sub-picker select:disabled { opacity: .6; cursor: default; }
+.header .sub-picker option { color: #111; }
 .header .user { width: 30px; height: 30px; border-radius: 50%; background: #2b7fc0;
   display: grid; place-items: center; font-size: 13px; font-weight: 600; }
 

@@ -1,18 +1,19 @@
-import { useEffect, useState, type ReactNode } from 'react'
+import { type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
-import { api } from '../api'
+import { useIdentity } from '../identity'
+
+function initials(name: string): string {
+  const parts = name.trim().split(/\s+/).filter(Boolean)
+  if (!parts.length) return '?'
+  return (parts[0][0] + (parts[1]?.[0] ?? '')).toUpperCase()
+}
 
 export default function Shell({ children }: { children: ReactNode }) {
-  const [backend, setBackend] = useState('loading…')
-
-  useEffect(() => {
-    api
-      .health()
-      .then((h) => setBackend(`${h.project}/${h.environment} · ${h.storage}`))
-      .catch(() => setBackend('storage: unreachable'))
-  }, [])
+  const { identity, subscriptions, selected, setSelected, loading, error } = useIdentity()
 
   const itemClass = ({ isActive }: { isActive: boolean }) => 'item' + (isActive ? ' active' : '')
+
+  const user = identity?.user
 
   return (
     <div className="app">
@@ -21,17 +22,33 @@ export default function Shell({ children }: { children: ReactNode }) {
           <span className="mark">⚡</span> Serverless Agent Portal
         </div>
         <div className="spacer" />
-        <span className="env">{backend}</span>
-        <div className="user">SN</div>
+        <label className="sub-picker" title="Azure subscription">
+          <span className="sub-picker-label">Subscription</span>
+          <select
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            disabled={loading || !!error || subscriptions.length === 0}
+          >
+            {loading && <option value="">Loading…</option>}
+            {error && <option value="">Unavailable</option>}
+            {!loading &&
+              !error &&
+              subscriptions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+          </select>
+        </label>
+        <div className="user" title={user ? `${user.name} · ${user.username}` : 'Not signed in'}>
+          {user ? initials(user.name || user.username) : '…'}
+        </div>
       </header>
 
       <nav className="nav">
         <div className="group-label">Build</div>
         <NavLink className={itemClass} to="/" end>
           <span className="ico">🤖</span> Agents
-        </NavLink>
-        <NavLink className={itemClass} to="/create">
-          <span className="ico">＋</span> Create agent
         </NavLink>
       </nav>
 
