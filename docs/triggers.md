@@ -507,7 +507,12 @@ datetimes represented as ISO-8601 strings.
 ### Binding-specific payloads
 
 **Blob (`InputStream`)** provides metadata only. The runtime does not call `read()` or put blob
-content in the prompt; expose a blob-reading tool when the agent needs the content.
+content in the prompt. The runtime also does **not** add a blob-reading tool automatically — if
+the agent needs the content, author one yourself (for example a function tool in your project's
+`tools/`, or an MCP server) that fetches the blob using the `name`/`uri`. Because `uri` is a
+plain blob URL with no SAS token, that tool must provide its own storage credentials — a
+connection string, or a managed identity granted the **Storage Blob Data Reader** role on the
+account/container.
 
 ```json
 {

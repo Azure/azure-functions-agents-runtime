@@ -175,7 +175,7 @@ def _serialize_rows(
     return [serialize_item(row) for row in rows]
 
 
-class _InputStreamSerializer:
+class _InputStreamSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _INPUT_STREAM_TYPE)
 
@@ -185,7 +185,7 @@ class _InputStreamSerializer:
         return payload
 
 
-class _QueueMessageSerializer:
+class _QueueMessageSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _QUEUE_MESSAGE_TYPE)
 
@@ -210,7 +210,7 @@ class _QueueMessageSerializer:
         return payload
 
 
-class _ServiceBusMessageSerializer:
+class _ServiceBusMessageSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _SERVICE_BUS_MESSAGE_TYPE)
 
@@ -241,7 +241,7 @@ class _ServiceBusMessageSerializer:
         return payload
 
 
-class _EventGridEventSerializer:
+class _EventGridEventSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _EVENT_GRID_EVENT_TYPE)
 
@@ -258,7 +258,7 @@ class _EventGridEventSerializer:
         return payload
 
 
-class _EventHubEventSerializer:
+class _EventHubEventSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _EVENT_HUB_EVENT_TYPE)
 
@@ -280,7 +280,7 @@ class _EventHubEventSerializer:
         return payload
 
 
-class _KafkaEventSerializer:
+class _KafkaEventSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _KAFKA_EVENT_TYPE)
 
@@ -295,7 +295,7 @@ class _KafkaEventSerializer:
         return payload
 
 
-class _TimerRequestSerializer:
+class _TimerRequestSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _TIMER_REQUEST_TYPE)
 
@@ -305,7 +305,7 @@ class _TimerRequestSerializer:
         return payload
 
 
-class _DocumentListSerializer:
+class _DocumentListSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _DOCUMENT_LIST_TYPE)
 
@@ -313,7 +313,7 @@ class _DocumentListSerializer:
         return _serialize_rows(binding, _serialize_document)
 
 
-class _SqlSerializer:
+class _SqlSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _SQL_ROW_LIST_TYPE) or _matches_binding_type(
             binding, _SQL_ROW_TYPE
@@ -325,7 +325,7 @@ class _SqlSerializer:
         return _row_payload(binding)
 
 
-class _MySqlSerializer:
+class _MySqlSerializer(TriggerBindingSerializer):
     def matches(self, binding: object) -> bool:
         return _matches_binding_type(binding, _MYSQL_ROW_LIST_TYPE) or _matches_binding_type(
             binding, _MYSQL_ROW_TYPE
