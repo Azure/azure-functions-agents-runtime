@@ -106,7 +106,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
       6. Fail fast on duplicate identity slugs, then validate every
          `subagents:` reference against the resulting slug index.
       7. Pass 1 (pure): validate each ResolvedAgent and build its
-         AgentCapabilities; freeze both into an immutable AgentCatalog.
+         AgentCapabilities; freeze both into a read-only AgentCatalog
+         (see registration/catalog.py for how deep that guarantee is).
          No FunctionApp exists yet and nothing is mutated.
       8. Create the FunctionApp (DFApp when the main agent opts into workflows).
       9. Pass 2: register each agent's trigger (if any) and built-in
@@ -189,7 +190,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         system_tools_used.add("web_request")
 
     # --- Two-pass composition, pass 1b (FRD 0006 §4.2): validate + build capabilities ---
-    # for every agent and freeze the result into an immutable AgentCatalog. Nothing here
+    # for every agent and freeze the result into a read-only AgentCatalog. Nothing here
     # touches `app` — a coordinator's `delegate_<slug>` tools must be able to resolve
     # *any* specialist by slug at request time, including ones registered later in
     # `resolved_agents` than the coordinator itself, so the full catalog has to exist
