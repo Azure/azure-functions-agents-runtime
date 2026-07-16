@@ -15,6 +15,8 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
 )
 from azure_functions_agents.registration._handlers import (
+    _tool_error_count,
+    _total_tool_error_count,
     build_sandbox_tools_for_session,
     make_agent_handler,
     make_http_agent_handler,
@@ -536,3 +538,43 @@ def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:
         assert str(exc) == "agent failed"
     else:
         raise AssertionError("Expected RuntimeError to be re-raised")
+
+
+def test_total_tool_error_count_combines_heuristic_and_delegate_errors() -> None:
+    # `_looks_like_tool_error`'s JSON `{error}`/stderr heuristic recognizes the
+    # sandbox-style tool_calls entry below as one failure; a specialist's
+    # sanitized free-text delegate failure is invisible to that heuristic
+    # (FRD 0006 §4.12), so `AgentResult.delegate_error_count` must be added
+    # on top rather than relying on the heuristic to catch it too.
+    result = SimpleNamespace(
+        tool_calls=[
+            {"name": "run_code", "result": json.dumps({"error": "boom"})},
+            {"name": "run_code", "result": json.dumps({"stdout": "ok"})},
+        ],
+        delegate_error_count=2,
+    )
+
+    assert _total_tool_error_count(result) == 1 + 2
+
+
+def test_total_tool_error_count_does_not_misclassify_sanitized_delegate_text() -> None:
+    # A delegate failure's sanitized message ("The 'x' specialist could not
+    # complete this task ...") is plain text, not the sandbox JSON envelope —
+    # `_looks_like_tool_error` must NOT flag it, proving the two accounting
+    # paths are additive rather than double-counting or mis-classifying.
+    sanitized_message = (
+        "The 'billing' specialist could not complete this task (RuntimeError). "
+        "Consider trying again, rephrasing the request, or proceeding without it."
+    )
+    result = SimpleNamespace(
+        tool_calls=[{"name": "delegate_billing", "result": sanitized_message}],
+        delegate_error_count=1,
+    )
+
+    assert _tool_error_count(result.tool_calls) == 0
+    assert _total_tool_error_count(result) == 1
+
+
+def test_total_tool_error_count_handles_missing_fields_gracefully() -> None:
+    assert _total_tool_error_count(SimpleNamespace()) == 0
+    assert _total_tool_error_count(None) == 0

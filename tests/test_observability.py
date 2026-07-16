@@ -267,6 +267,69 @@ def test_record_sandbox_execution_is_safe() -> None:
     obs.record_sandbox_execution(error=True)
 
 
+# --- delegation (FRD 0006) observability --------------------------------------------------------
+
+
+def test_fault_domain_delegate_value() -> None:
+    assert obs.FaultDomain.DELEGATE == "delegate"
+
+
+def test_current_span_is_noop_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(obs, "_enabled", False)
+    span = obs.current_span()
+    assert span._span is None
+    # No-op span must stay safe to call even though it wraps nothing.
+    span.set_attribute("af.delegate.specialist", "billing")
+    span.set_error("boom", fault_domain=obs.FaultDomain.DELEGATE)
+
+
+def test_current_span_wraps_active_span_when_enabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(obs, "_enabled", True)
+    with obs.start_span("unit.test.parent", lifecycle_stage=obs.LifecycleStage.AGENT_RUN):
+        span = obs.current_span()
+        assert span._span is not None  # wraps the already-active span, not a new one
+
+
+def test_record_delegate_call_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs, "_delegate_call_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("c"))
+    )
+    monkeypatch.setattr(
+        obs, "_delegate_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
+    )
+
+    monkeypatch.setattr(obs, "_enabled", False)
+    obs.record_delegate_call(error=True)
+    assert calls == []  # gated when disabled
+
+    monkeypatch.setattr(obs, "_enabled", True)
+    obs.record_delegate_call(error=True)
+    assert calls == ["c", "e"]  # emitted when enabled
+
+
+def test_record_delegate_call_only_increments_error_counter_when_error(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[str] = []
+    monkeypatch.setattr(obs, "_metrics_ready", True)
+    monkeypatch.setattr(
+        obs, "_delegate_call_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("c"))
+    )
+    monkeypatch.setattr(
+        obs, "_delegate_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
+    )
+    monkeypatch.setattr(obs, "_enabled", True)
+
+    obs.record_delegate_call(error=False)
+
+    assert calls == ["c"]  # call counter always increments; error counter only when error=True
+
+
+def test_record_delegate_call_is_safe() -> None:
+    obs.record_delegate_call(error=False)
+    obs.record_delegate_call(error=True)
+
+
 def test_quiet_noisy_loggers_raises_unset_levels() -> None:
     import logging
 

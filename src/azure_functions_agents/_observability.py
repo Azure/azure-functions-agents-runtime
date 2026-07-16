@@ -35,10 +35,12 @@ from .config.env import _to_bool, runtime_env_value
 # Attribute naming: every attribute this runtime adds is prefixed ``af.`` — short for
 # "Azure Functions agents". The prefix keeps our attributes from colliding with Microsoft Agent
 # Framework's ``gen_ai.*`` attributes or OpenTelemetry semantic conventions, and makes them trivial
-# to query ("everything we add starts with af."). Two sub-namespaces group the details:
+# to query ("everything we add starts with af."). A few sub-namespaces group the details:
 #
 #   * ``af.agent.*``            — attributes on the per-run ``agent.run {name}`` span.
 #   * ``af.dynamic_session.*``  — attributes on the ``dynamic_session.execute`` (sandbox) span.
+#   * ``af.delegate.*``         — attributes on the ``execute_tool delegate_<slug>`` span added
+#                                 for a chat-time sub-agent delegation (FRD 0006).
 #
 # Three ``af.*`` attributes are cross-cutting and can appear on any runtime span: fault domain,
 # lifecycle stage, and operation id (below). We reuse standard OTel semantic-convention attributes
@@ -65,6 +67,7 @@ class FaultDomain:
     CONNECTOR = "connector"
     SANDBOX = "sandbox"
     WEB_REQUEST = "web_request"
+    DELEGATE = "delegate"
     UNKNOWN = "unknown"
 
 
@@ -316,6 +319,28 @@ def bounded_content(value: str) -> str:
     return value[:_CONTENT_ATTR_MAX_CHARS] + "…[truncated]"
 
 
+def current_span() -> RuntimeSpan:
+    """Wrap whatever OTel span is already active, without starting a new one.
+
+    Used by the ``delegate_<slug>`` tool adapter (``runner.build_subagent_tools``)
+    to annotate the *existing* ``execute_tool delegate_<slug>`` span (opened by
+    MAF's ``FunctionTool.invoke()``) with ``af.delegate.*`` attributes, rather
+    than nesting a second span underneath it — see FRD 0006 §4.12, whose span
+    diagram shows exactly one ``execute_tool delegate_<slug>`` span per
+    delegation. Contrast with :func:`start_span`, which always creates a new
+    span. Returns a no-op :class:`RuntimeSpan` when tracing is unavailable or
+    disabled.
+    """
+    if not _enabled:
+        return RuntimeSpan(None)
+    try:
+        from opentelemetry import trace
+
+        return RuntimeSpan(trace.get_current_span())
+    except Exception:  # pragma: no cover - defensive
+        return RuntimeSpan(None)
+
+
 class RuntimeSpan:
     """Thin wrapper over an OTel span that no-ops when tracing is unavailable."""
 
@@ -427,12 +452,15 @@ _sandbox_execution_counter: Any = None
 _sandbox_error_counter: Any = None
 _web_request_counter: Any = None
 _web_request_error_counter: Any = None
+_delegate_call_counter: Any = None
+_delegate_error_counter: Any = None
 _metrics_ready = False
 
 
 def _ensure_metrics() -> None:
     global _meter, _sandbox_execution_counter, _sandbox_error_counter
     global _web_request_counter, _web_request_error_counter, _metrics_ready
+    global _delegate_call_counter, _delegate_error_counter
     if _metrics_ready:
         return
     _metrics_ready = True
@@ -466,11 +494,21 @@ def _ensure_metrics() -> None:
             "azure_functions_agents.web_request.errors",
             description="web_request invocations blocked or failed (SSRF, timeout, transport error).",
         )
+        _delegate_call_counter = _meter.create_counter(
+            "azure_functions_agents.delegate.calls",
+            description="delegate_<slug> tool invocations (chat-time sub-agent delegation).",
+        )
+        _delegate_error_counter = _meter.create_counter(
+            "azure_functions_agents.delegate.errors",
+            description="delegate_<slug> invocations that failed or timed out (specialist-side; sanitized before reaching the model).",
+        )
     except Exception:  # pragma: no cover - defensive
         _sandbox_execution_counter = None
         _sandbox_error_counter = None
         _web_request_counter = None
         _web_request_error_counter = None
+        _delegate_call_counter = None
+        _delegate_error_counter = None
 
 
 def record_sandbox_execution(*, error: bool) -> None:
@@ -502,5 +540,26 @@ def record_web_request(*, error: bool) -> None:
             _web_request_counter.add(1)
         if error and _web_request_error_counter is not None:
             _web_request_error_counter.add(1)
+    except Exception:  # pragma: no cover - defensive
+        pass
+
+
+def record_delegate_call(*, error: bool) -> None:
+    """Record one ``delegate_<slug>`` invocation and, when ``error``, one failure.
+
+    ``error`` covers a specialist run that failed, raised, or exceeded the
+    effective delegation timeout — any outcome the adapter sanitized into a
+    recoverable error string for the coordinator (FRD 0006 Decision #12). It
+    does not cover parent/request cancellation, which propagates instead of
+    being recorded as a delegate error.
+    """
+    if not _enabled:
+        return
+    _ensure_metrics()
+    try:
+        if _delegate_call_counter is not None:
+            _delegate_call_counter.add(1)
+        if error and _delegate_error_counter is not None:
+            _delegate_error_counter.add(1)
     except Exception:  # pragma: no cover - defensive
         pass

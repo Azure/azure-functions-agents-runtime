@@ -62,8 +62,10 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
 
-    async def fake_build_agent_session_history(**_kwargs: Any) -> tuple[_Agent, object, str]:
-        return _Agent(), object(), "test-session"
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None]:
+        return _Agent(), object(), "test-session", None
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
