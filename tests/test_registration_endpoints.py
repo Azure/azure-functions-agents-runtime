@@ -88,10 +88,19 @@ def _resolved_agent(
     builtin_endpoints: BuiltinEndpointsConfig,
     source_file: str | Path | None = None,
     input_schema: dict[str, Any] | None = None,
+    # Deliberately distinct from `name` above (S1): identity/telemetry call
+    # sites must key off `slug`, never the mutable display `name` (FRD 0006
+    # §4.3, "Display `name` is never an identity"). Defaulted so existing
+    # callers of this factory are unaffected; note route paths (e.g.
+    # `agents/daily_report_a/`) are derived from `source_file`/`name` via
+    # `allocate_unique_builtin_slug`, not this `slug` field, so changing its
+    # default here does not affect any route-path assertions.
+    slug: str = "resolved-agent-slug",
 ) -> ResolvedAgent:
     source = source_file or Path(__file__).resolve()
     return ResolvedAgent(
         name=name,
+        slug=slug,
         description="desc",
         trigger=None,
         instructions="Assist the user.",
@@ -330,6 +339,11 @@ def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     assert calls["run_agent"]["session_id"] == "generated-session-id"
     assert calls["run_agent"]["sandbox_tools"] == ["sandbox-tool"]
     assert result.session_id == "generated-session-id"
+    # S1: the coordinator/direct-role agent must be identified by
+    # `resolved.slug` for telemetry, not the mutable display `name` (FRD
+    # 0006 §4.3) -- matches round 2's B2 fix for delegated specialists.
+    assert calls["run_agent"]["agent_name"] == resolved.slug
+    assert calls["run_agent"]["agent_name"] != resolved.name
 
 
 def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_tools(
@@ -374,6 +388,9 @@ def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_t
     assert calls["run_agent_stream"]["session_id"] == "generated-stream-session-id"
     assert calls["run_agent_stream"]["sandbox_tools"] == ["sandbox-tool"]
     assert result == "stream"
+    # S1: same contract as the non-streaming builtin-agent test above.
+    assert calls["run_agent_stream"]["agent_name"] == resolved.slug
+    assert calls["run_agent_stream"]["agent_name"] != resolved.name
 
 
 def test_register_builtin_endpoints_chat_also_registers_http_routes_for_non_main_agent(
@@ -580,6 +597,10 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     # comes from `delegate_error_count`, proving it is the piece that was
     # previously dropped on this surface.
     assert span.attributes["af.agent.tool_error_count"] == 2
+    # S1: this endpoint's own span must identify the coordinator agent by
+    # `resolved.slug`, not the mutable display `name` (FRD 0006 §4.3).
+    assert span.attributes["af.agent.name"] == resolved.slug
+    assert span.attributes["af.agent.name"] != resolved.name
 
 
 def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
@@ -627,6 +648,55 @@ def test_handle_mcp_agent_chat_reports_delegate_error_count_on_span(
     [span] = spans
     assert span.attributes["af.agent.outcome"] == "success"
     assert span.attributes["af.agent.tool_error_count"] == 1
+    # S1: same contract as the chat endpoint test above, for the MCP surface.
+    assert span.attributes["af.agent.name"] == resolved.slug
+    assert span.attributes["af.agent.name"] != resolved.name
+
+
+def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """N1: when the caller supplies no explicit session id, the span's
+    ``af.agent.session_id`` attribute must reflect the id the runner actually
+    resolved/generated for the turn (``result.session_id``), not be left
+    unset from the pre-call ``None``.
+    """
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        source_file=source_file,
+    )
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        assert kwargs["session_id"] is None  # caller omitted it
+        return SimpleNamespace(
+            session_id="runner-generated-session-id",
+            content="ok",
+            tool_calls=[],
+            delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=False)
+    mcp_routes = [route for route in app.routes if route.get("mcp_tool_trigger")]
+    assert len(mcp_routes) == 1
+    mcp_handler = mcp_routes[0]["handler"]
+
+    # No "sessionId" key at all -- the caller-omitted case.
+    result = asyncio.run(mcp_handler(json.dumps({"arguments": {"prompt": "hello"}})))
+
+    assert json.loads(result)["session_id"] == "runner-generated-session-id"
+    [span] = spans
+    assert span.attributes["af.agent.session_id"] == "runner-generated-session-id"
 
 
 def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(

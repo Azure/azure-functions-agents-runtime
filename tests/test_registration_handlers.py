@@ -78,10 +78,16 @@ def _resolved_agent(
     input_schema: dict[str, Any] | None = None,
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None = None,
     tools_disabled: bool = False,
+    # Deliberately distinct from `name` below (S1): identity/telemetry call
+    # sites must key off `slug`, never the mutable display `name` (FRD 0006
+    # §4.3, "Display `name` is never an identity"). Defaulted so existing
+    # callers of this factory are unaffected.
+    slug: str = "resolved-agent-slug",
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
     return ResolvedAgent(
         name="Report",
+        slug=slug,
         description="desc",
         trigger=None,
         instructions="Return JSON",
@@ -578,3 +584,57 @@ def test_total_tool_error_count_does_not_misclassify_sanitized_delegate_text() -
 def test_total_tool_error_count_handles_missing_fields_gracefully() -> None:
     assert _total_tool_error_count(SimpleNamespace()) == 0
     assert _total_tool_error_count(None) == 0
+
+
+def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
+    monkeypatch: Any,
+) -> None:
+    """S1: the coordinator/direct-role agent must be identified by `resolved.slug`.
+
+    Round 2's B2 fix already made *delegated* specialists use `resolved.slug`
+    for telemetry identity rather than the mutable display `name` (FRD 0006
+    §4.3, "Display `name` is never an identity"). This asserts the direct/
+    coordinator role gets the same treatment on the non-HTTP trigger path.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured["agent_name"] = kwargs.get("agent_name")
+        return SimpleNamespace(content="ok", session_id=kwargs["session_id"], tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    resolved = _resolved_agent(response_schema=None, slug="report-slug")
+    handler = make_agent_handler(resolved, "queue_trigger", AgentCapabilities())
+
+    asyncio.run(handler({"message": "hello"}))
+
+    assert captured["agent_name"] == "report-slug"
+    assert captured["agent_name"] != resolved.name
+
+
+def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
+    monkeypatch: Any,
+) -> None:
+    """S1: same contract as the non-HTTP handler test above, for the HTTP trigger path."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured["agent_name"] = kwargs.get("agent_name")
+        return SimpleNamespace(content="ok", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    resolved = _resolved_agent(response_schema=None, slug="report-slug")
+    handler = make_http_agent_handler(resolved, AgentCapabilities())
+
+    asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert captured["agent_name"] == "report-slug"
+    assert captured["agent_name"] != resolved.name

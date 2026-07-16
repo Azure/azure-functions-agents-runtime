@@ -181,7 +181,7 @@ async def _run_builtin_agent(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
-        agent_name=resolved.name,
+        agent_name=resolved.slug,
         subagents=resolved.subagents,
         catalog=catalog,
     )
@@ -214,7 +214,7 @@ def _run_builtin_agent_stream(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
-        agent_name=resolved.name,
+        agent_name=resolved.slug,
         subagents=resolved.subagents,
         catalog=catalog,
     )
@@ -294,10 +294,11 @@ def _register_http_chat(
         # `af.agent.tool_error_count`, which folds in delegate errors) that
         # `make_agent_handler`/`make_http_agent_handler` already provide.
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": "builtin_chat",
                 "af.agent.session_id": resolved_session_id,
                 "af.agent.model": resolved.model,
@@ -426,10 +427,11 @@ def _register_mcp_endpoint(
         # `agent.run {name}` span for it — open one here to get the same
         # run-level attributes (including B3's `af.agent.tool_error_count`).
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": "builtin_mcp",
                 "af.agent.model": resolved.model,
             },
@@ -457,6 +459,13 @@ def _register_mcp_endpoint(
                     durable_client=durable_client,
                     catalog=catalog,
                 )
+                # When the caller supplies no explicit session id (`session_id`
+                # is `None` above), the runner still resolves/generates one for
+                # this turn (`result.session_id`) — refresh the span attribute
+                # with it (N1) instead of leaving the pre-call `None` in place,
+                # which otherwise left this attribute permanently unset for
+                # every caller-omitted-session-id turn.
+                span.set_attribute("af.agent.session_id", result.session_id)
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
                 return json.dumps(

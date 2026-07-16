@@ -264,10 +264,11 @@ def make_agent_handler(
 
         session_id = _new_session_id()
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": trigger_type,
                 "af.agent.session_id": session_id,
                 "af.agent.model": resolved.model,
@@ -295,6 +296,7 @@ def make_agent_handler(
                     skill_paths=capabilities.enabled_skill_paths,
                     subagents=resolved.subagents,
                     catalog=catalog,
+                    agent_name=resolved.slug,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -343,10 +345,11 @@ def make_http_agent_handler(
         )
 
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": "http",
                 "af.agent.model": resolved.model,
             },
@@ -403,6 +406,7 @@ def make_http_agent_handler(
                     skill_paths=capabilities.enabled_skill_paths,
                     subagents=resolved.subagents,
                     catalog=catalog,
+                    agent_name=resolved.slug,
                 )
 
                 _set_run_result_attributes(span, result)

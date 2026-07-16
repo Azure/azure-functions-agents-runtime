@@ -1180,3 +1180,357 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
     stream = agent.run("hello", stream=True)
     with pytest.raises(ValueError, match="Duplicate tool name 'delegate_billing'"):
         await stream.get_final_response()
+
+
+# ---------------------------------------------------------------------------
+# Real MAF stream finalization on timeout/cancellation (round-3 M2)
+# ---------------------------------------------------------------------------
+#
+# `_FakeStream`/`_FakeSpecialistAgent` (used by every other test in this
+# module) never touch MAF's real `ResponseStream`, so they cannot prove M2:
+# that a specialist call stopped by `asyncio.wait_for`'s timeout/cancellation
+# still finalizes MAF's own stream (closing its `invoke_agent` span
+# deterministically) rather than leaving it open until a nondeterministic
+# GC-timed `weakref.finalize` safety net eventually runs. The tests below go
+# through the real (unmocked) `_build_delegated_agent` -> `_build_role_agent`
+# -> `Agent(...)` chain, exactly like B2's
+# `test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name`,
+# with a chat client whose stream never yields — modeling a hung specialist
+# call — so the adapter's own `wait_for`/outer cancellation is what actually
+# stops it, and inspect the real exported span to prove finalization ran.
+
+
+class _NeverRespondingChatClient:
+    """Mirrors ``_RunnableFakeChatClient``, but its stream never yields.
+
+    Models a specialist call that hangs until an outer timeout/cancellation
+    forces it to stop — the scenario M2's fix (``_finalize_maf_stream``)
+    exists for. ``additional_properties`` matches ``_RunnableFakeChatClient``
+    (required by MAF's construction path); only the ``stream=True`` branch is
+    exercised by ``as_tool()``, same as its sibling fake.
+    """
+
+    additional_properties: ClassVar[dict[str, Any]] = {}
+
+    def get_response(self, messages: Any, *, stream: bool = False, **kwargs: Any) -> Any:
+        from agent_framework import ResponseStream
+
+        if not stream:
+            raise NotImplementedError("only the stream=True branch is exercised by as_tool()")
+
+        async def _stream() -> Any:
+            await asyncio.sleep(30.0)
+            yield None  # pragma: no cover - never reached within any test's timeout budget
+
+        return ResponseStream(_stream())
+
+
+class _NeverRespondingClientManager(ClientManager):
+    """A ``ClientManager`` whose chat client hangs forever — see ``_NeverRespondingChatClient``."""
+
+    def resolve_model(self, requested: str | None) -> str:
+        return requested or "fake-model"
+
+    def build_chat_client(self, model: str | None) -> Any:
+        return _NeverRespondingChatClient()
+
+
+def _install_maf_tracer(monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Swap MAF's OTel tracer provider for an in-memory exporter and force MAF's own
+    instrumentation on, for the duration of one test.
+
+    Extracts the boilerplate
+    ``test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name`` (B2)
+    already uses once: MAF's ``get_tracer()`` (used by ``AgentTelemetryLayer``/
+    ``get_function_span`` to create ``invoke_agent``/``execute_tool`` spans) is a
+    thin wrapper over ``opentelemetry.trace.get_tracer_provider()`` with no
+    per-call injection point, so the provider has to be swapped globally; MAF
+    only creates spans at all when
+    ``agent_framework.observability.OBSERVABILITY_SETTINGS.enable_instrumentation``
+    is truthy (read fresh on every call, so a plain monkeypatch is enough — no
+    need to touch this repo's own, separate ``_observability._enabled`` flag).
+    Returns the ``InMemorySpanExporter`` so a test can inspect finished spans.
+    """
+    import agent_framework.observability as maf_observability
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    from opentelemetry.sdk.trace.export import SimpleSpanProcessor
+    from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanExporter
+
+    exporter = InMemorySpanExporter()
+    provider = TracerProvider()
+    provider.add_span_processor(SimpleSpanProcessor(exporter))
+    monkeypatch.setattr(trace, "get_tracer_provider", lambda: provider)
+    monkeypatch.setattr(maf_observability.OBSERVABILITY_SETTINGS, "enable_instrumentation", True)
+    return exporter
+
+
+@pytest.mark.asyncio
+async def test_delegate_adapter_finalizes_real_maf_stream_on_specialist_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2: a specialist call that times out must still finalize MAF's own
+    ``ResponseStream`` — closing its ``invoke_agent`` span deterministically —
+    rather than leaving it open until a nondeterministic GC-timed
+    ``weakref.finalize`` safety net eventually runs.
+
+    ``_NeverRespondingClientManager`` makes the specialist's stream never
+    yield, forcing the adapter's own ``asyncio.wait_for`` to time out while
+    awaiting ``original_func(ctx, **kwargs)`` — the ``except TimeoutError``
+    branch this proves exercises is exactly the one that calls
+    ``_finalize_maf_stream`` before returning the recoverable, model-facing
+    "did not respond in time" text.
+    """
+    exporter = _install_maf_tracer(monkeypatch)
+    span = _install_span_capture(monkeypatch)
+    calls = _install_counter_capture(monkeypatch)
+
+    set_client_manager(_NeverRespondingClientManager())
+
+    resolved = _make_resolved(
+        name="Billing Specialist",
+        slug="billing",
+        instructions="Handle billing questions.",
+        timeout=0.05,
+    )
+    catalog = _catalog_of(("billing", resolved))
+    loop = asyncio.get_event_loop()
+    tools, tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
+    )
+    tool = tools[0]
+
+    result = await tool.func(SimpleNamespace(kwargs={}), task="Explain this month's invoice.")
+
+    assert "did not respond in time" in result
+    assert tracker.count == 1
+    assert calls == [True]
+    assert span.attributes["af.delegate.outcome"] == "timeout"
+
+    finished = exporter.get_finished_spans()
+    invoke_spans = [s for s in finished if s.name.startswith("invoke_agent")]
+    assert len(invoke_spans) == 1, (
+        f"expected exactly one finalized invoke_agent span, got: {[s.name for s in finished]}"
+    )
+    # A span only appears in `get_finished_spans()` once `.end()` has actually
+    # been called on it (the in-memory exporter is fed by a `SimpleSpanProcessor`,
+    # which exports `on_end`) — proving `_finalize_maf_stream`'s explicit
+    # `_run_cleanup_hooks()` call ran deterministically, not via GC.
+    assert invoke_spans[0].end_time is not None
+
+
+@pytest.mark.asyncio
+async def test_delegate_adapter_finalizes_real_maf_stream_on_outer_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """M2 (outer cancellation): mirrors the timeout test above, but the
+    delegate call is stopped by an OUTER task cancellation (e.g. the whole
+    coordinator run itself being cancelled) rather than the adapter's own
+    ``wait_for`` expiring — proving ``_finalize_maf_stream`` runs from the
+    ``except asyncio.CancelledError`` branch too, not only the
+    ``TimeoutError`` branch. Cancellation is never a recoverable delegate
+    failure (Decision #12), so the tracker/counter must NOT record anything.
+    """
+    exporter = _install_maf_tracer(monkeypatch)
+    span = _install_span_capture(monkeypatch)
+    calls = _install_counter_capture(monkeypatch)
+
+    set_client_manager(_NeverRespondingClientManager())
+
+    resolved = _make_resolved(
+        name="Billing Specialist",
+        slug="billing",
+        instructions="Handle billing questions.",
+        timeout=30.0,
+    )
+    catalog = _catalog_of(("billing", resolved))
+    loop = asyncio.get_event_loop()
+    tools, tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
+    )
+    tool = tools[0]
+
+    task = asyncio.ensure_future(
+        tool.func(SimpleNamespace(kwargs={}), task="Explain this month's invoice.")
+    )
+    await asyncio.sleep(0.1)  # let the call actually reach the never-responding stream
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert tracker.count == 0
+    assert calls == []
+    assert span.attributes["af.delegate.outcome"] == "cancelled"
+
+    finished = exporter.get_finished_spans()
+    invoke_spans = [s for s in finished if s.name.startswith("invoke_agent")]
+    assert len(invoke_spans) == 1, (
+        f"expected exactly one finalized invoke_agent span, got: {[s.name for s in finished]}"
+    )
+    assert invoke_spans[0].end_time is not None
+
+
+# ---------------------------------------------------------------------------
+# Telemetry preserves the exact caught timeout exception object (round-3 S3)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_delegate_adapter_timeout_records_the_exact_wait_for_exception_object(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3: telemetry for a ``wait_for``-expiry timeout must preserve the EXACT
+    exception object ``asyncio.wait_for`` raised, not a freshly-constructed
+    ``TimeoutError`` built purely from the specialist's slug/timeout.
+
+    Spies on the real ``asyncio.wait_for`` (wrapping it, not replacing its
+    behavior — the actual timeout still fires) to capture the exact instance
+    it raises on expiry, then asserts the span's recorded exception object
+    IS that instance (identity, not just str/type equality).
+    """
+    span = _install_span_capture(monkeypatch)
+    _install_counter_capture(monkeypatch)
+
+    real_wait_for = asyncio.wait_for
+    captured: list[BaseException] = []
+
+    async def spy_wait_for(*args: Any, **kwargs: Any) -> Any:
+        try:
+            return await real_wait_for(*args, **kwargs)
+        except TimeoutError as exc:
+            captured.append(exc)
+            raise
+
+    monkeypatch.setattr(asyncio, "wait_for", spy_wait_for)
+
+    async def slow_respond(task: str) -> str:
+        await asyncio.sleep(10)
+        return "too late"
+
+    tool, tracker = await _build_single_delegate_tool(
+        monkeypatch, slug="billing", respond=slow_respond, resolved_timeout=0.05
+    )
+
+    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+
+    assert "did not respond in time" in result
+    assert tracker.count == 1
+    assert len(captured) == 1
+    assert span.exceptions
+    recorded_exc, fault_domain = span.exceptions[-1]
+    assert recorded_exc is captured[0]
+    assert fault_domain == obs.FaultDomain.DELEGATE
+
+
+@pytest.mark.asyncio
+async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_telemetry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S3: a ``TimeoutError`` the specialist's OWN code raises internally (for
+    an unrelated reason, not ``wait_for`` expiry) must ALSO be preserved as
+    the recorded exception object rather than replaced by a synthetic one —
+    proving the fix isn't special-cased to only the ``wait_for``-expiry
+    shape. Python 3.11+ unifies ``asyncio.TimeoutError`` with the builtin
+    ``TimeoutError``, so the two cases are structurally indistinguishable by
+    type; this only works because ``except TimeoutError as exc: ...
+    record_exception(exc, ...)`` preserves whichever object was ACTUALLY
+    caught, regardless of its origin.
+    """
+    span = _install_span_capture(monkeypatch)
+    calls = _install_counter_capture(monkeypatch)
+
+    marker = "specialist's own unrelated timeout"
+
+    async def respond(task: str) -> str:
+        raise TimeoutError(marker)
+
+    tool, tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
+
+    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+
+    assert "did not respond in time" in result
+    assert tracker.count == 1
+    assert calls == [True]
+    assert span.attributes["af.delegate.outcome"] == "timeout"
+    assert span.exceptions
+    recorded_exc, fault_domain = span.exceptions[-1]
+    assert str(recorded_exc) == marker
+    assert fault_domain == obs.FaultDomain.DELEGATE
+
+
+# ---------------------------------------------------------------------------
+# End-to-end span tree through MAF's real `FunctionTool.invoke()` (round-3 S4)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_real_delegate_tool_invoke_produces_nested_execute_tool_and_invoke_agent_spans(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """S4: a real end-to-end span tree, going through MAF's actual
+    ``FunctionTool.invoke()`` entry point (parameter validation/injection)
+    rather than calling ``tool.func`` directly, under an ACTIVE coordinator
+    span. Asserts 3-level nesting:
+
+    * ``agent.run coordinator``      — opened by this test, standing in for
+      the coordinator's own run-level span (``run_agent``/``run_agent_stream``
+      open an equivalent span around the whole turn in production).
+    * ``execute_tool delegate_billing`` — opened by MAF's own
+      ``FunctionTool.invoke()`` (via ``get_function_span``) as a child of it.
+    * ``invoke_agent billing``       — opened by MAF's ``AgentTelemetryLayer``
+      when the specialist's real ``Agent.run()`` executes, as a child of
+      THAT.
+
+    All three must share one trace id.
+    """
+    exporter = _install_maf_tracer(monkeypatch)
+    _install_span_capture(monkeypatch)
+    _install_counter_capture(monkeypatch)
+
+    from opentelemetry import trace as ot_trace
+
+    set_client_manager(_RunnableFakeClientManager())
+
+    resolved = _make_resolved(
+        name="Billing Specialist", slug="billing", instructions="Handle billing questions."
+    )
+    catalog = _catalog_of(("billing", resolved))
+    loop = asyncio.get_event_loop()
+    tools, _tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
+    )
+    tool = tools[0]
+
+    tracer = ot_trace.get_tracer("test-coordinator")
+    with tracer.start_as_current_span("agent.run coordinator"):
+        # `skip_parsing=True` returns the delegate adapter's raw `str` return
+        # value directly (matching `tool.func(...)`'s own return shape used
+        # by every other test in this module) instead of MAF's default
+        # `list[Content]` wrapping — the wrapping itself is orthogonal to
+        # what this test is proving (the span tree).
+        result = await tool.invoke(task="Explain this month's invoice.", skip_parsing=True)
+
+    assert result == "specialist response"
+
+    finished = exporter.get_finished_spans()
+    by_name = {s.name: s for s in finished}
+    assert {"agent.run coordinator", "execute_tool delegate_billing", "invoke_agent billing"} <= set(
+        by_name
+    )
+
+    coordinator_span = by_name["agent.run coordinator"]
+    execute_tool_span = by_name["execute_tool delegate_billing"]
+    invoke_agent_span = by_name["invoke_agent billing"]
+
+    assert execute_tool_span.parent is not None
+    assert execute_tool_span.parent.span_id == coordinator_span.context.span_id
+    assert invoke_agent_span.parent is not None
+    assert invoke_agent_span.parent.span_id == execute_tool_span.context.span_id
+
+    trace_ids = {
+        coordinator_span.context.trace_id,
+        execute_tool_span.context.trace_id,
+        invoke_agent_span.context.trace_id,
+    }
+    assert len(trace_ids) == 1  # coordinator + execute_tool + invoke_agent share one trace

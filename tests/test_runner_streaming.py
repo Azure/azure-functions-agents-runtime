@@ -79,6 +79,33 @@ class _StallingAgent:
         yield _Update([_Content("text", text="unreachable")])  # pragma: no cover
 
 
+class _ToolErrorAgent:
+    """A fake agent whose one tool call's result carries the sandbox-style
+    JSON error envelope ``_looks_like_tool_error`` recognizes as a failure —
+    but with no delegate-tracker failure at all. Regression fixture for M3
+    (streaming): proves ``run_agent_stream`` counts *ordinary* (non-delegate)
+    tool-call failures on their own rather than relying entirely on
+    ``delegate_error_tracker.count``.
+    """
+
+    def run(
+        self,
+        _prompt: str,
+        *,
+        stream: bool,
+        session: object,
+        options: dict[str, Any] | None = None,
+    ) -> AsyncIterator[_Update]:
+        assert stream is True
+        return self._updates()
+
+    async def _updates(self) -> AsyncIterator[_Update]:
+        yield _Update(
+            [_Content("function_call", call_id="call_1", name="sandbox_exec", arguments="{}")]
+        )
+        yield _Update([_Content("function_result", call_id="call_1", result='{"error": "boom"}')])
+
+
 class _CapturedSpan:
     """Fake ``RuntimeSpan`` — mirrors ``test_web_request.py``'s ``_CapturedSpan``.
 
@@ -215,6 +242,96 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
     assert any(isinstance(exc, TimeoutError) for exc in span.exceptions)
 
 
+def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) -> None:
+    """M1 (non-streaming): the coordinator deadline must also bound the wait
+    for the per-session lock, not just the agent-run call after it.
+
+    Before the fix, ``run_agent`` computed ``coordinator_deadline`` but the
+    lock-acquire itself had no bound, and the subsequent ``agent.run(...)``
+    reused the FULL original ``timeout`` again (not the remaining budget
+    after the lock wait) — so a long lock wait let total wall-clock exceed
+    ``timeout``, and once the real ``coordinator_deadline`` had already
+    passed, the run kept going on a fresh/unbounded budget instead of
+    aborting the whole turn (FRD 0006 §4.6). Simulate lock contention the
+    same way a concurrent turn on the same ``session_id`` would: acquire
+    the session's lock *before* calling ``run_agent``.
+    """
+    resolved_id = "test-m1-lock-contention-non-streaming"
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None]:
+        return _Agent(), object(), resolved_id, None
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def scenario() -> BaseException | None:
+        lock = await runner._get_session_lock(resolved_id)
+        await lock.acquire()
+        try:
+            await runner.run_agent("prompt", timeout=0.05, session_id=resolved_id)
+        except BaseException as exc:  # captured for assertion below, not swallowed silently
+            return exc
+        finally:
+            lock.release()
+        return None
+
+    started = time.monotonic()
+    exc = asyncio.run(scenario())
+    elapsed = time.monotonic() - started
+
+    # Generous relative to the 0.05s timeout, but proves the run didn't
+    # silently continue on a fresh budget once the deadline had passed.
+    assert elapsed < 5.0
+    assert isinstance(exc, RuntimeError)
+    assert str(exc) == "Agent run timed out after 0.05s"
+
+
+def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) -> None:
+    """M1 (streaming): mirrors the non-streaming case above for
+    ``run_agent_stream`` — the lock-acquire before the per-update streaming
+    loop must also be bounded by the same absolute ``deadline``, emitting
+    the same ``error`` SSE event shape the existing per-update-timeout
+    branch already emits rather than continuing on a fresh budget.
+    """
+    spans = _install_start_span_capture(monkeypatch)
+    resolved_id = "test-m1-lock-contention-streaming"
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None]:
+        return _Agent(), object(), resolved_id, None
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def scenario() -> list[str]:
+        lock = await runner._get_session_lock(resolved_id)
+        await lock.acquire()
+        try:
+            return [
+                chunk
+                async for chunk in runner.run_agent_stream(
+                    "prompt", timeout=0.05, session_id=resolved_id
+                )
+            ]
+        finally:
+            lock.release()
+
+    started = time.monotonic()
+    events = _events_from_sse(asyncio.run(scenario()))
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0
+    assert events == [
+        {"type": "session", "session_id": resolved_id},
+        {"type": "error", "content": "Timeout after 0.05s"},
+    ]
+
+    [span] = spans
+    assert span.attributes["af.agent.outcome"] == "error"
+    assert any(isinstance(exc, TimeoutError) for exc in span.exceptions)
+
+
 def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any) -> None:
     """B3 (streaming): a recoverable delegate failure must land on the run's own span.
 
@@ -276,6 +393,73 @@ def test_run_agent_stream_reports_zero_tool_errors_without_delegation(monkeypatc
 
     [span] = spans
     assert span.attributes["af.agent.tool_error_count"] == 0
+
+
+def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
+    monkeypatch: Any,
+) -> None:
+    """M3 (streaming): a failed *ordinary* (non-delegate) tool call must
+    still be reflected in ``af.agent.tool_error_count`` even when there is
+    no delegate tracker at all (no ``subagents``/``catalog`` configured).
+
+    Before the fix, the streaming path's final count came ONLY from
+    ``delegate_error_tracker.count``, so a genuinely-failed sandbox/
+    web_request tool call with zero delegate failures reported a count of
+    0 — silently wrong telemetry. ``_ToolErrorAgent`` yields a
+    ``function_result`` whose ``result`` carries the same JSON error
+    envelope (``{"error": ...}``) ``_looks_like_tool_error`` recognizes.
+    """
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_ToolErrorAgent, object, str, None]:
+        return _ToolErrorAgent(), object(), "test-session", None
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def collect() -> list[str]:
+        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+
+    events = _events_from_sse(asyncio.run(collect()))
+    assert any(event["type"] == "done" for event in events)
+
+    [span] = spans
+    assert span.attributes["af.agent.tool_error_count"] >= 1
+
+
+def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: Any) -> None:
+    """M3 (mixed scenario): ordinary tool-call failures and delegate
+    failures come from independent sources and must both be counted —
+    summed, not one overwriting the other. There's no double-counting risk
+    between the two: a specialist's sanitized delegate-failure text is
+    never valid JSON, so ``_looks_like_tool_error`` can never also match a
+    delegate failure.
+    """
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    spans = _install_start_span_capture(monkeypatch)
+
+    tracker = runner._DelegateErrorTracker()
+    tracker.record_error()  # one delegate failure, independent of the tool error below
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_ToolErrorAgent, object, str, runner._DelegateErrorTracker]:
+        return _ToolErrorAgent(), object(), "test-session", tracker
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def collect() -> list[str]:
+        return [chunk async for chunk in runner.run_agent_stream("prompt")]
+
+    asyncio.run(collect())
+
+    [span] = spans
+    # 1 delegate failure + 1 ordinary tool-call failure from `_ToolErrorAgent`.
+    assert span.attributes["af.agent.tool_error_count"] == 2
 
 
 def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
