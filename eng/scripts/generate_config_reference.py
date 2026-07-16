@@ -230,6 +230,7 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
+    "auth": "App-wide default inbound authentication policy inherited by every agent's built-in endpoints; a per-agent `builtin_endpoints.auth` overrides it. Modes: `function` (default), `admin`, `anonymous`, `entra`.",
 }
 
 GLOBAL_CONFIG_DEFAULTS = {
@@ -237,6 +238,7 @@ GLOBAL_CONFIG_DEFAULTS = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
+    "auth": "`function` (per-agent default)",
 }
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS = {

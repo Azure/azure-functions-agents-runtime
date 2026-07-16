@@ -661,19 +661,27 @@ def test_mcp_non_system_key_mode_warns_that_auth_mode_is_ignored(
     )
 
 
-def test_mcp_admin_mode_does_not_warn(
+def test_mcp_admin_mode_warns_master_key_diverges_from_system_key(
     caplog: pytest.LogCaptureFixture, tmp_path: Path
 ) -> None:
-    """admin aligns with the extension system-key policy, so no divergence message."""
+    """admin maps to the master key, which differs from the extension system key."""
     app = FakeFunctionApp()
     resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode="admin"))
 
-    with caplog.at_level(logging.INFO):
+    with caplog.at_level(logging.WARNING):
         register_builtin_endpoints(app, resolved, AgentCapabilities())
 
-    assert not any(
-        "MCP webhook" in record.getMessage() or "enforced at the platform" in record.getMessage()
+    warnings = [
+        record.getMessage()
         for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert any(
+        "auth.mode=admin" in message
+        and "master key" in message
+        and "do not distribute the master key" in message
+        and "x-functions-key" in message
+        for message in warnings
     )
 
 

@@ -463,6 +463,11 @@ def _log_mcp_auth_policy(
     never sees its HTTP request, so it cannot apply the authored ``auth.mode``
     there. The webhook always requires the MCP extension **system key**
     (``x-functions-key``); ``entra`` additionally relies on platform Easy Auth.
+    ``admin`` diverges too: it maps the chat routes to the Functions **master
+    key** (``AuthLevel.ADMIN``), which is a different -- and far more privileged
+    -- credential than the extension **system key** the webhook requires. It must
+    not be conflated with the system key, so it is flagged rather than treated as
+    aligned.
     Emit a one-time message per agent so a mode the webhook cannot honor is
     explicit rather than silently diverging from the authored policy.
     """
@@ -476,6 +481,17 @@ def _log_mcp_auth_policy(
             marker,
             slug,
         )
+    elif auth.mode == "admin":
+        logger.warning(
+            "auth.mode=admin maps the chat routes to the Azure Functions master "
+            "key (AuthLevel.ADMIN), which is a different and far more privileged "
+            "credential than the MCP extension system key required by the "
+            "host-owned MCP webhook (/runtime/webhooks/mcp). Call the webhook "
+            "with the MCP extension system key (x-functions-key); do not "
+            "distribute the master key. source_file=%s tool=%s",
+            marker,
+            slug,
+        )
     elif auth.mode in ("function", "anonymous"):
         logger.warning(
             "auth.mode=%s does not apply to the host-owned MCP webhook "
@@ -486,8 +502,6 @@ def _log_mcp_auth_policy(
             marker,
             slug,
         )
-    # auth.mode == "admin" aligns with the extension's system-key policy, so the
-    # authored intent is already honored and no divergence message is needed.
 
 
 def _register_workflow_status_endpoints(

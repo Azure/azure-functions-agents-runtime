@@ -46,7 +46,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `auth` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -66,6 +66,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
+- `auth` — String or object specifying the app-wide default inbound authentication policy (same model as `builtin_endpoints.auth`). Every agent's built-in endpoints inherit this value unless the agent authors its own `builtin_endpoints.auth`, which always overrides. When omitted, endpoints default to `function`. Example: `auth: entra` requires every agent's chat API and MCP endpoints to use Entra ID by default.
 
 **Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
@@ -305,11 +306,13 @@ builtin_endpoints:
 | Mode | Behavior |
 | --- | --- |
 | `function` (default) | API key required — a valid function/host key (`AuthLevel.FUNCTION`). |
-| `admin` | System/host key required (`AuthLevel.ADMIN`). |
+| `admin` | Master key required (`AuthLevel.ADMIN` maps to the Functions `_master` key — the most privileged app credential, distinct from an extension system key). |
 | `anonymous` | No auth — open endpoint (`AuthLevel.ANONYMOUS`). |
 | `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions key layer; each request is then enforced against the platform-injected Easy Auth `x-ms-client-principal` header (App Service Authentication validates the token — the runtime never validates JWTs itself). Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid principal, 403 on allowlist mismatch). **Requires Easy Auth to be enabled** — because the route is anonymous, the runtime only trusts the injected principal when it has non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED`, or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting), and otherwise fails closed (401). |
 
-**MCP note:** The MCP endpoint (`/runtime/webhooks/mcp`) is owned by the Functions MCP extension. The runtime only registers `mcp_tool_trigger` tools on it and never sees its HTTP request, so `builtin_endpoints.auth.mode` **does not control the MCP webhook** — it always requires the MCP extension **system key** (`x-functions-key`), regardless of the authored mode. To make this explicit rather than silent, registration emits a one-time message per agent when `mcp` is enabled: `entra` logs (info) that enforcement is platform-level Easy Auth (App Service Authentication) on top of the system key; `function` and `anonymous` log (warning) that the authored mode cannot be honored on the host-owned webhook; `admin` aligns with the system-key policy and is not flagged. For `entra` + `mcp`, protect the webhook with platform Easy Auth in addition to the system key.
+**App-wide default:** You can set a top-level `auth` in `agents.config.yaml` to apply one policy to every agent (see [Global Configuration](#global-configuration-agentsconfigyaml)). Resolution precedence is: the agent's own `builtin_endpoints.auth` → the global `agents.config.yaml` `auth` → the built-in `function` default. An agent authoring its own `auth` always wins, even if it is weaker than the app-wide default.
+
+**MCP note:** The MCP endpoint (`/runtime/webhooks/mcp`) is owned by the Functions MCP extension. The runtime only registers `mcp_tool_trigger` tools on it and never sees its HTTP request, so `builtin_endpoints.auth.mode` **does not control the MCP webhook** — it always requires the MCP extension **system key** (`x-functions-key`), regardless of the authored mode. To make this explicit rather than silent, registration emits a one-time message per agent when `mcp` is enabled: `entra` logs (info) that enforcement is platform-level Easy Auth (App Service Authentication) on top of the system key; `function` and `anonymous` log (warning) that the authored mode cannot be honored on the host-owned webhook; `admin` logs (warning) that `AuthLevel.ADMIN` maps the chat routes to the Functions **master key**, a different and far more privileged credential than the extension system key the webhook requires — call the webhook with the system key, not the master key. For `entra` + `mcp`, protect the webhook with platform Easy Auth in addition to the system key.
 
 **Endpoint Details:**
 

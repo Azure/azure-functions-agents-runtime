@@ -125,6 +125,31 @@ def test_global_config_extra_forbidden() -> None:
         GlobalConfig.model_validate({"extra_field": 1})
 
 
+def test_global_config_auth_defaults_to_none() -> None:
+    assert GlobalConfig().auth is None
+
+
+def test_global_config_auth_string_shorthand() -> None:
+    config = GlobalConfig.model_validate({"auth": "entra"})
+    assert config.auth is not None
+    assert config.auth.mode == "entra"
+
+
+def test_global_config_auth_full_object() -> None:
+    config = GlobalConfig.model_validate(
+        {"auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}}}
+    )
+    assert config.auth is not None
+    assert config.auth.mode == "entra"
+    assert config.auth.entra is not None
+    assert config.auth.entra.tenant_id == "t-1"
+
+
+def test_global_config_auth_rejects_unknown_mode() -> None:
+    with pytest.raises(ValidationError):
+        GlobalConfig.model_validate({"auth": "basic"})
+
+
 def test_system_tools_config_parses() -> None:
     payload: dict[str, Any] = {
         "dynamic_sessions_code_interpreter": {"endpoint": "https://example.test"},

@@ -69,6 +69,8 @@ explicit and configurable.
   host-owned endpoint; the runtime only registers `mcp_tool_trigger` tools on it
   and never sees its HTTP request/headers, so it cannot validate bearer tokens
   there. MCP Entra auth is delegated to Easy Auth (platform) and documented.
+  Making the webhook honor the authored `auth.mode` is a **host/extension gap**,
+  not a runtime one — tracked as an upstream follow-up (Decision #15).
 - Per-agent-trigger `http_trigger` auth changes — that already has `auth_level`.
 - Authorization / RBAC beyond simple issuer/audience/appid allow-lists (roles,
   scopes, per-tool policy) — deferred to a future FRD.
@@ -143,6 +145,16 @@ staying silent (Decision #12): `function` and `anonymous` emit a one-time
 `entra` emits the info message above; `admin` aligns with the system-key policy
 and is not flagged.
 
+> **Known limitation / upstream follow-up (Decision #15).** This is a genuine
+> gap, not just a runtime quirk: when the app hosts the MCP server, the authored
+> `auth.mode` *should* apply to its webhook too. The runtime cannot close it
+> alone because the Functions MCP extension owns the `/runtime/webhooks/mcp`
+> HTTP surface and never surfaces the request to `mcp_tool_trigger` handlers. The
+> fix belongs in the host/MCP extension (e.g. a configurable `auth_level` or
+> Entra pass-through for the MCP webhook). We are tracking an upstream issue
+> against the host team; until it lands, the divergence-logging above is the
+> mitigation. See the `issues:` front-matter list for the tracking link.
+
 ### Authoring / API surface
 
 ```yaml
@@ -185,6 +197,8 @@ endpoints with default (`function`) auth.
 | 11 | Trusting `X-MS-CLIENT-PRINCIPAL` on an anonymous route | trust unconditionally / **gate on Easy Auth evidence** | **Gate** — trust the injected principal only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` assertion); else fail closed (401). Closes an auth-bypass where a caller forges the header when Easy Auth is off. See Amendment A. | Human + Agent | 2026-07-16 |
 | 12 | Authored `auth.mode` vs. host-owned MCP webhook | reject unsupported combos / **surface the divergence** | **Surface** — the MCP webhook always requires the extension system key and cannot honor `auth.mode`; log a one-time message per agent (`function`/`anonymous` ⇒ warning, `entra` ⇒ info, `admin` aligns) instead of silently diverging or rejecting backward-compatible configs (default is `function`). | Human + Agent | 2026-07-16 |
 | 13 | Architecture sign-off (phase 2) for the original design (Decisions #1–#7) | keep in review / **approve + finalize** | **Approve** — human reviewed the registration-stage placement, pipeline boundaries, and public surface (`builtin_endpoints.auth`) and signed off to move the FRD to `Finalized`. Recorded here explicitly rather than inferred from the implementation request. | Human | 2026-07-16 |
+| 14 | Scope of `auth` — per-agent only vs. app-wide inheritance (revisits #1) | keep per-agent on `builtin_endpoints.auth` / add a top-level `agents.config.yaml` `auth` default that all agents inherit and can override per `*.agent.md` (like `model`/`timeout`/`tools`) | **Adopt app-wide inheritance in this PR.** Add a top-level `auth` field to `GlobalConfig` (`agents.config.yaml`) that every agent inherits; a per-agent `builtin_endpoints.auth` still overrides it (detected via Pydantic `model_fields_set`, so an agent explicitly authoring `auth: function` wins even when the app default is stricter). This matches the existing `model`/`timeout`/`tools` inheritance and is fully backward compatible: no global `auth` ⇒ the per-agent default (`function`) is unchanged. Resolution precedence: authored per-agent `auth` → global `auth` → default `function`. | Human + Agent | 2026-07-16 |
+| 15 | Is the host-owned MCP webhook ignoring `auth.mode` a gap to fix upstream? | accept as a permanent runtime non-goal / **treat as a host-platform gap and track an upstream fix** | **Track upstream.** The reviewer is right: if the app hosts the MCP server, the same auth *should* apply to its webhook. The runtime can't fix it because the Functions MCP extension owns the HTTP surface, so this is a host/extension limitation, not a runtime design choice. Keep the divergence-logging (Decision #12) as the interim mitigation and open an issue against the host/MCP-extension team requesting configurable auth (`auth_level` / Entra pass-through) on `/runtime/webhooks/mcp`; record the link in the `issues:` front matter. | Human + Agent | 2026-07-16 |
 
 ## 6. Test plan
 

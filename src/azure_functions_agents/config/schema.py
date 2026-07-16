@@ -79,7 +79,7 @@ class BuiltinEndpointsConfig(BaseModel):
         default_factory=EndpointAuthConfig,
         description=(
             "Inbound authentication policy for the chat API and MCP endpoints. "
-            "Modes: function (API key, default), admin (system key), anonymous, entra (Entra ID)."
+            "Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
         ),
     )
 
@@ -167,6 +167,14 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
+    auth: EndpointAuthConfig | None = Field(
+        default=None,
+        description=(
+            "App-wide default inbound authentication policy inherited by every agent's "
+            "built-in endpoints. A per-agent builtin_endpoints.auth overrides it. "
+            "Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
+        ),
+    )
 
 
 class AgentSpec(BaseModel):
