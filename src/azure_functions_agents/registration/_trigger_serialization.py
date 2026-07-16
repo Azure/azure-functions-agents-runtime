@@ -10,8 +10,9 @@ from datetime import datetime
 from typing import Any, Protocol, cast
 
 import azure.functions as func
-from azure.functions.blob import InputStream
+import azure.functions.blob as blob
 
+type BindingType = type[object]
 type JsonScalar = str | int | float | bool | None
 type JsonValue = JsonScalar | list[JsonValue] | dict[str, JsonValue]
 type TriggerPayload = dict[str, JsonValue] | list[JsonValue]
@@ -33,6 +34,29 @@ class _Missing:
 
 
 _MISSING = _Missing()
+
+
+def _binding_type(module: object, name: str) -> BindingType | None:
+    candidate = getattr(module, name, None)
+    return cast(BindingType, candidate) if isinstance(candidate, type) else None
+
+
+_INPUT_STREAM_TYPE = _binding_type(blob, "InputStream")
+_QUEUE_MESSAGE_TYPE = _binding_type(func, "QueueMessage")
+_SERVICE_BUS_MESSAGE_TYPE = _binding_type(func, "ServiceBusMessage")
+_EVENT_GRID_EVENT_TYPE = _binding_type(func, "EventGridEvent")
+_EVENT_HUB_EVENT_TYPE = _binding_type(func, "EventHubEvent")
+_KAFKA_EVENT_TYPE = _binding_type(func, "KafkaEvent")
+_TIMER_REQUEST_TYPE = _binding_type(func, "TimerRequest")
+_DOCUMENT_LIST_TYPE = _binding_type(func, "DocumentList")
+_SQL_ROW_LIST_TYPE = _binding_type(func, "SqlRowList")
+_SQL_ROW_TYPE = _binding_type(func, "SqlRow")
+_MYSQL_ROW_LIST_TYPE = _binding_type(func, "MySqlRowList")
+_MYSQL_ROW_TYPE = _binding_type(func, "MySqlRow")
+
+
+def _matches_binding_type(binding: object, binding_type: BindingType | None) -> bool:
+    return binding_type is not None and isinstance(binding, binding_type)
 
 
 def _encode_bytes(value: bytes) -> EncodedBytes:
@@ -153,7 +177,7 @@ def _serialize_rows(
 
 class _InputStreamSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, InputStream)
+        return _matches_binding_type(binding, _INPUT_STREAM_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -163,7 +187,7 @@ class _InputStreamSerializer:
 
 class _QueueMessageSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.QueueMessage)
+        return _matches_binding_type(binding, _QUEUE_MESSAGE_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -188,7 +212,7 @@ class _QueueMessageSerializer:
 
 class _ServiceBusMessageSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.ServiceBusMessage)
+        return _matches_binding_type(binding, _SERVICE_BUS_MESSAGE_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -219,7 +243,7 @@ class _ServiceBusMessageSerializer:
 
 class _EventGridEventSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.EventGridEvent)
+        return _matches_binding_type(binding, _EVENT_GRID_EVENT_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -236,7 +260,7 @@ class _EventGridEventSerializer:
 
 class _EventHubEventSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.EventHubEvent)
+        return _matches_binding_type(binding, _EVENT_HUB_EVENT_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -258,7 +282,7 @@ class _EventHubEventSerializer:
 
 class _KafkaEventSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.KafkaEvent)
+        return _matches_binding_type(binding, _KAFKA_EVENT_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -273,7 +297,7 @@ class _KafkaEventSerializer:
 
 class _TimerRequestSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.TimerRequest)
+        return _matches_binding_type(binding, _TIMER_REQUEST_TYPE)
 
     def serialize(self, binding: object) -> dict[str, JsonValue]:
         payload: dict[str, JsonValue] = {}
@@ -283,7 +307,7 @@ class _TimerRequestSerializer:
 
 class _DocumentListSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, func.DocumentList)
+        return _matches_binding_type(binding, _DOCUMENT_LIST_TYPE)
 
     def serialize(self, binding: object) -> list[JsonValue]:
         return _serialize_rows(binding, _serialize_document)
@@ -291,20 +315,24 @@ class _DocumentListSerializer:
 
 class _SqlSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, (func.SqlRowList, func.SqlRow))
+        return _matches_binding_type(binding, _SQL_ROW_LIST_TYPE) or _matches_binding_type(
+            binding, _SQL_ROW_TYPE
+        )
 
     def serialize(self, binding: object) -> TriggerPayload:
-        if isinstance(binding, func.SqlRowList):
+        if _matches_binding_type(binding, _SQL_ROW_LIST_TYPE):
             return _serialize_rows(binding, _serialize_row)
         return _row_payload(binding)
 
 
 class _MySqlSerializer:
     def matches(self, binding: object) -> bool:
-        return isinstance(binding, (func.MySqlRowList, func.MySqlRow))
+        return _matches_binding_type(binding, _MYSQL_ROW_LIST_TYPE) or _matches_binding_type(
+            binding, _MYSQL_ROW_TYPE
+        )
 
     def serialize(self, binding: object) -> TriggerPayload:
-        if isinstance(binding, func.MySqlRowList):
+        if _matches_binding_type(binding, _MYSQL_ROW_LIST_TYPE):
             return _serialize_rows(binding, _serialize_row)
         return _row_payload(binding)
 

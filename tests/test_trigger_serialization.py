@@ -6,23 +6,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import azure.functions as func
+import pytest
 from azure.functions.blob import InputStream
+from azure.functions.timer import TimerRequest
 
+import azure_functions_agents.registration._trigger_serialization as trigger_serialization
 from azure_functions_agents.registration._handlers import serialize_trigger_data
-
-
-class _TimerRequest(func.TimerRequest):
-    @property
-    def past_due(self) -> bool:
-        return False
-
-    @property
-    def schedule_status(self) -> dict[str, str]:
-        return {"last": "2025-01-02T00:00:00+00:00"}
-
-    @property
-    def schedule(self) -> dict[str, bool]:
-        return {"adjust_for_dst": True}
 
 
 class _NativeContract:
@@ -35,10 +24,23 @@ class _ModelContract:
         return {"source": "model"}
 
 
+def _assert_no_bytes_repr(value: Any) -> None:
+    if isinstance(value, str):
+        assert not value.startswith("b'")
+    elif isinstance(value, dict):
+        for item in value.values():
+            _assert_no_bytes_repr(item)
+    elif isinstance(value, list):
+        for item in value:
+            _assert_no_bytes_repr(item)
+
+
 def _serialized(binding: object) -> Any:
     serialized = serialize_trigger_data(binding)
     assert " at 0x" not in serialized
-    return json.loads(serialized)
+    payload = json.loads(serialized)
+    _assert_no_bytes_repr(payload)
+    return payload
 
 
 def test_blob_input_stream_serializes_metadata_without_reading_content() -> None:
@@ -84,6 +86,17 @@ def test_queue_message_base64_encodes_non_utf8_body() -> None:
     assert payload["body"] == base64.b64encode(b"\xff\x00").decode("ascii")
     assert payload["body_encoding"] == "base64"
     assert "body_json" not in payload
+
+
+def test_top_level_bytes_and_bytearray_serialize_with_encoding_markers() -> None:
+    assert _serialized(b"top-level text") == {
+        "data": "top-level text",
+        "data_encoding": "utf-8",
+    }
+    assert _serialized(bytearray(b"\xff\x00")) == {
+        "data": base64.b64encode(b"\xff\x00").decode("ascii"),
+        "data_encoding": "base64",
+    }
 
 
 def test_service_bus_message_serializes_body() -> None:
@@ -161,7 +174,13 @@ def test_kafka_event_serializes_body_and_metadata() -> None:
 
 
 def test_timer_request_serializes_public_properties() -> None:
-    assert _serialized(_TimerRequest()) == {
+    assert _serialized(
+        TimerRequest(
+            past_due=False,
+            schedule_status={"last": "2025-01-02T00:00:00+00:00"},
+            schedule={"adjust_for_dst": True},
+        )
+    ) == {
         "past_due": False,
         "schedule_status": {"last": "2025-01-02T00:00:00+00:00"},
         "schedule": {"adjust_for_dst": True},
@@ -191,7 +210,22 @@ def test_single_document_and_sql_rows_serialize_without_to_json() -> None:
 def test_native_contracts_are_preferred_before_adapters() -> None:
     assert _serialized(_NativeContract()) == {"source": "native"}
     assert _serialized(_ModelContract()) == {"source": "model"}
+
+
+def test_fast_paths_remain_byte_identical() -> None:
+    assert serialize_trigger_data(None) == "{}"
+    assert serialize_trigger_data("already serialized") == "already serialized"
     assert serialize_trigger_data({"message": "hello"}) == '{"message": "hello"}'
+    assert serialize_trigger_data([]) == "[]"
+
+
+def test_missing_sdk_type_does_not_block_later_adapters(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(trigger_serialization, "_QUEUE_MESSAGE_TYPE", None)
+
+    assert _serialized(func.EventHubEvent(body=b"event hub payload")) == {
+        "body": "event hub payload",
+        "body_encoding": "utf-8",
+    }
 
 
 def test_plain_list_recursively_serializes_message_batches() -> None:
