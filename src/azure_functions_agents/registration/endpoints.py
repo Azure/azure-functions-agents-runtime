@@ -215,6 +215,12 @@ def _run_builtin_agent_stream(
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
         agent_name=resolved.slug,
+        # S1b: `_register_http_chat_stream`'s `handle_chat_stream` (unlike
+        # `handle_chat`/`handle_mcp_agent_chat` above) opens no span of its
+        # own around this call, so `run_agent_stream`'s own internal
+        # `agent.run {name}` span is the only place `af.agent.display_name`
+        # can be recorded for the streaming surface — thread it through.
+        display_name=resolved.name,
         subagents=resolved.subagents,
         catalog=catalog,
     )

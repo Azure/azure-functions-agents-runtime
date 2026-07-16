@@ -705,8 +705,19 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
 ) -> None:
     """A near-expired coordinator deadline times out the delegate call immediately,
     even when the specialist's own configured timeout is generous — proving
-    effective_timeout = min(specialist_timeout, coordinator_remaining)."""
-    _install_span_capture(monkeypatch)
+    effective_timeout = min(specialist_timeout, coordinator_remaining).
+
+    S3b (round 4): this is the *pre-dispatch* budget-exhausted path
+    (``effective_timeout <= 0`` before ``original_func`` is ever invoked,
+    proven here by ``body_ran is False``) — unambiguously a genuine deadline
+    expiry, never an inner specialist exception, so it must ALWAYS classify
+    as ``outcome=timeout`` regardless of the elapsed-time heuristic used to
+    distinguish the other two cases (a real ``wait_for`` expiry vs. an inner
+    ``TimeoutError`` the specialist's own code happens to raise) — the
+    heuristic doesn't even apply here since ``original_func`` was never
+    called at all.
+    """
+    span = _install_span_capture(monkeypatch)
     _install_counter_capture(monkeypatch)
 
     body_ran = False
@@ -730,6 +741,7 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
     assert "did not respond in time" in result
     assert tracker.count == 1
     assert body_ran is False  # wait_for(timeout<=0) cancels before the body ever runs
+    assert span.attributes["af.delegate.outcome"] == "timeout"
 
 
 @pytest.mark.asyncio
@@ -1371,6 +1383,133 @@ async def test_delegate_adapter_finalizes_real_maf_stream_on_outer_cancellation(
     assert invoke_spans[0].end_time is not None
 
 
+@pytest.mark.asyncio
+async def test_delegate_adapter_queued_cancellation_does_not_finalize_other_calls_stream(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1 (round 4): a SECOND call to the same specialist that is cancelled
+    while still queued on ``specialist_lock`` — never having acquired it,
+    never having reached the rebind-and-dispatch step, never itself having
+    called ``original_func`` — must NOT finalize the FIRST call's still-live
+    MAF stream.
+
+    Pre-fix, ``captured_stream``/``_capturing_run`` were built ONCE per tool
+    at tool-build time and shared across every future invocation. The first
+    call (A) reaching the rebind step overwrote that one shared slot with
+    its own live ``ResponseStream``; the second call (B), still queued on
+    the lock, would then have its ``except asyncio.CancelledError`` handler
+    fire on cancellation (the cancelled lock-acquire's ``CancelledError``
+    propagates into the very same ``try/except`` that wraps the whole
+    ``async with specialist_lock:`` block) and read that SAME shared slot —
+    now holding A's live stream, not B's (B never had one) — finalizing A's
+    in-flight ``invoke_agent`` span/stream out from under it while A was
+    still using it.
+
+    Post-fix, ``my_stream`` is a fresh local created at the top of every
+    ``_delegate_adapter`` call, and the rebind only happens *inside* the
+    lock, immediately before dispatch. B, cancelled while still queued,
+    never reaches the rebind, so its own ``my_stream["value"]`` is still
+    ``None`` when its handler runs — ``_finalize_maf_stream(None, ...)`` is
+    a safe no-op that can never reach into another call's state.
+
+    Uses the same real (unmocked) MAF ``Agent``/``ResponseStream`` +
+    ``_NeverRespondingChatClient`` scaffolding as the two
+    ``test_delegate_adapter_finalizes_real_maf_stream_on_*`` tests above, so
+    A's stream is a genuine, still-open, span-bearing MAF object — not a
+    hand-rolled fake — making the "was A's real span/stream finalized"
+    assertion below a meaningful, non-tautological check.
+    """
+    exporter = _install_maf_tracer(monkeypatch)
+    _install_span_capture(monkeypatch)
+    calls = _install_counter_capture(monkeypatch)
+
+    real_finalize = runner._finalize_maf_stream
+    finalize_calls: list[tuple[Any, BaseException]] = []
+
+    async def spy_finalize(stream: Any, exc: BaseException) -> None:
+        finalize_calls.append((stream, exc))
+        await real_finalize(stream, exc)
+
+    monkeypatch.setattr(runner, "_finalize_maf_stream", spy_finalize)
+
+    set_client_manager(_NeverRespondingClientManager())
+
+    resolved = _make_resolved(
+        name="Billing Specialist",
+        slug="billing",
+        instructions="Handle billing questions.",
+        timeout=30.0,
+    )
+    catalog = _catalog_of(("billing", resolved))
+    loop = asyncio.get_event_loop()
+    tools, tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
+    )
+    tool = tools[0]
+
+    # Call A: acquires `specialist_lock` uncontended and blocks mid-flight
+    # inside the never-responding real MAF stream.
+    call_a = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="first (mid-flight)"))
+    await asyncio.sleep(0.1)  # let A actually reach the never-responding stream (mirrors the sibling test above)
+
+    # Call B: same tool -> same specialist -> same `specialist_lock`,
+    # already held by A -> B suspends waiting for the lock, never reaching
+    # the rebind/dispatch step at all.
+    call_b = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="second (queued)"))
+    await asyncio.sleep(0.05)  # let B actually start running and suspend on the lock acquire
+    call_b.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call_b
+
+    # The core B1 assertion: B's own `except asyncio.CancelledError` handler
+    # still unconditionally calls `_finalize_maf_stream` (it has no way to
+    # know it was never dispatched) -- so exactly one call is expected here
+    # -- but the crucial thing is *which* stream it was called with: it must
+    # be B's own `my_stream["value"]`, which is `None` (B never reached the
+    # rebind), NOT A's live stream. Pre-fix, this slot would have been the
+    # ONE tool-level shared dict, already overwritten with A's real,
+    # still-in-use `ResponseStream` -- finalizing it here.
+    assert len(finalize_calls) == 1
+    assert finalize_calls[0][0] is None, (
+        "B's queued cancellation must finalize a None stream (its own, "
+        f"never-populated slot), not some other object: {finalize_calls[0][0]!r}"
+    )
+    assert isinstance(finalize_calls[0][1], asyncio.CancelledError)
+
+    finished = exporter.get_finished_spans()
+    invoke_spans = [s for s in finished if s.name.startswith("invoke_agent")]
+    assert invoke_spans == [], (
+        "A's real MAF invoke_agent span must still be open after B's "
+        f"queued cancellation, but found finished spans: {[s.name for s in finished]}"
+    )
+
+    # Confirm A is still fully intact and independently finalizable: cancel
+    # it too now, and prove ITS OWN cancellation finalizes its OWN stream
+    # exactly once, normally — i.e. B's cancellation did not silently
+    # corrupt or already half-finalize A's stream out from under it.
+    call_a.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await call_a
+
+    assert len(finalize_calls) == 2  # B's (None, ...) no-op, then A's own real finalize
+    finalized_stream, finalized_exc = finalize_calls[-1]
+    assert finalized_stream is not None
+    assert isinstance(finalized_exc, asyncio.CancelledError)
+
+    finished = exporter.get_finished_spans()
+    invoke_spans = [s for s in finished if s.name.startswith("invoke_agent")]
+    assert len(invoke_spans) == 1, (
+        f"expected exactly one finalized invoke_agent span (A's), got: {[s.name for s in finished]}"
+    )
+    assert invoke_spans[0].end_time is not None
+
+    # Both outcomes were cancellations, never recoverable delegate failures
+    # (Decision #12) -- neither call should have touched the tracker/counter.
+    assert tracker.count == 0
+    assert calls == []
+
+
 # ---------------------------------------------------------------------------
 # Telemetry preserves the exact caught timeout exception object (round-3 S3)
 # ---------------------------------------------------------------------------
@@ -1427,15 +1566,25 @@ async def test_delegate_adapter_timeout_records_the_exact_wait_for_exception_obj
 async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S3: a ``TimeoutError`` the specialist's OWN code raises internally (for
-    an unrelated reason, not ``wait_for`` expiry) must ALSO be preserved as
-    the recorded exception object rather than replaced by a synthetic one —
+    """S3/S3b: a ``TimeoutError`` the specialist's OWN code raises internally
+    (for an unrelated reason, not ``wait_for`` expiry — here, raised
+    essentially instantly, far inside the 5s budget) must be preserved as the
+    recorded exception object rather than replaced by a synthetic one,
     proving the fix isn't special-cased to only the ``wait_for``-expiry
     shape. Python 3.11+ unifies ``asyncio.TimeoutError`` with the builtin
     ``TimeoutError``, so the two cases are structurally indistinguishable by
     type; this only works because ``except TimeoutError as exc: ...
     record_exception(exc, ...)`` preserves whichever object was ACTUALLY
     caught, regardless of its origin.
+
+    S3b (round 4): this case must also be *classified* as an ordinary
+    recoverable delegate failure (``outcome=error``), not as a coordinator
+    deadline expiry (``outcome=timeout``) — the specialist raised this well
+    before ``effective_timeout`` elapsed, so it is not actually a budget/
+    deadline event at all, even though it happens to be a ``TimeoutError``
+    instance. Distinguished from a genuine ``wait_for`` expiry by elapsed-time
+    heuristic (see ``_INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS``),
+    since the two cases are, again, structurally indistinguishable by type.
     """
     span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)
@@ -1449,12 +1598,14 @@ async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_teleme
 
     result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
 
-    assert "did not respond in time" in result
+    assert "did not respond in time" not in result  # not a deadline/timeout outcome (S3b)
+    assert "could not complete this task" in result  # generic sanitized failure message instead
     assert tracker.count == 1
     assert calls == [True]
-    assert span.attributes["af.delegate.outcome"] == "timeout"
+    assert span.attributes["af.delegate.outcome"] == "error"
     assert span.exceptions
     recorded_exc, fault_domain = span.exceptions[-1]
+    assert recorded_exc is not None
     assert str(recorded_exc) == marker
     assert fault_domain == obs.FaultDomain.DELEGATE
 

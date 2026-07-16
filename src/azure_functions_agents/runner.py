@@ -52,6 +52,7 @@ import asyncio
 import contextlib
 import json
 import re
+import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -466,7 +467,7 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 
 
 async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
-    """Best-effort finalize a MAF ``ResponseStream`` after timeout/cancellation.
+    """Best-effort finalize a MAF ``ResponseStream`` chain after timeout/cancellation.
 
     ``ResponseStream.__anext__`` (``agent_framework._types``) only runs its
     registered cleanup hooks — which close the underlying ``invoke_agent``
@@ -484,30 +485,123 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
     delegate adapter's specialist call — so the stream's own finalization
     still runs deterministically (FRD 0006 round-3 M2 fix).
 
-    Deliberately defensive: ``stream`` may be ``None`` (nothing was captured
-    yet), and MAF's private cleanup surface (``_run_cleanup_hooks``/
-    ``_stream_error``) is not part of any public contract this package
-    depends on, so any failure while probing/calling it is swallowed rather
-    than allowed to mask the *original* timeout/cancellation being handled.
+    Round-4 (B2c) also walks ``stream._inner_stream`` to finalize any
+    *further* ``ResponseStream`` this one already resolved a reference to —
+    e.g. ``Agent.run(stream=True)``'s agent-level ``.map()``-transform
+    stream (``agent_framework._agents.RawAgent._parse_streaming_response``,
+    installed ``agent-framework-core==1.3.0``, lines 1102-1112:
+    ``stream_response.map(transform=..., finalizer=...)``; the returned
+    stream's inner reference is set via ``ResponseStream.map``,
+    ``_types.py`` lines 2962-2964, and resolved into ``_inner_stream`` on
+    first pull, ``_types.py`` lines 3004-3006). This is unconditionally
+    safe: a stream that never wraps another (including every non-MAF fake
+    used in this package's own tests) simply has ``_inner_stream is None``
+    (the ``_types.py`` line 2890 default), so the loop body still runs
+    exactly once for it — identical to this function's pre-round-4
+    behavior.
+
+    Known, *verified* residual gap this cannot close: when the concrete
+    chat client's MRO stacks ``FunctionInvocationLayer`` above
+    ``ChatTelemetryLayer`` — which is exactly what this repository's real
+    chat clients do (``agent_framework.openai.OpenAIChatClient`` /
+    ``agent_framework.foundry.FoundryChatClient``; confirmed via the
+    installed ``agent-framework-openai`` package's ``_chat_client.py``
+    lines 2878-2881: ``class OpenAIChatClient(FunctionInvocationLayer,
+    ChatMiddlewareLayer, ChatTelemetryLayer, BaseChatClient)``) — and
+    function invocation is enabled (the default), each per-turn
+    ``chat {model}`` span's backing ``ResponseStream`` (the one
+    ``ChatTelemetryLayer.get_response`` attaches its own
+    ``_record_duration``/``_finalize_stream`` cleanup hooks to,
+    ``observability.py`` lines 1366-1372) is created and consumed as a
+    *purely local variable* inside ``FunctionInvocationLayer.get_response``'s
+    own internal streaming closure (installed ``agent-framework-core``
+    package, ``_tools.py``, the ``_stream()`` async generator starting at
+    line 2513 — see the per-iteration ``inner_stream`` at lines 2543-2564
+    and the final iteration's ``final_inner_stream`` at lines 2642-2657).
+    That local variable is never assigned to ``_inner_stream`` or exposed
+    via any other externally reachable attribute on the object this (or
+    any other) caller can hold a reference to, and the ``_stream()``
+    generator has no ``try``/``except``/``finally`` of its own around that
+    consumption either (verified: none appears anywhere in its body, lines
+    2513-2670). So on an abrupt cancellation/timeout, that specific span
+    can only ever close via the generator running to natural completion or
+    via ``ChatTelemetryLayer``'s own ``weakref.finalize`` GC safety net
+    (``observability.py`` line 1372, mirroring the agent-level net at line
+    1642) firing nondeterministically, without recording the timeout/
+    cancellation outcome. This is a genuine upstream MAF architecture
+    limitation with no discoverable public or private workaround from
+    outside ``agent_framework`` itself — there is nothing further this
+    function can safely do about it for that composition. (The walk above
+    still has real, verifiable effect for compositions that do *not*
+    interpose ``FunctionInvocationLayer`` — e.g. function invocation
+    explicitly disabled, or a ``ChatTelemetryLayer`` + ``BaseChatClient``
+    client used directly — where the chat-level stream *is* reachable via
+    ``_inner_stream``.)
+
+    Deliberately defensive throughout: ``stream`` may be ``None`` (nothing
+    was captured yet), and MAF's private cleanup surface
+    (``_run_cleanup_hooks``/``_stream_error``/``_inner_stream``) is not part
+    of any public contract this package depends on, so any failure while
+    probing/calling it is swallowed rather than allowed to mask the
+    *original* timeout/cancellation being handled.
     """
-    run_cleanup_hooks = getattr(stream, "_run_cleanup_hooks", None)
-    if not callable(run_cleanup_hooks):
-        return
-    with contextlib.suppress(Exception):
-        has_stream_error_slot = hasattr(stream, "_stream_error")
-        if has_stream_error_slot and stream._stream_error is None:
-            # Mirrors what `ResponseStream.__anext__`'s own `except
-            # Exception` branch does on a normal failure: stash the error so
-            # the registered cleanup hook (MAF's `_finalize_stream`, see
-            # `agent_framework.observability`) can `capture_exception` it on
-            # the span instead of silently treating this as a clean finish.
-            stream._stream_error = exc
-            try:
-                await run_cleanup_hooks()
-            finally:
-                stream._stream_error = None
-        else:
-            await run_cleanup_hooks()
+    while stream is not None:
+        # Read `_inner_stream` before running this level's cleanup hooks
+        # (which may, defensively, mutate this object's state) so the next
+        # hop is captured regardless of what this level's hooks do.
+        next_stream = getattr(stream, "_inner_stream", None)
+        run_cleanup_hooks = getattr(stream, "_run_cleanup_hooks", None)
+        if callable(run_cleanup_hooks):
+            with contextlib.suppress(Exception):
+                has_stream_error_slot = hasattr(stream, "_stream_error")
+                if has_stream_error_slot and stream._stream_error is None:
+                    # Mirrors what `ResponseStream.__anext__`'s own `except
+                    # Exception` branch does on a normal failure: stash the
+                    # error so the registered cleanup hook (MAF's
+                    # `_finalize_stream`, see `agent_framework.observability`)
+                    # can `capture_exception` it on the span instead of
+                    # silently treating this as a clean finish.
+                    stream._stream_error = exc
+                    try:
+                        await run_cleanup_hooks()
+                    finally:
+                        stream._stream_error = None
+                else:
+                    await run_cleanup_hooks()
+        stream = next_stream
+
+
+# Timing tolerance (S3b) for telling a genuine `asyncio.wait_for` deadline
+# expiry apart from a `TimeoutError` the specialist happened to raise on its
+# own, well inside the budget. `asyncio.TimeoutError is TimeoutError` as of
+# Python 3.11, so there is no type-based way to distinguish the two — timing
+# is the only signal available. This is not perfectly precise under heavy
+# event-loop scheduling delay (a genuine expiry could in principle be
+# observed a little early), but it correctly separates the common cases: an
+# inner exception typically fires far earlier than the deadline, while a
+# real `wait_for` expiry fires essentially exactly at it.
+_INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS = 0.05
+
+
+def _record_generic_delegate_failure(
+    span: Any, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+) -> str:
+    """Shared bookkeeping for a recoverable, non-deadline delegate failure.
+
+    Used by the adapter's ``except Exception`` branch, and (S3b) by its
+    ``except TimeoutError`` branch when the timing heuristic indicates the
+    caught ``TimeoutError`` was raised by the specialist's own code rather
+    than by ``asyncio.wait_for``'s deadline actually expiring.
+    """
+    tracker.record_error()
+    record_delegate_call(error=True)
+    span.set_attribute("af.delegate.outcome", "error")
+    # `record_exception` is a strict superset of `set_error` (status + fault
+    # domain + the actual exception object/traceback) — using it here (B4)
+    # preserves the real exception type/detail in telemetry instead of a
+    # flattened string, without double-setting status.
+    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    return _sanitize_delegate_failure(slug, exc)
 
 
 def _build_delegate_tool(
@@ -562,31 +656,15 @@ def _build_delegate_tool(
     original_func = tool.func
     specialist_lock = asyncio.Lock()
     specialist_timeout = resolved.timeout
-
-    # `_agent_wrapper` (MAF's own `as_tool()` implementation, in
-    # `agent_framework._agents`) calls `self.run(..., stream=True, ...)` as a
-    # purely local variable inside its own stack frame — `original_func`
-    # never exposes the `ResponseStream` it produces, so there is no other
-    # way for this adapter to reach it. Wrapping `specialist_agent.run`
-    # itself lets the `except`/`CancelledError` branches below finalize that
-    # stream on timeout/cancellation (M2) so MAF's own span/usage cleanup
-    # still runs deterministically instead of only via a GC-timed
-    # `weakref.finalize` safety net that never records the outcome. This is
-    # race-safe: `specialist_lock` below already serializes every call to
-    # `original_func` (and therefore to this wrapped `run`) for this single
-    # tool, so one mutable slot per tool is enough. `Agent.run(stream=True)`
-    # returns the `ResponseStream` synchronously (it is a plain method, not
-    # a coroutine function — confirmed in `agent_framework._agents.Agent.run`),
-    # so capturing its return value here requires no `await`.
+    # A stable reference to the real, underlying `run` method — safe to
+    # reuse across every call to this tool (it never changes; only the
+    # *wrapper* rebound onto `specialist_agent.run` below changes, once per
+    # call). `Agent.run(stream=True)` returns the `ResponseStream`
+    # synchronously (it is a plain method, not a coroutine function —
+    # confirmed in `agent_framework._agents.Agent.run`/`RawAgent.run`), so
+    # capturing its return value in `_capturing_run` below requires no
+    # `await`.
     original_run = specialist_agent.run
-    captured_stream: dict[str, Any] = {"value": None}
-
-    def _capturing_run(*args: Any, **kwargs: Any) -> Any:
-        result = original_run(*args, **kwargs)
-        captured_stream["value"] = result
-        return result
-
-    specialist_agent.run = _capturing_run
 
     async def _delegate_adapter(ctx: Any, **kwargs: Any) -> str:
         loop = asyncio.get_event_loop()
@@ -596,6 +674,37 @@ def _build_delegate_tool(
         span.set_attribute("af.delegate.specialist", slug)
         span.set_attribute("af.delegate.task_bytes", len(task_text))
         span.set_content("af.delegate.task", task_text)
+
+        # Per-invocation capture slot (B1) — deliberately a fresh local, not
+        # a tool-build-scope/shared dict. `_agent_wrapper` (MAF's own
+        # `as_tool()` implementation, in `agent_framework._agents`) calls
+        # `self.run(..., stream=True, ...)` as a purely local variable
+        # inside its own stack frame — `original_func` never exposes the
+        # `ResponseStream` it produces, so there is no other way for this
+        # adapter to reach it than by wrapping `specialist_agent.run`
+        # itself. A call queued on `specialist_lock` that gets cancelled
+        # *before* acquiring it never reaches the rebind below, so its own
+        # `my_stream["value"]` stays `None` at exception time, and
+        # `_finalize_maf_stream(None, exc)` is a safe no-op — it can never
+        # observe (let alone finalize) some *other*, concurrently in-flight
+        # call's still-live stream. A single dict shared across every
+        # invocation of this tool (the pre-fix bug) let exactly that happen:
+        # a call still queued on the lock, cancelled while queued, would
+        # still hit `except asyncio.CancelledError` below and finalize
+        # whichever *other* call currently held the lock and its own live
+        # stream — out from under it, mid-flight.
+        my_stream: dict[str, Any] = {"value": None}
+        # `None` until the pre-dispatch budget check (below) is passed and
+        # `original_func` is actually about to be invoked; reused by S3b's
+        # timing heuristic as the natural "did we ever call `original_func`"
+        # signal — the pre-dispatch `TimeoutError` raised below is the only
+        # `TimeoutError` site that can fire while this is still `None`.
+        call_start: float | None = None
+
+        def _capturing_run(*args: Any, **kwargs: Any) -> Any:
+            result = original_run(*args, **kwargs)
+            my_stream["value"] = result
+            return result
 
         # Only the actual specialist run is serialized per-specialist
         # (Decision #14): different specialists always run in parallel;
@@ -617,8 +726,33 @@ def _build_delegate_tool(
                     # relying on `wait_for(timeout<=0)`'s cancel-before-first-
                     # step behavior to prevent it from ever starting. Carries
                     # a message (S3) so telemetry that later records this
-                    # exact instance verbatim still has useful detail.
+                    # exact instance verbatim still has useful detail. This
+                    # is unambiguously a genuine deadline-exhaustion case
+                    # (S3b) — `original_func` is never called, so
+                    # `call_start` stays `None` and the timing heuristic
+                    # below is skipped entirely for it.
                     raise TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
+                # Rebind `specialist_agent.run` to a closure over *this*
+                # call's own `my_stream`, immediately before dispatching and
+                # while still holding `specialist_lock` (B1). This is safe
+                # with no additional synchronization: asyncio is single-
+                # threaded/cooperative, and `specialist_lock` already
+                # guarantees only one invocation of this tool is ever inside
+                # this region at a time, so no other invocation of *this*
+                # tool can be rebinding/reading `specialist_agent.run`
+                # concurrently with this one (a different tool has its own,
+                # entirely separate `specialist_agent`/lock, so there is no
+                # cross-tool interference either). The rebind "belongs" to
+                # whichever call currently holds the lock; the next
+                # lock-holder rebinds again before *its own* call — so
+                # whenever `_agent_wrapper`'s first statement actually calls
+                # `self.run(...)` (a fresh attribute lookup on `self` at
+                # call time, not a pre-bound reference — confirmed in
+                # `agent_framework._agents.Agent.run`/`RawAgent.run`),
+                # `specialist_agent.run` is guaranteed to still be the
+                # closure rebound here, for this exact call.
+                specialist_agent.run = _capturing_run
+                call_start = loop.time()
                 # `original_func` is MAF's own `_agent_wrapper` (from
                 # `as_tool()`), which always resolves to a `str`
                 # (`AgentRunResponse.text`); the explicit `str(...)` only
@@ -641,26 +775,54 @@ def _build_delegate_tool(
             # from a `BaseException` such as this), so without this call the
             # specialist's `invoke_agent` span/usage bookkeeping would only
             # ever finalize via a nondeterministic GC-timed safety net.
-            await _finalize_maf_stream(captured_stream.get("value"), exc)
+            # Reads the per-call `my_stream` (B1), never a shared/tool-level
+            # slot: a call cancelled while still queued on `specialist_lock`
+            # never reaches the rebind above, so its own `my_stream["value"]`
+            # is still `None` here — finalizing `None` is a confirmed no-op,
+            # never someone else's live stream.
+            await _finalize_maf_stream(my_stream.get("value"), exc)
             span.set_attribute("af.delegate.outcome", "cancelled")
             raise
         except TimeoutError as exc:
+            # Finalize the underlying MAF stream first (M2/B1) — same
+            # reasoning as the cancellation branch above, and equally safe
+            # for the pre-dispatch case, since `my_stream["value"]` is still
+            # `None` there.
+            await _finalize_maf_stream(my_stream.get("value"), exc)
+            # S3b: this handler catches *both* a genuine `wait_for` deadline
+            # expiry *and* any `TimeoutError` that happens to propagate from
+            # inside `original_func` itself (e.g. an inner HTTP-client
+            # timeout in the specialist's own tool-calling) —
+            # `asyncio.TimeoutError is TimeoutError` as of Python 3.11, so
+            # there is no type-based way to tell the two apart. `call_start
+            # is None` unambiguously means the pre-dispatch budget-exhausted
+            # raise above fired (see its comment) — always a genuine
+            # deadline case, regardless of timing. Otherwise, compare
+            # elapsed wall time against `effective_timeout`: an inner
+            # exception typically surfaces well before the deadline, while a
+            # real `wait_for` expiry fires essentially exactly at it.
+            elapsed = None if call_start is None else loop.time() - call_start
+            if (
+                elapsed is not None
+                and elapsed < effective_timeout - _INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS
+            ):
+                # Not actually a coordinator-budget/deadline-expiry event —
+                # an ordinary specialist failure that happens to be a
+                # `TimeoutError` instance. Classify like any other
+                # recoverable delegate failure instead of as `outcome=timeout`.
+                return _record_generic_delegate_failure(span, tracker, slug, exc)
             # Specialist-local (or coordinator-budget) timeout: recoverable —
             # the coordinator continues (Decision #12).
-            await _finalize_maf_stream(captured_stream.get("value"), exc)
             tracker.record_error()
             record_delegate_call(error=True)
             span.set_attribute("af.delegate.outcome", "timeout")
             span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
             # Record whichever `TimeoutError` instance was actually caught
             # (S3) instead of constructing a fresh, synthetic one: `exc` may
-            # be `wait_for`'s own expiry error, the pre-emptive
-            # budget-exhausted raise above, or — structurally
-            # indistinguishable from either in 3.11+, where
-            # `asyncio.TimeoutError` is just the builtin `TimeoutError` — a
-            # `TimeoutError` the specialist's own code happened to raise
-            # internally. Preserving the real instance keeps whatever detail
-            # it carries instead of discarding it for a rebuilt string.
+            # be `wait_for`'s own expiry error or the pre-emptive
+            # budget-exhausted raise above. Preserving the real instance
+            # keeps whatever detail it carries instead of discarding it for
+            # a rebuilt string.
             span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
             return (
                 f"The '{slug}' specialist did not respond in time and was "
@@ -668,16 +830,7 @@ def _build_delegate_tool(
                 "proceeding without it."
             )
         except Exception as exc:
-            tracker.record_error()
-            record_delegate_call(error=True)
-            span.set_attribute("af.delegate.outcome", "error")
-            # `record_exception` is a strict superset of `set_error` (status
-            # + fault domain + the actual exception object/traceback) — using
-            # it here (B4) preserves the real exception type/detail in
-            # telemetry instead of a flattened string, without double-setting
-            # status.
-            span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
-            return _sanitize_delegate_failure(slug, exc)
+            return _record_generic_delegate_failure(span, tracker, slug, exc)
 
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
@@ -1098,6 +1251,7 @@ async def run_agent_stream(
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
     agent_name: str | None = None,
+    display_name: str | None = None,
     web_request_tools: list[Any] | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -1190,6 +1344,15 @@ async def run_agent_stream(
         lifecycle_stage=LifecycleStage.AGENT_RUN,
         attributes={
             "af.agent.name": agent_name,
+            # S1b: mirrors what `registration/endpoints.py`'s own
+            # `agent.run {name}` spans already set (`af.agent.name` = slug,
+            # `af.agent.display_name` = human-readable name) for the
+            # non-streaming/MCP surfaces. Those surfaces open their own span
+            # around `run_agent`, which has none of its own — but nothing
+            # upstream of *this* function does the same for the streaming
+            # surface (see the comment above), so this span is the only
+            # place `af.agent.display_name` can be recorded here.
+            "af.agent.display_name": display_name,
             "af.agent.trigger_type": "stream",
             "af.agent.session_id": resolved_id,
             "af.agent.model": model,
@@ -1258,6 +1421,18 @@ async def run_agent_stream(
                     emitted_tool_calls.add(call_id)
                     yield f"data: {json.dumps(event)}\n\n"
 
+                # B2b: `stream`/`stream_settled` are declared here, outside
+                # the `try:` below, so the `finally:` clause added at the
+                # bottom of this block can always safely reference `stream`
+                # (even if `agent.run(...)` itself never got a chance to
+                # assign it) and can tell whether some *other* branch already
+                # finalized it. `stream_settled` becomes `True` the moment
+                # any branch below (the inner per-`__anext__()` handler, the
+                # normal-completion path, or either outer `except`) has
+                # either finalized the stream itself or reached a point where
+                # finalization is not this generator's responsibility.
+                stream: Any = None
+                stream_settled = False
                 try:
                     stream = agent.run(
                         prompt,
@@ -1276,10 +1451,19 @@ async def run_agent_stream(
                     # absolute deadline either.
                     stream_iter = stream.__aiter__()
                     while True:
-                        remaining = max(0.0, deadline - loop.time())
-                        if remaining <= 0:
-                            raise TimeoutError
                         try:
+                            # B2a: the `remaining <= 0` pre-check now lives
+                            # *inside* this same `try` (it used to `raise`
+                            # one level up, before this `try` even started) so
+                            # a deadline that is already exhausted at the
+                            # *top* of an iteration is finalized identically
+                            # to one that expires *while* awaiting
+                            # `__anext__()`, instead of bypassing this handler
+                            # entirely and reaching the outer
+                            # `except TimeoutError` below still unfinalized.
+                            remaining = max(0.0, deadline - loop.time())
+                            if remaining <= 0:
+                                raise TimeoutError
                             update = await asyncio.wait_for(stream_iter.__anext__(), timeout=remaining)
                         except StopAsyncIteration:
                             break
@@ -1296,6 +1480,7 @@ async def run_agent_stream(
                             # Finalize the stream explicitly so MAF's own
                             # span/usage bookkeeping still completes (M2).
                             await _finalize_maf_stream(stream, exc)
+                            stream_settled = True
                             raise
                         for item in getattr(update, "contents", None) or []:
                             ctype = _content_type(item)
@@ -1334,17 +1519,65 @@ async def run_agent_stream(
                             yield f"data: {json.dumps(event)}\n\n"
                     yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     span.set_attribute("af.agent.outcome", "success")
-                except TimeoutError:
+                    stream_settled = True
+                except TimeoutError as exc:
+                    if not stream_settled:
+                        # Reached when the deadline/cancellation surfaced
+                        # from somewhere the inner handler above didn't cover
+                        # (B2b) — e.g. `agent.run(...)` itself raising before
+                        # the pull loop ever started. Finalize here too
+                        # rather than assuming it already happened.
+                        await _finalize_maf_stream(stream, exc)
+                        stream_settled = True
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
                     yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
                 except Exception as exc:
+                    if not stream_settled:
+                        # Same reasoning as the `TimeoutError` branch above:
+                        # an ordinary exception that reached here without
+                        # passing through the inner per-`__anext__()` handler
+                        # (e.g. raised directly by `agent.run(...)`, or by
+                        # the per-update content processing) still needs the
+                        # underlying MAF stream finalized (B2b).
+                        await _finalize_maf_stream(stream, exc)
+                        stream_settled = True
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
                     yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                finally:
+                    if not stream_settled:
+                        # B2b: reached only when this async generator itself
+                        # is torn down while suspended at one of the
+                        # `yield`s above — e.g. the ASGI/HTTP layer closing
+                        # the generator on client disconnect (`aclose()`), or
+                        # the enclosing task being cancelled while suspended
+                        # at a `yield` rather than while awaiting
+                        # `__anext__()`. Python's async-generator protocol
+                        # delivers `GeneratorExit`/cancellation *at* that
+                        # suspension point — a different code path entirely
+                        # from the `except` clauses above, neither of which
+                        # catches `BaseException` subclasses such as
+                        # `GeneratorExit` — so without this, `stream` would
+                        # never be finalized here at all, only ever via a
+                        # nondeterministic GC-timed safety net.
+                        # `sys.exc_info()` reliably reflects that in-flight
+                        # exception in this specific branch precisely
+                        # *because* nothing above matched/handled it (once an
+                        # `except` above runs, it sets `stream_settled = True`
+                        # itself, so this branch is never reached for those
+                        # cases); it is only `None` here if the generator is
+                        # being torn down with no active exception at all
+                        # (e.g. a bare `.aclose()` with nothing in flight), in
+                        # which case a generic `CancelledError` is a
+                        # reasonable stand-in for the finalize hook.
+                        exc_at_teardown = sys.exc_info()[1] or asyncio.CancelledError(
+                            "run_agent_stream torn down before completion"
+                        )
+                        await _finalize_maf_stream(stream, exc_at_teardown)
             finally:
                 lock.release()
         finally:

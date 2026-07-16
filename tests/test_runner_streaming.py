@@ -79,6 +79,62 @@ class _StallingAgent:
         yield _Update([_Content("text", text="unreachable")])  # pragma: no cover
 
 
+class _CleanupTrackingStream:
+    """A minimal stand-in for MAF's ``agent_framework._types.ResponseStream``,
+    exposing just the ``_run_cleanup_hooks``/``_inner_stream``/
+    ``_stream_error`` surface ``_finalize_maf_stream`` (``runner.py``) probes
+    — so a test can assert finalize actually ran, and with which exception
+    was stashed at the time, without needing a real, heavyweight
+    ``agent_framework`` chat-client composition for every streaming-teardown
+    scenario. Regression fixture for B2a/B2b (round 4).
+    """
+
+    _inner_stream = None  # matches the "no further wrapped stream" default `_finalize_maf_stream` handles
+
+    def __init__(self, updates: list[_Update]) -> None:
+        self._remaining = list(updates)
+        self._stream_error: BaseException | None = None
+        self.cleanup_calls: list[BaseException | None] = []
+
+    def __aiter__(self) -> _CleanupTrackingStream:
+        return self
+
+    async def __anext__(self) -> _Update:
+        if not self._remaining:
+            raise StopAsyncIteration
+        return self._remaining.pop(0)
+
+    async def _run_cleanup_hooks(self) -> None:
+        # Captured *before* `_finalize_maf_stream`'s own `finally` resets it
+        # back to `None`, so this records exactly what was stashed at call
+        # time — mirroring what MAF's real `_finalize_stream` hook would
+        # `capture_exception` onto its span.
+        self.cleanup_calls.append(self._stream_error)
+
+
+class _CleanupTrackingAgent:
+    """Wraps a pre-built ``_CleanupTrackingStream`` behind the same
+    ``run(stream=True, ...)`` surface every other fake agent in this module
+    implements, so a test can hold a direct reference to the stream object
+    itself (to inspect ``cleanup_calls`` afterwards) instead of needing to
+    dig it out of the generator/monkeypatch machinery.
+    """
+
+    def __init__(self, stream: _CleanupTrackingStream) -> None:
+        self._stream = stream
+
+    def run(
+        self,
+        _prompt: str,
+        *,
+        stream: bool,
+        session: object,
+        options: dict[str, Any] | None = None,
+    ) -> _CleanupTrackingStream:
+        assert stream is True
+        return self._stream
+
+
 class _ToolErrorAgent:
     """A fake agent whose one tool call's result carries the sandbox-style
     JSON error envelope ``_looks_like_tool_error`` recognizes as a failure —
@@ -240,6 +296,213 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
     [span] = spans
     assert span.attributes["af.agent.outcome"] == "error"
     assert any(isinstance(exc, TimeoutError) for exc in span.exceptions)
+
+
+def test_run_agent_stream_finalizes_when_deadline_exhausted_between_updates(
+    monkeypatch: Any,
+) -> None:
+    """B2a (round 4): the ``remaining <= 0`` pre-check at the *top* of the
+    per-update loop — hit when the deadline is already exhausted by the time
+    an iteration begins, as opposed to expiring *while genuinely awaiting*
+    ``stream_iter.__anext__()`` — must also finalize the underlying MAF
+    stream.
+
+    Pre-fix, this pre-check's ``raise TimeoutError`` happened one level
+    *above* the ``try`` that finalizes-and-reraises, so it reached the outer
+    ``except TimeoutError`` unfinalized, leaving the stream's ``invoke_agent``
+    span open until a nondeterministic GC-timed safety net eventually closed
+    it.
+
+    Drives the outer SSE generator by hand — consuming exactly the
+    "session" event and then the first "delta" chunk — so it suspends
+    between the two fake updates. Sleeping *outside* the generator, past the
+    (short) deadline, before requesting the next chunk guarantees the
+    second loop iteration's ``remaining <= 0`` check fires as a synchronous
+    pre-check, never reaching ``await asyncio.wait_for(stream_iter.__anext__(),
+    ...)`` for the second update at all — the exact code path this proves.
+    """
+    spans = _install_start_span_capture(monkeypatch)
+
+    fake_stream = _CleanupTrackingStream(
+        [
+            _Update([_Content("text", text="first")]),
+            _Update([_Content("text", text="second")]),  # pragma: no cover - deadline exhausted first
+        ]
+    )
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_CleanupTrackingAgent, object, str, None]:
+        return _CleanupTrackingAgent(fake_stream), object(), "test-session", None
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def drive() -> list[str]:
+        gen = runner.run_agent_stream("prompt", timeout=0.05)
+        chunks = [await gen.__anext__()]  # "session"
+        chunks.append(await gen.__anext__())  # "delta" for the first update
+        await asyncio.sleep(0.2)  # exceed the 0.05s deadline *outside* the generator
+        async for chunk in gen:  # resumes: hits the pre-check at the top of the next iteration
+            chunks.append(chunk)
+        return chunks
+
+    chunks = asyncio.run(drive())
+    events = _events_from_sse(chunks)
+
+    error_events = [event for event in events if event["type"] == "error"]
+    assert error_events == [{"type": "error", "content": "Timeout after 0.05s"}]
+    # The second update was never reached -- confirms the pre-check fired
+    # before any attempt to pull it, not mid-await on it.
+    assert not any(event.get("content") == "second" for event in events)
+
+    assert fake_stream.cleanup_calls, "finalize must have run for the deadline-exhausted-at-top-of-loop case"
+    assert len(fake_stream.cleanup_calls) == 1
+    assert isinstance(fake_stream.cleanup_calls[0], TimeoutError)
+
+    [span] = spans
+    assert span.attributes["af.agent.outcome"] == "error"
+
+
+def test_run_agent_stream_finalizes_when_cancelled_while_suspended_at_a_yield(
+    monkeypatch: Any,
+) -> None:
+    """B2b (round 4): tearing down the generator while it is suspended AT one
+    of its own ``yield f"data: ..."`` statements — e.g. an ASGI layer closing
+    the response generator on client disconnect, via ``aclose()`` — must
+    still finalize the underlying MAF stream, even though this is a
+    completely different code path/exception timing from cancellation while
+    *awaiting* ``stream_iter.__anext__()`` (which the existing inner handler
+    already covered before this fix).
+
+    ``gen.aclose()`` is the standard mechanism an ASGI server uses to tear
+    down a still-active ``StreamingResponse`` generator on disconnect: it
+    injects ``GeneratorExit`` at the generator's current suspension point.
+    Consuming exactly two chunks ("session", then the first "delta") before
+    closing guarantees that suspension point is *inside* the per-update
+    loop body, one `yield` past the point where `_run_agent_stream` would
+    next await `stream_iter.__anext__()` for a second update — never in that
+    await at all. Pre-fix, nothing in the function catches `BaseException`
+    subclasses like `GeneratorExit`, so the underlying stream was never
+    finalized here — only a `finally:` added for exactly this case does.
+    """
+    fake_stream = _CleanupTrackingStream(
+        [
+            _Update([_Content("text", text="first")]),
+            _Update([_Content("text", text="second")]),  # pragma: no cover - never reached; closed first
+        ]
+    )
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_CleanupTrackingAgent, object, str, None]:
+        return _CleanupTrackingAgent(fake_stream), object(), "test-session", None
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def drive() -> None:
+        gen = runner.run_agent_stream("prompt", timeout=30.0)
+        await gen.__anext__()  # "session"
+        await gen.__anext__()  # "delta" for the first update -- suspends generator right after this yield
+        await gen.aclose()  # inject GeneratorExit at that exact suspension point
+
+    asyncio.run(drive())
+
+    assert fake_stream.cleanup_calls, "finalize must run when torn down while suspended at a yield"
+    assert len(fake_stream.cleanup_calls) == 1
+    # No `TimeoutError`/`CancelledError` was ever actually caught locally by
+    # any of the `except` branches above the `finally` (this teardown never
+    # goes through any of them) -- `sys.exc_info()` reflects the propagating
+    # `GeneratorExit` itself.
+    assert isinstance(fake_stream.cleanup_calls[0], GeneratorExit)
+
+
+class _FakeHookStream:
+    """Minimal object exposing only the ``_run_cleanup_hooks``/
+    ``_inner_stream``/``_stream_error`` surface ``_finalize_maf_stream``
+    (``runner.py``) probes — for a *direct*, isolated unit test of its
+    ``_inner_stream``-chain walk (B2c, round 4), independent of any real
+    ``run_agent_stream``/``_delegate_adapter`` caller or real ``MAF`` object.
+    """
+
+    def __init__(self, *, inner: _FakeHookStream | None = None, raise_on_cleanup: bool = False) -> None:
+        self._inner_stream = inner
+        self._stream_error: BaseException | None = None
+        self._raise_on_cleanup = raise_on_cleanup
+        self.cleanup_calls: list[BaseException | None] = []
+
+    async def _run_cleanup_hooks(self) -> None:
+        # Recorded *before* any raise below, and before `_finalize_maf_stream`
+        # resets `_stream_error` back to `None` in its own `finally`.
+        self.cleanup_calls.append(self._stream_error)
+        if self._raise_on_cleanup:
+            raise RuntimeError("boom: hostile cleanup hook")
+
+
+def test_finalize_maf_stream_is_a_safe_no_op_for_none() -> None:
+    """``stream=None`` (nothing was ever captured, e.g. a call cancelled
+    while still queued on ``specialist_lock`` before it ever ran
+    ``original_func`` — the exact B1 scenario) must not raise.
+    """
+    asyncio.run(runner._finalize_maf_stream(None, asyncio.CancelledError()))
+
+
+def test_finalize_maf_stream_walks_the_entire_inner_stream_chain() -> None:
+    """B2c: finalizing the *outer* stream must cascade through every
+    ``_inner_stream`` hop, not just the first one — proving the chain-walk
+    loop itself, independent of whichever real ``agent_framework``
+    composition may or may not expose a multi-level chain in practice (see
+    ``_finalize_maf_stream``'s docstring for the source-verified specifics
+    of what's reachable there).
+    """
+    innermost = _FakeHookStream()
+    middle = _FakeHookStream(inner=innermost)
+    outer = _FakeHookStream(inner=middle)
+
+    exc = TimeoutError("boom")
+    asyncio.run(runner._finalize_maf_stream(outer, exc))
+
+    assert outer.cleanup_calls == [exc]
+    assert middle.cleanup_calls == [exc]
+    assert innermost.cleanup_calls == [exc]
+    # The stashed error is reset back to `None` after each level's hook runs
+    # (mirrors a clean finish; only the hook itself observed the exception).
+    assert outer._stream_error is None
+    assert middle._stream_error is None
+    assert innermost._stream_error is None
+
+
+def test_finalize_maf_stream_does_not_clobber_an_already_set_stream_error() -> None:
+    """If a level's ``_stream_error`` is already non-``None`` (e.g. MAF's own
+    ``ResponseStream.__anext__`` already recorded a *different* failure
+    before propagating it), ``_finalize_maf_stream`` must not overwrite it
+    with the timeout/cancellation it's currently handling — it only fills in
+    the slot when the stream hasn't already recorded its own error.
+    """
+    original_error = ValueError("stream's own original failure")
+    stream = _FakeHookStream()
+    stream._stream_error = original_error
+
+    asyncio.run(runner._finalize_maf_stream(stream, asyncio.CancelledError()))
+
+    assert stream.cleanup_calls == [original_error]
+    # Left exactly as it was -- this function never reset a value it didn't set.
+    assert stream._stream_error is original_error
+
+
+def test_finalize_maf_stream_swallows_a_broken_inner_cleanup_hook_and_keeps_walking() -> None:
+    """A ``_run_cleanup_hooks`` failure at one level of the chain (private,
+    non-contractual MAF surface) must not prevent the walk from reaching
+    further ``_inner_stream`` hops, and must never propagate out of
+    ``_finalize_maf_stream`` itself to mask the original timeout/
+    cancellation being handled.
+    """
+    inner = _FakeHookStream()
+    outer = _FakeHookStream(inner=inner, raise_on_cleanup=True)
+
+    asyncio.run(runner._finalize_maf_stream(outer, TimeoutError()))  # must not raise
+
+    assert len(outer.cleanup_calls) == 1
+    assert len(inner.cleanup_calls) == 1
 
 
 def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) -> None:
@@ -460,6 +723,41 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     [span] = spans
     # 1 delegate failure + 1 ordinary tool-call failure from `_ToolErrorAgent`.
     assert span.attributes["af.agent.tool_error_count"] == 2
+
+
+def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None:
+    """S1b: the streaming path's own ``agent.run {name}`` span must carry
+    ``af.agent.display_name`` too, not just ``af.agent.name`` — mirroring
+    what ``registration/endpoints.py``'s non-streaming/MCP handlers already
+    set on their own wrapping spans. ``run_agent_stream`` opens the *only*
+    span for the streaming surface (see the comment above ``start_span`` in
+    ``runner.py``), so this is the only place that attribute can be recorded
+    for it.
+    """
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY", raising=False)
+    spans = _install_start_span_capture(monkeypatch)
+
+    async def fake_build_agent_session_history(
+        **_kwargs: Any,
+    ) -> tuple[_Agent, object, str, None]:
+        return _Agent(), object(), "test-session", None
+
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
+
+    async def collect() -> list[str]:
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "prompt", agent_name="billing", display_name="Billing Specialist"
+            )
+        ]
+
+    asyncio.run(collect())
+
+    [span] = spans
+    assert span.attributes["af.agent.name"] == "billing"
+    assert span.attributes["af.agent.display_name"] == "Billing Specialist"
 
 
 def test_build_chat_options_from_environment(monkeypatch: Any) -> None:
