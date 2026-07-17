@@ -1,0 +1,6 @@
+name: queue-trigger-agent
+services:
+  api:
+    project: ./src
+    language: python
+    host: function
