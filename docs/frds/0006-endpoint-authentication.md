@@ -1,16 +1,16 @@
 ---
 frd: 0006
-title: Endpoint authentication (API key + Entra ID)
+title: Endpoint & HTTP trigger authentication (API key + Entra ID)
 status: Finalized            # Draft → In review → Finalized  (→ Implemented after merge)
 author: victoriahall
 created: 2026-07-14
-updated: 2026-07-16
+updated: 2026-07-17
 issues: []
 pull_requests: []
 branch: victoriahall/endpoint-auth
 ---
 
-# FRD 0006 — Endpoint authentication (API key + Entra ID)
+# FRD 0006 — Endpoint & HTTP trigger authentication (API key + Entra ID)
 
 ## 1. Summary
 
@@ -26,6 +26,12 @@ injected by the platform. Optional `tenant_id`, `allowed_audiences`, and
 `allowed_client_ids` allow-lists narrow which callers are accepted. This makes
 the built-in endpoints safe to expose in production without hand-rolling auth per
 app.
+
+The **same** `auth` policy also extends to arbitrary `http_trigger` agents (§10):
+a custom REST agent accepts the identical nested `auth:` object
+(`EndpointAuthConfig`, including `entra`) and reuses the shared `_auth` guard, so
+identity enforcement is uniform across every HTTP surface. The legacy flat
+`auth_level` string on `http_trigger` is deprecated but still honored.
 
 > **Amendment A (§9, 2026-07-16):** the original design also validated raw bearer
 > tokens in-app against Entra JWKS. That path was removed — the runtime now
@@ -51,6 +57,14 @@ security gate asks "how is `/agents/main/chat` authenticated?" and the honest
 answer is "implicitly, and you can't change it." This feature makes the answer
 explicit and configurable.
 
+The same gap existed one layer out for **custom `http_trigger` agents**: they
+could only pick a Functions `auth_level` (`anonymous`/`function`/`admin`) — there
+was no way to put Easy Auth / Entra ID identity enforcement in front of a
+custom agent route without falling back to the built-in chat API or wiring auth
+by hand. Since the `_auth` guard is surface-agnostic (it operates on an
+`EndpointAuthConfig` + a header getter), the only gap was that `http_trigger`
+registration never consumed it.
+
 ## 3. Goals / Non-goals
 
 **Goals**
@@ -62,6 +76,9 @@ explicit and configurable.
   `allowed_client_ids`, each with an environment-variable fallback.
 - Clear, documented behavior for the MCP endpoint, whose HTTP surface is owned by
   the Functions MCP extension and therefore authenticated at the platform layer.
+- Extend the identical `auth` policy (including `entra`) to arbitrary
+  `http_trigger` agents, reusing the shared `_auth` guard so enforcement is
+  uniform across all HTTP surfaces.
 - Backward compatible: no `auth` key ⇒ today's behavior (`function` / API key).
 
 **Non-goals**
@@ -71,7 +88,9 @@ explicit and configurable.
   there. MCP Entra auth is delegated to Easy Auth (platform) and documented.
   Making the webhook honor the authored `auth.mode` is a **host/extension gap**,
   not a runtime one — tracked as an upstream follow-up (Decision #15).
-- Per-agent-trigger `http_trigger` auth changes — that already has `auth_level`.
+- New `TriggerSpec` schema fields for `http_trigger` auth — the policy is parsed
+  from the existing free-form `trigger.args`, so `front-matter-reference.md` is
+  unchanged.
 - Authorization / RBAC beyond simple issuer/audience/appid allow-lists (roles,
   scopes, per-tool policy) — deferred to a future FRD.
 - Managing/rotating function or system keys, or provisioning the Easy Auth app
@@ -86,6 +105,8 @@ explicit and configurable.
 | translate | `config/validation.py` | No change needed — the `entra`+`mcp` guidance is surfaced as a one-time log at registration (see below), not a translate-stage warning. |
 | register | `registration/_auth.py` (new) | `resolve_endpoint_auth_level()` (mode → `func.AuthLevel`) and `authorize_entra_request()` (Easy Auth principal or validated bearer token, plus allow-list checks). |
 | register | `registration/endpoints.py` | Apply the resolved `auth_level` to the chat routes, gate the chat/chatstream handlers with `authorize_entra_request()` in `entra` mode, and emit a one-time log at registration when `auth.mode == "entra"` and `mcp` is enabled (MCP Entra enforcement is platform-level Easy Auth). |
+| register | `registration/triggers.py` | `_resolve_http_trigger_auth()` maps a nested `auth` (preferred) or the deprecated flat `auth_level` from `trigger.args` → `EndpointAuthConfig`; the `http_trigger` route is registered with `resolve_endpoint_auth_level(auth)`. |
+| register | `registration/_handlers.py` | `make_http_agent_handler()` takes an `auth` param and enforces `authorize_entra_request()` at the top of the request handler (fail-closed before any processing). |
 | execute | — | No runner change; auth is enforced before the runner is invoked. |
 
 ### Auth modes
@@ -173,12 +194,34 @@ Shorthand: `auth: function` (a bare string) is accepted and coerced to
 `{ mode: function }`. Omitting `auth` entirely keeps the current default
 (`function` / API key).
 
+A custom `http_trigger` agent takes the **same** `auth` object under
+`trigger.args` (see [`docs/triggers.md`](../triggers.md#http-trigger-authentication)):
+
+```yaml
+trigger:
+  type: http_trigger
+  args:
+    route: my-agent
+    methods: [POST]
+    auth:                    # same EndpointAuthConfig as builtin_endpoints.auth
+      mode: entra            # function (default) | admin | anonymous | entra
+      entra:
+        tenant_id: <tenant-guid>
+        allowed_audiences: ["api://<app-id>"]
+```
+
 ### Compatibility
 
 Fully backward compatible. Existing agents with no `auth` key keep `function`
 (API-key) protection on their chat routes — the same effective behavior as today,
 now explicit. `builtin_endpoints: true` shorthand continues to enable all
 endpoints with default (`function`) auth.
+
+For `http_trigger` agents, the legacy flat `auth_level`
+(`anonymous`/`function`/`admin`) is still accepted but **deprecated**: it emits a
+warning and maps to the equivalent `auth.mode`. If both `auth` and `auth_level`
+are set, `auth` wins and `auth_level` is ignored with a warning. Agents with no
+auth declared keep the default `function` key check.
 
 ## 5. Decisions log
 
@@ -199,6 +242,10 @@ endpoints with default (`function`) auth.
 | 13 | Architecture sign-off (phase 2) for the original design (Decisions #1–#7) | keep in review / **approve + finalize** | **Approve** — human reviewed the registration-stage placement, pipeline boundaries, and public surface (`builtin_endpoints.auth`) and signed off to move the FRD to `Finalized`. Recorded here explicitly rather than inferred from the implementation request. | Human | 2026-07-16 |
 | 14 | Scope of `auth` — per-agent only vs. app-wide inheritance (revisits #1) | keep per-agent on `builtin_endpoints.auth` / add a top-level `agents.config.yaml` `auth` default that all agents inherit and can override per `*.agent.md` (like `model`/`timeout`/`tools`) | **Adopt app-wide inheritance in this PR.** Add a top-level `auth` field to `GlobalConfig` (`agents.config.yaml`) that every agent inherits; a per-agent `builtin_endpoints.auth` still overrides it (detected via Pydantic `model_fields_set`, so an agent explicitly authoring `auth: function` wins even when the app default is stricter). This matches the existing `model`/`timeout`/`tools` inheritance and is fully backward compatible: no global `auth` ⇒ the per-agent default (`function`) is unchanged. Resolution precedence: authored per-agent `auth` → global `auth` → default `function`. | Human + Agent | 2026-07-16 |
 | 15 | Is the host-owned MCP webhook ignoring `auth.mode` a gap to fix upstream? | accept as a permanent runtime non-goal / **treat as a host-platform gap and track an upstream fix** | **Track upstream.** The reviewer is right: if the app hosts the MCP server, the same auth *should* apply to its webhook. The runtime can't fix it because the Functions MCP extension owns the HTTP surface, so this is a host/extension limitation, not a runtime design choice. Keep the divergence-logging (Decision #12) as the interim mitigation and open an issue against the host/MCP-extension team requesting configurable auth (`auth_level` / Entra pass-through) on `/runtime/webhooks/mcp`; record the link in the `issues:` front matter. | Human + Agent | 2026-07-16 |
+| 16 | Where to store `auth` for `http_trigger` (extends #1) | add fields to `TriggerSpec` schema / **parse from free-form `trigger.args`** | **Parse from `trigger.args`** — avoids a generic-trigger schema change and `front-matter-reference.md` regen; surgical and consistent with how other trigger args are read. | Human | 2026-07-16 |
+| 17 | Reuse vs. new extraction of the guard for `http_trigger` | extract a new shared helper / **reuse existing `_auth` as-is** | **Reuse `_auth`** — it is already surface-agnostic (`EndpointAuthConfig` + `HeaderGetter`), so one enforcement path covers built-in endpoints and `http_trigger`. | Agent | 2026-07-16 |
+| 18 | Flat `auth_level` handling on `http_trigger` | hard-remove / **keep + deprecate** / silently alias | **Keep + deprecate** — backward compatible; emits a warning and maps to the equivalent `auth.mode`. | Human | 2026-07-16 |
+| 19 | Conflict when both `auth` and `auth_level` are set | error / **`auth` wins + warn** / `auth_level` wins | **`auth` wins + warn** — least disruptive and steers authors to the richer `auth` model. | Human | 2026-07-16 |
 
 ## 6. Test plan
 
@@ -217,14 +264,28 @@ endpoints with default (`function`) auth.
 - [ ] Fixture scenario: `tests/fixtures/config_scenarios/` agent with
       `builtin_endpoints.auth` to exercise merge/validation end to end.
 - [ ] Validation: `entra` + `mcp` logs guidance and still registers.
+- [x] Unit `tests/test_registration_triggers.py`: nested `auth` string shorthand
+      for each mode maps to the correct `http_trigger` route `AuthLevel` (incl.
+      `entra`→anonymous); nested object `auth` with `entra` allow-lists is passed
+      to the handler; `auth` wins over `auth_level` (+warning); flat `auth_level`
+      deprecation warning; invalid nested `auth` and invalid flat `auth_level`
+      raise `ValueError`; existing valid `auth_level` levels still map correctly.
+- [x] Unit `tests/test_registration_handlers.py`: `entra` http handler returns
+      401 without Easy Auth evidence, 401 without a principal, 200 with a valid
+      principal when `WEBSITE_AUTH_ENABLED` is set; default (non-`entra`) handler
+      does not gate requests.
 
 ## 7. Docs impact
 
 - [ ] `docs/architecture.md` — add `registration/_auth.py` to the module map and
-      note the auth step in the endpoint-registration path.
+      note the auth step in the endpoint-registration path; module-map rows for
+      `_handlers.py` / `triggers.py` and the execute-stage HTTP agent note the
+      shared `_auth` guard on `http_trigger` routes.
 - [ ] `docs/front-matter-spec.md` — document `builtin_endpoints.auth` with
-      examples for API key and Entra ID.
-- [ ] `docs/triggers.md` — note built-in endpoint auth modes.
+      examples for API key and Entra ID; `#http-trigger` documents the nested
+      `auth` and deprecates the flat `auth_level`.
+- [ ] `docs/triggers.md` — note built-in endpoint auth modes and add an HTTP
+      trigger authentication section.
 - [ ] `README.md` — brief "securing endpoints" note for chat API and MCP.
 - [ ] `docs/frds/README.md` — index this FRD.
 
@@ -239,6 +300,13 @@ endpoints with default (`function`) auth.
   append-only Decisions log (Decision #13, Human, 2026-07-16): the human reviewed
   the registration-stage placement, pipeline boundaries, and public surface and
   approved the design. → `status: Finalized`.
+- **HTTP trigger extension (merged from former FRD 0007, 2026-07-17):** the same
+  `auth` policy was extended to `http_trigger` agents (Decisions #16–#19). The
+  architecture review confirmed the shared `_auth` module is already
+  surface-agnostic, so the work is reuse (not new extraction), and parsing `auth`
+  from the free-form `trigger.args` avoids a schema change. This extends the
+  feature without altering the Entra enforcement semantics. Human sign-off:
+  victoriahall, 2026-07-16.
 
 ## 9. Amendment A — Standardize Entra bearer tokens on Easy Auth (2026-07-16)
 

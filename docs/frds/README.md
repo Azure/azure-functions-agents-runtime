@@ -34,8 +34,7 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 | [0003](0003-runtime-observability.md) | Runtime-owned observability (OpenTelemetry) | Finalized |
 | [0004](0004-dynamic-workflows.md) | Dynamic workflows | Finalized |
 | [0005](0005-web-request-system-tool.md) | `web_request` system tool | In review |
-| [0006](0006-endpoint-authentication.md) | Endpoint authentication (API key / Entra ID) | Finalized |
-| [0007](0007-http-trigger-authentication.md) | HTTP trigger authentication (shared auth model) | Finalized |
+| [0006](0006-endpoint-authentication.md) | Endpoint & HTTP trigger authentication (API key / Entra ID) | Finalized |
 
 > `_template.md` is the template, not an FRD — the leading underscore keeps it
 > sorted first and excludes it from numbering.
