@@ -72,7 +72,7 @@ own reply to the user.
 
 4. **Try it out:**
    - Coordinator chat UI: `http://localhost:7071/agents/main/`
-   - Coordinator HTTP endpoint: `POST http://localhost:7071/main`
+   - Coordinator HTTP endpoint: `POST http://localhost:7071/agents/main/chat`
    - Billing specialist's own endpoint: `POST http://localhost:7071/billing`
    - Ask the coordinator something like *"Why was I charged twice this
      month?"* and it should delegate to `billing`; ask *"How do I reset my
