@@ -12,8 +12,9 @@ import {
 } from '@azure/msal-browser'
 import type { Configuration, RedirectRequest } from '@azure/msal-browser'
 
-// Owned "Serverless Portal" app registration. Overridable via /api/auth/config.
-const DEFAULT_CLIENT_ID = '0ceccceb-9c05-4953-9193-d94f9daa18d3'
+// Local-dev default: Polaris's already-tenant-consented app (works without admin
+// consent). Deploys override via /api/auth/config -> MSAL_CLIENT_ID env var.
+const DEFAULT_CLIENT_ID = '409cf302-c83f-43c3-94eb-ca581ab18c6d'
 const DEFAULT_AUTHORITY = 'https://login.microsoftonline.com/organizations'
 
 // ARM scope — identical to Polaris. Consent is captured at sign-in so the token
