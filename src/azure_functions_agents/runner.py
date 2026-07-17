@@ -146,6 +146,28 @@ async def _get_session_lock(session_id: str) -> asyncio.Lock:
         return lock
 
 
+@contextlib.asynccontextmanager
+async def _session_lock_bounded_by(session_id: str, deadline: float) -> AsyncIterator[None]:
+    """Acquire the per-session lock with the wait bounded by ``deadline``, and always release.
+
+    A concurrent turn on the same session id can hold the lock for a while,
+    so the acquire *wait* must be bounded by the caller's own absolute
+    deadline too — otherwise total wall-clock time could exceed the
+    caller's timeout by however long that wait took. `TimeoutError` from
+    the bounded acquire propagates to the caller: the lock was never
+    acquired, so `release()` is neither reachable nor needed on that path.
+    Once acquired, `release()` always runs in `finally`, including on
+    cancellation.
+    """
+    lock = await _get_session_lock(session_id)
+    loop = asyncio.get_event_loop()
+    await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - loop.time()))
+    try:
+        yield
+    finally:
+        lock.release()
+
+
 # ---------------------------------------------------------------------------
 # Result type
 # ---------------------------------------------------------------------------
@@ -861,43 +883,25 @@ async def run_agent(
         coordinator_deadline=coordinator_deadline,
     )
 
-    lock = await _get_session_lock(resolved_id)
-    # The lock *wait* itself must also be bounded by the same absolute
-    # `coordinator_deadline` (M1): a concurrent turn on the same session id
-    # can hold the lock for a while, and previously nothing capped how long
-    # this call would wait for it before running the agent with a *fresh*
-    # `timeout` window — letting total wall-clock exceed `timeout` by however
-    # long the lock wait took, and misclassifying what should be a
-    # parent-budget timeout (FRD 0006 §4.6: must abort the whole run) as
-    # something that only affects delegate adapters, which would see
-    # `remaining <= 0` and short-circuit as a recoverable specialist timeout
-    # while this outer run kept going. `asyncio.Lock.acquire()` cancelled by
-    # `wait_for`'s own timeout never actually acquires the lock, so no
-    # release is needed on this branch.
     try:
-        await asyncio.wait_for(lock.acquire(), timeout=max(0.0, coordinator_deadline - loop.time()))
+        async with _session_lock_bounded_by(resolved_id, coordinator_deadline):
+            # Re-derive the remaining budget *after* the lock wait instead of
+            # reusing the original full `timeout` — otherwise a long lock
+            # wait plus a full fresh `timeout` window could run well past
+            # `coordinator_deadline`.
+            remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
+            if remaining_after_lock <= 0:
+                raise TimeoutError
+            response = await asyncio.wait_for(
+                agent.run(
+                    prompt,
+                    session=session,
+                    options=_build_chat_options_from_environment(),
+                ),
+                timeout=remaining_after_lock,
+            )
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
-    try:
-        # Re-derive the remaining budget *after* the lock wait (M1) instead
-        # of reusing the original full `timeout` — otherwise a long lock
-        # wait plus a full fresh `timeout` window could run well past
-        # `coordinator_deadline`.
-        remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
-        if remaining_after_lock <= 0:
-            raise TimeoutError
-        response = await asyncio.wait_for(
-            agent.run(
-                prompt,
-                session=session,
-                options=_build_chat_options_from_environment(),
-            ),
-            timeout=remaining_after_lock,
-        )
-    except TimeoutError:
-        raise RuntimeError(f"Agent run timed out after {timeout}s") from None
-    finally:
-        lock.release()
 
     # Extract assistant text from the final response.
     text = ""
@@ -1072,22 +1076,7 @@ async def run_agent_stream(
     ) as span:
         ordinary_tool_error_count = 0
         try:
-            lock = await _get_session_lock(resolved_id)
-            # The lock *wait* itself must also be bounded by `deadline` (M1) —
-            # see the matching comment in `run_agent` for the full rationale:
-            # a concurrent turn on the same session id can hold the lock long
-            # enough that the absolute deadline passes before we even start
-            # streaming, and previously nothing bounded that wait.
-            try:
-                await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - loop.time()))
-            except TimeoutError:
-                span.set_attribute("af.agent.outcome", "error")
-                span.record_exception(
-                    TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
-                )
-                yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
-                return
-            try:
+            async with _session_lock_bounded_by(resolved_id, deadline):
                 pending_tool_calls: dict[str, dict[str, Any]] = {}
                 emitted_tool_calls: set[str] = set()
 
@@ -1290,8 +1279,12 @@ async def run_agent_stream(
                             "run_agent_stream torn down before completion"
                         )
                         await _finalize_maf_stream(stream, exc_at_teardown)
-            finally:
-                lock.release()
+        except TimeoutError:
+            span.set_attribute("af.agent.outcome", "error")
+            span.record_exception(
+                TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
+            )
+            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
         finally:
             # Retained through generator completion regardless of outcome
             # (success/timeout/error) so the streaming surface's delegate

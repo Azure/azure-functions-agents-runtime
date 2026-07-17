@@ -595,6 +595,67 @@ def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: 
     assert any(isinstance(exc, TimeoutError) for exc in span.exceptions)
 
 
+def test_session_lock_bounded_by_releases_lock_after_successful_body() -> None:
+    """The shared CM (``run_agent``/``run_agent_stream``'s DRY'd lock helper)
+    acquires the per-session lock for the body and releases it on normal exit.
+    """
+    resolved_id = "test-session-lock-cm-success"
+
+    async def scenario() -> tuple[bool, bool]:
+        lock = await runner._get_session_lock(resolved_id)
+        loop = asyncio.get_event_loop()
+        locked_during_body = False
+        async with runner._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
+            locked_during_body = lock.locked()
+        return locked_during_body, lock.locked()
+
+    locked_during_body, locked_after = asyncio.run(scenario())
+    assert locked_during_body is True
+    assert locked_after is False
+
+
+def test_session_lock_bounded_by_releases_lock_on_body_exception() -> None:
+    """An exception raised inside the ``async with`` body must still release
+    the lock (via the CM's own ``finally``), not leak it.
+    """
+    resolved_id = "test-session-lock-cm-body-exception"
+
+    async def scenario() -> bool:
+        lock = await runner._get_session_lock(resolved_id)
+        loop = asyncio.get_event_loop()
+        with contextlib.suppress(ValueError):
+            async with runner._session_lock_bounded_by(resolved_id, loop.time() + 5.0):
+                raise ValueError("boom")
+        return lock.locked()
+
+    assert asyncio.run(scenario()) is False
+
+
+def test_session_lock_bounded_by_does_not_release_on_acquire_timeout() -> None:
+    """`TimeoutError` from a bounded acquire that never wins must propagate
+    without touching the lock's state — no double-release, no leak, and the
+    existing holder's own eventual ``release()`` must still work cleanly.
+    """
+    resolved_id = "test-session-lock-cm-acquire-timeout"
+
+    async def scenario() -> tuple[BaseException | None, bool]:
+        lock = await runner._get_session_lock(resolved_id)
+        await lock.acquire()  # simulate a concurrent turn already holding it
+        try:
+            async with runner._session_lock_bounded_by(resolved_id, asyncio.get_event_loop().time()):
+                pass  # pragma: no cover - must never be entered
+        except BaseException as exc:  # captured for assertion, not swallowed
+            caught: BaseException | None = exc
+        else:
+            caught = None
+        lock.release()  # must not raise (e.g. "released too many times")
+        return caught, lock.locked()
+
+    caught, locked_after = asyncio.run(scenario())
+    assert isinstance(caught, TimeoutError)
+    assert locked_after is False
+
+
 def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any) -> None:
     """B3 (streaming): a recoverable delegate failure must land on the run's own span.
 
