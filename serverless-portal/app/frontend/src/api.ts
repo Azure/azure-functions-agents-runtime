@@ -1,4 +1,9 @@
 // API client for the Serverless Agent Portal — live Azure discovery.
+//
+// Every request forwards the signed-in user's ARM access token (acquired via
+// MSAL) as a Bearer token; the backend uses it to call ARM as that user.
+
+import { acquireArmToken } from './auth'
 
 export interface Health {
   status: string
@@ -42,7 +47,11 @@ export interface LiveDiscovery {
 }
 
 async function req<T>(method: string, url: string): Promise<T> {
-  const res = await fetch(url, { method })
+  const token = await acquireArmToken()
+  const res = await fetch(url, {
+    method,
+    headers: { Authorization: `Bearer ${token}` },
+  })
   const text = await res.text()
   let data: unknown = null
   try {
