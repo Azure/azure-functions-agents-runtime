@@ -23,6 +23,7 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import ResolvedAgent, _to_bool
+from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
 
 AUTH_LEVEL_MAP = {
@@ -31,26 +32,6 @@ AUTH_LEVEL_MAP = {
     "admin": func.AuthLevel.ADMIN,
 }
 _SESSION_ID_HEADER = "x-ms-session-id"
-
-
-def serialize_trigger_data(trigger_data: Any) -> str:
-    """Serialize trigger binding data to a JSON string."""
-    if trigger_data is None:
-        return "{}"
-    if hasattr(trigger_data, "to_dict"):
-        payload = trigger_data.to_dict()
-    elif hasattr(trigger_data, "model_dump"):
-        payload = trigger_data.model_dump()
-    elif isinstance(trigger_data, dict):
-        payload = trigger_data
-    elif isinstance(trigger_data, str):
-        return trigger_data
-    else:
-        payload = str(trigger_data)
-
-    if isinstance(payload, dict):
-        return json.dumps(payload, ensure_ascii=False, default=str)
-    return str(payload)
 
 
 def extract_json_from_response(text: str) -> str:
