@@ -14,13 +14,11 @@ __all__ = [
 
 
 def _allocate_unique_name(base_name: str, registered_names: set[str]) -> str:
-    """Reserve ``base_name`` in ``registered_names``.
+    """Reserve ``base_name`` in ``registered_names`` or raise if already taken.
 
-    Slugs are the agent's stable, prompt-visible identity (function name,
-    built-in endpoint route, and ``delegate_<slug>`` tool name all derive
-    from it), so a collision must fail fast rather than silently register
-    under a different name. See FRD 0006 Decision #17: this replaces the
-    previous silent auto-suffix behavior, which is a breaking change.
+    Fails fast on collision (Decision #17) rather than silently
+    auto-suffixing, since slugs are prompt-visible identity (function name,
+    endpoint route, and ``delegate_<slug>`` tool name all derive from them).
     """
     if base_name not in registered_names:
         registered_names.add(base_name)

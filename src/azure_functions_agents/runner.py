@@ -87,13 +87,10 @@ from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
 
 # `_handlers` is always fully imported as a side effect of the
-# `.registration.*` imports above (`registration/__init__.py` imports
-# `.endpoints`, which imports `._handlers`), so importing this shared
-# tool-error-detection helper here — rather than duplicating the JSON
-# error-envelope/stderr heuristic inline (M3) — does not introduce a new
-# import cycle: `_handlers.py` itself has no module-level dependency back on
-# `runner.py` (its own dependency on `run_agent`/`run_agent_stream` is a
-# lazy, call-time `importlib.import_module`, specifically to avoid that).
+# `.registration.*` imports above, so importing this shared tool-error
+# heuristic here (rather than duplicating it) creates no new import cycle:
+# `_handlers.py` has no module-level dependency back on `runner.py` (its own
+# need for `run_agent`/`run_agent_stream` uses a lazy, call-time import).
 from .registration._handlers import _looks_like_tool_error
 from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
@@ -266,13 +263,10 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 class _DelegateErrorTracker:
     """Per-request counter of *recoverable* ``delegate_<slug>`` failures.
 
-    One instance is shared by every ``delegate_<slug>`` adapter built for a
-    single coordinator run. ``AgentResult.delegate_error_count`` (and the
-    streaming path's equivalent bookkeeping) reads :attr:`count` once the run
-    completes. Only failures the adapter *recovers* from (specialist error or
-    specialist-local timeout — FRD 0006 Decision #12) are counted; a
-    propagated cancellation is not a "delegate error" and is never recorded
-    here because the adapter never reaches its ``except`` clause for that case.
+    Shared by every delegate tool for one coordinator run;
+    ``AgentResult.delegate_error_count`` reads :attr:`count` when the run
+    completes. Only recovered failures count — a propagated cancellation
+    never reaches ``record_error`` (Decision #12).
     """
 
     __slots__ = ("count",)
@@ -282,48 +276,6 @@ class _DelegateErrorTracker:
 
     def record_error(self) -> None:
         self.count += 1
-
-
-def _check_delegate_tool_name_collisions(
-    resolved_tools: list[Any], delegate_tool_names: list[str]
-) -> None:
-    """Fail fast when a ``delegate_<slug>`` name collides with a known tool name.
-
-    ``registration.capabilities.validate_subagent_tool_names`` already runs
-    an equivalent check at composition time; this is the runtime's re-check
-    right before final tool assembly (FRD 0006 §4.2: "The runtime checks
-    tool-name collisions again during final tool assembly because MCP and
-    sandbox tool names may not be known earlier"), covering sandbox/workflow
-    tool names this repo only finalizes at this point.
-
-    Scope note — this only inspects each tool object's own ``.name`` (e.g. an
-    MCP server *connection's* configured name from ``mcp.json``, such as
-    "billing-mcp-server"). It does **not** see the individual remote
-    tools/functions an MCP server exposes once connected: those are a
-    dynamically-populated, separate collection
-    (``agent_framework.MCPTool.functions``, populated by ``MCPTool
-    .load_tools()`` — see ``discovery/mcp.py``) that this repo never expands
-    itself, and this check runs before any such connection happens. A remote
-    tool literally named e.g. ``delegate_billing`` is therefore invisible to
-    this guard. That gap is not a silent hole in practice: MAF's own
-    ``Agent.run()`` independently re-checks tool-name uniqueness once it
-    expands ``MCPTool.functions`` into its final tool list
-    (``agent_framework._agents.BaseAgent._prepare_run_context`` ->
-    ``agent_framework._tools._append_unique_tools``), raising ``ValueError``
-    before any model or tool call happens — see
-    ``test_real_maf_agent_run_raises_on_expanded_mcp_function_collision`` in
-    ``tests/test_runner_delegation.py`` for a real (non-mocked) proof of that
-    backstop.
-    """
-    existing = {str(getattr(tool, "name", "") or "") for tool in resolved_tools}
-    existing.discard("")
-    for delegate_name in delegate_tool_names:
-        if delegate_name in existing:
-            raise ValueError(
-                f"Tool name `{delegate_name}` collides with an existing tool "
-                "on this agent, discovered while assembling the final tool "
-                "list for this request. See docs/front-matter-spec.md#subagents."
-            )
 
 
 def _build_role_agent(
@@ -345,22 +297,16 @@ def _build_role_agent(
 ) -> Any:
     """Assemble the final tool list + context providers and build the MAF ``Agent``.
 
-    Shared tail for both agent execution roles (FRD 0006 §4.6, Decisions
-    #13/#15):
+    Shared tail for both execution roles (Decisions #13/#15):
 
-    * ``direct`` — a coordinator, or any agent invoked through its own
-      trigger/endpoint. Callers pass a real ``history_provider`` and, when
-      the resolved agent declares ``subagents``, ``delegate_tools``.
-    * ``delegated`` — a specialist invoked *as* a ``delegate_<slug>`` tool by
-      a coordinator. Callers pass ``history_provider=None`` (an isolated,
-      session-less run — the delegate handler's own ``agent.run(task)`` call
-      never passes a ``session=`` argument either, so a delegated agent
-      never even gets a *local* history context provider) and
-      ``delegate_tools=None``. Per-request sandbox tools and main-only
-      Dynamic-Workflow tools are simply never passed for this role
-      (``sandbox_tools=None``, ``workflow_enabled=False`` — see
-      :func:`_build_delegated_agent`), so they are naturally absent rather
-      than stripped from a shared list.
+    * ``direct`` — a coordinator or any agent invoked through its own
+      trigger/endpoint. Gets a real ``history_provider`` and, if it declares
+      ``subagents``, ``delegate_tools``.
+    * ``delegated`` — a specialist invoked as a ``delegate_<slug>`` tool.
+      Gets ``history_provider=None`` and ``delegate_tools=None``; sandbox and
+      main-only Dynamic-Workflow tools are simply never passed for this role
+      (see :func:`_build_delegated_agent`), so they're naturally absent
+      rather than stripped from a shared list.
     """
     app_root = get_app_root()
     resolved_tools: list[Any] = (
@@ -392,8 +338,6 @@ def _build_role_agent(
         resolved_tools.extend(resolved_mcp_tools)
 
     if delegate_tools:
-        delegate_tool_names = [str(getattr(tool, "name", "") or "") for tool in delegate_tools]
-        _check_delegate_tool_name_collisions(resolved_tools, delegate_tool_names)
         resolved_tools.extend(delegate_tools)
 
     context_providers: list[Any] = []
@@ -421,16 +365,11 @@ def _build_role_agent(
 def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
     """Build one specialist's MAF ``Agent`` in the *delegated* execution role.
 
-    "Runs as itself" (FRD 0006 §5 Decisions #13/#15): its own instructions,
-    model, and static user/MCP/skills tools — but never a per-request sandbox
-    tool (bound to the *coordinator's* chat session/ACA pool, not the
-    specialist's own) and never main-only Dynamic-Workflow tools. Both are
-    naturally absent here because this helper never receives them, not
-    because anything is stripped from a shared tool list.
-    ``resolved.subagents`` is deliberately never read: this is the structural
-    enforcement of single-level delegation (Decision #6) — a delegated
-    specialist cannot itself gain ``delegate_*`` tools, with no runtime depth
-    counter required.
+    Runs as itself: own instructions, model, and static tools, but never a
+    per-request sandbox or main-only Dynamic-Workflow tools (naturally
+    absent — never passed to :func:`_build_role_agent`, not stripped).
+    ``resolved.subagents`` is deliberately never read — the structural
+    enforcement of single-level delegation (Decision #6).
     """
     client_manager = get_client_manager()
     chat_client = client_manager.build_chat_client(resolved.model)
@@ -445,13 +384,9 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
-        # The *slug* (not `resolved.name`, the display name) — this becomes
-        # the MAF `Agent`'s `name=`, which MAF uses for its `invoke_agent`
-        # OTel span attribution (`gen_ai.agent.name`). The delegate tool is
-        # named `delegate_<slug>` (see `_build_delegate_tool`), so using the
-        # slug here lets a trace viewer correlate "the tool call named
-        # `delegate_<slug>`" with "the nested `invoke_agent {slug}` span it
-        # produced" (FRD 0006 §5 Decision #19) without a name/slug lookup.
+        # The slug, not `resolved.name` (the display name) — this becomes
+        # the MAF span's `gen_ai.agent.name`, matching the `delegate_<slug>`
+        # tool name so a trace viewer can correlate the two directly.
         agent_name=resolved.slug,
         resolved_id=None,
         history_provider=None,
@@ -462,16 +397,10 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
 def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
     """Sanitized, model-facing message for a recovered delegate failure.
 
-    Deliberately generic *and class-independent* — this string must not vary
-    by the internal exception type (e.g. it must read identically whether
-    the specialist raised a ``ValueError`` or a ``ConnectionError``), so the
-    coordinator's model never learns anything about the specialist's
-    internals from wording alone. The *real* exception detail (type,
-    message, traceback) goes only to telemetry, via
-    :meth:`RuntimeSpan.record_exception` (in the ``execute_tool
-    delegate_<slug>`` span) and :func:`record_delegate_call` — never to the
-    coordinator's model context (FRD 0006 Decision #12: "full detail to
-    telemetry, sanitized string to the model").
+    Deliberately generic and class-independent — never varies by exception
+    type, so the coordinator's model learns nothing about the specialist's
+    internals from wording alone. Real exception detail goes only to
+    telemetry (Decision #12).
     """
     return (
         f"The '{slug}' specialist could not complete this task. "
@@ -480,93 +409,15 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 
 
 async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
-    """Best-effort finalize a MAF ``ResponseStream`` chain after timeout/cancellation.
+    """Best-effort finalize a MAF ``ResponseStream`` chain on cancel/timeout.
 
-    ``ResponseStream.__anext__`` (``agent_framework._types``) only runs its
-    registered cleanup hooks — which close the underlying ``invoke_agent``
-    OTel span, flush usage stats, and invoke provider callbacks — from its
-    own ``except StopAsyncIteration`` / ``except Exception`` branches. It has
-    no handler for ``BaseException``, so ``asyncio.CancelledError`` (which is
-    exactly what ``asyncio.wait_for`` injects into whichever task is
-    currently awaiting ``__anext__()`` when its timeout expires) bypasses
-    that cleanup entirely. Without it, the span backing that stream is only
-    ever closed by a separate ``weakref.finalize`` GC safety net that never
-    records the exception/outcome and fires at a nondeterministic time.
-
-    Call this from the ``except`` handler that catches that timeout/
-    cancellation for the coordinator's own streaming pull (``run_agent_stream``)
-    so the stream's own finalization still runs deterministically (FRD 0006
-    round-3 M2 fix). The ``delegate_<slug>`` adapter (``_build_delegate_tool``)
-    no longer has any use for this: it runs its specialist through plain
-    non-streaming ``agent.run(task)``, and a non-streaming run's OTel spans
-    are opened with an ordinary ``with``/context-manager (``AgentTelemetryLayer
-    ._run`` / ``ChatTelemetryLayer._get_response`` in ``agent_framework
-    .observability``), which — unlike ``ResponseStream.__anext__``'s bespoke
-    per-branch cleanup-hook protocol — closes deterministically on *any*
-    exception, ``asyncio.CancelledError`` included, via the standard
-    ``with`` statement's ``__exit__`` guarantee. No delegate-side workaround
-    is needed (verified against installed ``agent-framework-core==1.3.0``;
-    see FRD 0006 §5 Decision #20).
-
-    Round-4 (B2c) also walks ``stream._inner_stream`` to finalize any
-    *further* ``ResponseStream`` this one already resolved a reference to —
-    e.g. ``Agent.run(stream=True)``'s agent-level ``.map()``-transform
-    stream (``agent_framework._agents.RawAgent._parse_streaming_response``,
-    installed ``agent-framework-core==1.3.0``, lines 1102-1112:
-    ``stream_response.map(transform=..., finalizer=...)``; the returned
-    stream's inner reference is set via ``ResponseStream.map``,
-    ``_types.py`` lines 2962-2964, and resolved into ``_inner_stream`` on
-    first pull, ``_types.py`` lines 3004-3006). This is unconditionally
-    safe: a stream that never wraps another (including every non-MAF fake
-    used in this package's own tests) simply has ``_inner_stream is None``
-    (the ``_types.py`` line 2890 default), so the loop body still runs
-    exactly once for it — identical to this function's pre-round-4
-    behavior.
-
-    Known, *verified* residual gap this cannot close: when the concrete
-    chat client's MRO stacks ``FunctionInvocationLayer`` above
-    ``ChatTelemetryLayer`` — which is exactly what this repository's real
-    chat clients do (``agent_framework.openai.OpenAIChatClient`` /
-    ``agent_framework.foundry.FoundryChatClient``; confirmed via the
-    installed ``agent-framework-openai`` package's ``_chat_client.py``
-    lines 2878-2881: ``class OpenAIChatClient(FunctionInvocationLayer,
-    ChatMiddlewareLayer, ChatTelemetryLayer, BaseChatClient)``) — and
-    function invocation is enabled (the default), each per-turn
-    ``chat {model}`` span's backing ``ResponseStream`` (the one
-    ``ChatTelemetryLayer.get_response`` attaches its own
-    ``_record_duration``/``_finalize_stream`` cleanup hooks to,
-    ``observability.py`` lines 1366-1372) is created and consumed as a
-    *purely local variable* inside ``FunctionInvocationLayer.get_response``'s
-    own internal streaming closure (installed ``agent-framework-core``
-    package, ``_tools.py``, the ``_stream()`` async generator starting at
-    line 2513 — see the per-iteration ``inner_stream`` at lines 2543-2564
-    and the final iteration's ``final_inner_stream`` at lines 2642-2657).
-    That local variable is never assigned to ``_inner_stream`` or exposed
-    via any other externally reachable attribute on the object this (or
-    any other) caller can hold a reference to, and the ``_stream()``
-    generator has no ``try``/``except``/``finally`` of its own around that
-    consumption either (verified: none appears anywhere in its body, lines
-    2513-2670). So on an abrupt cancellation/timeout, that specific span
-    can only ever close via the generator running to natural completion or
-    via ``ChatTelemetryLayer``'s own ``weakref.finalize`` GC safety net
-    (``observability.py`` line 1372, mirroring the agent-level net at line
-    1642) firing nondeterministically, without recording the timeout/
-    cancellation outcome. This is a genuine upstream MAF architecture
-    limitation with no discoverable public or private workaround from
-    outside ``agent_framework`` itself — there is nothing further this
-    function can safely do about it for that composition. (The walk above
-    still has real, verifiable effect for compositions that do *not*
-    interpose ``FunctionInvocationLayer`` — e.g. function invocation
-    explicitly disabled, or a ``ChatTelemetryLayer`` + ``BaseChatClient``
-    client used directly — where the chat-level stream *is* reachable via
-    ``_inner_stream``.)
-
-    Deliberately defensive throughout: ``stream`` may be ``None`` (nothing
-    was captured yet), and MAF's private cleanup surface
-    (``_run_cleanup_hooks``/``_stream_error``/``_inner_stream``) is not part
-    of any public contract this package depends on, so any failure while
-    probing/calling it is swallowed rather than allowed to mask the
-    *original* timeout/cancellation being handled.
+    ``ResponseStream.__anext__`` only runs its cleanup hooks (closing the
+    OTel span, flushing usage) on success/ordinary-exception, never on
+    cancellation — so this force-runs them so spans close deterministically
+    instead of via GC. Used by ``run_agent_stream`` only; the non-streaming
+    delegate path doesn't need it (FRD 0006 §5 Decision #20). Known gap: one
+    chat-level span MAF never exposes externally can only close via GC — no
+    workaround exists. Defensive throughout: safe if ``stream`` is ``None``.
     """
     while stream is not None:
         # Read `_inner_stream` before running this level's cleanup hooks
@@ -594,47 +445,38 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
         stream = next_stream
 
 
-# Timing tolerance (S3b) for telling a genuine `asyncio.wait_for` deadline
-# expiry apart from a `TimeoutError` the specialist happened to raise on its
-# own, well inside the budget. `asyncio.TimeoutError is TimeoutError` as of
-# Python 3.11, so there is no type-based way to distinguish the two — timing
-# is the only signal available. This is not perfectly precise under heavy
-# event-loop scheduling delay (a genuine expiry could in principle be
-# observed a little early), but it correctly separates the common cases: an
-# inner exception typically fires far earlier than the deadline, while a
-# real `wait_for` expiry fires essentially exactly at it.
-_INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS = 0.05
-
-
 def _record_generic_delegate_failure(
     span: Any, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
 ) -> str:
-    """Shared bookkeeping for a recoverable, non-deadline delegate failure.
-
-    Used by the adapter's ``except Exception`` branch, and (S3b) by its
-    ``except TimeoutError`` branch when the timing heuristic indicates the
-    caught ``TimeoutError`` was raised by the specialist's own code rather
-    than by ``asyncio.wait_for``'s deadline actually expiring.
-    """
+    """Record a recoverable delegate failure and return the sanitized model-facing string."""
     tracker.record_error()
     record_delegate_call(error=True)
     span.set_attribute("af.delegate.outcome", "error")
-    # `record_exception` is a strict superset of `set_error` (status + fault
-    # domain + the actual exception object/traceback) — using it here (B4)
-    # preserves the real exception type/detail in telemetry instead of a
-    # flattened string, without double-setting status.
+    # `record_exception` also sets error status + fault domain, preserving
+    # the real exception type/detail in telemetry instead of a flattened
+    # string.
     span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
     return _sanitize_delegate_failure(slug, exc)
 
 
-class _DelegateTaskParams(BaseModel):
-    """Argument schema for a ``delegate_<slug>`` tool call — always one field.
+def _record_delegate_timeout(
+    span: Any, tracker: _DelegateErrorTracker, slug: str, effective_timeout: float, exc: BaseException
+) -> str:
+    """Record a recoverable delegate timeout (deadline or specialist-raised) and return the model-facing string."""
+    tracker.record_error()
+    record_delegate_call(error=True)
+    span.set_attribute("af.delegate.outcome", "timeout")
+    span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
+    span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+    return (
+        f"The '{slug}' specialist did not respond in time and was "
+        "stopped. Consider a narrower request, trying again, or "
+        "proceeding without it."
+    )
 
-    Mirrors ``BaseAgent.as_tool()``'s own ``arg_name="task"`` single-string
-    contract, but as an ordinary Pydantic schema (this repo's own ``@tool``
-    convention — see ``system_tools/web_request.py``/``system_tools/
-    sandbox.py``) rather than MAF's hand-assembled raw JSON-schema dict.
-    """
+
+class _DelegateTaskParams(BaseModel):
+    """Argument schema for a ``delegate_<slug>`` tool call: a single ``task`` string."""
 
     task: str = Field(
         description=(
@@ -655,29 +497,11 @@ def _build_delegate_tool(
 ) -> Any:
     """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
 
-    A hand-written function tool — the same ``@tool(schema=...)`` pattern
-    this repo already uses for ``web_request``/``execute_python`` (see
-    ``system_tools/web_request.py``'s ``create_web_request_tools``) — rather
-    than MAF's ``BaseAgent.as_tool()``. A delegate only ever needs the
-    specialist's final answer as a single string back to the coordinator; it
-    never streams the specialist's tokens anywhere (surfacing specialist
-    deltas is an explicit FRD 0006 non-goal — §4.12 "SSE is a black box at
-    the boundary"). So there is no reason to run the specialist through
-    ``Agent.run(stream=True)`` at all, which is all ``as_tool()`` ever did
-    internally (via its own ``_agent_wrapper``, in ``agent_framework
-    ._agents``) before ``await``-ing ``stream.get_final_response()`` right
-    back into one string anyway.
-
-    The handler below builds a FRESH specialist ``Agent`` on every call
-    (:func:`_build_delegated_agent` — reusing the process-wide
-    ``ClientManager``, never a live agent instance cached from a previous
-    call) and awaits its plain, non-streaming ``agent.run(task)`` directly
-    (FRD 0006 §4.7, §5 Decision #20). Because each call gets its own,
-    unshared ``Agent`` object, there is no mutable state for concurrent
-    calls to race on — including concurrent calls to the *same* specialist —
-    so no per-specialist lock, monkeypatch, or captured-stream bookkeeping is
-    needed (contrast the old design's ``asyncio.Lock`` + ``specialist_agent
-    .run`` rebind, removed by this change).
+    A hand-written ``@tool(schema=...)`` function tool (not MAF's
+    ``BaseAgent.as_tool()`` — see FRD 0006 §5 Decision #20): the handler
+    builds a fresh specialist :class:`agent_framework.Agent` per call and
+    awaits its plain, non-streaming ``run(task)`` directly, so no lock,
+    monkeypatch, or stream capture is needed.
     """
     resolved = entry.resolved
     capabilities = entry.capabilities
@@ -701,113 +525,35 @@ def _build_delegate_tool(
         span.set_attribute("af.delegate.task_bytes", len(task_text))
         span.set_content("af.delegate.task", task_text)
 
-        # The coordinator's deadline is an absolute wall-clock point;
-        # `effective_timeout = min(specialist, coordinator remaining)` per
-        # FRD 0006 Decision #12. Checked *before* building the specialist
-        # `Agent` at all: if the budget is already exhausted, skip the call
-        # entirely (building an `Agent` is cheap, but there is still no
-        # reason to do it for a run that can never be attempted) rather than
-        # relying on `wait_for(timeout<=0)`'s cancel-before-first-step
-        # behavior to prevent it from starting.
+        # effective_timeout = min(specialist, coordinator remaining) per
+        # Decision #12. Checked before building the specialist `Agent` at
+        # all — a run that can never be attempted shouldn't be built either.
         remaining = max(0.0, coordinator_deadline - loop.time())
         effective_timeout = min(specialist_timeout, remaining)
         if effective_timeout <= 0:
             exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-            tracker.record_error()
-            record_delegate_call(error=True)
-            span.set_attribute("af.delegate.outcome", "timeout")
-            span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
-            span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
-            return (
-                f"The '{slug}' specialist did not respond in time and was "
-                "stopped. Consider a narrower request, trying again, or "
-                "proceeding without it."
-            )
+            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
 
-        # `call_start` stays unbound (`None`) until the specialist `Agent` is
-        # actually built and `wait_for` is about to be dispatched — see the
-        # `except TimeoutError` branch below, which treats a still-`None`
-        # `call_start` (i.e. `_build_delegated_agent` itself raised) the same
-        # as an early inner exception: never a genuine `wait_for` deadline
-        # event, since the timed run never even started.
-        call_start: float | None = None
         try:
-            # Building the specialist `Agent` (client construction, tool
-            # assembly) is inside this `try` too — not before it — so a
+            # Building the specialist `Agent` is inside this `try` too, so a
             # construction failure (e.g. a misconfigured specialist model)
-            # is caught by the same `except Exception` branch below and
-            # returned as a recoverable, sanitized failure (FRD 0006
-            # Decision #12) instead of propagating unhandled out of this
-            # tool call and aborting the whole coordinator turn.
+            # is just as recoverable as a run failure, instead of
+            # propagating unhandled and aborting the coordinator turn.
             specialist_agent = _build_delegated_agent(resolved, capabilities)
-            call_start = loop.time()
             response = await asyncio.wait_for(specialist_agent.run(task_text), timeout=effective_timeout)
         except asyncio.CancelledError:
-            # Parent/request cancellation, not a specialist-local timeout —
-            # never recorded as a (recoverable) delegate *error* (Decision #12
-            # and `_DelegateErrorTracker`'s docstring are explicit that only
-            # *recoverable* failures count there). It IS recorded as a
-            # delegate *call*, though (`error=False` only suppresses the
-            # error counter, not the call counter — see
-            # `record_delegate_call`'s docstring): the specialist call was
-            # genuinely dispatched (this branch is only reachable once
-            # `wait_for` is actually awaiting `specialist_agent.run(...)`),
-            # so it must not be invisible to the call metric. Annotate the
-            # outcome for telemetry's sake too, then re-raise immediately so
-            # the cancellation still propagates and aborts the run — this is
-            # an observability side-effect on the way out, never a swallow.
-            # No explicit stream/span finalization call is needed here
-            # (unlike the old streaming design): a non-streaming
-            # `agent.run()`'s OTel spans are opened with an ordinary
-            # `with`/context-manager, which closes deterministically on any
-            # exception — `asyncio.CancelledError` included — via the
-            # standard `with` statement's `__exit__` guarantee (verified
-            # against installed `agent-framework-core==1.3.0`; see FRD 0006
-            # §5 Decision #20).
+            # Parent/request cancellation — never a recoverable delegate
+            # error (Decision #12), but still a dispatched call, so it's
+            # counted in the call metric (not the error metric) before
+            # re-raising to propagate and abort the run.
             record_delegate_call(error=False)
             span.set_attribute("af.delegate.outcome", "cancelled")
             raise
         except TimeoutError as exc:
-            # This handler catches *both* a genuine `wait_for` deadline
-            # expiry *and* any `TimeoutError` that happens to propagate from
-            # inside the specialist's own tool-calling (e.g. an inner
-            # HTTP-client timeout) — `asyncio.TimeoutError is TimeoutError`
-            # as of Python 3.11, so there is no type-based way to tell the
-            # two apart. Compare elapsed wall time against
-            # `effective_timeout`: an inner exception typically surfaces
-            # well before the deadline, while a real `wait_for` expiry fires
-            # essentially exactly at it. `call_start is None` means
-            # `_build_delegated_agent` itself raised this `TimeoutError`
-            # before the timed run ever started — unambiguously not a
-            # genuine deadline event either, so it takes the same generic-
-            # error branch as an early inner exception.
-            elapsed = None if call_start is None else loop.time() - call_start
-            if (
-                elapsed is None
-                or elapsed < effective_timeout - _INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS
-            ):
-                # Not actually a coordinator-budget/deadline-expiry event —
-                # an ordinary specialist failure (construction or inner call)
-                # that happens to be a `TimeoutError` instance. Classify like
-                # any other recoverable delegate failure instead of as
-                # `outcome=timeout`.
-                return _record_generic_delegate_failure(span, tracker, slug, exc)
-            # Specialist-local (or coordinator-budget) timeout: recoverable —
-            # the coordinator continues (Decision #12).
-            tracker.record_error()
-            record_delegate_call(error=True)
-            span.set_attribute("af.delegate.outcome", "timeout")
-            span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
-            # Record whichever `TimeoutError` instance was actually caught
-            # instead of constructing a fresh, synthetic one — `exc` may be
-            # `wait_for`'s own expiry error or an inner one; preserving the
-            # real instance keeps whatever detail it carries.
-            span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
-            return (
-                f"The '{slug}' specialist did not respond in time and was "
-                "stopped. Consider a narrower request, trying again, or "
-                "proceeding without it."
-            )
+            # Covers both a genuine `wait_for` deadline expiry and any
+            # `TimeoutError` the specialist's own code happens to raise —
+            # both are recoverable specialist-side timeouts either way.
+            return _record_delegate_timeout(span, tracker, slug, effective_timeout, exc)
         except Exception as exc:
             return _record_generic_delegate_failure(span, tracker, slug, exc)
 
@@ -829,53 +575,30 @@ async def build_subagent_tools(
 ) -> tuple[list[Any], _DelegateErrorTracker]:
     """Build one ``delegate_<slug>`` tool per ``subagents`` reference.
 
-    The ``FunctionTool`` wrapper itself is built eagerly here, once per
-    reference for this coordinator run — cheap, since it is just a
-    schema/closure, and a specialist only actually *runs* if the
-    coordinator's model selects the corresponding ``delegate_<slug>`` tool
-    call. The specialist's ``Agent`` object is a separate matter: each
-    wrapper's handler builds a FRESH one, in the *delegated* role
-    (:func:`_build_delegated_agent`), on every individual tool CALL — not
-    once here — reusing the process-wide :class:`ClientManager` but never a
-    live agent instance cached from a previous call. MAF's ``Agent.run()``
-    self-mutates, so per-call construction is the only safe option, and it
-    is cheap (FRD 0006 §4.7, §5 Decision #20); it also means concurrent
-    calls, including repeated calls to the *same* specialist, never share a
-    live agent instance and so need no lock.
+    The tool wrapper (schema/closure) is built once per reference, here.
+    The specialist's ``Agent`` object is different: each call builds a
+    FRESH one in the *delegated* role (:func:`_build_delegated_agent`) — not
+    once here — reusing the process-wide ``ClientManager`` but never a
+    cached agent instance. MAF's ``Agent.run()`` self-mutates, so per-call
+    construction is required; it also means concurrent calls to the same
+    specialist need no lock (Decision #20).
 
-    Returns ``(tools, tracker)``. ``tracker`` is incremented by each
-    delegate handler on a *recoverable* specialist failure/timeout — see
-    :class:`_DelegateErrorTracker`.
+    Returns ``(tools, tracker)``; ``tracker`` counts recoverable delegate
+    failures (see :class:`_DelegateErrorTracker`).
     """
     tracker = _DelegateErrorTracker()
     tools: list[Any] = []
     if not subagents:
         return tools, tracker
-    if catalog is None:
-        # Unreachable through app.py's composition root, which always builds
-        # and threads a non-None AgentCatalog whenever any agent declares
-        # subagents. Guarded so a wiring mistake (e.g. a hand-rolled call
-        # site) fails with a clear message instead of a confusing KeyError.
-        raise RuntimeError(
-            "This agent declares `subagents` but no AgentCatalog was "
-            "provided to build_subagent_tools(). This is an internal "
-            "consistency error: the composition root (app.py) should "
-            "always thread a non-None catalog to any agent with subagents."
-        )
+    # Guarded for a hand-rolled call site; app.py's composition root always
+    # threads a real catalog whenever any agent declares subagents.
+    assert catalog is not None, "subagents declared but no AgentCatalog was provided"
 
     for ref in subagents:
         entry = catalog.get(ref.agent)
-        if entry is None:
-            # Also unreachable in a correctly composed app:
-            # `validate_subagent_references` already rejects unknown
-            # references at startup (FRD 0006 §4.4). Guarded here only so a
-            # programming error surfaces as a clear message instead of a
-            # bare KeyError deep inside tool assembly.
-            raise RuntimeError(
-                f"subagents reference `{ref.agent}` was not found in the "
-                "AgentCatalog. This should have been rejected at startup; "
-                "this is an internal consistency error."
-            )
+        # Guarded for a hand-rolled call site; validate_subagent_references
+        # already rejects unknown references at startup.
+        assert entry is not None, f"subagents reference `{ref.agent}` was not found in the AgentCatalog"
         tools.append(
             _build_delegate_tool(
                 ref,
@@ -907,14 +630,11 @@ async def _build_agent_session_history(
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
-    Returns ``(agent, session, resolved_session_id, delegate_error_tracker)``.
+    Returns ``(agent, session, resolved_session_id, delegate_error_tracker)``;
     ``delegate_error_tracker`` is ``None`` unless ``subagents`` is non-empty.
-
-    When ``subagents`` is non-empty, one ``delegate_<slug>`` tool is built
-    per reference (:func:`build_subagent_tools`) and appended to this
-    (coordinator, ``direct``-role) agent's own tool list — never the other
-    way around; the tools built here are for *this* agent to call its
-    specialists, not tools the specialists get.
+    When non-empty, one ``delegate_<slug>`` tool per reference
+    (:func:`build_subagent_tools`) is appended to this (coordinator,
+    ``direct``-role) agent's own tools — never the reverse.
     """
     # Imported here so a missing optional dependency surfaces only when actually
     # needed (e.g. tests that don't run the runtime path).

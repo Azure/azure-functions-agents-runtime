@@ -7,7 +7,7 @@ from .capabilities import (
     validate_subagent_tool_names,
 )
 from .catalog import AgentCatalog, CatalogEntry, build_catalog
-from .endpoints import register_builtin_endpoints, reset_builtin_slug_registry
+from .endpoints import register_builtin_endpoints
 from .triggers import register_agent
 
 __all__ = [
@@ -19,6 +19,5 @@ __all__ = [
     "existing_tool_names",
     "register_agent",
     "register_builtin_endpoints",
-    "reset_builtin_slug_registry",
     "validate_subagent_tool_names",
 ]

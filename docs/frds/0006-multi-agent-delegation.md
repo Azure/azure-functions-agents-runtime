@@ -4,7 +4,7 @@ title: Multi-agent delegation (agent-as-tool)
 status: Draft            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-14
-updated: 2026-07-16
+updated: 2026-07-17
 issues: []
 pull_requests: []
 branch: larohra/multi-agent-delegation
@@ -235,8 +235,11 @@ registration before global validation finishes. Cross-agent awareness in steps
 2–5 is the only genuinely new plumbing requirement; current validation rules
 are local to one agent.
 
-The runtime checks tool-name collisions again during final tool assembly because
-MCP and sandbox tool names may not be known earlier.
+Tool-name collision validation runs once, at composition (step 5); it is not
+re-checked at request time. The one category composition can't see — an MCP
+server's individually expanded remote functions, unknown until the server
+connects — is backstopped by MAF's own tool assembly, which independently
+rejects a duplicate name there.
 
 ### 4.3 Participant identity (Decisions log #9)
 
@@ -428,9 +431,10 @@ delegation or route incorrectly; this is an accepted limitation.
 The delegated tool is named `delegate_<slug>`. That name must be a valid
 identifier and unique in the coordinator's final tool set. A collision with a
 user, MCP, sandbox, workflow, or another specialist tool fails fast and is never
-silently suffixed, because the name is a prompt-visible API. Validate known
-names after capabilities are built, then check again during final runtime
-assembly for late MCP/sandbox names.
+silently suffixed, because the name is a prompt-visible API. Validation runs
+once, during capability-aware validation at composition; MAF's own tool
+assembly backstops the one category composition can't see (an MCP server's
+individually expanded remote functions).
 
 Construct the specialist's `FunctionTool` wrapper while assembling one
 invocation's coordinator tools; the specialist `Agent` itself is not built
@@ -650,7 +654,7 @@ handoff participant may itself declare `subagents` and delegate.
       endpoint-less internal specialist regardless of file order.
 - [ ] Unit: tool-name collision — fail fast when `delegate_<slug>`
       collides with coordinator user/MCP/sandbox/workflow tools or another
-      specialist. Check during capability-aware validation and final assembly.
+      specialist. Checked once, during capability-aware validation.
 - [ ] Unit: `runner` / delegated role — assemble the hand-written `delegate_<slug>`
       specialist tool and return a result. Verify that a delegated specialist uses its own
       instructions, model, static user/MCP/skills tools; lacks a per-request

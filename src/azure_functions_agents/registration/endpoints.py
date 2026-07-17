@@ -78,16 +78,6 @@ def _builtin_slug_registry(app: func.FunctionApp) -> set[str]:
     return registry
 
 
-def reset_builtin_slug_registry(app: func.FunctionApp) -> None:
-    """Clear stored built-in endpoint slugs for ``app``.
-
-    Tests can call this before registering a fresh set of agents on the same
-    ``FunctionApp`` instance.
-    """
-
-    setattr(app, _BUILTIN_SLUG_ATTR, set())
-
-
 def _ensure_unique_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
     return allocate_unique_builtin_slug(
         resolved.source_file,

@@ -45,12 +45,9 @@ def validate_resolved_agent(
     """Run post-merge sanity checks for a resolved agent.
 
     ``is_referenced_as_subagent`` relaxes the trigger/``builtin_endpoints``
-    requirement below: an agent that is reachable only as another agent's
-    delegation target (declared in that agent's ``subagents:`` list) does
-    not need its own external entry point. See FRD 0006 §4.3 and Decision
-    #18 ("any independently runnable agent may declare subagents" implies
-    the reverse is also true — an agent referenced only as a specialist
-    does not itself need to be independently runnable).
+    requirement below: an agent reachable only as another agent's
+    delegation target (via that agent's ``subagents:``) doesn't need its
+    own external entry point (Decision #18).
     """
     source_file = resolved.source_file or "<unknown>"
 
@@ -131,10 +128,9 @@ def validate_subagent_references(
     """Reject self, unknown, and duplicate ``subagents:`` references.
 
     Must run only after the app-wide identity-slug index (``known_slugs``)
-    has been built and checked for duplicates — see the composition root
-    in ``app.py`` (FRD 0006 §4.2 two-pass composition, §4.3, and the
-    Decisions log: unknown/duplicate/self references are fail-fast
-    configuration errors, never silently dropped or ignored).
+    is built and de-duplicated (see ``app.py``'s two-pass composition
+    root) — these are fail-fast configuration errors, never silently
+    dropped.
     """
     source_file = resolved.source_file or "<unknown>"
     seen: set[str] = set()

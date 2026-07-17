@@ -60,19 +60,11 @@ def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
 def _fail_on_duplicate_slugs(resolved_agents: list[Any]) -> set[str]:
     """Fail fast on colliding agent identity slugs and return the known-slug set.
 
-    An agent's identity slug (its source file's stem, sanitized — see
-    ``_slug.py``) doubles as the registered Azure Functions function name,
-    the ``/agents/<slug>/`` built-in endpoint route, and the ``agent:``
-    value other agents reference in their ``subagents:`` list (and thus the
-    ``delegate_<slug>`` tool name). FRD 0006 §5 Decision #17 requires slugs
-    to be globally unique across the whole app; two source files that
-    sanitize to the same slug used to be silently disambiguated with an
-    auto-suffix (``registration/_naming.py``'s old behavior) — that is now
-    a hard startup error so ``subagents:`` references are never ambiguous.
-
-    Must run before any other per-agent validation (FRD 0006 §4.2's
-    "two-pass composition": this *is* the first pass) so the resulting
-    ``known_slugs`` set can be handed to ``validate_subagent_references``.
+    A slug (sanitized file stem) doubles as the function name, the
+    ``/agents/<slug>/`` route, and the ``delegate_<slug>`` tool name, so a
+    collision is a hard startup error (Decision #17), not the old silent
+    auto-suffix behavior. Must run first (two-pass composition, pass 1) so
+    ``known_slugs`` can be handed to ``validate_subagent_references``.
     """
     sources_by_slug: dict[str, list[str]] = {}
     for resolved in resolved_agents:
@@ -97,22 +89,10 @@ def _fail_on_duplicate_slugs(resolved_agents: list[Any]) -> set[str]:
 def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     """Build and return a fully-configured Azure Functions app.
 
-    Pipeline (FRD 0006 §4.2 "two-pass composition"):
-      1. Resolve app root (explicit > AZURE_FUNCTIONS_AGENTS_APP_ROOT > AzureWebJobsScriptRoot > cwd).
-      2. Load global agents.config.yaml (optional).
-      3. Load all *.agent.md frontmatter into AgentSpec objects.
-      4. Discover user tools, skills, and MCP servers from disk.
-      5. Compose a ResolvedAgent per spec (apply global defaults + agent overrides).
-      6. Fail fast on duplicate identity slugs, then validate every
-         `subagents:` reference against the resulting slug index.
-      7. Pass 1 (pure): validate each ResolvedAgent and build its
-         AgentCapabilities; freeze both into a read-only AgentCatalog
-         (see registration/catalog.py for how deep that guarantee is).
-         No FunctionApp exists yet and nothing is mutated.
-      8. Create the FunctionApp (DFApp when the main agent opts into workflows).
-      9. Pass 2: register each agent's trigger (if any) and built-in
-         endpoints (if any), threading the frozen AgentCatalog through so
-         `delegate_<slug>` tools can resolve specialists at request time.
+    Two-pass composition: resolve, validate, and freeze every agent into a
+    read-only ``AgentCatalog`` (pass 1) before registering any trigger or
+    endpoint (pass 2), so `subagents:` references always see the full,
+    already-validated app. See FRD 0006 §4.2 for the full pipeline stages.
     """
     if app_root is not None:
         set_app_root(app_root)

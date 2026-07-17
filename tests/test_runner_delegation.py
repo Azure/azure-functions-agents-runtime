@@ -254,8 +254,7 @@ def _catalog_of(*entries: tuple[str, ResolvedAgent]) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Pure helpers: _DelegateErrorTracker, _sanitize_delegate_failure,
-# _check_delegate_tool_name_collisions
+# Pure helpers: _DelegateErrorTracker, _sanitize_delegate_failure
 # ---------------------------------------------------------------------------
 
 
@@ -292,19 +291,6 @@ def test_sanitize_delegate_failure_message_identical_across_exception_classes() 
     message_runtime_error = runner._sanitize_delegate_failure("billing", RuntimeError("kaboom"))
 
     assert message_value_error == message_runtime_error
-
-
-def test_check_delegate_tool_name_collisions_raises_on_collision() -> None:
-    existing_tools = [SimpleNamespace(name="delegate_billing")]
-
-    with pytest.raises(ValueError, match="delegate_billing"):
-        runner._check_delegate_tool_name_collisions(existing_tools, ["delegate_billing"])
-
-
-def test_check_delegate_tool_name_collisions_passes_when_no_overlap() -> None:
-    existing_tools = [SimpleNamespace(name="some_user_tool")]
-
-    runner._check_delegate_tool_name_collisions(existing_tools, ["delegate_billing"])  # no raise
 
 
 # ---------------------------------------------------------------------------
@@ -379,30 +365,6 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
         "list_workflows",
     } <= tool_names
     assert history_provider in agent.context_providers
-
-
-def test_build_role_agent_raises_on_delegate_tool_name_collision() -> None:
-    chat_client = SimpleNamespace(model="fake-model")
-    mcp_tool = SimpleNamespace(name="delegate_billing")  # collides with the delegate tool below
-    delegate_tool = SimpleNamespace(name="delegate_billing")
-
-    with pytest.raises(ValueError, match="delegate_billing"):
-        runner._build_role_agent(
-            chat_client,
-            instructions=None,
-            tools=[],
-            mcp_tools=[mcp_tool],
-            skill_paths=None,
-            sandbox_tools=None,
-            web_request_tools=None,
-            system_addendum=None,
-            workflow_enabled=False,
-            workflow_durable_client=None,
-            agent_name="coordinator",
-            resolved_id=None,
-            history_provider=None,
-            delegate_tools=[delegate_tool],
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -605,7 +567,7 @@ async def test_build_subagent_tools_returns_empty_when_no_subagents_declared() -
 async def test_build_subagent_tools_raises_when_catalog_missing_but_subagents_declared() -> None:
     loop = asyncio.get_event_loop()
 
-    with pytest.raises(RuntimeError, match="AgentCatalog"):
+    with pytest.raises(AssertionError, match="AgentCatalog"):
         await runner.build_subagent_tools(
             [SubagentRef(agent="billing")], None, coordinator_deadline=loop.time() + 30
         )
@@ -616,7 +578,7 @@ async def test_build_subagent_tools_raises_on_unknown_reference() -> None:
     catalog = _catalog_of(("shipping", _make_resolved(slug="shipping")))
     loop = asyncio.get_event_loop()
 
-    with pytest.raises(RuntimeError, match="billing"):
+    with pytest.raises(AssertionError, match="billing"):
         await runner.build_subagent_tools(
             [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
         )
@@ -789,15 +751,9 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
     even when the specialist's own configured timeout is generous — proving
     effective_timeout = min(specialist_timeout, coordinator_remaining).
 
-    This is the *pre-dispatch* budget-exhausted path
-    (``effective_timeout <= 0`` before the specialist ``Agent`` is even
-    built, proven here by ``body_ran is False``) — unambiguously a genuine
-    deadline expiry, never an inner specialist exception, so it must ALWAYS
-    classify as ``outcome=timeout`` regardless of the elapsed-time heuristic
-    used to distinguish the other two cases (a real ``wait_for`` expiry vs.
-    an inner ``TimeoutError`` the specialist's own code happens to raise) —
-    the heuristic doesn't even apply here since the specialist was never
-    built or called at all.
+    This is the *pre-dispatch* budget-exhausted path (``effective_timeout <=
+    0`` before the specialist ``Agent`` is even built, proven here by
+    ``body_ran is False`` and ``build_calls == 0``).
     """
     span = _install_span_capture(monkeypatch)
     _install_counter_capture(monkeypatch)
@@ -1155,49 +1111,20 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
 
 
 # ---------------------------------------------------------------------------
-# MCP dynamic tool-name collisions against real `agent_framework` MCP shape
-# (FRD 0006 §4.2 re-check-at-assembly-time requirement) — S5
+# MCP-expanded remote function names: backstopped by MAF itself, not by
+# composition-time validation (which only sees each MCP server's own
+# connection name, not its remote functions — unknown until connected).
 # ---------------------------------------------------------------------------
-#
-# `_check_delegate_tool_name_collisions` (like `registration.capabilities
-# .existing_tool_names`, its composition-time counterpart) only inspects an
-# MCP tool object's own `.name` — the *server connection's* name, set once
-# at `discover_mcp_servers()` time (see `discovery/mcp.py`). The individual
-# remote tools/functions a connected MCP server exposes are a completely
-# different, dynamically-populated collection: `agent_framework.MCPTool
-# .functions` (a property backed by `._functions`, filled in by
-# `MCPTool.load_tools()` — see `agent_framework/_mcp.py`). A remote tool
-# literally named e.g. "delegate_billing" therefore cannot be seen by this
-# repo's own guard at all: it inspects the server object, never its
-# eventual `.functions`.
-#
-# The two tests below use a fake MCP server subclassing the real
-# `agent_framework.MCPStreamableHTTPTool` (marked pre-connected, with
-# `._functions` pre-populated to stand in for a completed `load_tools()`
-# round-trip, so no real network server is needed) to prove, against real
-# `agent_framework` code rather than a guess about its behavior: (1) this
-# repo's own guard really does miss the collision (documenting its actual,
-# narrower-than-the-old-docstring-implied scope), and (2) this is not a
-# silent hole in practice — MAF's own `Agent.run()` independently re-checks
-# tool-name uniqueness once it expands `MCPTool.functions` into the final
-# tool list (`agent_framework._agents.BaseAgent._prepare_run_context` ->
-# `agent_framework._tools._append_unique_tools`), raising `ValueError`
-# before any model or tool call happens. Given that backstop already exists
-# in MAF and fires with a clear, if differently-worded, error, the guard
-# here is kept as a best-effort, earlier check for the cases it *does* see
-# (a colliding MCP server connection name, or any non-MCP tool) rather than
-# duplicated/expanded to replicate MAF's own runtime check.
 
 
 class _FakeMCPServerWithExpandedFunctions(MCPStreamableHTTPTool):
-    """A stand-in for an already-*connected* MCP server (see module comment above).
+    """A stand-in for an already-*connected* MCP server.
 
-    Its own connection ``.name`` ("billing-mcp-server") deliberately does
-    NOT collide with anything; only one of its *expanded* ``.functions``
-    does. ``load_tools=False`` plus manually setting ``is_connected``/
-    ``._functions`` skips the real network handshake `MCPTool.load_tools()`
-    would otherwise perform, while still using the real ``MCPTool.functions``
-    property (unmodified) to expose them.
+    Its own connection ``.name`` ("billing-mcp-server") does not collide
+    with anything; only one of its *expanded* ``.functions`` does.
+    ``load_tools=False`` plus manually setting ``is_connected``/
+    ``._functions`` skips the real network handshake, while still using the
+    real ``MCPTool.functions`` property (unmodified) to expose them.
     """
 
     def __init__(self, colliding_function_name: str) -> None:
@@ -1206,35 +1133,16 @@ class _FakeMCPServerWithExpandedFunctions(MCPStreamableHTTPTool):
         self._functions = [tool(lambda: "ignored", name=colliding_function_name)]
 
 
-def test_check_delegate_tool_name_collisions_misses_expanded_mcp_remote_function_names() -> None:
-    """Documents the guard's real scope: it does not see expanded remote tool names.
-
-    ``mcp_server.name`` ("billing-mcp-server") does not collide with
-    "delegate_billing", and the guard never looks at ``.functions`` — so it
-    does not raise even though a real connected server here would expose a
-    colliding remote tool once loaded. See the test immediately below for
-    why this is not a silent gap in practice.
-    """
-    mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
-
-    runner._check_delegate_tool_name_collisions([mcp_server], ["delegate_billing"])  # does not raise
-
-
 @pytest.mark.asyncio
 async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() -> None:
-    """MAF's own tool assembly is the actual backstop for the gap documented above.
+    """MAF's own tool assembly backstops a collision this repo's composition-time
+    validation can't see: an MCP server's *expanded* remote function name.
 
-    Builds a real ``agent_framework.Agent`` through the real
-    ``_build_role_agent`` (construction itself does not raise — confirming
-    the previous test's finding holds through the full path a coordinator
-    actually goes through) with a fake, pre-connected MCP server whose one
-    expanded remote function is named ``delegate_billing`` — the exact same
-    name as the coordinator's own ``delegate_billing`` tool. Running the
-    agent (the point at which MAF expands ``MCPTool.functions`` into the
-    final tool list) must raise ``ValueError`` from MAF's own
-    ``_append_unique_tools``, proving the system fails loudly with an
-    actionable message rather than silently double-registering the name or
-    letting one tool shadow the other.
+    Builds a real ``Agent`` with a fake, pre-connected MCP server whose one
+    expanded remote function is named ``delegate_billing`` — the same name
+    as the coordinator's own ``delegate_billing`` tool. Running the agent
+    (the point at which MAF expands ``MCPTool.functions``) must raise
+    ``ValueError`` from MAF's own ``_append_unique_tools``.
     """
     mcp_server = _FakeMCPServerWithExpandedFunctions("delegate_billing")
     delegate_tool = tool(lambda: "ignored", name="delegate_billing")
@@ -1520,25 +1428,11 @@ async def test_delegate_adapter_timeout_records_the_exact_wait_for_exception_obj
 async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_telemetry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """S3/S3b: a ``TimeoutError`` the specialist's OWN code raises internally
-    (for an unrelated reason, not ``wait_for`` expiry — here, raised
-    essentially instantly, far inside the 5s budget) must be preserved as the
-    recorded exception object rather than replaced by a synthetic one,
-    proving the fix isn't special-cased to only the ``wait_for``-expiry
-    shape. Python 3.11+ unifies ``asyncio.TimeoutError`` with the builtin
-    ``TimeoutError``, so the two cases are structurally indistinguishable by
-    type; this only works because ``except TimeoutError as exc: ...
-    record_exception(exc, ...)`` preserves whichever object was ACTUALLY
-    caught, regardless of its origin.
-
-    S3b (round 4): this case must also be *classified* as an ordinary
-    recoverable delegate failure (``outcome=error``), not as a coordinator
-    deadline expiry (``outcome=timeout``) — the specialist raised this well
-    before ``effective_timeout`` elapsed, so it is not actually a budget/
-    deadline event at all, even though it happens to be a ``TimeoutError``
-    instance. Distinguished from a genuine ``wait_for`` expiry by elapsed-time
-    heuristic (see ``_INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS``),
-    since the two cases are, again, structurally indistinguishable by type.
+    """A ``TimeoutError`` the specialist's OWN code raises internally (not a
+    ``wait_for`` expiry) must still be recorded as the exact exception
+    object, and produces the same recoverable ``outcome=timeout`` result as
+    a genuine deadline expiry — both are specialist-side timeouts either way
+    (P1: the two cases are no longer classified differently).
     """
     span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)
@@ -1552,11 +1446,10 @@ async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_teleme
 
     result = await tool.func(task="invoice #42")
 
-    assert "did not respond in time" not in result  # not a deadline/timeout outcome (S3b)
-    assert "could not complete this task" in result  # generic sanitized failure message instead
+    assert "did not respond in time" in result
     assert tracker.count == 1
     assert calls == [True]
-    assert span.attributes["af.delegate.outcome"] == "error"
+    assert span.attributes["af.delegate.outcome"] == "timeout"
     assert span.exceptions
     recorded_exc, fault_domain = span.exceptions[-1]
     assert recorded_exc is not None

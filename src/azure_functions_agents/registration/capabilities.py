@@ -12,12 +12,10 @@ from .._slug import delegate_tool_name
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPTool
 
-# The Azure Container Apps dynamic-sessions sandbox tool is unconditionally
-# named "execute_python" (see system_tools/sandbox.py's `@tool(name=...)`
-# decorator). Hardcoded locally rather than imported: `system_tools.sandbox`
-# pulls in heavy optional deps (aiohttp, azure.identity) and this module
-# otherwise avoids eagerly importing `system_tools.*` (see
-# `_build_web_request_tools` below for the same convention).
+# Hardcoded (not imported from system_tools.sandbox) to avoid pulling in
+# that module's heavy optional deps (aiohttp, azure.identity) — matches the
+# lazy-import convention used by `_build_web_request_tools` below. The
+# sandbox tool's name is fixed as "execute_python" by its `@tool` decorator.
 _SANDBOX_TOOL_NAME = "execute_python"
 
 
@@ -123,24 +121,11 @@ def build_capabilities(
 def existing_tool_names(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> set[str]:
     """Collect every tool name already in play for ``resolved`` before delegation.
 
-    Used by :func:`validate_subagent_tool_names` to fail fast on
-    ``delegate_<slug>`` name collisions (FRD 0006 §4.9, §5 Decision log:
-    tool-name collisions with user/MCP/sandbox/workflow-management/other
-    -specialist tools must be rejected during capability-aware validation).
-    Skill tools are intentionally excluded: they are not exposed as
-    top-level agent tools by name at this layer.
-
-    Scope note — for MCP, this reads each connected server's own configured
-    ``.name`` (e.g. "billing-mcp-server"), not the individual remote
-    tools/functions that server exposes once connected
-    (``agent_framework.MCPTool.functions``, populated dynamically by
-    ``MCPTool.load_tools()``). Those remote tool names are unknown at this,
-    composition time; ``runner._check_delegate_tool_name_collisions`` runs a
-    later, equally name-only re-check right before final tool assembly, and
-    MAF's own ``Agent.run()`` independently rejects any remaining collision
-    once it actually expands ``MCPTool.functions`` — see that function's
-    docstring in ``runner.py`` for the full picture and a pointer to the test
-    that proves it against real ``agent_framework`` code.
+    Used by :func:`validate_subagent_tool_names` for fail-fast collision
+    checks. Skill tools are excluded (not exposed as top-level tools by
+    name). Covers each MCP server's configured name but not its individual
+    remote functions (unknown at composition time) — MAF's ``Agent.run()``
+    independently rejects those collisions once expanded.
     """
     names = {_tool_name(tool) for tool in capabilities.filtered_user_tools or []}
     names.update(_tool_name(tool) for tool in capabilities.filtered_mcp_tools or [])
