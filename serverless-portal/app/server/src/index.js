@@ -1,8 +1,9 @@
 // Serverless Agent Portal — Node.js backend (Express).
 //
-// A thin read-only control plane over live Azure discovery: it authenticates
-// with the signed-in identity (DefaultAzureCredential), lists the user's
-// subscriptions, and scans a subscription for serverless agents. See
+// A thin read-only control plane over live Azure discovery. Every Azure call
+// runs as the signed-in user: the browser authenticates via MSAL (the same
+// first-party app as Polaris), acquires an ARM access token, and forwards it as
+// a Bearer token, which this backend uses for all ARM requests. See
 // serverless-portal/app/README.md.
 
 import { fileURLToPath } from 'node:url'
@@ -29,6 +30,7 @@ app.use(
       'http://127.0.0.1:5173',
     ],
     methods: ['GET'],
+    allowedHeaders: ['Authorization', 'Content-Type'],
   }),
 )
 
@@ -44,6 +46,14 @@ class HttpError extends Error {
 // Wrap an async route handler so thrown errors reach the error middleware.
 const wrap = (fn) => (req, res, next) => Promise.resolve(fn(req, res, next)).catch(next)
 
+// Pull the forwarded ARM bearer token off the request, or 401.
+function requireToken(req) {
+  const header = String(req.get('authorization') ?? '')
+  const match = /^Bearer\s+(.+)$/i.exec(header)
+  if (!match) throw new HttpError(401, 'Missing or malformed Authorization header.')
+  return match[1].trim()
+}
+
 // ---------------------------------------------------------------------------
 // Health
 // ---------------------------------------------------------------------------
@@ -56,17 +66,34 @@ app.get(
 )
 
 // ---------------------------------------------------------------------------
-// Azure (live discovery)
+// Auth config (public) — MSAL bootstrap values for the SPA.
+// ---------------------------------------------------------------------------
+
+// The first-party app the browser signs in with. Same app as Polaris for now;
+// override via MSAL_CLIENT_ID / MSAL_AUTHORITY.
+const MSAL_CLIENT_ID = process.env.MSAL_CLIENT_ID || '409cf302-c83f-43c3-94eb-ca581ab18c6d'
+const MSAL_AUTHORITY =
+  process.env.MSAL_AUTHORITY || 'https://login.microsoftonline.com/organizations'
+
+app.get('/api/auth/config', (_req, res) => {
+  res.json({
+    authenticationEnabled: true,
+    msalClientId: MSAL_CLIENT_ID,
+    msalAuthority: MSAL_AUTHORITY,
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Azure (live discovery). Every route below requires a forwarded ARM token.
 // ---------------------------------------------------------------------------
 
 // Signed-in identity + the default subscription to scan.
 app.get(
   '/api/identity',
-  wrap(async (_req, res) => {
-    const [user, subscriptionName] = await Promise.all([
-      azure.getSignedInIdentity(),
-      azure.getSubscriptionName(azure.DEFAULT_SUBSCRIPTION_ID),
-    ])
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const user = azure.getSignedInIdentity(token)
+    const subscriptionName = await azure.getSubscriptionName(token, azure.DEFAULT_SUBSCRIPTION_ID)
     res.json({
       user,
       subscription: { id: azure.DEFAULT_SUBSCRIPTION_ID, name: subscriptionName },
@@ -77,8 +104,9 @@ app.get(
 // List subscriptions the signed-in identity can see (for the top-bar picker).
 app.get(
   '/api/subscriptions',
-  wrap(async (_req, res) => {
-    res.json(await azure.listSubscriptions())
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    res.json(await azure.listSubscriptions(token))
   }),
 )
 
@@ -87,11 +115,12 @@ app.get(
 app.get(
   '/api/live/agents',
   wrap(async (req, res) => {
+    const token = requireToken(req)
     const ref = String(req.query.subscription ?? '').trim()
     let subscriptionId = azure.DEFAULT_SUBSCRIPTION_ID
     if (ref) {
       try {
-        subscriptionId = await azure.resolveSubscriptionId(ref)
+        subscriptionId = await azure.resolveSubscriptionId(token, ref)
       } catch (err) {
         if (err instanceof azure.SubscriptionNotFoundError) {
           throw new HttpError(404, err.message)
@@ -99,7 +128,7 @@ app.get(
         throw err
       }
     }
-    const result = await azure.discoverAgentApps(subscriptionId)
+    const result = await azure.discoverAgentApps(token, subscriptionId)
     // Flatten to an agent list the UI can render directly, keeping app context.
     const agents = result.apps.flatMap((a) =>
       a.agents.map((ag) => ({

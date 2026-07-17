@@ -1,6 +1,6 @@
 // Signed-in identity, the subscriptions the user can see, and the currently
-// selected subscription (which drives live agent discovery). The backend
-// authenticates with DefaultAzureCredential; the UI displays and selects.
+// selected subscription (which drives live agent discovery). The user signs in
+// via MSAL; the forwarded ARM token authorises every backend call.
 
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
 import { api, type Identity, type Subscription } from './api'

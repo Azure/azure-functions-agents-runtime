@@ -1,1 +1,1 @@
--e ../../..[monitor]
+azurefunctions-agents-runtime[monitor]

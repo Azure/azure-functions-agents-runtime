@@ -32,6 +32,8 @@ a:hover { text-decoration: underline; }
 .header .sub-picker option { color: #111; }
 .header .user { width: 30px; height: 30px; border-radius: 50%; background: #2b7fc0;
   display: grid; place-items: center; font-size: 13px; font-weight: 600; }
+.header .btn.ghost { color: #fff; border-color: rgba(255,255,255,.28); }
+.header .btn.ghost:hover { background: rgba(255,255,255,.12); }
 
 .nav { background: var(--surface); border-right: 1px solid var(--border); padding: 12px 8px; }
 .nav .group-label { font-size: 11px; text-transform: uppercase; letter-spacing: .6px; color: var(--text-faint); padding: 12px 12px 6px; }
@@ -57,6 +59,16 @@ a:hover { text-decoration: underline; }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.sm { padding: 4px 9px; font-size: 12px; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
+
+.login { min-height: 100vh; display: grid; place-items: center; padding: 24px;
+  background: radial-gradient(1200px 600px at 50% -10%, #0b3b63 0%, var(--bg) 60%); }
+.login-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow); padding: 40px 36px; max-width: 400px; text-align: center; }
+.login-mark { width: 56px; height: 56px; border-radius: 14px; margin: 0 auto 18px;
+  background: linear-gradient(135deg, #4db8ff, #0f6cbd); display: grid; place-items: center; font-size: 30px; }
+.login-card h1 { font-size: 21px; margin: 0 0 10px; font-weight: 600; }
+.login-card p { color: var(--text-muted); margin: 0 0 24px; }
+.login-card .btn { width: 100%; justify-content: center; padding: 10px 16px; font-size: 14px; }
 
 .grid { display: grid; gap: 16px; }
 .grid.cols-2 { grid-template-columns: repeat(2, 1fr); }

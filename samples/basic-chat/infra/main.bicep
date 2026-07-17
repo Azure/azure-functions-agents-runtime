@@ -38,6 +38,9 @@ param foundryModelVersion string = '2026-03-05'
 @description('Microsoft Foundry deployment capacity.')
 param foundryDeploymentCapacity int = 50
 
+@description('Optional. Exact resource group name to create. When empty, defaults to "rg-<environmentName>".')
+param resourceGroupName string = ''
+
 var abbrs = loadJsonContent('./abbreviations.json')
 var resourceToken = toLower(uniqueString(subscription().id, environmentName, location))
 var tags = { 'azd-env-name': environmentName }
@@ -49,7 +52,7 @@ var deployerPrincipalId = deployer().objectId
 
 // Resource Group
 resource rg 'Microsoft.Resources/resourceGroups@2021-04-01' = {
-  name: '${abbrs.resourcesResourceGroups}${environmentName}'
+  name: !empty(resourceGroupName) ? resourceGroupName : '${abbrs.resourcesResourceGroups}${environmentName}'
   location: location
   tags: tags
 }

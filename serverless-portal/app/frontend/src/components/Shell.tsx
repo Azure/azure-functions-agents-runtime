@@ -1,6 +1,7 @@
 import { type ReactNode } from 'react'
 import { NavLink } from 'react-router-dom'
 import { useIdentity } from '../identity'
+import { signOut } from '../auth'
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean)
@@ -43,6 +44,9 @@ export default function Shell({ children }: { children: ReactNode }) {
         <div className="user" title={user ? `${user.name} · ${user.username}` : 'Not signed in'}>
           {user ? initials(user.name || user.username) : '…'}
         </div>
+        <button className="btn ghost sm" onClick={() => void signOut()} title="Sign out">
+          Sign out
+        </button>
       </header>
 
       <nav className="nav">

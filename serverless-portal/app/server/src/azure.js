@@ -17,22 +17,19 @@
 //      and an MCP tool trigger `agent_<name>_builtin_mcp`. If no agents can be
 //      parsed, the app itself is surfaced as a single agent.
 //
-// Auth uses DefaultAzureCredential (run `az login`; needs Reader on the
-// subscription). This mirrors the identity-based approach in storage.js.
+// Auth uses the caller's ARM access token, acquired in the browser via MSAL
+// (the same first-party app as Polaris) and forwarded as a Bearer token. Every
+// ARM call below runs as the signed-in user — no `az login` required.
 
-import { DefaultAzureCredential } from '@azure/identity'
 import { SubscriptionClient } from '@azure/arm-resources-subscriptions'
 import { WebSiteManagementClient } from '@azure/arm-appservice'
 
 const AGENT_PROVIDER_SETTING = 'AZURE_FUNCTIONS_AGENTS_PROVIDER'
 
-// v1 scope: a single hardcoded subscription. Override with PORTAL_SUBSCRIPTION_ID.
-// The signed-in identity (DefaultAzureCredential) still authorises every call;
-// listing subscriptions dynamically comes later.
+// v1 scope: a single default subscription. Override with PORTAL_SUBSCRIPTION_ID.
+// The signed-in identity (the forwarded ARM token) authorises every call.
 export const DEFAULT_SUBSCRIPTION_ID =
   process.env.PORTAL_SUBSCRIPTION_ID || '1a839f1f-10b2-4613-95ad-0800a22abbf2'
-
-const MANAGEMENT_SCOPE = 'https://management.azure.com/.default'
 
 // Built-in endpoint function suffixes we recognise, longest first so the agent
 // name is stripped correctly (e.g. `_builtin_chatstream` before `_builtin_chat`).
@@ -43,35 +40,43 @@ const BUILTIN_SUFFIXES = [
   '_builtin_mcp',
 ]
 
-let _credential = null
-
-function credential() {
-  if (!_credential) _credential = new DefaultAzureCredential()
-  return _credential
+/**
+ * Wrap a raw ARM access token (forwarded from the browser) as a `TokenCredential`
+ * the Azure SDK clients can consume. The SDK ignores the requested scope and
+ * simply attaches this bearer token; ARM validates its audience.
+ * @param {string} accessToken
+ */
+function credentialFromToken(accessToken) {
+  if (!accessToken) throw new Error('An ARM access token is required.')
+  return {
+    // The SDK only reads `.token`; expiry is advisory. The browser refreshes
+    // and re-sends a fresh token on every request, so a short window is safe.
+    getToken: async () => ({
+      token: accessToken,
+      expiresOnTimestamp: Date.now() + 5 * 60 * 1000,
+    }),
+  }
 }
 
-// Cache management clients per subscription id.
-const _webClients = new Map()
+function webClient(accessToken, subscriptionId) {
+  return new WebSiteManagementClient(credentialFromToken(accessToken), subscriptionId)
+}
 
-function webClient(subscriptionId) {
-  let client = _webClients.get(subscriptionId)
-  if (!client) {
-    client = new WebSiteManagementClient(credential(), subscriptionId)
-    _webClients.set(subscriptionId, client)
-  }
-  return client
+function subscriptionClient(accessToken) {
+  return new SubscriptionClient(credentialFromToken(accessToken))
 }
 
 /** Raised when a subscription name/id cannot be resolved for the caller. */
 export class SubscriptionNotFoundError extends Error {}
 
 /**
- * Read the signed-in principal from the management access token claims.
- * @returns {Promise<{name: string, username: string, oid: string, tenantId: string}>}
+ * Read the signed-in principal from the forwarded ARM access token claims.
+ * @param {string} accessToken
+ * @returns {{name: string, username: string, oid: string, tenantId: string}}
  */
-export async function getSignedInIdentity() {
-  const token = await credential().getToken(MANAGEMENT_SCOPE)
-  const [, payload] = token.token.split('.')
+export function getSignedInIdentity(accessToken) {
+  if (!accessToken) throw new Error('An ARM access token is required.')
+  const [, payload] = accessToken.split('.')
   const claims = JSON.parse(Buffer.from(payload, 'base64').toString('utf-8'))
   return {
     name: claims.name ?? '',
@@ -84,12 +89,12 @@ export async function getSignedInIdentity() {
 /**
  * Look up a subscription's display name by id. Falls back to the id if the
  * signed-in identity cannot enumerate subscriptions.
+ * @param {string} accessToken
  * @param {string} subscriptionId
  */
-export async function getSubscriptionName(subscriptionId) {
+export async function getSubscriptionName(accessToken, subscriptionId) {
   try {
-    const client = new SubscriptionClient(credential())
-    const sub = await client.subscriptions.get(subscriptionId)
+    const sub = await subscriptionClient(accessToken).subscriptions.get(subscriptionId)
     return sub.displayName ?? subscriptionId
   } catch {
     return subscriptionId
@@ -98,10 +103,11 @@ export async function getSubscriptionName(subscriptionId) {
 
 /**
  * List subscriptions the signed-in identity can see.
+ * @param {string} accessToken
  * @returns {Promise<Array<{id: string, name: string, state: string}>>}
  */
-export async function listSubscriptions() {
-  const client = new SubscriptionClient(credential())
+export async function listSubscriptions(accessToken) {
+  const client = subscriptionClient(accessToken)
   const out = []
   for await (const sub of client.subscriptions.list()) {
     if (!sub.subscriptionId) continue
@@ -117,12 +123,13 @@ export async function listSubscriptions() {
 
 /**
  * Resolve a subscription reference (id or display name) to its id.
+ * @param {string} accessToken
  * @param {string} ref subscription id or display name
  */
-export async function resolveSubscriptionId(ref) {
+export async function resolveSubscriptionId(accessToken, ref) {
   const value = String(ref ?? '').trim()
   if (!value) throw new SubscriptionNotFoundError('No subscription specified.')
-  const subs = await listSubscriptions()
+  const subs = await listSubscriptions(accessToken)
   const byId = subs.find((s) => s.id.toLowerCase() === value.toLowerCase())
   if (byId) return byId.id
   const byName = subs.find((s) => s.name.toLowerCase() === value.toLowerCase())
@@ -206,6 +213,7 @@ async function agentsInApp(client, resourceGroup, appName) {
 /**
  * Discover every agent app + its agents in a subscription.
  *
+ * @param {string} accessToken forwarded ARM access token
  * @param {string} subscriptionId resolved subscription id
  * @returns {Promise<{
  *   subscriptionId: string,
@@ -219,8 +227,8 @@ async function agentsInApp(client, resourceGroup, appName) {
  *   }>,
  * }>}
  */
-export async function discoverAgentApps(subscriptionId) {
-  const client = webClient(subscriptionId)
+export async function discoverAgentApps(accessToken, subscriptionId) {
+  const client = webClient(accessToken, subscriptionId)
   const apps = []
   for await (const site of client.webApps.list()) {
     const kind = String(site.kind ?? '')
