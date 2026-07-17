@@ -7,6 +7,8 @@ from typing import Any
 
 from azure_functions_agents._logger import logger as _logger
 
+from .schema import ResolvedAgent
+
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
 _UNSUPPORTED_TRIGGER_TYPES: dict[str, str] = {
@@ -121,7 +123,7 @@ def validate_resolved_agent(
 
 
 def validate_subagent_references(
-    resolved: Any,
+    resolved: ResolvedAgent,
     *,
     known_slugs: set[str],
 ) -> None:

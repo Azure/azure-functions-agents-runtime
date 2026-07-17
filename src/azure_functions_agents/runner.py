@@ -64,16 +64,17 @@ import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from pydantic import BaseModel, Field
 
 from ._blob_history import build_blob_provider_from_environment
-from ._function_tool import tool
+from ._function_tool import FunctionTool, tool
 from ._logger import logger
 from ._observability import (
     FaultDomain,
     LifecycleStage,
+    RuntimeSpan,
     current_span,
     record_delegate_call,
     start_span,
@@ -94,6 +95,13 @@ from .discovery.tools import discover_user_tools
 from .registration._handlers import _looks_like_tool_error
 from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
+
+if TYPE_CHECKING:
+    # Type-only: the runtime values are always obtained via the lazy,
+    # call-time `from agent_framework import ...` imports below (this
+    # module's established pattern for the heavier agent-construction
+    # symbols), so this adds no import-time cost.
+    from agent_framework import Agent, ContextProvider, SupportsChatGetResponse
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -279,7 +287,7 @@ class _DelegateErrorTracker:
 
 
 def _build_role_agent(
-    chat_client: Any,
+    chat_client: SupportsChatGetResponse[Any],
     *,
     instructions: str | None,
     tools: list[Any] | None,
@@ -292,9 +300,9 @@ def _build_role_agent(
     workflow_durable_client: Any | None,
     agent_name: str | None,
     resolved_id: str | None,
-    history_provider: Any | None,
-    delegate_tools: list[Any] | None,
-) -> Any:
+    history_provider: ContextProvider | None,
+    delegate_tools: list[FunctionTool] | None,
+) -> Agent[Any]:
     """Assemble the final tool list + context providers and build the MAF ``Agent``.
 
     Shared tail for both execution roles (Decisions #13/#15):
@@ -340,7 +348,7 @@ def _build_role_agent(
     if delegate_tools:
         resolved_tools.extend(delegate_tools)
 
-    context_providers: list[Any] = []
+    context_providers: list[ContextProvider] = []
     if history_provider is not None:
         context_providers.append(history_provider)
     skills_provider = _build_skills_provider(skill_paths)
@@ -362,7 +370,7 @@ def _build_role_agent(
     )
 
 
-def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Agent[Any]:
     """Build one specialist's MAF ``Agent`` in the *delegated* execution role.
 
     Runs as itself: own instructions, model, and static tools, but never a
@@ -446,7 +454,7 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
 
 
 def _record_generic_delegate_failure(
-    span: Any, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
+    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, exc: BaseException
 ) -> str:
     """Record a recoverable delegate failure and return the sanitized model-facing string."""
     tracker.record_error()
@@ -460,7 +468,7 @@ def _record_generic_delegate_failure(
 
 
 def _record_delegate_timeout(
-    span: Any, tracker: _DelegateErrorTracker, slug: str, effective_timeout: float, exc: BaseException
+    span: RuntimeSpan, tracker: _DelegateErrorTracker, slug: str, effective_timeout: float, exc: BaseException
 ) -> str:
     """Record a recoverable delegate timeout (deadline or specialist-raised) and return the model-facing string."""
     tracker.record_error()
@@ -494,7 +502,7 @@ def _build_delegate_tool(
     *,
     coordinator_deadline: float,
     tracker: _DelegateErrorTracker,
-) -> Any:
+) -> FunctionTool:
     """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
 
     A hand-written ``@tool(schema=...)`` function tool (not MAF's
@@ -557,7 +565,7 @@ def _build_delegate_tool(
         except Exception as exc:
             return _record_generic_delegate_failure(span, tracker, slug, exc)
 
-        result = str(response.text)
+        result = response.text
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
         span.set_attribute("af.delegate.response_bytes", len(result))
@@ -572,7 +580,7 @@ async def build_subagent_tools(
     catalog: AgentCatalog | None,
     *,
     coordinator_deadline: float,
-) -> tuple[list[Any], _DelegateErrorTracker]:
+) -> tuple[list[FunctionTool], _DelegateErrorTracker]:
     """Build one ``delegate_<slug>`` tool per ``subagents`` reference.
 
     The tool wrapper (schema/closure) is built once per reference, here.
@@ -587,7 +595,7 @@ async def build_subagent_tools(
     failures (see :class:`_DelegateErrorTracker`).
     """
     tracker = _DelegateErrorTracker()
-    tools: list[Any] = []
+    tools: list[FunctionTool] = []
     if not subagents:
         return tools, tracker
     # Guarded for a hand-rolled call site; app.py's composition root always

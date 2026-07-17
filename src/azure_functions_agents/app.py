@@ -15,6 +15,7 @@ from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
+from .config.schema import ResolvedAgent
 from .config.validation import validate_resolved_agent, validate_subagent_references
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
@@ -57,7 +58,7 @@ def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
     return isinstance(workflows, dict) and workflows.get("enabled") is True
 
 
-def _fail_on_duplicate_slugs(resolved_agents: list[Any]) -> set[str]:
+def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
     """Fail fast on colliding agent identity slugs and return the known-slug set.
 
     A slug (sanitized file stem) doubles as the function name, the
