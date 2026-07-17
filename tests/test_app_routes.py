@@ -140,6 +140,88 @@ def test_workflow_routes_register_durable_client_binding(tmp_path: Path):
         assert get_type_hints(_registered_function(function_app, function_name))["client"] is str
 
 
+def test_workflow_timer_trigger_registers_durable_client_binding(tmp_path: Path):
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        name="Main",
+        workflows=True,
+        builtin_endpoints=False,
+    )
+
+    function_app = app_module.create_function_app(app_root=tmp_path)
+
+    assert isinstance(function_app, df.DFApp)
+    assert "durableClient" in _binding_types(function_app, "handler_Main")
+    assert (
+        get_type_hints(_registered_function(function_app, "handler_Main"))["client"]
+        is str
+    )
+    bindings = _bindings(function_app, "handler_Main")
+    timer_binding = next(binding for binding in bindings if binding["type"] == "timerTrigger")
+    assert timer_binding["schedule"] == "0 */5 * * * *"
+    assert timer_binding["name"] == "trigger_data"
+
+
+@pytest.mark.parametrize(
+    ("trigger_yaml", "binding_type", "expected_fields"),
+    [
+        (
+            "type: http_trigger\n  args:\n    route: start-workflow\n    methods: [POST]",
+            "httpTrigger",
+            {"route": "start-workflow"},
+        ),
+        (
+            "type: queue_trigger\n  args:\n    queue_name: workflow-jobs\n"
+            "    connection: AzureWebJobsStorage",
+            "queueTrigger",
+            {"queueName": "workflow-jobs", "name": "trigger_data"},
+        ),
+        (
+            "type: event_grid_trigger",
+            "eventGridTrigger",
+            {"name": "trigger_data"},
+        ),
+    ],
+)
+def test_workflow_declared_triggers_register_durable_client_binding(
+    tmp_path: Path,
+    trigger_yaml: str,
+    binding_type: str,
+    expected_fields: dict[str, str],
+):
+    (tmp_path / "main.agent.md").write_text(
+        (
+            "---\n"
+            "name: Main\n"
+            "description: Trigger workflow test\n"
+            "workflows:\n"
+            "  enabled: true\n"
+            "trigger:\n"
+            f"  {trigger_yaml}\n"
+            "---\n"
+            "Start one workflow.\n"
+        ),
+        encoding="utf-8",
+    )
+
+    function_app = app_module.create_function_app(app_root=tmp_path)
+    bindings = _bindings(function_app, "handler_Main")
+
+    binding_types = [binding["type"] for binding in bindings]
+    assert binding_types[:2] == [
+        "durableClient",
+        binding_type,
+    ]
+    if binding_type == "httpTrigger":
+        assert binding_types[2:] == ["http"]
+    else:
+        assert len(binding_types) == 2
+    trigger_binding = bindings[1]
+    for field, expected in expected_fields.items():
+        assert trigger_binding[field] == expected
+
+
 def test_workflow_mcp_endpoint_keeps_function_name_and_trigger_binding(tmp_path: Path):
     _write_main_agent(tmp_path, workflows=True)
 

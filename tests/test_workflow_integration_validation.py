@@ -280,22 +280,40 @@ def test_exclude_rejects_non_string_in_list():
 
 def test_no_workflows_key_at_all_is_fine():
     """Agents without any workflows declaration must keep working."""
-    tools, addendum = integration.build_workflow_integration(_FakeApp(), {})
-    assert tools == [] and addendum is None
+    result = integration.build_workflow_integration(_FakeApp(), {})
+    assert result.workflow_tools == []
+    assert result.chat_system_addendum is None
+    assert result.trigger_system_addendum is None
+    assert result.enabled is False
+
+
+def test_result_preserves_legacy_two_value_unpacking():
+    result = integration.build_workflow_integration(_FakeApp(), {})
+
+    workflow_tools, system_addendum = result
+
+    assert workflow_tools == []
+    assert system_addendum is None
 
 
 def test_disabled_explicitly_is_a_noop():
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(), {"workflows": {"enabled": False}}
     )
-    assert tools == [] and addendum is None
+    assert result.workflow_tools == []
+    assert result.chat_system_addendum is None
+    assert result.trigger_system_addendum is None
+    assert result.enabled is False
 
 
 def test_enabled_with_no_other_keys_works():
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(), {"workflows": {"enabled": True}}, workflow_tools=[]
     )
-    assert tools and addendum is not None
+    assert result.workflow_tools
+    assert result.chat_system_addendum is not None
+    assert result.trigger_system_addendum is not None
+    assert result.enabled is True
 
 
 def test_enabled_with_exclude_filters_workflow_tools():
@@ -304,11 +322,35 @@ def test_enabled_with_exclude_filters_workflow_tools():
         WorkflowTool("skip", "Skip tool", lambda args: {"args": args}),
     ]
 
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(),
         {"workflows": {"enabled": True, "exclude": ["skip"]}},
         workflow_tools=workflow_tools,
     )
-    assert tools and addendum is not None
-    assert "`keep`" in addendum
-    assert "`skip`" not in addendum
+    assert result.workflow_tools
+    assert "`keep`" in result.chat_system_addendum
+    assert "`skip`" not in result.chat_system_addendum
+    assert "`keep`" in result.trigger_system_addendum
+    assert "`skip`" not in result.trigger_system_addendum
+
+
+def test_enabled_builds_channel_specific_workflow_guidance():
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        {"workflows": {"enabled": True}},
+        workflow_tools=[
+            WorkflowTool("publish_result", "Publish the final result.", lambda args: args)
+        ],
+    )
+
+    assert result.enabled is True
+    assert "`publish_result`" in result.chat_system_addendum
+    assert "`publish_result`" in result.trigger_system_addendum
+    assert "<workflow-notification>" in result.chat_system_addendum
+    assert "There is no built-in chat poller" in result.trigger_system_addendum
+    assert "<workflow-id>" not in result.trigger_system_addendum
+    assert "do not poll" in result.trigger_system_addendum.lower()
+    assert "terminal" in result.trigger_system_addendum.lower()
+    assert "sink" in result.trigger_system_addendum.lower()
+    assert "Function timeout" in result.trigger_system_addendum
+    assert "Durable timers" in result.trigger_system_addendum

@@ -5,7 +5,9 @@
 > may change based on early feedback, but the behavior described here is
 > the supported v1 surface. Run the
 > [workflow-incident-triage sample](../samples/workflow-incident-triage/README.md)
-> for an end-to-end example. Larger features such as sub-orchestrations,
+> for the interactive experience, or the
+> [timer-trigger sample](../samples/workflow-timer-trigger/README.md) for a
+> non-interactive starter. Larger features such as sub-orchestrations,
 > sub-agent tasks, configurable retry policies, and MCP Tasks integration
 > are tracked as v2 follow-up work.
 
@@ -38,7 +40,8 @@ They are **not** the right tool for:
 - hand-authored orchestration DSLs — plans are LLM-authored only, by
   design, so there is no YAML/markdown workflow template format;
 - cross-app or multi-agent coordination. Those are v2 scenarios; v1
-  workflows live inside one Functions app and one interactive agent.
+  workflows live inside one Functions app and are enabled only by its
+  `main.agent.md`.
 
 ## Why workflows (token, latency, context)
 
@@ -87,10 +90,9 @@ Three concrete wins versus chaining tool calls in conversation:
    a Durable timer (waits), using `task_all` to fan out parallel tasks and
    `depends_on` edges for sequencing.
 5. **`start_workflow` is fire-and-forget from the agent's perspective.**
-   After receiving the `workflow_id`, the agent reports it to the user
-   and ends its turn. The agent does not poll `get_workflow_status` to
-   wait for completion; the workflow result is not pushed back into the
-   conversation as a tool result.
+   After receiving the `workflow_id`, the agent reports or records it as its
+   invocation channel allows and ends its turn. The agent does not poll
+   `get_workflow_status` to wait for completion.
 6. The chat client (the built-in chat UI, or any external poller) polls
    `GET /agents/{slug}/workflows` on a short interval while the session is
    visible, renders a live per-task progress card alongside the chat
@@ -159,7 +161,8 @@ agent markdown stays focused on the domain.
 
 > [!IMPORTANT]
 > **v1 constraint:** `workflows.enabled: true` is only honored on
-> `main.agent.md` (the interactive, session-backed agent). Other agents
+> `main.agent.md`. That main agent may be invoked interactively or by a declared
+> trigger. Other agents
 > that set the flag get a startup warning and the tools are not injected.
 > A future release will lift this constraint.
 
@@ -308,6 +311,11 @@ includes any partial results gathered before the cancel signal landed.
 
 ## Completion delivery
 
+Completion is channel-specific. Interactive chat uses polling and a synthetic
+notification turn; declared triggers use an explicit terminal result sink.
+
+### Interactive chat completion
+
 Completion delivery is **poll-based**, by design. There is no push
 channel from the orchestrator into the agent's chat thread.
 
@@ -377,6 +385,39 @@ after a summary turn has landed does not re-fire the notification.
 Same-poll concurrent completions are batched into one notification
 turn.
 
+### Trigger-started workflows
+
+Any supported Markdown-declared trigger on a workflow-enabled `main.agent.md`
+can start a Dynamic Workflow. The initial trigger Function is only a Durable
+client/starter:
+
+1. The agent receives the trigger payload and authors a workflow plan.
+2. `start_workflow` schedules the orchestration and immediately returns a
+   `workflow_id`.
+3. The agent records or returns that ID as appropriate and ends its turn.
+4. Durable Functions checkpoints and executes the workflow independently.
+
+The starter's model call remains subject to the normal agent and Azure Functions
+timeout. The orchestration can run for hours or days, but each tool Activity is
+still a normal Function execution and must stay within the hosting plan's
+Function timeout. Split large work into bounded Activities and use durable
+timers instead of sleeping inside an Activity.
+
+There is no built-in chat poller, synthetic `<workflow-notification>` turn, or
+automatic agent reactivation for declared triggers. Timer, queue, blob, event,
+and similar trigger sessions are ephemeral; after the starter exits, a later
+agent turn cannot use session-scoped workflow management tools for that
+instance. End these workflows with an Activity that publishes the final result
+to an explicit queue, database, webhook, notification service, or other domain
+sink. Use Durable Functions or Durable Task Scheduler tooling for operational
+status, cancellation, and termination.
+
+A declared HTTP trigger has a synchronous response and returns
+`x-ms-session-id`. It may include `workflow_id` when its authored response
+schema/example permits it. The runtime does not weaken response validation.
+Built-in workflow polling routes are present only when the same main agent also
+enables the built-in chat API.
+
 ## Ownership
 
 Every workflow's Durable instance ID is prefixed with
@@ -390,6 +431,8 @@ existence cannot be probed by guessing IDs across sessions).
 
 - **Live-progress chat UI** — built-in poll loop renders per-node state
   in the chat session.
+- **Terminal trigger sink** — non-interactive workflows publish their result
+  from a final Activity chosen by the application.
 - **Durable Task Scheduler portal** — when the app's
   `host.json` is configured with the DTS `storageProvider`, each
   workflow appears as a queryable instance with per-task state and retry
@@ -417,6 +460,8 @@ v1 includes:
 - result templating with `${node_id.result}` and dotted paths;
 - cooperative cancel and hard terminate;
 - live progress in the built-in chat UI;
+- workflow starts from supported Markdown-declared triggers;
+- channel-specific chat notification and trigger terminal-sink guidance;
 - Azure Storage and Durable Task Scheduler backends selected by
   `host.json`;
 - fixed v1 guardrails for plan size, parallelism, wait duration, active

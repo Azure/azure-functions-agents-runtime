@@ -39,6 +39,35 @@ referenced by any other agent's `subagents:`, is invalid and fails validation â€
 completely unreachable. See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/)
 for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
 
+### Starting Dynamic Workflows
+
+When `main.agent.md` sets `workflows.enabled: true`, every supported declared
+trigger also receives a Durable client binding. The triggered agent can call
+`start_workflow`, receive a `workflow_id`, and end its initial turn while the
+Durable orchestration continues independently. The trigger Function does not
+wait for terminal workflow status.
+
+This behavior is generic across HTTP, timer, queue, blob, Event Grid, Service
+Bus, connector, and the other supported trigger decorators. It is still limited
+to `main.agent.md`; workflow settings on other agent files are ignored with a
+startup warning.
+
+Completion behavior depends on the trigger:
+
+- **HTTP:** the synchronous response can include `workflow_id`. If
+  `response_schema` or `response_example` is configured, add `workflow_id` to
+  that authored format; strict response validation remains active.
+- **Timer and event triggers:** the generated session ends with the starter
+  turn. Include a terminal workflow Activity that writes the result to an
+  explicit sink such as a queue, database, webhook, or notification tool.
+  Observe and control the instance through Durable Functions or Durable Task
+  Scheduler tooling.
+
+Individual workflow Activities remain subject to the hosting plan's normal
+Function timeout. Split long work into bounded Activities and use Durable timers
+for long waits. See [Dynamic workflows](./workflows.md#trigger-started-workflows)
+and the [timer workflow sample](../samples/workflow-timer-trigger/README.md).
+
 ## Supported Trigger Types
 
 | Agent `trigger.type` | Azure Functions decorator | Status | Notes |
@@ -130,6 +159,11 @@ See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentica
 By default, the handler returns the agent response as `text/plain`. When `response_example` or `response_schema` is configured at the top level, the runtime instructs the model to return JSON, validates the result, and returns `application/json`.
 
 HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header.
+
+For workflow-enabled HTTP triggers, callers that need the workflow ID should
+include `workflow_id` in the configured response schema/example. Runtime
+workflow polling routes are available only when the same main agent also enables
+the built-in chat API.
 
 Use `response_example` or `response_schema` at the top level, not under `trigger`.
 

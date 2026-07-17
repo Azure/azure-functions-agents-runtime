@@ -248,7 +248,7 @@ def _workflow_tool(
 
 
 def test_integration_default_workflow_tools_are_public_tools_only():
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
         workflow_tools=[
@@ -256,18 +256,18 @@ def test_integration_default_workflow_tools_are_public_tools_only():
             _workflow_tool("beta", "beta desc", public=False),
         ],
     )
-    assert tools  # 5 management tools registered
-    assert "alpha" in addendum
-    assert "beta" not in addendum
+    assert result.workflow_tools  # 5 management tools registered
+    assert "alpha" in result.chat_system_addendum
+    assert "beta" not in result.chat_system_addendum
     # __echo is private and must not leak into the default allowlist.
-    assert "__echo" not in addendum
+    assert "__echo" not in result.chat_system_addendum
     effective = registry.get_app_config()
     assert effective is not None
     assert "alpha" in effective and "beta" not in effective
 
 
 def test_integration_exclude_filters_public_workflow_tools():
-    _, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(exclude=["beta"]),
         workflow_tools=[
@@ -275,8 +275,8 @@ def test_integration_exclude_filters_public_workflow_tools():
             _workflow_tool("beta", "beta desc"),
         ],
     )
-    assert "alpha" in addendum
-    assert "beta" not in addendum
+    assert "alpha" in result.chat_system_addendum
+    assert "beta" not in result.chat_system_addendum
     assert registry.get_app_config() == frozenset({"alpha"})
 
 
@@ -288,26 +288,28 @@ def test_integration_malformed_exclude_fails_at_app_start():
 
 
 def test_integration_no_workflow_tools_yields_empty_effective_set():
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(), _enable_metadata()
     )
-    assert tools  # management tools still come back
-    assert "No tool tasks are currently allowed" in addendum
+    assert result.workflow_tools  # management tools still come back
+    assert "No tool tasks are currently allowed" in result.chat_system_addendum
     assert registry.get_app_config() == frozenset()
 
 
 def test_integration_disabled_returns_empty_and_does_not_set_config():
     # Stash a sentinel and ensure the disabled path doesn't clobber it.
     registry.set_app_config(frozenset({"sentinel"}))
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(), {"workflows": {"enabled": False}}
     )
-    assert tools == [] and addendum is None
+    assert result.workflow_tools == []
+    assert result.chat_system_addendum is None
+    assert result.trigger_system_addendum is None
     assert registry.get_app_config() == frozenset({"sentinel"})
 
 
 def test_addendum_includes_per_tool_descriptions():
-    _, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
         workflow_tools=[
@@ -317,6 +319,7 @@ def test_addendum_includes_per_tool_descriptions():
             )
         ],
     )
+    addendum = result.chat_system_addendum
     assert "## Long-running work: workflows" in addendum
     assert "### Available workflow tools" in addendum
     assert "`demo_evidence_tool`" in addendum
@@ -332,7 +335,7 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     input box from re-enabling — surfacing as the demo bug that motivated
     this guard.
     """
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
         workflow_tools=[
@@ -344,6 +347,7 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     )
     # Addendum contract: explicit fire-and-forget framing + explicit
     # negative on get_workflow_status auto-polling.
+    addendum = result.chat_system_addendum
     assert "fire-and-forget" in addendum
     assert "end your turn" in addendum
     assert "do not call `get_workflow_status` to wait" in addendum
@@ -351,7 +355,7 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     assert "Do not return large raw evidence" in addendum
     # Tool descriptions must not encourage polling either, otherwise the
     # tool-call contract overrides the addendum.
-    descriptions = {tool.name: tool.description for tool in tools}
+    descriptions = {tool.name: tool.description for tool in result.workflow_tools}
     assert "fire-and-forget" in descriptions["start_workflow"]
     assert "do not poll get_workflow_status" in descriptions["start_workflow"]
     assert "only when the user explicitly asks" in descriptions["get_workflow_status"]
@@ -373,7 +377,7 @@ def test_addendum_documents_workflow_notification_contract():
     user input and lets a future UI parse the wrapper for richer
     rendering without changing the agent contract.
     """
-    tools, addendum = integration.build_workflow_integration(
+    result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
         workflow_tools=[
@@ -386,6 +390,7 @@ def test_addendum_documents_workflow_notification_contract():
     # Addendum must name the envelope shape verbatim (so the LLM sees
     # the exact tags it will receive) and explain the one-shot
     # summarize-only contract.
+    addendum = result.chat_system_addendum
     assert "<workflow-notification>" in addendum
     assert "<workflow-id>" in addendum
     assert "<status>" in addendum
@@ -417,7 +422,7 @@ def test_addendum_documents_workflow_notification_contract():
     assert "[Workflow notification]" not in addendum
     # Tool descriptions must reinforce the same envelope so the LLM
     # sees it both at system-prompt time and at tool-call selection time.
-    descriptions = {tool.name: tool.description for tool in tools}
+    descriptions = {tool.name: tool.description for tool in result.workflow_tools}
     assert "<workflow-notification>" in descriptions["start_workflow"]
     assert "<workflow-notification>" in descriptions["get_workflow_status"]
     assert "[Workflow notification]" not in descriptions["start_workflow"]
