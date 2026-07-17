@@ -503,9 +503,144 @@ Triggered by: timer_trigger
 
 Trigger data:
 ```json
-{"past_due": false, "schedule": {...}}
+{
+  "past_due": false,
+  "schedule_status": {
+    "last": "2025-01-02T09:00:00+00:00",
+    "next": "2025-01-03T09:00:00+00:00"
+  },
+  "schedule": {"adjust_for_dst": true}
+}
 ```
 ````
+
+The runtime serializes public Azure Functions binding objects with per-binding adapters rather
+than using their Python `repr`. Text message bodies use `"body_encoding": "utf-8"`; binary
+bodies are base64-encoded with `"body_encoding": "base64"`. Metadata values are JSON-safe, with
+datetimes represented as ISO-8601 strings.
+
+### Binding-specific payloads
+
+**Blob (`InputStream`)** provides metadata only. The runtime does not call `read()` or put blob
+content in the prompt. The runtime also does **not** add a blob-reading tool automatically — if
+the agent needs the content, author one yourself (for example a function tool in your project's
+`tools/`, or an MCP server) that fetches the blob using the `name`/`uri`. Because `uri` is a
+plain blob URL with no SAS token, that tool must provide its own storage credentials — a
+connection string, or a managed identity granted the **Storage Blob Data Reader** role on the
+account/container.
+
+> Richer content access — a built-in in-memory blob-reading tool (no extra storage call or
+> credentials) and native multimodal ingestion (images/PDF/audio) — is tracked separately in
+> [Azure/azure-functions-bucees-planning#1200](https://github.com/Azure/azure-functions-bucees-planning/issues/1200).
+> The metadata-only payload here is the deliberate first step.
+
+```json
+{
+  "name": "uploads/x.png",
+  "uri": "https://storage.example.net/uploads/x.png",
+  "length": 18432,
+  "blob_properties": {"content_type": "image/png"},
+  "metadata": {"source": "upload"}
+}
+```
+
+**Queue (`QueueMessage`)** includes the decoded body and queue delivery metadata. If the body is
+valid JSON, `body_json` is included as a parsed value.
+
+```json
+{
+  "id": "queue-message-id",
+  "body": "{\"order_id\": 42}",
+  "body_encoding": "utf-8",
+  "body_json": {"order_id": 42},
+  "dequeue_count": 1,
+  "pop_receipt": "receipt"
+}
+```
+
+**Service Bus (`ServiceBusMessage`)** includes the decoded body plus canonical message and
+application properties.
+
+```json
+{
+  "body": "process order 42",
+  "body_encoding": "utf-8",
+  "message_id": "message-42",
+  "subject": "order.created",
+  "delivery_count": 1,
+  "application_properties": {"tenant": "contoso"},
+  "user_properties": {"priority": "high"}
+}
+```
+
+**Event Grid (`EventGridEvent`)** preserves the event envelope and parsed event data.
+
+```json
+{
+  "id": "event-42",
+  "topic": "/subscriptions/example",
+  "subject": "uploads/x.png",
+  "event_type": "Microsoft.Storage.BlobCreated",
+  "event_time": "2025-01-02T09:00:00+00:00",
+  "data_version": "1.0",
+  "data": {"url": "https://storage.example.net/uploads/x.png"}
+}
+```
+
+**Event Hubs (`EventHubEvent`)** and **Kafka (`KafkaEvent`)** include their decoded bodies and
+broker metadata.
+
+```json
+{
+  "body": "telemetry payload",
+  "body_encoding": "utf-8",
+  "partition_key": "device-7",
+  "sequence_number": 123,
+  "offset": "456",
+  "enqueued_time": "2025-01-02T09:00:00+00:00",
+  "iothub_metadata": {"device": "device-7"}
+}
+```
+
+```json
+{
+  "body": "order payload",
+  "body_encoding": "utf-8",
+  "key": "order-42",
+  "topic": "orders",
+  "partition": 2,
+  "offset": 456,
+  "timestamp": "2025-01-02T09:00:00Z",
+  "headers": [{"correlation-id": "abc"}]
+}
+```
+
+**Timer (`TimerRequest`)** is serialized from its public properties. `TimerRequest` does not
+provide `to_dict()`.
+
+```json
+{
+  "past_due": false,
+  "schedule_status": {
+    "last": "2025-01-02T09:00:00+00:00",
+    "next": "2025-01-03T09:00:00+00:00"
+  },
+  "schedule": {"adjust_for_dst": true}
+}
+```
+
+**Cosmos DB (`DocumentList`)**, **Azure SQL (`SqlRowList`)**, and **MySQL (`MySqlRowList`)**
+serialize as JSON arrays of document or row mappings, preserving null entries.
+
+```json
+[
+  {"id": "document-42", "status": "new"},
+  null
+]
+```
+
+When Event Hubs, Kafka, or Service Bus delivers a plain batch list, each message is serialized
+with the same per-message shape and the prompt contains a JSON array.
 
 HTTP-triggered agents use the same split: markdown body as instructions, request body data in the prompt.
 

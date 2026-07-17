@@ -277,7 +277,7 @@ Agent instructions in markdown...
 > [delegation specialists](#multi-agent-delegation-subagents) and never register their own trigger or
 > endpoints — every agent's slug is checked against the same app-wide index.
 
-When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and the serialized binding data:
+When a triggered function runs, the agent's markdown body is used as the system instructions. The prompt sent to the agent includes the trigger type and JSON-safe binding data:
 
 ```
 Triggered by: service_bus_queue_trigger
@@ -288,9 +288,15 @@ Trigger data:
 ```​
 ```
 
-This applies to all trigger types, including timers (whose data includes fields like `past_due`).
+For non-HTTP Azure Functions bindings, the runtime serializes public binding fields instead of the
+binding object's Python representation: Queue, Service Bus, Event Hubs, and Kafka bodies include
+an encoding marker; Event Grid includes its parsed `data`; timers include `past_due`,
+`schedule_status`, and `schedule`; and Cosmos DB/SQL batches become JSON arrays. Blob triggers
+include blob name, URI, properties, and metadata only; they do not read blob content, so provide a
+tool when an agent must fetch it. HTTP request-body handling remains separate.
 
-For a complete reference of all supported triggers and their parameters, see [docs/triggers.md](docs/triggers.md).
+For concrete payload examples and a complete reference of supported triggers and parameters, see
+[docs/triggers.md](docs/triggers.md).
 
 ### Trigger type resolution
 
