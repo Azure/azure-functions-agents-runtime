@@ -237,7 +237,7 @@ For non-HTTP Azure Functions bindings, the runtime serializes public binding fie
 binding object's Python representation: Queue, Service Bus, Event Hubs, and Kafka bodies include
 an encoding marker; Event Grid includes its parsed `data`; timers include `past_due`,
 `schedule_status`, and `schedule`; and Cosmos DB/SQL batches become JSON arrays. Blob triggers
-include blob name, URI, properties, and metadata only--they do not read blob content, so provide a
+include blob name, URI, properties, and metadata only; they do not read blob content, so provide a
 tool when an agent must fetch it. HTTP request-body handling remains separate.
 
 For concrete payload examples and a complete reference of supported triggers and parameters, see
