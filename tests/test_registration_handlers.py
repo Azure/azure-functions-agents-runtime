@@ -569,7 +569,7 @@ def test_total_tool_error_count_does_not_misclassify_sanitized_delegate_text() -
     # `_looks_like_tool_error` must NOT flag it, proving the two accounting
     # paths are additive rather than double-counting or mis-classifying.
     sanitized_message = (
-        "The 'billing' specialist could not complete this task (RuntimeError). "
+        "The 'billing' specialist could not complete this task. "
         "Consider trying again, rephrasing the request, or proceeding without it."
     )
     result = SimpleNamespace(

@@ -581,7 +581,7 @@ relevant, then give the customer a single consolidated answer.
 
 **Trust boundary:** `subagents` is an explicit **capability grant** from the app author. A delegated call runs in-process and does not pass through the specialist's own endpoint authorization (`auth_level`, etc.) — treat one deployed app as one trust domain, and only delegate to specialists you are comfortable exposing to anyone who can reach the coordinator.
 
-**Concurrency:** There is no hard cap on the number of declared specialists (Microsoft Agent Framework's own tool-calling loop is the only per-turn bound). Different specialists may run concurrently; concurrent calls to the *same* specialist are serialized.
+**Concurrency:** There is no hard cap on the number of declared specialists (Microsoft Agent Framework's own tool-calling loop is the only per-turn bound). Each delegate call builds its own specialist instance, so different specialists — and repeated or concurrent calls to the *same* specialist — all run independently and in parallel; there is no per-specialist lock or serialization.
 
 **Failure handling:** A specialist failure or specialist-local timeout is recoverable — the coordinator receives a sanitized error string and continues (it does not abort the whole request). Parent/request cancellation still propagates and aborts normally. See [`docs/observability.md`](./observability.md) for how delegated calls are traced and how errors are attributed.
 

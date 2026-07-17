@@ -192,7 +192,7 @@ name: Support Coordinator
 subagents:
   - agent: billing               # references agents/billing.agent.md (or billing.agent.md) by slug
     when: "Billing, invoices, refunds, or subscription questions"
-  - agent: tech-support
+  - agent: tech_support          # references agents/tech-support.agent.md — slug is the sanitized file stem
     when: "Technical troubleshooting or product bugs"
 ---
 

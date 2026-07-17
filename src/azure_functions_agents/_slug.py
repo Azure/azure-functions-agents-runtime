@@ -32,7 +32,7 @@ def _function_name_from_source(
     ``source_file`` there means something real is misconfigured), but
     ``config/merge.py``'s ``compose()`` must stay warning-free — see
     ``test_compose_defers_warning_only_validation`` — since directly
-    -constructed ``AgentSpec``s (common in unit tests) often omit
+    constructed ``AgentSpec``s (common in unit tests) often omit
     ``source_file`` and that is not itself a validation concern.
     """
     source_value = str(source_file).strip() if source_file is not None else ""
