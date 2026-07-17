@@ -248,3 +248,24 @@ def test_plain_list_recursively_serializes_message_batches() -> None:
             "user_properties": {},
         },
     ]
+
+
+def test_connector_trigger_string_and_bytes_payloads_serialize_cleanly() -> None:
+    # connector_trigger / generic_trigger route through the same non-HTTP handler, but the
+    # Functions worker delivers a generic binding's payload as a string (DataType.STRING) or
+    # bytes (DataType.BINARY) -- never an arbitrary SDK object. Both serialize cleanly.
+    assert serialize_trigger_data('{"event": "connect"}') == '{"event": "connect"}'
+    assert serialize_trigger_data("plain connector text") == "plain connector text"
+    assert _serialized(b'{"k": "v"}') == {"data": '{"k": "v"}', "data_encoding": "utf-8"}
+    assert _serialized(b"\xff\xfe\x00\x01") == {"data": "//4AAQ==", "data_encoding": "base64"}
+
+
+def test_opaque_object_uses_documented_last_resort_str() -> None:
+    # A value with no adapter / to_dict / model_dump and no str/bytes/dict/list shape falls
+    # back to str() by design. The Functions worker does not deliver such objects for
+    # connector/generic (or any) trigger; this documents the intentional last-resort behavior.
+    class _Opaque:
+        pass
+
+    opaque = _Opaque()
+    assert serialize_trigger_data(opaque) == str(opaque)
