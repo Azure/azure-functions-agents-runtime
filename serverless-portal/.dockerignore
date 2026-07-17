@@ -1,0 +1,17 @@
+# Build context excludes local artifacts so the image is reproducible.
+**/node_modules
+**/dist
+**/.env
+**/.env.*
+**/npm-debug.log*
+.git
+.gitignore
+Dockerfile
+.dockerignore
+infra
+deploy.ps1
+deploy.sh
+azure.yaml
+mocks
+proposals
+requirements.md

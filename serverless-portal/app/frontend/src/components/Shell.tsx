@@ -10,7 +10,7 @@ function initials(name: string): string {
 }
 
 export default function Shell({ children }: { children: ReactNode }) {
-  const { identity, subscriptions, selected, setSelected, loading, error } = useIdentity()
+  const { identity } = useIdentity()
 
   const itemClass = ({ isActive }: { isActive: boolean }) => 'item' + (isActive ? ' active' : '')
 
@@ -23,24 +23,6 @@ export default function Shell({ children }: { children: ReactNode }) {
           <span className="mark">⚡</span> Serverless Agent Portal
         </div>
         <div className="spacer" />
-        <label className="sub-picker" title="Azure subscription">
-          <span className="sub-picker-label">Subscription</span>
-          <select
-            value={selected}
-            onChange={(e) => setSelected(e.target.value)}
-            disabled={loading || !!error || subscriptions.length === 0}
-          >
-            {loading && <option value="">Loading…</option>}
-            {error && <option value="">Unavailable</option>}
-            {!loading &&
-              !error &&
-              subscriptions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-          </select>
-        </label>
         <div className="user" title={user ? `${user.name} · ${user.username}` : 'Not signed in'}>
           {user ? initials(user.name || user.username) : '…'}
         </div>

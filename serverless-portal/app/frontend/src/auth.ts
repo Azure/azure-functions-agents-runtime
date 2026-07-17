@@ -12,8 +12,8 @@ import {
 } from '@azure/msal-browser'
 import type { Configuration, RedirectRequest } from '@azure/msal-browser'
 
-// Same first-party app as Polaris (for now). Overridable via /api/auth/config.
-const DEFAULT_CLIENT_ID = '409cf302-c83f-43c3-94eb-ca581ab18c6d'
+// Owned "Serverless Portal" app registration. Overridable via /api/auth/config.
+const DEFAULT_CLIENT_ID = '0ceccceb-9c05-4953-9193-d94f9daa18d3'
 const DEFAULT_AUTHORITY = 'https://login.microsoftonline.com/organizations'
 
 // ARM scope — identical to Polaris. Consent is captured at sign-in so the token

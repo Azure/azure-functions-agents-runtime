@@ -24,8 +24,8 @@ subscriptions it scans.
 
 ### Sign-in configuration
 
-- The first-party app defaults to Polaris's client ID
-  `409cf302-c83f-43c3-94eb-ca581ab18c6d` and authority
+- The sign-in app defaults to the owned "Serverless Portal" client ID
+  `0ceccceb-9c05-4953-9193-d94f9daa18d3` and authority
   `https://login.microsoftonline.com/organizations`. Override on the backend
   with `MSAL_CLIENT_ID` / `MSAL_AUTHORITY` (served to the SPA at
   `/api/auth/config`).

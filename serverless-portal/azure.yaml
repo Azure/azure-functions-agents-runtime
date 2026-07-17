@@ -1,0 +1,22 @@
+# Azure Developer CLI (azd) project for the Serverless Agent Portal.
+#
+# Deploys the combined portal container image to Azure Container Apps. Run:
+#   azd up            (from this folder), or use ./deploy.ps1 / ./deploy.sh
+#
+# See infra/ for the Bicep templates that create the resources.
+
+# yaml-language-server: $schema=https://raw.githubusercontent.com/Azure/azure-dev/main/schemas/v1.0/azure.yaml.json
+
+name: serverless-portal
+metadata:
+  template: serverless-portal@0.1.0
+services:
+  portal:
+    project: .
+    host: containerapp
+    language: js
+    docker:
+      path: ./Dockerfile
+      context: .
+      # Build the image on ACR (az acr build) so a local Docker daemon isn't required.
+      remoteBuild: true

@@ -30,6 +30,13 @@ a:hover { text-decoration: underline; }
   cursor: pointer; }
 .header .sub-picker select:disabled { opacity: .6; cursor: default; }
 .header .sub-picker option { color: #111; }
+.toolbar .sub-picker { display: flex; align-items: center; gap: 8px; margin-right: auto; }
+.toolbar .sub-picker-label { font-size: 11px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--text-muted); }
+.toolbar .sub-picker select { background: var(--surface); color: var(--text); font-size: 13px;
+  border: 1px solid var(--border-strong); border-radius: 6px; padding: 7px 10px; max-width: 320px;
+  cursor: pointer; font-family: inherit; }
+.toolbar .sub-picker select:disabled { opacity: .6; cursor: default; }
 .header .user { width: 30px; height: 30px; border-radius: 50%; background: #2b7fc0;
   display: grid; place-items: center; font-size: 13px; font-weight: 600; }
 .header .btn.ghost { color: #fff; border-color: rgba(255,255,255,.28); }
