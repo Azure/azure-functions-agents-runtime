@@ -3,7 +3,13 @@ import { api, type LiveDiscovery } from '../api'
 import { useIdentity } from '../identity'
 
 export default function AgentsPage() {
-  const { subscriptions, selected } = useIdentity()
+  const {
+    subscriptions,
+    selected,
+    setSelected,
+    loading: identityLoading,
+    error: identityError,
+  } = useIdentity()
   const [data, setData] = useState<LiveDiscovery | null>(null)
   const [error, setError] = useState<string | null>(null)
 
@@ -41,6 +47,24 @@ export default function AgentsPage() {
       </p>
 
       <div className="toolbar">
+        <label className="sub-picker" title="Azure subscription">
+          <span className="sub-picker-label">Subscription</span>
+          <select
+            value={selected}
+            onChange={(e) => setSelected(e.target.value)}
+            disabled={identityLoading || !!identityError || subscriptions.length === 0}
+          >
+            {identityLoading && <option value="">Loading…</option>}
+            {identityError && <option value="">Unavailable</option>}
+            {!identityLoading &&
+              !identityError &&
+              subscriptions.map((s) => (
+                <option key={s.id} value={s.id}>
+                  {s.name}
+                </option>
+              ))}
+          </select>
+        </label>
         <button className="btn" onClick={load} disabled={!selected}>
           ⟳ Refresh
         </button>
