@@ -69,9 +69,9 @@ app.get(
 // Auth config (public) — MSAL bootstrap values for the SPA.
 // ---------------------------------------------------------------------------
 
-// The app registration the browser signs in with (owned "Serverless Portal");
-// override via MSAL_CLIENT_ID / MSAL_AUTHORITY.
-const MSAL_CLIENT_ID = process.env.MSAL_CLIENT_ID || '0ceccceb-9c05-4953-9193-d94f9daa18d3'
+// Local-dev default: Polaris's already-tenant-consented app (works without admin
+// consent). Deploys set MSAL_CLIENT_ID to the owned "Serverless Portal" app.
+const MSAL_CLIENT_ID = process.env.MSAL_CLIENT_ID || '409cf302-c83f-43c3-94eb-ca581ab18c6d'
 const MSAL_AUTHORITY =
   process.env.MSAL_AUTHORITY || 'https://login.microsoftonline.com/organizations'
 
