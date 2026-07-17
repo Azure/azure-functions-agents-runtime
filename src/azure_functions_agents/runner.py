@@ -724,25 +724,47 @@ def _build_delegate_tool(
                 "proceeding without it."
             )
 
-        specialist_agent = _build_delegated_agent(resolved, capabilities)
-        call_start = loop.time()
+        # `call_start` stays unbound (`None`) until the specialist `Agent` is
+        # actually built and `wait_for` is about to be dispatched — see the
+        # `except TimeoutError` branch below, which treats a still-`None`
+        # `call_start` (i.e. `_build_delegated_agent` itself raised) the same
+        # as an early inner exception: never a genuine `wait_for` deadline
+        # event, since the timed run never even started.
+        call_start: float | None = None
         try:
+            # Building the specialist `Agent` (client construction, tool
+            # assembly) is inside this `try` too — not before it — so a
+            # construction failure (e.g. a misconfigured specialist model)
+            # is caught by the same `except Exception` branch below and
+            # returned as a recoverable, sanitized failure (FRD 0006
+            # Decision #12) instead of propagating unhandled out of this
+            # tool call and aborting the whole coordinator turn.
+            specialist_agent = _build_delegated_agent(resolved, capabilities)
+            call_start = loop.time()
             response = await asyncio.wait_for(specialist_agent.run(task_text), timeout=effective_timeout)
         except asyncio.CancelledError:
             # Parent/request cancellation, not a specialist-local timeout —
-            # never recorded as a (recoverable) delegate error (Decision #12
+            # never recorded as a (recoverable) delegate *error* (Decision #12
             # and `_DelegateErrorTracker`'s docstring are explicit that only
-            # *recoverable* failures count). Annotate the outcome for
-            # telemetry's sake only, then re-raise immediately so the
-            # cancellation still propagates and aborts the run — this is an
-            # observability side-effect on the way out, never a swallow. No
-            # explicit stream/span finalization call is needed here (unlike
-            # the old streaming design): a non-streaming `agent.run()`'s
-            # OTel spans are opened with an ordinary `with`/context-manager,
-            # which closes deterministically on any exception —
-            # `asyncio.CancelledError` included — via the standard `with`
-            # statement's `__exit__` guarantee (verified against installed
-            # `agent-framework-core==1.3.0`; see FRD 0006 §5 Decision #20).
+            # *recoverable* failures count there). It IS recorded as a
+            # delegate *call*, though (`error=False` only suppresses the
+            # error counter, not the call counter — see
+            # `record_delegate_call`'s docstring): the specialist call was
+            # genuinely dispatched (this branch is only reachable once
+            # `wait_for` is actually awaiting `specialist_agent.run(...)`),
+            # so it must not be invisible to the call metric. Annotate the
+            # outcome for telemetry's sake too, then re-raise immediately so
+            # the cancellation still propagates and aborts the run — this is
+            # an observability side-effect on the way out, never a swallow.
+            # No explicit stream/span finalization call is needed here
+            # (unlike the old streaming design): a non-streaming
+            # `agent.run()`'s OTel spans are opened with an ordinary
+            # `with`/context-manager, which closes deterministically on any
+            # exception — `asyncio.CancelledError` included — via the
+            # standard `with` statement's `__exit__` guarantee (verified
+            # against installed `agent-framework-core==1.3.0`; see FRD 0006
+            # §5 Decision #20).
+            record_delegate_call(error=False)
             span.set_attribute("af.delegate.outcome", "cancelled")
             raise
         except TimeoutError as exc:
@@ -754,13 +776,21 @@ def _build_delegate_tool(
             # two apart. Compare elapsed wall time against
             # `effective_timeout`: an inner exception typically surfaces
             # well before the deadline, while a real `wait_for` expiry fires
-            # essentially exactly at it.
-            elapsed = loop.time() - call_start
-            if elapsed < effective_timeout - _INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS:
+            # essentially exactly at it. `call_start is None` means
+            # `_build_delegated_agent` itself raised this `TimeoutError`
+            # before the timed run ever started — unambiguously not a
+            # genuine deadline event either, so it takes the same generic-
+            # error branch as an early inner exception.
+            elapsed = None if call_start is None else loop.time() - call_start
+            if (
+                elapsed is None
+                or elapsed < effective_timeout - _INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS
+            ):
                 # Not actually a coordinator-budget/deadline-expiry event —
-                # an ordinary specialist failure that happens to be a
-                # `TimeoutError` instance. Classify like any other
-                # recoverable delegate failure instead of as `outcome=timeout`.
+                # an ordinary specialist failure (construction or inner call)
+                # that happens to be a `TimeoutError` instance. Classify like
+                # any other recoverable delegate failure instead of as
+                # `outcome=timeout`.
                 return _record_generic_delegate_failure(span, tracker, slug, exc)
             # Specialist-local (or coordinator-budget) timeout: recoverable —
             # the coordinator continues (Decision #12).

@@ -203,15 +203,18 @@ sandbox/`web_request` tools:
 | Attribute | Meaning |
 | --- | --- |
 | `af.delegate.specialist` | The specialist's slug (the same identity used for its `delegate_<slug>` tool name). |
-| `af.delegate.outcome` | `success`, `error`, or `timeout`. |
+| `af.delegate.outcome` | `success`, `error`, `timeout`, or `cancelled`. |
 | `af.delegate.task_bytes` | Size of the `task` argument passed to the specialist. |
 | `af.delegate.response_bytes` | Size of the specialist's response text (only set on success). |
 | `af.delegate.task` / `.result` | **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 
-Plus `af.fault_domain=delegate` on a failing span: the specialist raised, or the *effective*
+Plus `af.fault_domain=delegate` on a failing span: the specialist raised (including a failure
+*constructing* the specialist itself), or the *effective*
 delegation timeout — `min(specialist timeout, coordinator's remaining time)` — was exceeded. A
-**parent/request cancellation** (`asyncio.CancelledError`) is different: it propagates untouched and
-aborts the whole run, rather than being recorded as a delegate error (FRD 0006 Decision #12).
+**parent/request cancellation** (`asyncio.CancelledError`) is different: the handler tags the span
+`outcome=cancelled` and still counts it in the delegate *call* metric (it was genuinely dispatched),
+but never converts it into a recoverable error — it re-raises immediately and aborts the whole run,
+rather than being recorded as a delegate error (FRD 0006 Decision #12).
 
 **Error accounting.** `_looks_like_tool_error` (the sandbox/`web_request` JSON `{"error": …}` /
 non-empty-`stderr` heuristic) does not understand a specialist's sanitized free-text failure message,

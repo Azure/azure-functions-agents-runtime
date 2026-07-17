@@ -650,6 +650,30 @@ async def _build_single_delegate_tool(
 
 
 @pytest.mark.asyncio
+async def test_delegate_tool_schema_has_a_single_required_string_task_field(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """N2: the built ``FunctionTool``'s own JSON schema — what the
+    coordinator's model actually sees — must declare exactly one required
+    string parameter named ``task``, mirroring ``as_tool()``'s old
+    ``arg_name="task"`` contract even though this schema is now Pydantic-
+    derived (``_DelegateTaskParams``) rather than a hand-assembled raw
+    JSON-schema dict.
+    """
+
+    async def respond(task: str) -> str:
+        return "unused"
+
+    tool, _tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
+
+    schema = tool.parameters()
+    assert schema["type"] == "object"
+    assert set(schema["properties"]) == {"task"}
+    assert schema["properties"]["task"]["type"] == "string"
+    assert schema["required"] == ["task"]
+
+
+@pytest.mark.asyncio
 async def test_delegate_adapter_success_records_span_and_metrics(monkeypatch: pytest.MonkeyPatch) -> None:
     span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)
@@ -681,6 +705,51 @@ async def test_delegate_adapter_recovers_from_specialist_exception_with_sanitize
 
     tool, tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
 
+    result = await tool.func(task="invoice #42")
+
+    assert "billing" in result
+    assert "hunter2" not in result  # sanitized: raw detail never reaches the model
+    assert tracker.count == 1
+    assert calls == [True]
+    assert span.attributes["af.delegate.outcome"] == "error"
+    assert span.errors and span.errors[0][1] == obs.FaultDomain.DELEGATE
+
+
+@pytest.mark.asyncio
+async def test_delegate_adapter_recovers_from_specialist_construction_failure_with_sanitized_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """B1: a failure *building* the specialist ``Agent`` (e.g. a misconfigured
+    specialist model failing chat-client construction, or tool assembly
+    raising) must be just as recoverable as a failure raised from actually
+    *running* the specialist — sanitized, telemetry-recorded, and returned as
+    a normal tool result string — never an unhandled exception that would
+    propagate out of this tool call and abort the whole coordinator turn.
+
+    ``_build_delegated_agent(...)`` lives inside the same ``try`` as the run
+    itself (see ``_build_delegate_tool``) specifically so this holds; this
+    test monkeypatches it to raise directly, rather than making the
+    specialist's own ``run()`` raise (that's the sibling test above), to
+    prove the *construction* step specifically is covered.
+    """
+    span = _install_span_capture(monkeypatch)
+    calls = _install_counter_capture(monkeypatch)
+
+    def _raising_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+        raise RuntimeError("client secret is hunter2")
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", _raising_build_delegated_agent)
+
+    catalog = _catalog_of(("billing", _make_resolved(slug="billing")))
+    loop = asyncio.get_event_loop()
+    tools, tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
+    )
+    tool = tools[0]
+
+    # Must return the sanitized, recoverable string — NOT raise (a raise here
+    # would propagate out of this tool call and abort the whole coordinator
+    # turn, which is exactly the B1 bug this test guards against).
     result = await tool.func(task="invoice #42")
 
     assert "billing" in result
@@ -749,16 +818,32 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
         coordinator_deadline=loop.time() - 100.0,  # already expired
     )
 
+    # N1: re-wrap `_build_delegated_agent` itself (currently the
+    # `_FakeSpecialistAgent`-returning lambda `_build_single_delegate_tool`
+    # installed) with a call counter — proving the pre-dispatch
+    # budget-exhausted check returns *before ever calling the builder at
+    # all*, not just before running the specialist's `respond()` body.
+    build_calls = 0
+    original_build_delegated_agent = runner._build_delegated_agent
+
+    def _counting_build_delegated_agent(resolved: ResolvedAgent, caps: AgentCapabilities) -> Any:
+        nonlocal build_calls
+        build_calls += 1
+        return original_build_delegated_agent(resolved, caps)
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", _counting_build_delegated_agent)
+
     result = await tool.func(task="invoice #42")
 
     assert "did not respond in time" in result
     assert tracker.count == 1
     assert body_ran is False  # the pre-dispatch check returns before the specialist is ever built/called
+    assert build_calls == 0  # ...and never even calls _build_delegated_agent
     assert span.attributes["af.delegate.outcome"] == "timeout"
 
 
 @pytest.mark.asyncio
-async def test_delegate_adapter_propagates_cancellation_without_recording_a_delegate_error(
+async def test_delegate_adapter_propagates_cancellation_recording_a_call_but_not_an_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     span = _install_span_capture(monkeypatch)
@@ -778,9 +863,13 @@ async def test_delegate_adapter_propagates_cancellation_without_recording_a_dele
         await task
 
     # Parent/request cancellation propagates + aborts (Decision #12) — it is
-    # never mistaken for a recoverable specialist failure.
+    # never mistaken for a recoverable specialist failure, so the
+    # *error* tracker/counter stay at zero.
     assert tracker.count == 0
-    assert calls == []
+    # S1: a cancelled call was still genuinely dispatched to the specialist,
+    # so it must not be invisible to the delegate *call* metric — recorded
+    # with error=False (a call, not an error).
+    assert calls == [False]
     # ... but it IS still annotated on the span (B4): telemetry should be
     # able to tell a cancelled delegate call apart from one that simply
     # never got another outcome recorded.
@@ -1333,8 +1422,9 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_outer_cancellat
     closes deterministically from the ``except asyncio.CancelledError``
     branch too, not only the ``TimeoutError`` branch, with no explicit
     finalize call needed either way. Cancellation is never a recoverable
-    delegate failure (Decision #12), so the tracker/counter must NOT record
-    anything.
+    delegate *failure* (Decision #12), so the error tracker/counter must NOT
+    record anything — but the call itself (genuinely dispatched before being
+    cancelled) IS still recorded as a call (S1).
     """
     exporter = _install_maf_tracer(monkeypatch)
     span = _install_span_capture(monkeypatch)
@@ -1363,7 +1453,7 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_outer_cancellat
         await task
 
     assert tracker.count == 0
-    assert calls == []
+    assert calls == [False]
     assert span.attributes["af.delegate.outcome"] == "cancelled"
 
     finished = exporter.get_finished_spans()

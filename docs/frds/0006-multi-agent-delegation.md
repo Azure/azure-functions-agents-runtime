@@ -338,7 +338,11 @@ outside delegation's control.
 
 The runtime treats two failure classes differently:
 
-- **Specialist failure or specialist-local timeout is recoverable.** Return it
+- **Specialist failure or specialist-local timeout is recoverable.** This
+  covers a failure *building* the specialist `Agent` (e.g. a misconfigured
+  specialist model) just as much as a failure or timeout from actually
+  *running* it — both are inside the same recoverable-failure boundary, so
+  neither can propagate unhandled out of the tool call. Return it
   as a recoverable tool error in `tool_end`. The coordinator can retry, choose
   another route, or apologize.
 - **Parent or request cancellation propagates.** A coordinator-turn timeout,
@@ -353,12 +357,12 @@ Existing SSE order remains `tool_start` then `tool_end`, with recoverable errors
 inside the `tool_end` result.
 
 A thin, hand-written handler guarantees this split (§5 Decision #20) — it
-does not rely on or wrap pinned `as_tool()` behavior; it awaits the
-specialist's plain, non-streaming `Agent.run(task)` directly inside
-`asyncio.wait_for`, catching `asyncio.CancelledError` separately from
-`TimeoutError`/`Exception`. Because each call builds its own specialist
-`Agent` instance (§4.7), no per-specialist serialization is needed either —
-see §4.11.
+does not rely on or wrap pinned `as_tool()` behavior; it builds the
+specialist `Agent` and awaits its plain, non-streaming `Agent.run(task)`
+directly inside `asyncio.wait_for`, both inside the same `try`, catching
+`asyncio.CancelledError` separately from `TimeoutError`/`Exception`. Because
+each call builds its own specialist `Agent` instance (§4.7), no
+per-specialist serialization is needed either — see §4.11.
 
 ### 4.7 Build live agents per delegate tool-call
 
@@ -542,7 +546,11 @@ web_request), the `delegate_<slug>` tool's handler enriches the delegate call:
 - `af.delegate.*` span attributes (at least the specialist slug and outcome) on
   the `execute_tool delegate_<slug>` span, a dedicated `FaultDomain` value for a
   failed delegated call, and delegate call/error **metrics** parallel to
-  `record_sandbox_execution` / `record_web_request`.
+  `record_sandbox_execution` / `record_web_request`. The call metric is
+  recorded on every dispatched attempt, including one stopped by a parent/
+  request cancellation (`outcome=cancelled`) — cancellation is exempt only
+  from the *error* counter (Decision #12), never from the call counter, so a
+  cancelled delegate call is never invisible to call-volume metrics.
 - Correct error accounting: today `_looks_like_tool_error` expects a JSON
   `{"error": …}` / `stderr` envelope (the sandbox/web_request shape) and would
   mis-count a specialist's sanitized free-text failure (§4.6, Decision #12). The
@@ -609,11 +617,11 @@ handoff participant may itself declare `subagents` and delegate.
 | - | -------- | ------------------ | ------ | ---------- | ---- |
 | 1 | v1 pattern | manual routing / delegation (`as_tool`) / true handoff (`HandoffBuilder`) | **Delegation** | Human (user) | 2026-07-14 |
 | 2 | Target interaction | "one assistant throughout" vs "specialist takes over" | **One assistant throughout** (→ delegation) | Human (user) | 2026-07-14 |
-| 3 | Dependency for v1 | none (`as_tool` in core 1.3.x) / orchestrations beta / orchestrations stable + core bump | **None** (use `as_tool`, no new dep) | Agent (proposed) | 2026-07-14 |
+| 3 | Dependency for v1 | none (`as_tool` in core 1.3.x) / orchestrations beta / orchestrations stable + core bump | **None** (use `as_tool`, no new dep — mechanism later revised by #20, conclusion unchanged: still no new dependency) | Agent (proposed) | 2026-07-14 |
 | 4 | Handoff disposition | drop / "maybe later" / committed fast-follow / v1 preview | **Committed fast-follow, chat-scoped, designed-for in v1** | Human (user) | 2026-07-14 |
 | 5 | Authoring field name | `subagents` / `delegates_to` / `agents` / reuse `workflows` | **`subagents`** (avoids `workflows` collision) | Human (user) | 2026-07-15 |
 | 6 | Mutual / peer references (A↔B) | reject cycles / single-level (structural) / nested + depth cap | **Single-level in v1**, enforced structurally (a delegated specialist has no `delegate_*` tools wired), so mutual refs are benign and no cycle detection is needed; nesting is a later extension | Human (user) | 2026-07-14 |
-| 7 | Delegation vs handoff coexistence | either-or / both coexist + compose | **Coexist + compose** (a handoff participant may hold `as_tool` sub-agents) | Human (user) | 2026-07-14 |
+| 7 | Delegation vs handoff coexistence | either-or / both coexist + compose | **Coexist + compose** (a handoff participant may itself declare `subagents` and delegate) | Human (user) | 2026-07-14 |
 | 8 | HITL in v1 | support / none | **None** — no HITL/approval exists in the runtime today (verified); v1 sub-agents run autonomously; HITL is net-new and lands with the handoff fast-follow | Agent (proposed — confirm) | 2026-07-14 |
 | 9 | Participant identity | file-stem slug only / display `name` / stable `id` field / relative path | **File-stem slug only** (no `id` field — see #16); computed pre-registration; slugs are globally unique — any collision fails fast at startup (see #17) — so a reference resolves to exactly one agent | Human (user) | 2026-07-15 |
 | 10 | Delegation trust model | coordinator-authority / specialist opt-in / auth-level guardrail | **Coordinator-authority** — `subagents` is an author capability grant; one app = one trust domain; specialist endpoint auth not consulted | Human (user) | 2026-07-14 |
@@ -625,7 +633,7 @@ handoff participant may itself declare `subagents` and delegate.
 | 16 | Drop `id` and `tool_name` for v1 (simplicity) | keep both / drop both / drop one | **Drop both** — identity is the file-stem slug (collisions fail fast app-wide — see #17); the delegated tool is always `delegate_<slug>`. Removes a field and the id/name/slug confusion; both are re-addable later as non-breaking additions if a real need appears | Human (user) | 2026-07-15 |
 | 17 | Same-stem slug collision handling (base runtime) | keep auto-suffix+warn / fail-fast app-wide / open separate issue | **Fail-fast app-wide** — replace `_naming.py`'s silent auto-suffix with a startup error, unifying the contract with duplicate skill/workflow-tool handling and guaranteeing unique slugs for `subagents` references. **Breaking**: existing apps with same-stem files must rename one (release-note item) | Human (user) | 2026-07-15 |
 | 18 | Who may declare `subagents` | any independently runnable agent / main-agent-only (mirror FRD 0004 `workflows.enabled`) | **Any independently runnable agent** may declare `subagents`. Single-level (#6) still applies, so when that agent is itself invoked as a sub-agent its `subagents` are not wired and it cannot delegate onward. Simpler than a main/non-main split and matches the cross-framework norm (#15) | Human (user) | 2026-07-15 |
-| 19 | Observability approach | new bespoke tracing / rely on existing auto-instrumentation + add delegation enrichment / defer all enrichment | **Rely on auto-instrumentation, add delegation enrichment** — the runtime already enables MAF `gen_ai` spans and Azure Monitor export (`_observability.py`), and `as_tool()`→`run()` + `FunctionTool.invoke()` auto-nest a delegated call under one trace/`OperationId` with no new tracing code (verified against MAF tag `python-1.3.0` and the Functions Python worker's context attach). v1 additionally adds `af.delegate.*` attributes, delegate metrics, and explicit delegated-error accounting for parity with sandbox/web_request. Token roll-up across the boundary and SSE stream-through of specialist internals are documented limitations | Human (user) | 2026-07-15 |
+| 19 | Observability approach | new bespoke tracing / rely on existing auto-instrumentation + add delegation enrichment / defer all enrichment | **Rely on auto-instrumentation, add delegation enrichment** — the runtime already enables MAF `gen_ai` spans and Azure Monitor export (`_observability.py`), and the delegate tool calling `Agent.run()` (originally via `as_tool()`→`run()`; the hand-written tool added by #20 calls `run()` directly, same effect) + `FunctionTool.invoke()` auto-nest a delegated call under one trace/`OperationId` with no new tracing code (verified against MAF tag `python-1.3.0` and the Functions Python worker's context attach). v1 additionally adds `af.delegate.*` attributes, delegate metrics, and explicit delegated-error accounting for parity with sandbox/web_request. Token roll-up across the boundary and SSE stream-through of specialist internals are documented limitations | Human (user) | 2026-07-15 |
 | 20 | Delegate execution mechanism, revisited post-implementation | keep `as_tool()` + per-specialist `asyncio.Lock` + `specialist_agent.run` monkeypatch/stream-capture (as first implemented, #1/#3) / rewrite as a hand-written non-streaming `@tool(schema=...)` function tool, building a fresh specialist `Agent` per call | **Hand-written non-streaming tool, built fresh per call** — a delegate only ever needs the specialist's final text (§4.12's "SSE is a black box at the boundary" was already a non-goal), so there is no reason to run the specialist through `Agent.run(stream=True, ...)` at all, which is all `as_tool()`'s own `_agent_wrapper` ever did internally before `await`-ing `stream.get_final_response()` back into one string anyway. That streaming requirement was the *only* reason the first implementation needed to monkeypatch `specialist_agent.run` (to capture the `ResponseStream` `as_tool()` builds internally, so it could be force-finalized on timeout/cancellation — `ResponseStream.__anext__`'s cleanup hooks only fire from its own `except StopAsyncIteration`/`except Exception` branches, never `BaseException`) and, because the specialist `Agent` object was shared across calls in a turn, to serialize concurrent same-specialist calls behind a per-specialist `asyncio.Lock` so that monkeypatch rebind was race-free. Switching to plain, non-streaming `agent.run(task)` — verified against installed `agent-framework-core==1.3.0` (`AgentTelemetryLayer._run`, `ChatTelemetryLayer._get_response` in `agent_framework.observability`) to close its OTel spans deterministically on *any* exception, `asyncio.CancelledError` included, via the ordinary `with`/context-manager `__exit__` guarantee (no `BaseException` gap like the streaming path has) — removes the need to capture or finalize a stream at all. Building the specialist `Agent` fresh on every call, instead of once per tool-build and reused, removes the shared mutable state the lock existed to protect, so the lock is removed too: same-specialist calls now simply run in parallel, each on its own instance (revises #14). Net result: less code, a cleaner and more debuggable per-call span timeline (each specialist run's span opens/closes at one well-defined point per call, on every path — success, recoverable failure, timeout, cancel), and no behavior change visible to the coordinator or its model | Human (user) | 2026-07-16 |
 
 ## 6. Test plan
