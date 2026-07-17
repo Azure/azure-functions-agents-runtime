@@ -62,3 +62,5 @@ jobs:
         env:
           AzureWebJobsStorage: 'UseDevelopmentStorage=true'
           FUNCTIONS_WORKER_RUNTIME: 'python'
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)

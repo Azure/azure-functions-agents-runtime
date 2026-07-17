@@ -117,6 +117,90 @@ def ensure_local_settings(app_dir: Path) -> None:
     )
 
 
+# Provider config the LLM-backed E2E tests care about. In CI the Foundry
+# endpoint/model arrive as *pipeline* variables (not in the committed
+# ``local.settings.template.json``), so they must be pushed into the app's
+# ``local.settings.json`` for the worker to see them.
+PROVIDER_ENV_KEYS: tuple[str, ...] = (
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER",
+    "AZURE_FUNCTIONS_AGENTS_MODEL",
+    "FOUNDRY_PROJECT_ENDPOINT",
+    "FOUNDRY_MODEL",
+    "OPENAI_API_KEY",
+    "OPENAI_CHAT_MODEL_ID",
+    "AZURE_OPENAI_ENDPOINT",
+    "AZURE_OPENAI_API_KEY",
+    "AZURE_OPENAI_DEPLOYMENT",
+    "AZURE_OPENAI_API_VERSION",
+    "AZURE_CLIENT_ID",
+)
+
+
+def overlay_provider_settings(app_dir: Path) -> dict[str, str]:
+    """Copy non-empty provider env vars into the app's ``local.settings.json``.
+
+    The committed template ships empty placeholder provider values (e.g.
+    ``FOUNDRY_PROJECT_ENDPOINT: ""``). When ``func start`` applies those to the
+    worker they *shadow* any inherited process environment, so passing the real
+    pipeline values through the process env alone is not enough. Writing them
+    into ``local.settings.json`` (which is gitignored, so this never commits a
+    real endpoint) makes the worker pick them up reliably.
+
+    Only keys present *and* non-empty in ``os.environ`` are written, so local
+    development with real values already in ``local.settings.json`` is left
+    untouched. Returns the mapping of keys/values that were applied.
+    """
+    ensure_local_settings(app_dir)
+    settings_path = app_dir / "local.settings.json"
+    data = json.loads(settings_path.read_text(encoding="utf-8"))
+    values = data.get("Values")
+    if not isinstance(values, dict):
+        values = {}
+        data["Values"] = values
+
+    applied: dict[str, str] = {}
+    for key in PROVIDER_ENV_KEYS:
+        val = (os.environ.get(key) or "").strip()
+        if val:
+            values[key] = val
+            applied[key] = val
+
+    if applied:
+        settings_path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+    return applied
+
+
+def configured_provider(app_dir: Path) -> str | None:
+    """Return the app's configured MAF provider label, or ``None`` if none is set.
+
+    Reads the app's resolved ``local.settings.json`` (call
+    :func:`overlay_provider_settings` first so pipeline env vars are reflected),
+    falling back to the committed template. Returns a label such as ``foundry``
+    when a provider endpoint/key is present and non-empty; ``None`` otherwise so
+    LLM-backed tests can skip cleanly.
+    """
+    settings_path = app_dir / "local.settings.json"
+    if not settings_path.exists():
+        settings_path = app_dir / "local.settings.template.json"
+    if not settings_path.exists():
+        return None
+    try:
+        values = json.loads(settings_path.read_text(encoding="utf-8")).get("Values", {})
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(values, dict):
+        return None
+
+    explicit = str(values.get("AZURE_FUNCTIONS_AGENTS_PROVIDER") or "").strip().lower()
+    if str(values.get("AZURE_OPENAI_ENDPOINT") or "").strip():
+        return explicit or "azure_openai"
+    if str(values.get("FOUNDRY_PROJECT_ENDPOINT") or "").strip():
+        return explicit or "foundry"
+    if str(values.get("OPENAI_API_KEY") or "").strip():
+        return explicit or "openai"
+    return None
+
+
 def _terminate(proc: subprocess.Popen[str]) -> None:
     """Stop ``func`` and its worker child process(es)."""
     if proc.poll() is not None:
