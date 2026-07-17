@@ -459,7 +459,7 @@ def test_register_agent_accepts_nested_auth_string_shorthand(
     resolved = _resolved_agent(
         trigger=TriggerSpec(
             type="http_trigger",
-            args={"route": f"{auth}-reports", "auth": auth},
+            args={"route": f"{auth}-reports", "http_auth": auth},
         )
     )
     app = FakeFunctionApp()
@@ -496,7 +496,7 @@ def test_register_agent_accepts_nested_auth_object_with_entra_allowlists(
             type="http_trigger",
             args={
                 "route": "secured",
-                "auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}},
+                "http_auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}},
             },
         )
     )
@@ -526,7 +526,7 @@ def test_register_agent_nested_auth_wins_over_flat_auth_level(
     resolved = _resolved_agent(
         trigger=TriggerSpec(
             type="http_trigger",
-            args={"route": "secured", "auth": "entra", "auth_level": "function"},
+            args={"route": "secured", "http_auth": "entra", "auth_level": "function"},
         )
     )
     app = FakeFunctionApp()
@@ -581,7 +581,7 @@ def test_register_agent_raises_on_invalid_nested_auth(
     resolved = _resolved_agent(
         trigger=TriggerSpec(
             type="http_trigger",
-            args={"route": "reports", "auth": {"mode": "nope"}},
+            args={"route": "reports", "http_auth": {"mode": "nope"}},
         )
     )
     app = FakeFunctionApp()
@@ -590,7 +590,7 @@ def test_register_agent_raises_on_invalid_nested_auth(
         lambda *args, **kwargs: _stub_handler,
     )
 
-    with pytest.raises(ValueError, match="invalid http_trigger 'auth'"):
+    with pytest.raises(ValueError, match="invalid http_trigger 'http_auth'"):
         register_agent(app, resolved, AgentCapabilities())
 
 

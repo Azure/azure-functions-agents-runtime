@@ -609,82 +609,6 @@ def test_register_builtin_endpoints_mcp_with_workflows_has_client_parameter(
     assert mcp_routes[0]["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
 
-def _mcp_agent(tmp_path: Path, auth: EndpointAuthConfig) -> ResolvedAgent:
-    source_file = tmp_path / "test_agent.agent.md"
-    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
-    return _resolved_agent(
-        name="Test Agent",
-        is_main=False,
-        builtin_endpoints=BuiltinEndpointsConfig(mcp=True, auth=auth),
-        source_file=source_file,
-    )
-
-
-def test_mcp_entra_auth_logs_platform_enforcement(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """entra + mcp surfaces that the webhook is enforced at the platform (Easy Auth)."""
-    app = FakeFunctionApp()
-    resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode="entra"))
-
-    with caplog.at_level(logging.INFO):
-        register_builtin_endpoints(app, resolved, AgentCapabilities())
-
-    assert any(
-        "enforced at the platform" in record.getMessage()
-        and record.levelno == logging.INFO
-        for record in caplog.records
-    )
-
-
-@pytest.mark.parametrize("mode", ["function", "anonymous"])
-def test_mcp_non_system_key_mode_warns_that_auth_mode_is_ignored(
-    mode: str, caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """function/anonymous + mcp warn that the host-owned webhook ignores auth.mode."""
-    app = FakeFunctionApp()
-    resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode=mode))
-
-    with caplog.at_level(logging.WARNING):
-        register_builtin_endpoints(app, resolved, AgentCapabilities())
-
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.WARNING
-    ]
-    assert any(
-        f"auth.mode={mode}" in message
-        and "does not apply to the host-owned MCP webhook" in message
-        and "x-functions-key" in message
-        for message in warnings
-    )
-
-
-def test_mcp_admin_mode_warns_master_key_diverges_from_system_key(
-    caplog: pytest.LogCaptureFixture, tmp_path: Path
-) -> None:
-    """admin maps to the master key, which differs from the extension system key."""
-    app = FakeFunctionApp()
-    resolved = _mcp_agent(tmp_path, EndpointAuthConfig(mode="admin"))
-
-    with caplog.at_level(logging.WARNING):
-        register_builtin_endpoints(app, resolved, AgentCapabilities())
-
-    warnings = [
-        record.getMessage()
-        for record in caplog.records
-        if record.levelno == logging.WARNING
-    ]
-    assert any(
-        "auth.mode=admin" in message
-        and "master key" in message
-        and "do not distribute the master key" in message
-        and "x-functions-key" in message
-        for message in warnings
-    )
-
-
 def test_workflows_enabled_passes_client_to_run_builtin_agent(
     monkeypatch: Any, tmp_path: Path
 ) -> None:
@@ -761,7 +685,7 @@ def _chat_api_agent(tmp_path: Path, auth: EndpointAuthConfig) -> ResolvedAgent:
     return _resolved_agent(
         name="Test Agent",
         is_main=False,
-        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True, auth=auth),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True, http_auth=auth),
         source_file=source_file,
     )
 

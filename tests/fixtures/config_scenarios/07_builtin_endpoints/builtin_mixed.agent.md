@@ -9,7 +9,7 @@ builtin_endpoints:
   debug_chat_ui: true
   chat_api: true
   mcp: false
-  auth:
+  http_auth:
     mode: entra
     entra:
       tenant_id: "00000000-0000-0000-0000-000000000000"

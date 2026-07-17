@@ -61,7 +61,7 @@ class EndpointAuthConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def _coerce_shorthand(cls, value: Any) -> Any:
-        # Accept a bare string shorthand, e.g. ``auth: entra`` -> ``{mode: entra}``.
+        # Accept a bare string shorthand, e.g. ``http_auth: entra`` -> ``{mode: entra}``.
         if isinstance(value, str):
             return {"mode": value}
         return value
@@ -75,17 +75,19 @@ class BuiltinEndpointsConfig(BaseModel):
     debug_chat_ui: bool = False
     chat_api: bool = False
     mcp: bool = False
-    auth: EndpointAuthConfig = Field(
+    http_auth: EndpointAuthConfig = Field(
         default_factory=EndpointAuthConfig,
         description=(
-            "Inbound authentication policy for the chat API and MCP endpoints. "
-            "Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
+            "Inbound authentication policy for the HTTP chat API endpoints "
+            "(chat_api / debug_chat_ui). Applies only to HTTP endpoints and does "
+            "not affect the MCP endpoint. Modes: function (API key, default), "
+            "admin (master key), anonymous, entra (Entra ID)."
         ),
     )
 
-    @field_validator("auth", mode="before")
+    @field_validator("http_auth", mode="before")
     @classmethod
-    def _default_auth(cls, value: Any) -> Any:
+    def _default_http_auth(cls, value: Any) -> Any:
         if value is None:
             return EndpointAuthConfig()
         return value
@@ -167,11 +169,12 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
-    auth: EndpointAuthConfig | None = Field(
+    http_auth: EndpointAuthConfig | None = Field(
         default=None,
         description=(
-            "App-wide default inbound authentication policy inherited by every agent's "
-            "built-in endpoints. A per-agent builtin_endpoints.auth overrides it. "
+            "App-wide default inbound HTTP authentication policy inherited by every "
+            "agent's built-in HTTP endpoints. A per-agent builtin_endpoints.http_auth "
+            "overrides it. Applies only to HTTP endpoints and does not affect MCP. "
             "Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
         ),
     )

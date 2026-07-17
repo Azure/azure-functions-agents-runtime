@@ -13,7 +13,7 @@
 @bearerToken = <entra-access-token>
 
 # ---------------------------------------------------------------------------
-# API KEY AGENT  (builtin_endpoints.auth: function)
+# API KEY AGENT  (builtin_endpoints.http_auth: function)
 # ---------------------------------------------------------------------------
 
 ### Chat WITHOUT key -> 401 Unauthorized
@@ -42,7 +42,7 @@ Content-Type: {{contentType}}
 }
 
 # ---------------------------------------------------------------------------
-# ENTRA AGENT  (builtin_endpoints.auth.mode: entra)
+# ENTRA AGENT  (builtin_endpoints.http_auth.mode: entra)
 # ---------------------------------------------------------------------------
 
 ### Chat WITHOUT token -> 401 Unauthorized

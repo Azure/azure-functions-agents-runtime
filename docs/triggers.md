@@ -67,7 +67,7 @@ These Azure Functions Python decorators are intentionally not supported as `.age
 
 ### Built-in endpoint authentication
 
-The chat API and MCP endpoints registered by `builtin_endpoints` are protected via `builtin_endpoints.auth`. Modes: `function` (API key, default), `admin` (master key), `anonymous`, and `entra` (Entra ID / Azure AD). For `entra`, both the chat routes and the MCP webhook rely on platform-level App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal`. See [`front-matter-spec.md`](front-matter-spec.md#auth--endpoint-authentication) for the full schema and examples.
+The HTTP chat API registered by `builtin_endpoints` is protected via `builtin_endpoints.http_auth`. Modes: `function` (API key, default), `admin` (master key), `anonymous`, and `entra` (Entra ID / Azure AD). For `entra`, the chat routes rely on platform-level App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal`. `http_auth` applies only to HTTP endpoints and does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions MCP extension and always requires the MCP extension system key (`x-functions-key`). See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentication) for the full schema and examples.
 
 ## HTTP Trigger
 
@@ -79,19 +79,19 @@ trigger:
   args:
     route: my-endpoint
     methods: ["POST"]
-    auth: function
+    http_auth: function
 ```
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `route` | Yes | - | URL path for the endpoint. |
 | `methods` | No | `["POST"]` | HTTP methods to accept. |
-| `auth` | No | `function` | Inbound auth policy, the same model as `builtin_endpoints.auth`. Accepts a string (`function`, `admin`, `anonymous`, `entra`) or an object with `mode` + optional `entra` allow-lists. |
-| `auth_level` | No | `function` | **Deprecated** — use `auth` instead. Still accepted (`anonymous`, `function`, or `admin`); if both are set, `auth` wins and `auth_level` is ignored with a warning. |
+| `http_auth` | No | `function` | Inbound auth policy, the same model as `builtin_endpoints.http_auth`. Accepts a string (`function`, `admin`, `anonymous`, `entra`) or an object with `mode` + optional `entra` allow-lists. |
+| `auth_level` | No | `function` | **Deprecated** — use `http_auth` instead. Still accepted (`anonymous`, `function`, or `admin`); if both are set, `http_auth` wins and `auth_level` is ignored with a warning. |
 
 ### HTTP trigger authentication
 
-`auth` reuses the same `EndpointAuthConfig` model as the built-in chat/MCP endpoints, so HTTP-triggered agents get identical enforcement:
+`http_auth` reuses the same `EndpointAuthConfig` model as the built-in chat endpoints, so HTTP-triggered agents get identical enforcement:
 
 - `function` (default) — Azure Functions host key check (a function or host key, `AuthLevel.FUNCTION`).
 - `admin` — Azure Functions master key check (`AuthLevel.ADMIN` maps to the `_master` key, distinct from an extension system key).
@@ -103,14 +103,14 @@ trigger:
   type: http_trigger
   args:
     route: secured
-    auth:
+    http_auth:
       mode: entra
       entra:
         tenant_id: <tenant-guid>
         allowed_audiences: ["api://my-app"]
 ```
 
-See [`front-matter-spec.md`](front-matter-spec.md#auth--endpoint-authentication) for the full auth schema and semantics.
+See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentication) for the full auth schema and semantics.
 
 By default, the handler returns the agent response as `text/plain`. When `response_example` or `response_schema` is configured at the top level, the runtime instructs the model to return JSON, validates the result, and returns `application/json`.
 

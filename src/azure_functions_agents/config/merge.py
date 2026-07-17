@@ -29,14 +29,14 @@ def _resolve_builtin_endpoints(
     else:
         resolved = BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
 
-    # Inherit the app-wide auth default (agents.config.yaml `auth`) unless the
-    # agent authored its own builtin_endpoints.auth, which always overrides.
-    authored_auth = (
+    # Inherit the app-wide auth default (agents.config.yaml `http_auth`) unless the
+    # agent authored its own builtin_endpoints.http_auth, which always overrides.
+    authored_http_auth = (
         isinstance(builtin_endpoints, BuiltinEndpointsConfig)
-        and "auth" in builtin_endpoints.model_fields_set
+        and "http_auth" in builtin_endpoints.model_fields_set
     )
-    if not authored_auth and global_config.auth is not None:
-        resolved = resolved.model_copy(update={"auth": global_config.auth})
+    if not authored_http_auth and global_config.http_auth is not None:
+        resolved = resolved.model_copy(update={"http_auth": global_config.http_auth})
     return resolved
 
 

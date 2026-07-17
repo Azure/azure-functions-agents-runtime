@@ -4,7 +4,7 @@ description: Chat agent whose HTTP API requires a valid Entra ID (Azure AD) toke
 
 builtin_endpoints:
   chat_api: true
-  auth:
+  http_auth:
     mode: entra
     # tenant_id and allowed_audiences are read from the environment variables
     # set by the Bicep deployment:

@@ -449,61 +449,6 @@ def _register_mcp_endpoint(
     app.function_name(name=function_name)(decorated)
 
 
-def _log_mcp_auth_policy(
-    auth: EndpointAuthConfig,
-    *,
-    resolved: ResolvedAgent,
-    slug: str,
-) -> None:
-    """Surface how the host-owned MCP webhook is actually authenticated.
-
-    ``builtin_endpoints.auth`` configures the runtime-owned chat routes, but the
-    MCP webhook (``/runtime/webhooks/mcp``) is owned by the Functions MCP
-    extension: the runtime only registers ``mcp_tool_trigger`` tools on it and
-    never sees its HTTP request, so it cannot apply the authored ``auth.mode``
-    there. The webhook always requires the MCP extension **system key**
-    (``x-functions-key``); ``entra`` additionally relies on platform Easy Auth.
-    ``admin`` diverges too: it maps the chat routes to the Functions **master
-    key** (``AuthLevel.ADMIN``), which is a different -- and far more privileged
-    -- credential than the extension **system key** the webhook requires. It must
-    not be conflated with the system key, so it is flagged rather than treated as
-    aligned.
-    Emit a one-time message per agent so a mode the webhook cannot honor is
-    explicit rather than silently diverging from the authored policy.
-    """
-    marker = source_marker(resolved.source_file)
-    if auth.mode == "entra":
-        logger.info(
-            "MCP endpoint Entra auth is enforced at the platform (App Service "
-            "Authentication / Easy Auth), not in-app; the webhook itself is "
-            "owned by the Functions MCP extension and still requires its system "
-            "key (x-functions-key): source_file=%s tool=%s",
-            marker,
-            slug,
-        )
-    elif auth.mode == "admin":
-        logger.warning(
-            "auth.mode=admin maps the chat routes to the Azure Functions master "
-            "key (AuthLevel.ADMIN), which is a different and far more privileged "
-            "credential than the MCP extension system key required by the "
-            "host-owned MCP webhook (/runtime/webhooks/mcp). Call the webhook "
-            "with the MCP extension system key (x-functions-key); do not "
-            "distribute the master key. source_file=%s tool=%s",
-            marker,
-            slug,
-        )
-    elif auth.mode in ("function", "anonymous"):
-        logger.warning(
-            "auth.mode=%s does not apply to the host-owned MCP webhook "
-            "(/runtime/webhooks/mcp): it is owned by the Functions MCP extension "
-            "and always requires the MCP extension system key (x-functions-key), "
-            "regardless of the authored auth mode. source_file=%s tool=%s",
-            auth.mode,
-            marker,
-            slug,
-        )
-
-
 def _register_workflow_status_endpoints(
     app: func.FunctionApp,
     *,
@@ -608,7 +553,7 @@ def register_builtin_endpoints(
             _builtin_slug_registry(app).add(slug)
 
     base_function_name = _safe_function_name(f"agent_{slug}_builtin")
-    auth = builtin_endpoints.auth
+    auth = builtin_endpoints.http_auth
 
     if builtin_endpoints.debug_chat_ui:
         route = f"agents/{slug}/"
@@ -651,7 +596,6 @@ def register_builtin_endpoints(
             )
 
     if builtin_endpoints.mcp:
-        _log_mcp_auth_policy(auth, resolved=resolved, slug=slug)
         _register_mcp_endpoint(
             app,
             resolved,

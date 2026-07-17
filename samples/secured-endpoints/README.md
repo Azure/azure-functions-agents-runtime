@@ -8,7 +8,7 @@ Demonstrates inbound authentication for built-in agent endpoints: **API key** (A
 
 ## What this sample shows
 
-| Agent | Endpoint | `auth` mode | How to call it |
+| Agent | Endpoint | `http_auth` mode | How to call it |
 |---|---|---|---|
 | `apikey` | `POST /agents/apikey/chat` | `function` | Requires a valid **function/host key** (`x-functions-key` header or `?code=`). |
 | `entra` | `POST /agents/entra/chat` | `entra` | Requires a valid **Entra ID token**. App Service Authentication (Easy Auth) validates the token and injects a client principal; the runtime enforces that principal in-app. |
@@ -70,7 +70,7 @@ No Entra app registration is created by the template. You create one yourself an
 
 ## Test 1 — API key agent
 
-The `apikey` agent uses `auth: function`, so the chat route requires a function key.
+The `apikey` agent uses `http_auth: function`, so the chat route requires a function key.
 
 1. **Get the app name and default function key:**
 
@@ -99,11 +99,11 @@ The `apikey` agent uses `auth: function`, so the chat route requires a function 
 
    The key can also be passed as a query string: `.../agents/apikey/chat?code=$KEY`.
 
-> Use `auth: admin` instead of `function` to require the **master key** (`AuthLevel.ADMIN` maps to the Functions `_master` key — the most privileged app credential, distinct from an extension system key). Use `auth: anonymous` to disable key checks entirely.
+> Use `http_auth: admin` instead of `function` to require the **master key** (`AuthLevel.ADMIN` maps to the Functions `_master` key — the most privileged app credential, distinct from an extension system key). Use `http_auth: anonymous` to disable key checks entirely.
 
 ## Test 2 — Entra ID agent
 
-The `entra` agent uses `auth: mode: entra`. The route is anonymous at the Functions
+The `entra` agent uses `http_auth: mode: entra`. The route is anonymous at the Functions
 key layer; **App Service Authentication (Easy Auth)** validates the incoming Entra
 token at the platform and injects an `x-ms-client-principal` header. The runtime
 reads that principal, confirms it is an Entra (`aad`) identity, and applies the
@@ -174,12 +174,12 @@ Because the MCP handler never sees HTTP headers in-process, `auth.mode: entra` c
 
 ## Configuration reference
 
-`builtin_endpoints.auth` accepts a shorthand string (`auth: function`) or an object:
+`builtin_endpoints.http_auth` accepts a shorthand string (`http_auth: function`) or an object:
 
 ```yaml
 builtin_endpoints:
   chat_api: true
-  auth:
+  http_auth:
     mode: entra            # function (default) | admin | anonymous | entra
     entra:                 # only used when mode == entra
       tenant_id: "<guid>"                  # or env AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID
@@ -194,7 +194,7 @@ builtin_endpoints:
 | `anonymous` | No auth. |
 | `entra` | Route is anonymous at the Functions key layer; App Service Authentication (Easy Auth) validates the Entra token and the runtime enforces the injected client principal with optional tenant/audience/client-id allowlists. Requires Easy Auth to be configured. |
 
-See [`docs/front-matter-spec.md`](../../docs/front-matter-spec.md#auth--endpoint-authentication) for the full schema.
+See [`docs/front-matter-spec.md`](../../docs/front-matter-spec.md#http_auth--endpoint-authentication) for the full schema.
 
 ## Run locally
 

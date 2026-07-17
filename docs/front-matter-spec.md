@@ -46,7 +46,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `auth` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -66,7 +66,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 - `model` — String specifying default LLM model identifier
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
-- `auth` — String or object specifying the app-wide default inbound authentication policy (same model as `builtin_endpoints.auth`). Every agent's built-in endpoints inherit this value unless the agent authors its own `builtin_endpoints.auth`, which always overrides. When omitted, endpoints default to `function`. Example: `auth: entra` requires every agent's chat API and MCP endpoints to use Entra ID by default.
+- `http_auth` — String or object specifying the app-wide default inbound HTTP authentication policy (same model as `builtin_endpoints.http_auth`). Every agent's built-in HTTP endpoints inherit this value unless the agent authors its own `builtin_endpoints.http_auth`, which always overrides. When omitted, endpoints default to `function`. Applies only to HTTP endpoints and does not affect the MCP endpoint. Example: `http_auth: entra` requires every agent's chat API to use Entra ID by default.
 
 **Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
@@ -178,12 +178,12 @@ trigger:
   args:
     route: string          # Required. URL path for the endpoint
     methods: string[]      # Optional. Array of HTTP methods. Defaults to ["POST"]
-    auth:                  # Optional. Inbound auth policy (same model as builtin_endpoints.auth).
+    http_auth:             # Optional. Inbound auth policy (same model as builtin_endpoints.http_auth).
                            #   String shorthand: function | admin | anonymous | entra
                            #   Object form: { mode: <mode>, entra: { tenant_id, allowed_audiences, allowed_client_ids } }
                            #   Defaults to function.
-    auth_level: string     # Deprecated. Use `auth` instead. One of: anonymous, function, admin.
-                           #   If both are set, `auth` wins and this is ignored with a warning.
+    auth_level: string     # Deprecated. Use `http_auth` instead. One of: anonymous, function, admin.
+                           #   If both are set, `http_auth` wins and this is ignored with a warning.
 ```
 
 **Example (default key auth):**
@@ -193,7 +193,7 @@ trigger:
   args:
     route: "resource-summary"
     methods: ["POST"]
-    auth: function
+    http_auth: function
 ```
 
 **Example (Entra ID enforcement):**
@@ -202,14 +202,14 @@ trigger:
   type: http_trigger
   args:
     route: "secured"
-    auth:
+    http_auth:
       mode: entra
       entra:
         tenant_id: "<tenant-guid>"
         allowed_audiences: ["api://my-app"]
 ```
 
-`http_trigger` `auth` reuses the same [`auth` endpoint-authentication model](#auth--endpoint-authentication) as the built-in chat/MCP endpoints. `entra` mode registers the route anonymous at the Functions key layer and enforces the App Service Authentication (Easy Auth) `x-ms-client-principal` header in-app, rejecting requests without a validated principal before the agent runs. The legacy flat `auth_level` string remains supported for backward compatibility but is deprecated.
+`http_trigger` `http_auth` reuses the same [`http_auth` endpoint-authentication model](#http_auth--endpoint-authentication) as the built-in chat endpoints. `entra` mode registers the route anonymous at the Functions key layer and enforces the App Service Authentication (Easy Auth) `x-ms-client-principal` header in-app, rejecting requests without a validated principal before the agent runs. The legacy flat `auth_level` string remains supported for backward compatibility but is deprecated.
 
 #### **Timer Trigger**
 ```yaml
@@ -283,19 +283,19 @@ builtin_endpoints:
   debug_chat_ui: boolean   # Enable chat UI plus chat/chatstream APIs
   chat_api: boolean  # Enable REST API endpoints even without the chat UI
   mcp: boolean       # Enable MCP tool registration for agent-to-agent calls
-  auth: string | object  # Inbound authentication policy (see below); default "function"
+  http_auth: string | object  # Inbound HTTP authentication policy (see below); default "function"
 ```
 
 `debug_chat_ui: true` automatically enables `chat_api: true` because the built-in UI calls the chat API. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints: `debug_chat_ui`, `chat_api`, and `mcp`.
 
-##### `auth` — Endpoint authentication
+##### `http_auth` — Endpoint authentication
 
-Controls how the chat API (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) and MCP endpoints authenticate inbound requests. Accepts a shorthand string (`auth: entra`) or an object.
+Controls how the HTTP chat API (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) authenticates inbound requests. Applies only to HTTP endpoints and does not affect the MCP endpoint. Accepts a shorthand string (`http_auth: entra`) or an object.
 
 ```yaml
 builtin_endpoints:
   chat_api: true
-  auth:
+  http_auth:
     mode: entra          # function | admin | anonymous | entra
     entra:               # only used when mode == "entra"
       tenant_id: "<tenant-guid>"           # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID
@@ -310,9 +310,9 @@ builtin_endpoints:
 | `anonymous` | No auth — open endpoint (`AuthLevel.ANONYMOUS`). |
 | `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions key layer; each request is then enforced against the platform-injected Easy Auth `x-ms-client-principal` header (App Service Authentication validates the token — the runtime never validates JWTs itself). Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid principal, 403 on allowlist mismatch). **Requires Easy Auth to be enabled** — because the route is anonymous, the runtime only trusts the injected principal when it has non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED`, or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting), and otherwise fails closed (401). |
 
-**App-wide default:** You can set a top-level `auth` in `agents.config.yaml` to apply one policy to every agent (see [Global Configuration](#global-configuration-agentsconfigyaml)). Resolution precedence is: the agent's own `builtin_endpoints.auth` → the global `agents.config.yaml` `auth` → the built-in `function` default. An agent authoring its own `auth` always wins, even if it is weaker than the app-wide default.
+**App-wide default:** You can set a top-level `http_auth` in `agents.config.yaml` to apply one policy to every agent (see [Global Configuration](#global-configuration-agentsconfigyaml)). Resolution precedence is: the agent's own `builtin_endpoints.http_auth` → the global `agents.config.yaml` `http_auth` → the built-in `function` default. An agent authoring its own `http_auth` always wins, even if it is weaker than the app-wide default.
 
-**MCP note:** The MCP endpoint (`/runtime/webhooks/mcp`) is owned by the Functions MCP extension. The runtime only registers `mcp_tool_trigger` tools on it and never sees its HTTP request, so `builtin_endpoints.auth.mode` **does not control the MCP webhook** — it always requires the MCP extension **system key** (`x-functions-key`), regardless of the authored mode. To make this explicit rather than silent, registration emits a one-time message per agent when `mcp` is enabled: `entra` logs (info) that enforcement is platform-level Easy Auth (App Service Authentication) on top of the system key; `function` and `anonymous` log (warning) that the authored mode cannot be honored on the host-owned webhook; `admin` logs (warning) that `AuthLevel.ADMIN` maps the chat routes to the Functions **master key**, a different and far more privileged credential than the extension system key the webhook requires — call the webhook with the system key, not the master key. For `entra` + `mcp`, protect the webhook with platform Easy Auth in addition to the system key.
+**HTTP only:** `http_auth` applies only to the agent's HTTP endpoints (the chat API and any `http_trigger` routes). It does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions MCP extension and always requires the MCP extension **system key** (`x-functions-key`).
 
 **Endpoint Details:**
 

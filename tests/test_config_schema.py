@@ -46,20 +46,20 @@ def test_builtin_endpoints_debug_chat_ui_enables_chat_api() -> None:
 
 def test_builtin_endpoints_auth_defaults_to_function() -> None:
     config = BuiltinEndpointsConfig(chat_api=True)
-    assert config.auth.mode == "function"
-    assert config.auth.entra is None
+    assert config.http_auth.mode == "function"
+    assert config.http_auth.entra is None
 
 
 def test_builtin_endpoints_auth_string_shorthand() -> None:
-    config = BuiltinEndpointsConfig.model_validate({"chat_api": True, "auth": "entra"})
-    assert config.auth.mode == "entra"
+    config = BuiltinEndpointsConfig.model_validate({"chat_api": True, "http_auth": "entra"})
+    assert config.http_auth.mode == "entra"
 
 
 def test_builtin_endpoints_auth_full_object() -> None:
     config = BuiltinEndpointsConfig.model_validate(
         {
             "chat_api": True,
-            "auth": {
+            "http_auth": {
                 "mode": "entra",
                 "entra": {
                     "tenant_id": "t-1",
@@ -69,21 +69,21 @@ def test_builtin_endpoints_auth_full_object() -> None:
             },
         }
     )
-    assert config.auth.mode == "entra"
-    assert config.auth.entra is not None
-    assert config.auth.entra.tenant_id == "t-1"
-    assert config.auth.entra.allowed_audiences == ["api://app"]
+    assert config.http_auth.mode == "entra"
+    assert config.http_auth.entra is not None
+    assert config.http_auth.entra.tenant_id == "t-1"
+    assert config.http_auth.entra.allowed_audiences == ["api://app"]
 
 
 def test_builtin_endpoints_auth_rejects_unknown_mode() -> None:
     with pytest.raises(ValidationError):
-        BuiltinEndpointsConfig.model_validate({"chat_api": True, "auth": "basic"})
+        BuiltinEndpointsConfig.model_validate({"chat_api": True, "http_auth": "basic"})
 
 
 def test_builtin_endpoints_auth_rejects_extra_keys() -> None:
     with pytest.raises(ValidationError):
         BuiltinEndpointsConfig.model_validate(
-            {"chat_api": True, "auth": {"mode": "entra", "bogus": 1}}
+            {"chat_api": True, "http_auth": {"mode": "entra", "bogus": 1}}
         )
 
 
@@ -126,28 +126,28 @@ def test_global_config_extra_forbidden() -> None:
 
 
 def test_global_config_auth_defaults_to_none() -> None:
-    assert GlobalConfig().auth is None
+    assert GlobalConfig().http_auth is None
 
 
 def test_global_config_auth_string_shorthand() -> None:
-    config = GlobalConfig.model_validate({"auth": "entra"})
-    assert config.auth is not None
-    assert config.auth.mode == "entra"
+    config = GlobalConfig.model_validate({"http_auth": "entra"})
+    assert config.http_auth is not None
+    assert config.http_auth.mode == "entra"
 
 
 def test_global_config_auth_full_object() -> None:
     config = GlobalConfig.model_validate(
-        {"auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}}}
+        {"http_auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}}}
     )
-    assert config.auth is not None
-    assert config.auth.mode == "entra"
-    assert config.auth.entra is not None
-    assert config.auth.entra.tenant_id == "t-1"
+    assert config.http_auth is not None
+    assert config.http_auth.mode == "entra"
+    assert config.http_auth.entra is not None
+    assert config.http_auth.entra.tenant_id == "t-1"
 
 
 def test_global_config_auth_rejects_unknown_mode() -> None:
     with pytest.raises(ValidationError):
-        GlobalConfig.model_validate({"auth": "basic"})
+        GlobalConfig.model_validate({"http_auth": "basic"})
 
 
 def test_system_tools_config_parses() -> None:

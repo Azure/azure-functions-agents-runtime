@@ -1,7 +1,7 @@
 """Inbound authentication enforcement for built-in endpoints.
 
 This module is the only place that reasons about *who* may call an agent's
-built-in HTTP endpoints. It maps the authoring-level ``builtin_endpoints.auth``
+built-in HTTP endpoints. It maps the authoring-level ``builtin_endpoints.http_auth``
 policy onto an Azure Functions ``AuthLevel`` (for native function/system-key
 "API key" auth) and, for Entra ID, checks the caller's identity before the
 runner is ever invoked.

@@ -15,20 +15,21 @@ branch: victoriahall/endpoint-auth
 ## 1. Summary
 
 Add first-class, configurable **inbound authentication** for an agent's built-in
-HTTP endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) and its MCP
-tool surface (`/runtime/webhooks/mcp`). Authoring gains a single new key —
-`builtin_endpoints.auth` — that selects one of four modes: `function` (Azure
-Functions **API key**, the default), `admin` (system key), `anonymous`
-(unauthenticated, dev-only), or `entra` (Microsoft **Entra ID**). In `entra`
-mode the runtime accepts a request only when it carries a validated identity: an
-App Service Authentication (**Easy Auth**) `X-MS-CLIENT-PRINCIPAL` header
-injected by the platform. Optional `tenant_id`, `allowed_audiences`, and
-`allowed_client_ids` allow-lists narrow which callers are accepted. This makes
-the built-in endpoints safe to expose in production without hand-rolling auth per
-app.
+HTTP endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`). Authoring
+gains a single new key — `builtin_endpoints.http_auth` — that selects one of four
+modes: `function` (Azure Functions **API key**, the default), `admin` (system
+key), `anonymous` (unauthenticated, dev-only), or `entra` (Microsoft **Entra
+ID**). In `entra` mode the runtime accepts a request only when it carries a
+validated identity: an App Service Authentication (**Easy Auth**)
+`X-MS-CLIENT-PRINCIPAL` header injected by the platform. Optional `tenant_id`,
+`allowed_audiences`, and `allowed_client_ids` allow-lists narrow which callers
+are accepted. This makes the built-in endpoints safe to expose in production
+without hand-rolling auth per app. `http_auth` applies **only to HTTP
+endpoints** and does not affect the MCP endpoint (`/runtime/webhooks/mcp`),
+which is owned by the Functions MCP extension and always requires its system key.
 
-The **same** `auth` policy also extends to arbitrary `http_trigger` agents (§10):
-a custom REST agent accepts the identical nested `auth:` object
+The **same** `http_auth` policy also extends to arbitrary `http_trigger` agents
+(§10): a custom REST agent accepts the identical nested `http_auth:` object
 (`EndpointAuthConfig`, including `entra`) and reuses the shared `_auth` guard, so
 identity enforcement is uniform across every HTTP surface. The legacy flat
 `auth_level` string on `http_trigger` is deprecated but still honored.
@@ -37,6 +38,14 @@ identity enforcement is uniform across every HTTP surface. The legacy flat
 > tokens in-app against Entra JWKS. That path was removed — the runtime now
 > delegates all Entra token validation to Easy Auth and fails closed when no
 > platform-validated principal is present.
+
+> **Amendment B (2026-07-17):** the authoring key was renamed from `auth` to
+> `http_auth` (at the global `agents.config.yaml` level, on `builtin_endpoints`,
+> and on `http_trigger`) to make explicit that the policy governs only HTTP
+> endpoints and has no effect on the MCP endpoint. The MCP-webhook
+> divergence-logging described below (Decisions #12/#15) was **removed**: since
+> the key no longer implies any MCP relationship, there is nothing to reconcile,
+> so the info/warning messages were dropped. See Decision #20.
 
 ## 2. Motivation / problem
 
@@ -68,7 +77,7 @@ registration never consumed it.
 ## 3. Goals / Non-goals
 
 **Goals**
-- One authoring key, `builtin_endpoints.auth`, controlling built-in endpoint auth.
+- One authoring key, `builtin_endpoints.http_auth`, controlling built-in endpoint auth.
 - **API key** support via native Azure Functions auth levels (`function`, `admin`).
 - **Entra ID** support for the chat API via two accepted proofs of identity:
   Easy Auth principal header **and** in-app bearer-token (JWT) validation.
@@ -100,18 +109,18 @@ registration never consumed it.
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
-| translate | `config/schema.py` | New `EntraAuthConfig` + `EndpointAuthConfig` models; `BuiltinEndpointsConfig.auth` field with string-shorthand coercion. |
-| translate | `config/merge.py` | No behavior change — `auth` flows through `_resolve_builtin_endpoints` as part of `BuiltinEndpointsConfig`. |
-| translate | `config/validation.py` | No change needed — the `entra`+`mcp` guidance is surfaced as a one-time log at registration (see below), not a translate-stage warning. |
+| translate | `config/schema.py` | New `EntraAuthConfig` + `EndpointAuthConfig` models; `BuiltinEndpointsConfig.http_auth` field with string-shorthand coercion. |
+| translate | `config/merge.py` | `http_auth` flows through `_resolve_builtin_endpoints` as part of `BuiltinEndpointsConfig`, with app-wide inheritance from `GlobalConfig.http_auth`. |
+| translate | `config/validation.py` | No change needed. |
 | register | `registration/_auth.py` (new) | `resolve_endpoint_auth_level()` (mode → `func.AuthLevel`) and `authorize_entra_request()` (Easy Auth principal or validated bearer token, plus allow-list checks). |
-| register | `registration/endpoints.py` | Apply the resolved `auth_level` to the chat routes, gate the chat/chatstream handlers with `authorize_entra_request()` in `entra` mode, and emit a one-time log at registration when `auth.mode == "entra"` and `mcp` is enabled (MCP Entra enforcement is platform-level Easy Auth). |
-| register | `registration/triggers.py` | `_resolve_http_trigger_auth()` maps a nested `auth` (preferred) or the deprecated flat `auth_level` from `trigger.args` → `EndpointAuthConfig`; the `http_trigger` route is registered with `resolve_endpoint_auth_level(auth)`. |
+| register | `registration/endpoints.py` | Apply the resolved `auth_level` to the chat routes and gate the chat/chatstream handlers with `authorize_entra_request()` in `entra` mode. |
+| register | `registration/triggers.py` | `_resolve_http_trigger_auth()` maps a nested `http_auth` (preferred) or the deprecated flat `auth_level` from `trigger.args` → `EndpointAuthConfig`; the `http_trigger` route is registered with `resolve_endpoint_auth_level(auth)`. |
 | register | `registration/_handlers.py` | `make_http_agent_handler()` takes an `auth` param and enforces `authorize_entra_request()` at the top of the request handler (fail-closed before any processing). |
 | execute | — | No runner change; auth is enforced before the runner is invoked. |
 
 ### Auth modes
 
-`builtin_endpoints.auth.mode` ∈ `{function, admin, anonymous, entra}`:
+`builtin_endpoints.http_auth.mode` ∈ `{function, admin, anonymous, entra}`:
 
 | mode | Functions `auth_level` on chat routes | In-app enforcement | Intended use |
 | --- | --- | --- | --- |
@@ -150,31 +159,13 @@ list must contain the claim): `tenant_id` vs `tid`, `allowed_audiences` vs `aud`
 ### MCP endpoint
 
 `/runtime/webhooks/mcp` is owned by the Functions MCP extension. The runtime
-registers tools on it but never handles its HTTP request, so:
-
-- **API key:** the extension already requires the MCP **system key**
-  (`x-functions-key`). This is unchanged and now documented.
-- **Entra ID:** enforced at the platform via Easy Auth (App Service
-  Authentication). The runtime cannot validate a bearer token inside a
-  `mcp_tool_trigger` handler. `entra` + `mcp` therefore logs a one-time info
-  message pointing to the Easy Auth guidance; it is not an error.
-
-Because `auth.mode` cannot be applied to the host-owned webhook at all,
-registration surfaces the divergence for every enabled `mcp` agent instead of
-staying silent (Decision #12): `function` and `anonymous` emit a one-time
-**warning** that the authored mode is ignored and the system key still applies;
-`entra` emits the info message above; `admin` aligns with the system-key policy
-and is not flagged.
-
-> **Known limitation / upstream follow-up (Decision #15).** This is a genuine
-> gap, not just a runtime quirk: when the app hosts the MCP server, the authored
-> `auth.mode` *should* apply to its webhook too. The runtime cannot close it
-> alone because the Functions MCP extension owns the `/runtime/webhooks/mcp`
-> HTTP surface and never surfaces the request to `mcp_tool_trigger` handlers. The
-> fix belongs in the host/MCP extension (e.g. a configurable `auth_level` or
-> Entra pass-through for the MCP webhook). We are tracking an upstream issue
-> against the host team; until it lands, the divergence-logging above is the
-> mitigation. See the `issues:` front-matter list for the tracking link.
+registers tools on it but never handles its HTTP request, so it always requires
+the MCP extension **system key** (`x-functions-key`); for Entra, protect it with
+platform Easy Auth (App Service Authentication). `http_auth` does **not** apply
+to this endpoint at all — it governs only the HTTP chat API and `http_trigger`
+routes. Because the key no longer implies any MCP relationship, the runtime does
+not log any divergence between the authored mode and the webhook (the earlier
+one-time info/warning messages were removed — see Amendment B / Decision #20).
 
 ### Authoring / API surface
 
@@ -182,7 +173,7 @@ and is not flagged.
 builtin_endpoints:
   chat_api: true
   mcp: true
-  auth:
+  http_auth:
     mode: entra              # function (default) | admin | anonymous | entra
     entra:                   # only used when mode: entra
       tenant_id: <tenant-guid>
@@ -190,11 +181,11 @@ builtin_endpoints:
       allowed_client_ids: ["<caller-app-id>"]   # optional
 ```
 
-Shorthand: `auth: function` (a bare string) is accepted and coerced to
-`{ mode: function }`. Omitting `auth` entirely keeps the current default
+Shorthand: `http_auth: function` (a bare string) is accepted and coerced to
+`{ mode: function }`. Omitting `http_auth` entirely keeps the current default
 (`function` / API key).
 
-A custom `http_trigger` agent takes the **same** `auth` object under
+A custom `http_trigger` agent takes the **same** `http_auth` object under
 `trigger.args` (see [`docs/triggers.md`](../triggers.md#http-trigger-authentication)):
 
 ```yaml
@@ -203,7 +194,7 @@ trigger:
   args:
     route: my-agent
     methods: [POST]
-    auth:                    # same EndpointAuthConfig as builtin_endpoints.auth
+    http_auth:               # same EndpointAuthConfig as builtin_endpoints.http_auth
       mode: entra            # function (default) | admin | anonymous | entra
       entra:
         tenant_id: <tenant-guid>
@@ -212,16 +203,16 @@ trigger:
 
 ### Compatibility
 
-Fully backward compatible. Existing agents with no `auth` key keep `function`
-(API-key) protection on their chat routes — the same effective behavior as today,
-now explicit. `builtin_endpoints: true` shorthand continues to enable all
-endpoints with default (`function`) auth.
+Fully backward compatible. Existing agents with no `http_auth` key keep
+`function` (API-key) protection on their chat routes — the same effective
+behavior as today, now explicit. `builtin_endpoints: true` shorthand continues
+to enable all endpoints with default (`function`) auth.
 
 For `http_trigger` agents, the legacy flat `auth_level`
 (`anonymous`/`function`/`admin`) is still accepted but **deprecated**: it emits a
-warning and maps to the equivalent `auth.mode`. If both `auth` and `auth_level`
-are set, `auth` wins and `auth_level` is ignored with a warning. Agents with no
-auth declared keep the default `function` key check.
+warning and maps to the equivalent `http_auth.mode`. If both `http_auth` and
+`auth_level` are set, `http_auth` wins and `auth_level` is ignored with a
+warning. Agents with no auth declared keep the default `function` key check.
 
 ## 5. Decisions log
 
@@ -246,10 +237,11 @@ auth declared keep the default `function` key check.
 | 17 | Reuse vs. new extraction of the guard for `http_trigger` | extract a new shared helper / **reuse existing `_auth` as-is** | **Reuse `_auth`** — it is already surface-agnostic (`EndpointAuthConfig` + `HeaderGetter`), so one enforcement path covers built-in endpoints and `http_trigger`. | Agent | 2026-07-16 |
 | 18 | Flat `auth_level` handling on `http_trigger` | hard-remove / **keep + deprecate** / silently alias | **Keep + deprecate** — backward compatible; emits a warning and maps to the equivalent `auth.mode`. | Human | 2026-07-16 |
 | 19 | Conflict when both `auth` and `auth_level` are set | error / **`auth` wins + warn** / `auth_level` wins | **`auth` wins + warn** — least disruptive and steers authors to the richer `auth` model. | Human | 2026-07-16 |
+| 20 | Name + scope of the endpoint-auth key (revisits #1) & the MCP-webhook divergence logging (revisits #12/#15) | keep `auth` + keep MCP divergence-logging / **rename to `http_auth` + drop MCP logging** | **Rename `auth` → `http_auth`** everywhere it is authored (global `agents.config.yaml`, `builtin_endpoints`, and `http_trigger`) to make explicit that the policy governs only HTTP endpoints and never the MCP endpoint. Because the key no longer implies any MCP relationship, **remove** the MCP-webhook divergence info/warning logging (`_log_mcp_auth_policy`) and its tests; docs now carry a single callout that `http_auth` is HTTP-only. Decisions #12/#15 (and the `mcp.json` outbound `auth` block) are unaffected in concept but the in-app logging they described is gone. | Human + Agent | 2026-07-17 |
 
 ## 6. Test plan
 
-- [ ] Unit `tests/test_config_schema.py`: `auth` parses (string shorthand, full
+- [ ] Unit `tests/test_config_schema.py`: `http_auth` parses (string shorthand, full
       object, default), rejects unknown modes and extra keys.
 - [ ] Unit `tests/test_registration_auth.py` (new): `resolve_endpoint_auth_level`
       mapping; `authorize_entra_request` — Easy Auth principal happy path,
@@ -262,8 +254,7 @@ auth declared keep the default `function` key check.
       `auth_level` per mode; `entra` handler returns 401 without identity and 200
       with a valid principal; chatstream returns an SSE `error` frame on 401.
 - [ ] Fixture scenario: `tests/fixtures/config_scenarios/` agent with
-      `builtin_endpoints.auth` to exercise merge/validation end to end.
-- [ ] Validation: `entra` + `mcp` logs guidance and still registers.
+      `builtin_endpoints.http_auth` to exercise merge/validation end to end.
 - [x] Unit `tests/test_registration_triggers.py`: nested `auth` string shorthand
       for each mode maps to the correct `http_trigger` route `AuthLevel` (incl.
       `entra`→anonymous); nested object `auth` with `entra` allow-lists is passed
@@ -281,7 +272,7 @@ auth declared keep the default `function` key check.
       note the auth step in the endpoint-registration path; module-map rows for
       `_handlers.py` / `triggers.py` and the execute-stage HTTP agent note the
       shared `_auth` guard on `http_trigger` routes.
-- [ ] `docs/front-matter-spec.md` — document `builtin_endpoints.auth` with
+- [ ] `docs/front-matter-spec.md` — document `builtin_endpoints.http_auth` with
       examples for API key and Entra ID; `#http-trigger` documents the nested
       `auth` and deprecates the flat `auth_level`.
 - [ ] `docs/triggers.md` — note built-in endpoint auth modes and add an HTTP
