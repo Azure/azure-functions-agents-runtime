@@ -4,7 +4,7 @@ title: Multi-agent delegation (agent-as-tool)
 status: Draft            # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-14
-updated: 2026-07-15
+updated: 2026-07-16
 issues: []
 pull_requests: []
 branch: larohra/multi-agent-delegation
@@ -25,12 +25,16 @@ branch: larohra/multi-agent-delegation
 v1 adds **delegation** to the markdown-first runtime. A coordinator
 `*.agent.md` declares existing agents as specialists in a new `subagents:`
 front-matter field. At runtime, the coordinator calls those specialists as
-tools through Microsoft Agent Framework (MAF) `BaseAgent.as_tool()`. The user
-still interacts with "one assistant that consults specialists, then answers."
+hand-written `delegate_<slug>` function tools, each of whose handler runs its
+specialist through Microsoft Agent Framework (MAF) `Agent.run()` — a plain,
+non-streaming call, since a delegate only ever needs the specialist's final
+answer back, never its streamed tokens. The user still interacts with "one
+assistant that consults specialists, then answers."
 
-Delegation needs **no new dependency**. `as_tool()` already exists, unchanged,
-on `BaseAgent` in the pinned `agent-framework-core==1.3.*`. It fits the existing
-tool assembly, registration, SSE streaming, and single-`agent.run()` path.
+Delegation needs **no new dependency**. `agent_framework.Agent`, its
+non-streaming `run()`, and this repo's own existing `@tool` decorator all
+already exist, unchanged, in the pinned `agent-framework-core==1.3.*`. It
+fits the existing tool assembly, registration, and single-`agent.run()` path.
 
 True **handoff** is different: control moves between agents through MAF's
 `HandoffBuilder`, which returns a `Workflow`. Handoff is not part of v1. It is a
@@ -105,16 +109,16 @@ The three routing patterns are:
 
 - Add an optional, object-only `subagents:` front-matter field. A coordinator
   can use it to declare one or more existing agents as specialists.
-- Let the coordinator call each specialist through MAF
-  `BaseAgent.as_tool()` inside the existing `agent.run()` path, with no MAF
-  `Workflow`.
+- Let the coordinator call each specialist as a `delegate_<slug>` function
+  tool inside the existing `agent.run()` path, with no MAF `Workflow`.
 - Run a specialist as itself in the **delegated** role: with its own
   instructions, model, static user tools, MCP servers, and skills.
   Request-scoped capabilities are naturally absent: a delegated call has no
   per-request sandbox of its own, and Dynamic-Workflow tools are already
   main-only. Delegation does not strip them.
-- Add no dependency. `as_tool()` is present and unchanged in the pinned
-  `agent-framework-core==1.3.*`.
+- Add no dependency. Delegation needs only `agent_framework.Agent`,
+  `Agent.run()`, and this repo's own existing `@tool` decorator — all
+  present and unchanged in the pinned `agent-framework-core==1.3.*`.
 - Make same-stem agent slugs **fail fast app-wide** (replacing today's silent
   auto-suffixing), so every agent has a unique slug — one collision contract,
   consistent with how the runtime already rejects duplicate skill and
@@ -143,7 +147,8 @@ The three routing patterns are:
   `UserInputRequired` handling in `src/`; `run_agent` awaits `agent.run(...)`
   once and has no approval loop. v1 specialists must use autonomous tools.
   HITL is deferred to the handoff fast-follow.
-- `propagate_session=True`, shared context, or shared-state tools. In v1 the
+- Shared session/context, or shared-state tools, between coordinator and
+  specialist (what MAF's `as_tool()` calls `propagate_session=True`). In v1 the
   specialist receives only the tool-call argument, not the coordinator's chat
   history.
 - Nested delegation. v1 is single-level: a delegated specialist cannot delegate
@@ -157,9 +162,16 @@ The three routing patterns are:
 
 ### 4.1 Runtime foundation
 
-**TL;DR:** Delegation uses an API already available in the pinned MAF package.
+**TL;DR:** Delegation uses APIs already available in the pinned MAF package —
+no new dependency, in either the first or the final v1 shape.
 
-The existing API is:
+A delegate needs only two MAF primitives, both already present, unchanged,
+in pinned `agent-framework-core==1.3.*` (verified at tag `python-1.3.0`):
+`Agent(...)`, to build a specialist agent in the *delegated* role (§4.4), and
+`Agent.run(task)`, the plain non-streaming coroutine — it returns an
+`AgentResponse`, and `.text` is the specialist's final answer.
+
+`BaseAgent.as_tool()` also exists, unchanged, on root `BaseAgent`:
 
 ```python
 BaseAgent.as_tool(
@@ -174,9 +186,16 @@ BaseAgent.as_tool(
 ) -> FunctionTool
 ```
 
-It is defined on root `BaseAgent`, inherited by concrete `Agent`, and present
-unchanged in pinned `agent-framework-core==1.3.*` (verified at tag
-`python-1.3.0`). No new dependency is needed.
+The first v1 implementation called it directly. The final v1 shape (§5
+Decision #20) does not: `as_tool()`'s own wrapper always runs the specialist
+through `Agent.run(stream=True, ...)` internally and awaits
+`stream.get_final_response()`, even though a delegate only ever needs that
+final text back and never the specialist's streamed tokens (§4.12 — "SSE is
+a black box at the boundary" was already a non-goal). Building the
+`delegate_<slug>` tool by hand instead (§4.2, §4.8) and calling plain,
+non-streaming `Agent.run(task)` directly avoids that unneeded streaming
+machinery, and everything it otherwise forced on the implementation (see
+Decision #20). Either way, no new dependency is needed.
 
 ### 4.2 Pipeline and two-pass composition
 
@@ -193,7 +212,7 @@ an explicit multi-pass order.
 | discover | — | No change. Coordinators and specialists are ordinary `*.agent.md` files found by the existing top-level and `agents/` folder scan (FRD 0001). Discovery stays read-only. |
 | translate | `config/schema.py`, `config/merge.py`, `config/validation.py` | Add `SubagentRef` (`{agent, when?}`) and `AgentSpec.subagents: list[SubagentRef] \| None`. Carry `subagents` and the resolved identity (`agent_id`, the file-stem slug) onto `ResolvedAgent`. `merge.py` normalizes and validates each reference, and derives canonical identity from the file-stem slug. `validation.py` uses the complete global index. It rejects **duplicate agent slugs (app-wide, fail-fast)**, unknown/duplicate/self references, and tool-name collisions. It relaxes the trigger-or-`builtin_endpoints` rule for a referenced internal specialist. |
 | register | `app.py`, `registration/_handlers.py`, `registration/endpoints.py`, `registration/_naming.py` | `app.py` becomes the composition root. It builds the identity index (slug → agent) and **fails fast if two agents share a slug** (`_naming.py` now rejects duplicates instead of auto-suffixing). After capabilities and capability-aware validation, it builds the read-only `AgentCatalog` (`agent_id -> (ResolvedAgent, AgentCapabilities)`) and the global referenced-subagent set. All of this happens before any `FunctionApp` mutation. `_handlers.py` and `endpoints.py` pass read-only catalog data, not live MAF agents, into `run_agent` and `run_agent_stream` for coordinators with `subagents`. Registration parses no YAML/front matter and resolves no references; it consumes validated data. |
-| execute | `runner.py`, `_observability.py` | Add `build_subagent_tools(subagents, catalog)`. For each reference, build the specialist's MAF `Agent` in the `delegated` role through the shared role-based client/tool assembly path. `ClientManager` creates the chat client for the specialist's own resolved model while reusing provider and credential state process-wide. Expose the agent with `.as_tool(name=delegate_<slug>, description=<when \| specialist description>, arg_name="task", arg_description=…, approval_mode="never_require", propagate_session=False)` and a thin adapter for failure and concurrency rules. Append the resulting tools to the coordinator's `resolved_tools`. Build the tool eagerly, but run the specialist model only if the coordinator selects it. The adapter also emits `af.delegate.*` span attributes and delegate call/error metrics, and marks a recoverable delegated failure for correct tool-error accounting (see §4.12). |
+| execute | `runner.py`, `_observability.py` | Add `build_subagent_tools(subagents, catalog)`. For each reference, build one hand-written `delegate_<slug>` `FunctionTool` (`_build_delegate_tool` — the same `@tool(schema=...)` pattern this repo already uses for the `web_request`/`execute_python` system tools, **not** MAF's `BaseAgent.as_tool()`) whose schema is `{task: str}` with a fixed `arg_description`, name `delegate_<slug>`, and description `<when \| specialist description>`. Its handler builds the specialist's MAF `Agent` in the `delegated` role — through the shared role-based client/tool assembly path — FRESH on every call (not once when the tool is built) and awaits its plain, non-streaming `agent.run(task)` directly. `ClientManager` creates the chat client for the specialist's own resolved model while reusing provider and credential state process-wide. Append the resulting tools to the coordinator's `resolved_tools`. Build the tool wrapper eagerly, but build/run the specialist `Agent` only if the coordinator selects it. The handler also emits `af.delegate.*` span attributes and delegate call/error metrics, and marks a recoverable delegated failure for correct tool-error accounting (see §4.12). Because each call gets its own, unshared specialist `Agent`, there is no per-specialist lock (see §5 Decision #20). |
 
 The ordered composition pipeline is:
 
@@ -248,17 +267,18 @@ or fails as an "unknown reference" — no ambiguity handling is needed. Display
 A referenced specialist remains an ordinary `*.agent.md` agent. It runs with
 its own instructions, model, timeout, static user tools, MCP servers, and
 skills. Delegation does not copy coordinator tools onto it or remove its static
-tools. MAF `BaseAgent.as_tool()` runs the wrapped agent unchanged, as verified
-against `agent_framework` source. The same full-capability pattern appears in
+tools. The delegate tool's handler runs the specialist `Agent` unchanged — a
+plain `agent.run(task)` call, as verified against `agent_framework` source.
+The same full-capability pattern appears in
 the surveyed OpenAI Agents SDK, LangGraph, AutoGen, CrewAI, and Google ADK.
 
 | Capability | `direct` role | `delegated` role |
 | --- | --- | --- |
-| Entry point | Own trigger or endpoint | Coordinator's `as_tool()` call |
+| Entry point | Own trigger or endpoint | Coordinator's `delegate_<slug>` tool call |
 | Instructions, model, timeout, static tools, MCP, skills | Specialist's own | Specialist's own |
 | Per-request sandbox | Attached by the top-level handler | No new sandbox session |
 | Dynamic-Workflow tools | Main-agent-only rule applies | Absent because they are already main-only |
-| Conversation context | Direct request/session behavior | Only the `task` string; `propagate_session=False` |
+| Conversation context | Direct request/session behavior | Only the `task` string; no `session=` argument passed at all |
 | Own `subagents` | Full direct-role behavior | Not wired in v1 |
 
 The sandbox/code-interpreter is request-scoped. A trigger or endpoint handler
@@ -270,12 +290,13 @@ delegated sandbox session could be a future enhancement.
 Dynamic-Workflow tools are already restricted to `main.agent.md` by FRD 0004,
 regardless of delegation. No delegation-specific removal is needed.
 
-Conversation history is also isolated. With `propagate_session=False`, the
-specialist receives only the `task` string. This is the standard default in
-OpenAI, LangGraph, and AutoGen. In pinned MAF 1.3.0,
-`propagate_session=True` can merge parent and child histories, so keeping it off
-is the safe, conventional choice. The coordinator includes needed context in
-the task.
+Conversation history is also isolated: the delegate tool's handler calls
+`agent.run(task)` with no `session=` argument at all, so the specialist
+receives only the `task` string and never the coordinator's history or any
+other shared state. This mirrors the standard default in OpenAI, LangGraph,
+and AutoGen (and, when the delegate tool was first implemented via MAF's
+`as_tool()`, its own `propagate_session=False` default, which had the same
+effect). The coordinator includes needed context in the task.
 
 One reusable helper builds a MAF `Agent` from a `ResolvedAgent`, parameterized
 by the `direct` or `delegated` execution role. It never mutates
@@ -286,7 +307,7 @@ capabilities through its own endpoint.
 
 **TL;DR:** v1 permits one coordinator-to-specialist level and removes recursion structurally.
 
-When the runtime builds a specialist for `as_tool()`, it does not wire that
+When the runtime builds a specialist for the `delegated` role, it does not wire that
 specialist's own `subagents`. The resulting agent has no `delegate_*` tools.
 There is no runtime refusal or cycle check because the capability is absent.
 Mutual references are therefore safe: A may reference B and B may reference A,
@@ -331,14 +352,17 @@ full diagnostic detail: redacted exception type, correlation id, and outcome.
 Existing SSE order remains `tool_start` then `tool_end`, with recoverable errors
 inside the `tool_end` result.
 
-A thin adapter may be needed to guarantee this split around pinned
-`as_tool()` behavior. Implementation must verify that version's real exception
-and cancellation surface rather than assume it. The same adapter serializes
-same-specialist calls.
+A thin, hand-written handler guarantees this split (§5 Decision #20) — it
+does not rely on or wrap pinned `as_tool()` behavior; it awaits the
+specialist's plain, non-streaming `Agent.run(task)` directly inside
+`asyncio.wait_for`, catching `asyncio.CancelledError` separately from
+`TimeoutError`/`Exception`. Because each call builds its own specialist
+`Agent` instance (§4.7), no per-specialist serialization is needed either —
+see §4.11.
 
-### 4.7 Build live agents per request
+### 4.7 Build live agents per delegate tool-call
 
-**TL;DR:** Cache immutable definitions and shared clients, but build each live MAF agent fresh for every request.
+**TL;DR:** Cache immutable definitions and shared clients, but build each live MAF agent fresh for every request — and, for a specialist, fresh for every individual `delegate_<slug>` tool CALL, not merely once per request.
 
 Do not build specialists once at startup:
 
@@ -355,9 +379,16 @@ Do not build specialists once at startup:
   prevents cross-request state sharing, and uses less cold-start time and memory
   than pre-building every agent.
 
-The runtime caches `AgentCatalog` (`ResolvedAgent` + `AgentCapabilities`) and the
-shared client. It builds the coordinator and delegated specialist `Agent`
-objects per call, matching today's execution model.
+The runtime caches `AgentCatalog` (`ResolvedAgent` + `AgentCapabilities`) and
+the shared client. It builds the coordinator `Agent` object once per request,
+matching today's execution model. A delegated specialist's `Agent` object,
+though, is built fresh on every individual `delegate_<slug>` tool CALL — by
+the tool's own handler, not by `build_subagent_tools`/`_build_delegate_tool`
+at tool-assembly time (§5 Decision #20). Only the cheap `FunctionTool`
+wrapper (schema + closure) is built once, when the coordinator's tools are
+assembled; the specialist `Agent` itself is not, so two calls to the same
+declared specialist — even concurrent ones — never share a live agent
+instance and need no lock (§4.11).
 
 ### 4.8 Authoring and routing
 
@@ -373,7 +404,7 @@ description: Routes customer questions to the right specialist
 builtin_endpoints: true
 subagents:
   - agent: billing                 # references billing.agent.md by its slug
-    when: Invoices, charges, refunds, or subscription questions   # → as_tool(description=...)
+    when: Invoices, charges, refunds, or subscription questions   # -> becomes delegate_billing's tool description
   - agent: tech                    # when omitted → uses tech's own `description`
 ---
 You are a support coordinator. Use the billing and tech specialists when
@@ -397,14 +428,16 @@ silently suffixed, because the name is a prompt-visible API. Validate known
 names after capabilities are built, then check again during final runtime
 assembly for late MCP/sandbox names.
 
-Construct specialist agents while assembling one invocation's coordinator
-tools because `as_tool()` is an instance method. `ClientManager` builds each
-specialist client for that specialist's own resolved model and reuses
-provider/credential state process-wide. Do not cache mutable MAF agents between
-Functions requests. Declaring a specialist creates one cheap wrapper and adds
-its schema to the coordinator prompt; the specialist's model does not run
-until selected. Prompt-visible tool-schema size is the real cost of declaring
-many specialists.
+Construct the specialist's `FunctionTool` wrapper while assembling one
+invocation's coordinator tools; the specialist `Agent` itself is not built
+there — its handler builds one fresh on every call (§4.7, §5 Decision #20).
+`ClientManager` builds each specialist client for that specialist's own
+resolved model and reuses provider/credential state process-wide. Do not
+cache mutable MAF agents between Functions requests, or between calls within
+one request. Declaring a specialist creates one cheap wrapper and adds its
+schema to the coordinator prompt; the specialist's model does not run until
+selected. Prompt-visible tool-schema size is the real cost of declaring many
+specialists.
 
 These fields are front-matter-only. They have no `agents.config.yaml`
 equivalent, so there is no global/front-matter merge or precedence rule as there
@@ -415,14 +448,14 @@ is for `model`, `timeout`, and `tools`. This follows
 
 **TL;DR:** The coordinator must send a self-contained task because no conversation history is shared implicitly.
 
-`as_tool()` gives the specialist one string argument named `task`
-(`arg_name="task"`). Its `arg_description` tells the coordinator to send a
-self-contained request. Isolation does not mean that no data can move: the
-coordinator must include all needed context in this string.
+The `delegate_<slug>` tool's schema gives the specialist one string argument
+named `task`. Its description tells the coordinator to send a self-contained
+request. Isolation does not mean that no data can move: the coordinator must
+include all needed context in this string.
 
-`propagate_session=True` is deliberately off. It would share a session id and
-mutable state dictionary, but not chat history. The specialist's output returns
-only as the coordinator's `tool_end` result.
+No session id or mutable state dictionary is shared either — the handler's
+`agent.run(task)` call passes no `session=` argument at all. The specialist's
+output returns only as the coordinator's `tool_end` result.
 
 ### 4.10 HITL and trust boundary
 
@@ -444,20 +477,28 @@ allow-list, is possible future hardening, not v1.
 
 ### 4.11 Breadth and concurrency (Decisions log #14)
 
-**TL;DR:** Declare any number of specialists; run different ones in parallel and serialize repeated calls to the same one.
+**TL;DR:** Declare any number of specialists; every call — different specialists or repeated calls to the same one — runs independently and in parallel.
 
 v1 sets no hard cap on declared specialists. MAF's tool-calling loop bounds the
-number of delegations in one turn. Different specialists may run in parallel.
-The adapter uses a per-specialist lock for concurrent calls to the same
-specialist, so v1 does not assume one delegated `Agent` is reentrant.
+number of delegations in one turn. Different specialists always run in
+parallel. So do concurrent calls to the *same* specialist: each
+`delegate_<slug>` call builds its own specialist `Agent` instance fresh
+(§4.7, §5 Decision #20) rather than sharing or reusing one built at
+tool-assembly time, so there is no shared, mutable `Agent` for concurrent
+calls to race on in the first place — v1 needs no per-specialist lock and no
+assumption about whether a delegated `Agent` is reentrant, because no two
+calls ever share one.
 
-Delegated calls are ephemeral, use `propagate_session=False`, and have no
-persistent session. They do not contend for the coordinator session lock, which
-serializes turns rather than tool calls inside one turn. The only shared
-components are process-wide `ClientManager` and per-app cached MCP tool objects.
-Both are already shared across concurrent top-level requests, so delegation
-adds no new cross-request sharing model. Tests cover parallel specialists and
-repeated calls to one specialist.
+Delegated calls are ephemeral and have no persistent session: the handler's
+`agent.run(task)` call passes no `session=` argument at all, so a specialist
+never sees the coordinator's conversation history or any other shared state.
+They do not contend for the coordinator session lock, which serializes turns
+rather than tool calls inside one turn. The only shared components are
+process-wide `ClientManager` and per-app cached MCP tool objects. Both are
+already shared across concurrent top-level requests, so delegation adds no
+new cross-request sharing model. Tests cover parallel specialists and
+repeated, concurrent calls to one specialist, each running independently on
+its own instance.
 
 ### 4.12 Observability
 
@@ -468,8 +509,9 @@ repeated calls to one specialist.
 `enable_instrumentation()` and, when `APPLICATIONINSIGHTS_CONNECTION_STRING` and
 the `[monitor]` extra are present, wires the Azure Monitor exporter (a no-op
 otherwise). Every run is already wrapped in a runtime `agent.run {name}` span
-with `af.*` attributes. Because `as_tool()` just calls the specialist's `.run()`,
-and MAF traces every `Agent.run()` and every `FunctionTool.invoke()`, a delegated
+with `af.*` attributes. Because the hand-written `delegate_<slug>` tool's
+handler calls the specialist's plain `Agent.run(task)` directly, and MAF
+traces every `Agent.run()` and every `FunctionTool.invoke()`, a delegated
 call produces this tree with **no new tracing code**:
 
 ```
@@ -496,7 +538,7 @@ system logger, which the Functions worker does not surface in App Insights
 `traces`; spans, not logs, are the debugging surface.)
 
 **Added in v1.** For parity with the existing system tools (sandbox,
-web_request), the `delegated`-role adapter enriches the delegate call:
+web_request), the `delegate_<slug>` tool's handler enriches the delegate call:
 - `af.delegate.*` span attributes (at least the specialist slug and outcome) on
   the `execute_tool delegate_<slug>` span, a dedicated `FaultDomain` value for a
   failed delegated call, and delegate call/error **metrics** parallel to
@@ -504,7 +546,7 @@ web_request), the `delegated`-role adapter enriches the delegate call:
 - Correct error accounting: today `_looks_like_tool_error` expects a JSON
   `{"error": …}` / `stderr` envelope (the sandbox/web_request shape) and would
   mis-count a specialist's sanitized free-text failure (§4.6, Decision #12). The
-  delegated adapter marks a recoverable delegated failure explicitly so it lands
+  handler marks a recoverable delegated failure explicitly so it lands
   in `af.agent.tool_error_count` rather than relying on that heuristic.
 
 **Accepted limitations.**
@@ -559,7 +601,7 @@ that work.
 
 Delegation and handoff will coexist and compose (Decisions log #7). An app may
 mix delegating coordinators with handoff coordinators. After the fast-follow, a
-handoff participant may itself use `as_tool()` specialists.
+handoff participant may itself declare `subagents` and delegate.
 
 ## 5. Decisions log
 
@@ -578,12 +620,13 @@ handoff participant may itself use `as_tool()` specialists.
 | 11 | `subagents` schema shape | object-only / string-list / mixed `str \| SubagentRef` union | **Object-only `SubagentRef`** with fields `{agent, when?}` (see #16); string shorthand deferrable later as non-breaking sugar | Human (user) | 2026-07-14 |
 | 12 | Delegated failure / timeout / cancellation | abort coordinator / recoverable tool error / split the two classes | **Split**: child failure or specialist-local timeout → recoverable `tool_end` error; parent/request cancellation → propagate + abort; effective timeout = `min(specialist, coordinator remaining)`; stable sanitized error to the model, full detail to telemetry | Agent (proposed — confirm) | 2026-07-14 |
 | 13 | How a specialist runs when delegated (the delegated role) | strip a delegated agent's tools / inherit-then-restrict / **runs as itself** with request-scoped caps naturally absent | **Runs as itself** — own instructions/model/static tools/MCP/skills, via a builder `direct`/`delegated` execution-role param (no mutation); sandbox is per-request and Dynamic-Workflow tools are already main-only, so both are *naturally* absent from a delegated call rather than stripped; context isolated (`propagate_session=False`) per industry-standard default | Agent (proposed — confirm) | 2026-07-15 |
-| 14 | Delegation breadth / concurrency | no cap / explicit caps / serialize calls | **No hard cap**; different specialists run in parallel, concurrent same-specialist calls serialized per-specialist (no delegated-`Agent` reentrancy assumption); per-turn count bounded by MAF's tool loop; prompt-schema size is the documented cost | Human (user) | 2026-07-14 |
+| 14 | Delegation breadth / concurrency | no cap / explicit caps / serialize calls | **No hard cap**; different specialists run in parallel. **Revised by #20:** each delegate call builds its own specialist instance, so calls — including repeated calls to the same specialist — run in parallel with no shared-instance lock; per-turn count bounded by MAF's tool loop; prompt-schema size is the documented cost | Human (user) | 2026-07-14 |
 | 15 | Delegated-role capability scope, re-examined via cross-framework research | keep original restrictive framing / drop restrictions / reframe | **Reframe** — a survey of MAF + OpenAI, Anthropic, LangGraph, AutoGen, CrewAI, and Google ADK confirmed MAF imposes *none* of the originally-drafted restrictions and that a delegated sub-agent running with its own tools is the universal norm. Dropped the "workflow-tool strip" (redundant with FRD 0004's main-only gating); reframed sandbox/context as request-scoped defaults, not restrictions; kept **single-level** (#6) as the one real delegation rule — enforced structurally (a delegated specialist has no `delegate_*` tools wired), precedented (ADK task-mode, CrewAI), with bounded nesting left as a localized future change | Human (user) | 2026-07-15 |
 | 16 | Drop `id` and `tool_name` for v1 (simplicity) | keep both / drop both / drop one | **Drop both** — identity is the file-stem slug (collisions fail fast app-wide — see #17); the delegated tool is always `delegate_<slug>`. Removes a field and the id/name/slug confusion; both are re-addable later as non-breaking additions if a real need appears | Human (user) | 2026-07-15 |
 | 17 | Same-stem slug collision handling (base runtime) | keep auto-suffix+warn / fail-fast app-wide / open separate issue | **Fail-fast app-wide** — replace `_naming.py`'s silent auto-suffix with a startup error, unifying the contract with duplicate skill/workflow-tool handling and guaranteeing unique slugs for `subagents` references. **Breaking**: existing apps with same-stem files must rename one (release-note item) | Human (user) | 2026-07-15 |
 | 18 | Who may declare `subagents` | any independently runnable agent / main-agent-only (mirror FRD 0004 `workflows.enabled`) | **Any independently runnable agent** may declare `subagents`. Single-level (#6) still applies, so when that agent is itself invoked as a sub-agent its `subagents` are not wired and it cannot delegate onward. Simpler than a main/non-main split and matches the cross-framework norm (#15) | Human (user) | 2026-07-15 |
 | 19 | Observability approach | new bespoke tracing / rely on existing auto-instrumentation + add delegation enrichment / defer all enrichment | **Rely on auto-instrumentation, add delegation enrichment** — the runtime already enables MAF `gen_ai` spans and Azure Monitor export (`_observability.py`), and `as_tool()`→`run()` + `FunctionTool.invoke()` auto-nest a delegated call under one trace/`OperationId` with no new tracing code (verified against MAF tag `python-1.3.0` and the Functions Python worker's context attach). v1 additionally adds `af.delegate.*` attributes, delegate metrics, and explicit delegated-error accounting for parity with sandbox/web_request. Token roll-up across the boundary and SSE stream-through of specialist internals are documented limitations | Human (user) | 2026-07-15 |
+| 20 | Delegate execution mechanism, revisited post-implementation | keep `as_tool()` + per-specialist `asyncio.Lock` + `specialist_agent.run` monkeypatch/stream-capture (as first implemented, #1/#3) / rewrite as a hand-written non-streaming `@tool(schema=...)` function tool, building a fresh specialist `Agent` per call | **Hand-written non-streaming tool, built fresh per call** — a delegate only ever needs the specialist's final text (§4.12's "SSE is a black box at the boundary" was already a non-goal), so there is no reason to run the specialist through `Agent.run(stream=True, ...)` at all, which is all `as_tool()`'s own `_agent_wrapper` ever did internally before `await`-ing `stream.get_final_response()` back into one string anyway. That streaming requirement was the *only* reason the first implementation needed to monkeypatch `specialist_agent.run` (to capture the `ResponseStream` `as_tool()` builds internally, so it could be force-finalized on timeout/cancellation — `ResponseStream.__anext__`'s cleanup hooks only fire from its own `except StopAsyncIteration`/`except Exception` branches, never `BaseException`) and, because the specialist `Agent` object was shared across calls in a turn, to serialize concurrent same-specialist calls behind a per-specialist `asyncio.Lock` so that monkeypatch rebind was race-free. Switching to plain, non-streaming `agent.run(task)` — verified against installed `agent-framework-core==1.3.0` (`AgentTelemetryLayer._run`, `ChatTelemetryLayer._get_response` in `agent_framework.observability`) to close its OTel spans deterministically on *any* exception, `asyncio.CancelledError` included, via the ordinary `with`/context-manager `__exit__` guarantee (no `BaseException` gap like the streaming path has) — removes the need to capture or finalize a stream at all. Building the specialist `Agent` fresh on every call, instead of once per tool-build and reused, removes the shared mutable state the lock existed to protect, so the lock is removed too: same-specialist calls now simply run in parallel, each on its own instance (revises #14). Net result: less code, a cleaner and more debuggable per-call span timeline (each specialist run's span opens/closes at one well-defined point per call, on every path — success, recoverable failure, timeout, cancel), and no behavior change visible to the coordinator or its model | Human (user) | 2026-07-16 |
 
 ## 6. Test plan
 
@@ -600,8 +643,8 @@ handoff participant may itself use `as_tool()` specialists.
 - [ ] Unit: tool-name collision — fail fast when `delegate_<slug>`
       collides with coordinator user/MCP/sandbox/workflow tools or another
       specialist. Check during capability-aware validation and final assembly.
-- [ ] Unit: `runner` / delegated role — assemble `as_tool()` specialist tools
-      and return a result. Verify that a delegated specialist uses its own
+- [ ] Unit: `runner` / delegated role — assemble the hand-written `delegate_<slug>`
+      specialist tool and return a result. Verify that a delegated specialist uses its own
       instructions, model, static user/MCP/skills tools; lacks a per-request
       sandbox and main-only workflow tools; and does not expand its own
       `subagents`. Verify the same agent in the direct role keeps its full
@@ -613,8 +656,10 @@ handoff participant may itself use `as_tool()` specialists.
       timeouts as sanitized recoverable `tool_end` errors without aborting the
       coordinator. Propagate parent/request cancellation and abort. Enforce
       `min(specialist, coordinator remaining)` timeout.
-- [ ] Unit: concurrency — serialize concurrent calls to one specialist; run
-      calls to different specialists in parallel; verify every result.
+- [ ] Unit: concurrency — two concurrent calls to the *same* specialist each
+      build and run on their own independent instance, in parallel, both
+      producing correct results (no shared-instance lock — #20); calls to
+      different specialists also run in parallel; verify every result.
 - [ ] Observability — with instrumentation enabled, one delegated call produces
       nested `execute_tool delegate_<slug>` and `invoke_agent {specialist}` spans
       under the coordinator's `agent.run` span, all sharing one trace id;
@@ -673,7 +718,14 @@ handoff participant may itself use `as_tool()` specialists.
   the `id` and `tool_name` fields (#16) and unified slug-collision handling to
   fail-fast app-wide (#17), so identity is simply a globally-unique file-stem
   slug. Single-level delegation remains the one real rule and is enforced
-  structurally.
+  structurally. A **post-implementation simplification** (#20) then replaced
+  the `as_tool()`-based delegate tool — and the per-specialist `asyncio.Lock`
+  + `specialist_agent.run` monkeypatch/stream-capture it needed to finalize
+  MAF's internal `ResponseStream` on timeout/cancellation — with a
+  hand-written, non-streaming `@tool(schema=...)` function tool that builds a
+  fresh specialist `Agent` per call: a delegate never needed the specialist's
+  streamed tokens, so removing the streaming removed the lock and the
+  monkeypatch with it, at no behavior change to the coordinator.
   **No mechanical blockers remain; the final verdict is Go.** Both product
   choices previously open here are now decided by the reviewer (#5, #18).
 - **Human sign-off: Pending.** No open questions remain. `status` stays `Draft`

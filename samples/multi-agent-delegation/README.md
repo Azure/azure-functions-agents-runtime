@@ -48,7 +48,8 @@ At startup, the runtime resolves each `agent:` reference to the specialist's
 file-stem slug (`billing.agent.md` → `billing`), fails fast if any slug
 collides or a reference is unknown/duplicate/self-referential, and then
 builds one `delegate_billing` and one `delegate_tech` function tool for the
-coordinator, via Microsoft Agent Framework's `BaseAgent.as_tool()`.
+coordinator — a hand-written tool, not Microsoft Agent Framework's
+`BaseAgent.as_tool()`.
 
 At chat time, the coordinator's own model decides whether to call a
 specialist — routing is **model-selected, not deterministic**. When it does:

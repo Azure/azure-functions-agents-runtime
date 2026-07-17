@@ -25,13 +25,21 @@ Architecture
   so the chat UI doesn't change.
 * Chat-time sub-agent delegation (FRD 0006): when the resolved agent
   declares ``subagents``, :func:`build_subagent_tools` builds one
-  ``delegate_<slug>`` :class:`~agent_framework.FunctionTool` per reference
-  (via MAF's ``BaseAgent.as_tool()``) and appends it to that agent's own
-  tool list, so the coordinator can call a specialist from inside its
-  normal ``agent.run()`` tool-calling loop. Specialists are built fresh per
-  request, in the isolated *delegated* execution role — see
-  :func:`_build_delegated_agent` — and never expand their own ``subagents``
-  (single-level delegation).
+  hand-written ``delegate_<slug>`` :class:`~agent_framework.FunctionTool`
+  per reference (the same ``@tool(schema=...)`` pattern as the
+  ``web_request``/``execute_python`` system tools — see
+  :mod:`.system_tools.web_request` — not MAF's ``BaseAgent.as_tool()``) and
+  appends it to that agent's own tool list, so the coordinator can call a
+  specialist from inside its normal ``agent.run()`` tool-calling loop. A
+  delegate only ever needs the specialist's final answer as a single
+  string, so its handler builds a FRESH specialist :class:`agent_framework.
+  Agent`, in the isolated *delegated* execution role — see
+  :func:`_build_delegated_agent` — on every call and awaits its
+  non-streaming ``agent.run(task)`` directly. Building fresh per call (not
+  once per request) means concurrent calls, including repeated calls to the
+  *same* specialist, never share a live agent instance, so no per-specialist
+  lock is needed. Specialists never expand their own ``subagents`` (single-
+  level delegation).
 
 Concurrency
 -----------
@@ -58,7 +66,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pydantic import BaseModel, Field
+
 from ._blob_history import build_blob_provider_from_environment
+from ._function_tool import tool
 from ._logger import logger
 from ._observability import (
     FaultDomain,
@@ -237,8 +248,10 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 # Chat-time sub-agent delegation (FRD 0006)
 # ---------------------------------------------------------------------------
 #
-# A coordinator agent that declares ``subagents:`` gets one ``delegate_<slug>``
-# function tool per reference, built via MAF's ``BaseAgent.as_tool()`` and run
+# A coordinator agent that declares ``subagents:`` gets one hand-written
+# ``delegate_<slug>`` function tool per reference (:func:`_build_delegate_tool`
+# — the same ``@tool(schema=...)`` pattern as the ``web_request``/
+# ``execute_python`` system tools, not MAF's ``BaseAgent.as_tool()``) and run
 # inside the coordinator's normal ``agent.run()`` tool-calling loop — no
 # ``HandoffBuilder``, no HITL (out of scope for v1; see FRD 0006 §2).
 #
@@ -340,9 +353,9 @@ def _build_role_agent(
       the resolved agent declares ``subagents``, ``delegate_tools``.
     * ``delegated`` — a specialist invoked *as* a ``delegate_<slug>`` tool by
       a coordinator. Callers pass ``history_provider=None`` (an isolated,
-      session-less run — enforced independently by MAF's own
-      ``propagate_session=False``, mirrored here so a delegated agent never
-      even gets a *local* history context provider) and
+      session-less run — the delegate handler's own ``agent.run(task)`` call
+      never passes a ``session=`` argument either, so a delegated agent
+      never even gets a *local* history context provider) and
       ``delegate_tools=None``. Per-request sandbox tools and main-only
       Dynamic-Workflow tools are simply never passed for this role
       (``sandbox_tools=None``, ``workflow_enabled=False`` — see
@@ -481,9 +494,19 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
     records the exception/outcome and fires at a nondeterministic time.
 
     Call this from the ``except`` handler that catches that timeout/
-    cancellation — for both the coordinator's own streaming pull and the
-    delegate adapter's specialist call — so the stream's own finalization
-    still runs deterministically (FRD 0006 round-3 M2 fix).
+    cancellation for the coordinator's own streaming pull (``run_agent_stream``)
+    so the stream's own finalization still runs deterministically (FRD 0006
+    round-3 M2 fix). The ``delegate_<slug>`` adapter (``_build_delegate_tool``)
+    no longer has any use for this: it runs its specialist through plain
+    non-streaming ``agent.run(task)``, and a non-streaming run's OTel spans
+    are opened with an ordinary ``with``/context-manager (``AgentTelemetryLayer
+    ._run`` / ``ChatTelemetryLayer._get_response`` in ``agent_framework
+    .observability``), which — unlike ``ResponseStream.__anext__``'s bespoke
+    per-branch cleanup-hook protocol — closes deterministically on *any*
+    exception, ``asyncio.CancelledError`` included, via the standard
+    ``with`` statement's ``__exit__`` guarantee. No delegate-side workaround
+    is needed (verified against installed ``agent-framework-core==1.3.0``;
+    see FRD 0006 §5 Decision #20).
 
     Round-4 (B2c) also walks ``stream._inner_stream`` to finalize any
     *further* ``ResponseStream`` this one already resolved a reference to —
@@ -604,6 +627,25 @@ def _record_generic_delegate_failure(
     return _sanitize_delegate_failure(slug, exc)
 
 
+class _DelegateTaskParams(BaseModel):
+    """Argument schema for a ``delegate_<slug>`` tool call — always one field.
+
+    Mirrors ``BaseAgent.as_tool()``'s own ``arg_name="task"`` single-string
+    contract, but as an ordinary Pydantic schema (this repo's own ``@tool``
+    convention — see ``system_tools/web_request.py``/``system_tools/
+    sandbox.py``) rather than MAF's hand-assembled raw JSON-schema dict.
+    """
+
+    task: str = Field(
+        description=(
+            "A complete, self-contained instruction for the specialist. The "
+            "specialist does not see the coordinator's conversation history "
+            "or any other context — include every fact, detail, and "
+            "requirement the specialist needs to complete the task."
+        )
+    )
+
+
 def _build_delegate_tool(
     ref: SubagentRef,
     entry: CatalogEntry,
@@ -613,199 +655,108 @@ def _build_delegate_tool(
 ) -> Any:
     """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
 
-    Calls MAF's ``BaseAgent.as_tool()`` to get the real, MAF-shaped
-    ``FunctionTool`` (JSON-schema argument model, name, the ``ctx``-parameter
-    injection ``FunctionTool.invoke()`` relies on) and then swaps its
-    ``.func`` for a thin adapter implementing the failure/cancellation split
-    and per-specialist serialization (FRD 0006 §4.6, §5 Decision #12).
-    ``FunctionTool`` is a plain mutable object in the pinned
-    ``agent-framework-core``; ``FunctionTool.__call__`` reads ``self.func``
-    fresh on every invocation, so reassigning it after construction is safe
-    as long as the replacement's first parameter keeps the name ``ctx`` (the
-    only thing MAF's own parameter-injection cached from the original
-    function's signature).
+    A hand-written function tool — the same ``@tool(schema=...)`` pattern
+    this repo already uses for ``web_request``/``execute_python`` (see
+    ``system_tools/web_request.py``'s ``create_web_request_tools``) — rather
+    than MAF's ``BaseAgent.as_tool()``. A delegate only ever needs the
+    specialist's final answer as a single string back to the coordinator; it
+    never streams the specialist's tokens anywhere (surfacing specialist
+    deltas is an explicit FRD 0006 non-goal — §4.12 "SSE is a black box at
+    the boundary"). So there is no reason to run the specialist through
+    ``Agent.run(stream=True)`` at all, which is all ``as_tool()`` ever did
+    internally (via its own ``_agent_wrapper``, in ``agent_framework
+    ._agents``) before ``await``-ing ``stream.get_final_response()`` right
+    back into one string anyway.
 
-    The specialist ``Agent`` is built once, here, for this single tool
-    (eagerly, per FRD 0006 §4.7 — "build eagerly; run the specialist only if
-    the coordinator selects it"); the adapter re-invokes MAF's own
-    ``_agent_wrapper`` (captured as ``original_func``) on every call, so
-    ``propagate_session=False`` and the JSON-schema argument handling MAF
-    already implements are reused as-is — this adapter only adds the
-    timeout/cancellation split, serialization, and observability enrichment
-    on top.
+    The handler below builds a FRESH specialist ``Agent`` on every call
+    (:func:`_build_delegated_agent` — reusing the process-wide
+    ``ClientManager``, never a live agent instance cached from a previous
+    call) and awaits its plain, non-streaming ``agent.run(task)`` directly
+    (FRD 0006 §4.7, §5 Decision #20). Because each call gets its own,
+    unshared ``Agent`` object, there is no mutable state for concurrent
+    calls to race on — including concurrent calls to the *same* specialist —
+    so no per-specialist lock, monkeypatch, or captured-stream bookkeeping is
+    needed (contrast the old design's ``asyncio.Lock`` + ``specialist_agent
+    .run`` rebind, removed by this change).
     """
     resolved = entry.resolved
+    capabilities = entry.capabilities
     slug = ref.agent
     tool_name = delegate_tool_name(slug)
     description = ref.when or resolved.description
+    specialist_timeout = resolved.timeout
 
-    specialist_agent = _build_delegated_agent(resolved, entry.capabilities)
-    tool = specialist_agent.as_tool(
+    @tool(
         name=tool_name,
         description=description,
-        arg_name="task",
-        arg_description=(
-            "A complete, self-contained instruction for the specialist. The "
-            "specialist does not see the coordinator's conversation history "
-            "or any other context — include every fact, detail, and "
-            "requirement the specialist needs to complete the task."
-        ),
+        schema=_DelegateTaskParams,
         approval_mode="never_require",
-        propagate_session=False,
     )
-    original_func = tool.func
-    specialist_lock = asyncio.Lock()
-    specialist_timeout = resolved.timeout
-    # A stable reference to the real, underlying `run` method — safe to
-    # reuse across every call to this tool (it never changes; only the
-    # *wrapper* rebound onto `specialist_agent.run` below changes, once per
-    # call). `Agent.run(stream=True)` returns the `ResponseStream`
-    # synchronously (it is a plain method, not a coroutine function —
-    # confirmed in `agent_framework._agents.Agent.run`/`RawAgent.run`), so
-    # capturing its return value in `_capturing_run` below requires no
-    # `await`.
-    original_run = specialist_agent.run
-
-    async def _delegate_adapter(ctx: Any, **kwargs: Any) -> str:
+    async def delegate(params: _DelegateTaskParams) -> str:
         loop = asyncio.get_event_loop()
-        task_text = str(kwargs.get("task", "") or "")
+        task_text = params.task
 
         span = current_span()
         span.set_attribute("af.delegate.specialist", slug)
         span.set_attribute("af.delegate.task_bytes", len(task_text))
         span.set_content("af.delegate.task", task_text)
 
-        # Per-invocation capture slot (B1) — deliberately a fresh local, not
-        # a tool-build-scope/shared dict. `_agent_wrapper` (MAF's own
-        # `as_tool()` implementation, in `agent_framework._agents`) calls
-        # `self.run(..., stream=True, ...)` as a purely local variable
-        # inside its own stack frame — `original_func` never exposes the
-        # `ResponseStream` it produces, so there is no other way for this
-        # adapter to reach it than by wrapping `specialist_agent.run`
-        # itself. A call queued on `specialist_lock` that gets cancelled
-        # *before* acquiring it never reaches the rebind below, so its own
-        # `my_stream["value"]` stays `None` at exception time, and
-        # `_finalize_maf_stream(None, exc)` is a safe no-op — it can never
-        # observe (let alone finalize) some *other*, concurrently in-flight
-        # call's still-live stream. A single dict shared across every
-        # invocation of this tool (the pre-fix bug) let exactly that happen:
-        # a call still queued on the lock, cancelled while queued, would
-        # still hit `except asyncio.CancelledError` below and finalize
-        # whichever *other* call currently held the lock and its own live
-        # stream — out from under it, mid-flight.
-        my_stream: dict[str, Any] = {"value": None}
-        # `None` until the pre-dispatch budget check (below) is passed and
-        # `original_func` is actually about to be invoked; reused by S3b's
-        # timing heuristic as the natural "did we ever call `original_func`"
-        # signal — the pre-dispatch `TimeoutError` raised below is the only
-        # `TimeoutError` site that can fire while this is still `None`.
-        call_start: float | None = None
+        # The coordinator's deadline is an absolute wall-clock point;
+        # `effective_timeout = min(specialist, coordinator remaining)` per
+        # FRD 0006 Decision #12. Checked *before* building the specialist
+        # `Agent` at all: if the budget is already exhausted, skip the call
+        # entirely (building an `Agent` is cheap, but there is still no
+        # reason to do it for a run that can never be attempted) rather than
+        # relying on `wait_for(timeout<=0)`'s cancel-before-first-step
+        # behavior to prevent it from starting.
+        remaining = max(0.0, coordinator_deadline - loop.time())
+        effective_timeout = min(specialist_timeout, remaining)
+        if effective_timeout <= 0:
+            exc = TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
+            tracker.record_error()
+            record_delegate_call(error=True)
+            span.set_attribute("af.delegate.outcome", "timeout")
+            span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
+            span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
+            return (
+                f"The '{slug}' specialist did not respond in time and was "
+                "stopped. Consider a narrower request, trying again, or "
+                "proceeding without it."
+            )
 
-        def _capturing_run(*args: Any, **kwargs: Any) -> Any:
-            result = original_run(*args, **kwargs)
-            my_stream["value"] = result
-            return result
-
-        # Only the actual specialist run is serialized per-specialist
-        # (Decision #14): different specialists always run in parallel;
-        # concurrent calls to the *same* specialist wait their turn here.
-        # `remaining`/`effective_timeout` are deliberately computed *inside*
-        # the lock (B1) — the coordinator's deadline is an absolute wall-clock
-        # point, so time spent queued behind a concurrent call to this same
-        # specialist must count against it too. Computing them before the
-        # lock (the pre-fix bug) would let a call that waited out the whole
-        # budget still see a stale, still-positive snapshot and attempt the
-        # underlying call anyway, well past the coordinator's real deadline.
+        specialist_agent = _build_delegated_agent(resolved, capabilities)
+        call_start = loop.time()
         try:
-            async with specialist_lock:
-                remaining = max(0.0, coordinator_deadline - loop.time())
-                effective_timeout = min(specialist_timeout, remaining)
-                if effective_timeout <= 0:
-                    # Budget is already exhausted post-lock: treat exactly
-                    # like a timeout, but skip the call entirely rather than
-                    # relying on `wait_for(timeout<=0)`'s cancel-before-first-
-                    # step behavior to prevent it from ever starting. Carries
-                    # a message (S3) so telemetry that later records this
-                    # exact instance verbatim still has useful detail. This
-                    # is unambiguously a genuine deadline-exhaustion case
-                    # (S3b) — `original_func` is never called, so
-                    # `call_start` stays `None` and the timing heuristic
-                    # below is skipped entirely for it.
-                    raise TimeoutError(f"delegate_{slug}: coordinator budget exhausted before dispatch")
-                # Rebind `specialist_agent.run` to a closure over *this*
-                # call's own `my_stream`, immediately before dispatching and
-                # while still holding `specialist_lock` (B1). This is safe
-                # with no additional synchronization: asyncio is single-
-                # threaded/cooperative, and `specialist_lock` already
-                # guarantees only one invocation of this tool is ever inside
-                # this region at a time, so no other invocation of *this*
-                # tool can be rebinding/reading `specialist_agent.run`
-                # concurrently with this one (a different tool has its own,
-                # entirely separate `specialist_agent`/lock, so there is no
-                # cross-tool interference either). The rebind "belongs" to
-                # whichever call currently holds the lock; the next
-                # lock-holder rebinds again before *its own* call — so
-                # whenever `_agent_wrapper`'s first statement actually calls
-                # `self.run(...)` (a fresh attribute lookup on `self` at
-                # call time, not a pre-bound reference — confirmed in
-                # `agent_framework._agents.Agent.run`/`RawAgent.run`),
-                # `specialist_agent.run` is guaranteed to still be the
-                # closure rebound here, for this exact call.
-                specialist_agent.run = _capturing_run
-                call_start = loop.time()
-                # `original_func` is MAF's own `_agent_wrapper` (from
-                # `as_tool()`), which always resolves to a `str`
-                # (`AgentRunResponse.text`); the explicit `str(...)` only
-                # satisfies mypy, since `tool.func` is typed `Any`.
-                result = str(
-                    await asyncio.wait_for(original_func(ctx, **kwargs), timeout=effective_timeout)
-                )
-        except asyncio.CancelledError as exc:
+            response = await asyncio.wait_for(specialist_agent.run(task_text), timeout=effective_timeout)
+        except asyncio.CancelledError:
             # Parent/request cancellation, not a specialist-local timeout —
             # never recorded as a (recoverable) delegate error (Decision #12
             # and `_DelegateErrorTracker`'s docstring are explicit that only
             # *recoverable* failures count). Annotate the outcome for
             # telemetry's sake only, then re-raise immediately so the
             # cancellation still propagates and aborts the run — this is an
-            # observability side-effect on the way out, never a swallow.
-            # Finalize the underlying MAF stream first (M2): `wait_for`
-            # cancelling `original_func` mid-flight bypasses
-            # `ResponseStream.__anext__`'s own cleanup (it only runs from its
-            # `except StopAsyncIteration`/`except Exception` branches, never
-            # from a `BaseException` such as this), so without this call the
-            # specialist's `invoke_agent` span/usage bookkeeping would only
-            # ever finalize via a nondeterministic GC-timed safety net.
-            # Reads the per-call `my_stream` (B1), never a shared/tool-level
-            # slot: a call cancelled while still queued on `specialist_lock`
-            # never reaches the rebind above, so its own `my_stream["value"]`
-            # is still `None` here — finalizing `None` is a confirmed no-op,
-            # never someone else's live stream.
-            await _finalize_maf_stream(my_stream.get("value"), exc)
+            # observability side-effect on the way out, never a swallow. No
+            # explicit stream/span finalization call is needed here (unlike
+            # the old streaming design): a non-streaming `agent.run()`'s
+            # OTel spans are opened with an ordinary `with`/context-manager,
+            # which closes deterministically on any exception —
+            # `asyncio.CancelledError` included — via the standard `with`
+            # statement's `__exit__` guarantee (verified against installed
+            # `agent-framework-core==1.3.0`; see FRD 0006 §5 Decision #20).
             span.set_attribute("af.delegate.outcome", "cancelled")
             raise
         except TimeoutError as exc:
-            # Finalize the underlying MAF stream first (M2/B1) — same
-            # reasoning as the cancellation branch above, and equally safe
-            # for the pre-dispatch case, since `my_stream["value"]` is still
-            # `None` there.
-            await _finalize_maf_stream(my_stream.get("value"), exc)
-            # S3b: this handler catches *both* a genuine `wait_for` deadline
+            # This handler catches *both* a genuine `wait_for` deadline
             # expiry *and* any `TimeoutError` that happens to propagate from
-            # inside `original_func` itself (e.g. an inner HTTP-client
-            # timeout in the specialist's own tool-calling) —
-            # `asyncio.TimeoutError is TimeoutError` as of Python 3.11, so
-            # there is no type-based way to tell the two apart. `call_start
-            # is None` unambiguously means the pre-dispatch budget-exhausted
-            # raise above fired (see its comment) — always a genuine
-            # deadline case, regardless of timing. Otherwise, compare
-            # elapsed wall time against `effective_timeout`: an inner
-            # exception typically surfaces well before the deadline, while a
-            # real `wait_for` expiry fires essentially exactly at it.
-            elapsed = None if call_start is None else loop.time() - call_start
-            if (
-                elapsed is not None
-                and elapsed < effective_timeout - _INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS
-            ):
+            # inside the specialist's own tool-calling (e.g. an inner
+            # HTTP-client timeout) — `asyncio.TimeoutError is TimeoutError`
+            # as of Python 3.11, so there is no type-based way to tell the
+            # two apart. Compare elapsed wall time against
+            # `effective_timeout`: an inner exception typically surfaces
+            # well before the deadline, while a real `wait_for` expiry fires
+            # essentially exactly at it.
+            elapsed = loop.time() - call_start
+            if elapsed < effective_timeout - _INNER_TIMEOUT_MISCLASSIFICATION_TOLERANCE_SECONDS:
                 # Not actually a coordinator-budget/deadline-expiry event —
                 # an ordinary specialist failure that happens to be a
                 # `TimeoutError` instance. Classify like any other
@@ -818,11 +769,9 @@ def _build_delegate_tool(
             span.set_attribute("af.delegate.outcome", "timeout")
             span.set_attribute("af.delegate.timeout_seconds", effective_timeout)
             # Record whichever `TimeoutError` instance was actually caught
-            # (S3) instead of constructing a fresh, synthetic one: `exc` may
-            # be `wait_for`'s own expiry error or the pre-emptive
-            # budget-exhausted raise above. Preserving the real instance
-            # keeps whatever detail it carries instead of discarding it for
-            # a rebuilt string.
+            # instead of constructing a fresh, synthetic one — `exc` may be
+            # `wait_for`'s own expiry error or an inner one; preserving the
+            # real instance keeps whatever detail it carries.
             span.record_exception(exc, fault_domain=FaultDomain.DELEGATE)
             return (
                 f"The '{slug}' specialist did not respond in time and was "
@@ -832,14 +781,14 @@ def _build_delegate_tool(
         except Exception as exc:
             return _record_generic_delegate_failure(span, tracker, slug, exc)
 
+        result = str(response.text)
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
         span.set_attribute("af.delegate.response_bytes", len(result))
         span.set_content("af.delegate.result", result)
         return result
 
-    tool.func = _delegate_adapter
-    return tool
+    return delegate
 
 
 async def build_subagent_tools(
@@ -850,17 +799,22 @@ async def build_subagent_tools(
 ) -> tuple[list[Any], _DelegateErrorTracker]:
     """Build one ``delegate_<slug>`` tool per ``subagents`` reference.
 
-    Each specialist ``Agent`` is built FRESH for this call, in the
-    *delegated* role (:func:`_build_delegated_agent`), reusing the
-    process-wide :class:`ClientManager` but never a live agent instance
-    cached from a previous request — MAF's ``Agent.run()`` self-mutates, so
-    per-request construction is the only safe option, and it is cheap (FRD
-    0006 §4.7). Tools are built eagerly for every reference; a specialist
-    only actually *runs* if the coordinator's model selects the
-    corresponding ``delegate_<slug>`` tool call.
+    The ``FunctionTool`` wrapper itself is built eagerly here, once per
+    reference for this coordinator run — cheap, since it is just a
+    schema/closure, and a specialist only actually *runs* if the
+    coordinator's model selects the corresponding ``delegate_<slug>`` tool
+    call. The specialist's ``Agent`` object is a separate matter: each
+    wrapper's handler builds a FRESH one, in the *delegated* role
+    (:func:`_build_delegated_agent`), on every individual tool CALL — not
+    once here — reusing the process-wide :class:`ClientManager` but never a
+    live agent instance cached from a previous call. MAF's ``Agent.run()``
+    self-mutates, so per-call construction is the only safe option, and it
+    is cheap (FRD 0006 §4.7, §5 Decision #20); it also means concurrent
+    calls, including repeated calls to the *same* specialist, never share a
+    live agent instance and so need no lock.
 
     Returns ``(tools, tracker)``. ``tracker`` is incremented by each
-    adapter on a *recoverable* specialist failure/timeout — see
+    delegate handler on a *recoverable* specialist failure/timeout — see
     :class:`_DelegateErrorTracker`.
     """
     tracker = _DelegateErrorTracker()

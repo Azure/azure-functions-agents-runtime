@@ -539,7 +539,7 @@ Normal custom tools keep their existing behavior. Plain public functions and `@t
 #### `subagents`
 - **Type:** `array` of objects
 - **Location:** Agent front matter (any independently runnable agent — one with its own `trigger` and/or enabled `builtin_endpoints`; not limited to `main.agent.md`)
-- **Description:** Declares specialist agents this agent (the "coordinator") may delegate to at chat time. Each declared specialist is exposed to the coordinator's model as a `delegate_<slug>` function tool, built with Microsoft Agent Framework's `BaseAgent.as_tool()`. This runs entirely inside the coordinator's normal `agent.run()` tool-calling loop — there is no hand-off, no human-in-the-loop, and no `Workflow` involved.
+- **Description:** Declares specialist agents this agent (the "coordinator") may delegate to at chat time. Each declared specialist is exposed to the coordinator's model as a hand-written `delegate_<slug>` function tool whose handler calls the specialist's plain, non-streaming `agent_framework.Agent.run(task)`. This runs entirely inside the coordinator's normal `agent.run()` tool-calling loop — there is no hand-off, no human-in-the-loop, and no `Workflow` involved.
 
 ```yaml
 subagents:
@@ -557,7 +557,7 @@ description: Routes customer questions to the right specialist
 builtin_endpoints: true
 subagents:
   - agent: billing                 # references billing.agent.md by its slug
-    when: Invoices, charges, refunds, or subscription questions   # -> as_tool(description=...)
+    when: Invoices, charges, refunds, or subscription questions   # -> becomes delegate_billing's tool description
   - agent: tech                    # when omitted -> uses tech's own `description`
 ---
 You are a support coordinator. Use the billing and tech specialists when

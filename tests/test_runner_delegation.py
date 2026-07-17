@@ -4,21 +4,23 @@ Covers the pieces added to :mod:`azure_functions_agents.runner` for
 delegation: the ``direct``/``delegated`` execution-role split
 (``_build_role_agent`` / ``_build_delegated_agent``), single-level
 structural enforcement (Decision #6), ``build_subagent_tools``'s guard
-clauses, the ``delegate_<slug>`` adapter's failure/cancellation split
-(Decision #12), per-specialist serialization vs. cross-specialist
-parallelism (Decision #14), and delegation observability enrichment
-(Decision #19, §4.12).
+clauses, the ``delegate_<slug>`` tool's failure/cancellation split
+(Decision #12), per-call specialist construction giving cross-specialist
+AND same-specialist parallelism with no shared-instance lock (Decision #14,
+revised), and delegation observability enrichment (Decision #19, §4.12).
 
 Fake specialist harness
 ------------------------
 
-MAF's ``BaseAgent.as_tool()`` is only defined on ``BaseAgent`` (not on the
-``SupportsAgentRun`` protocol), so a usable fake specialist must subclass
-``agent_framework.BaseAgent``. ``as_tool()``'s wrapper calls
-``self.run(..., stream=True, ...)`` *without* ``await`` and then
-``await``s the returned object's ``get_final_response()`` — so
-``_FakeSpecialistAgent.run()`` below is a plain (non-``async``) method
-returning a ``_FakeStream``, matching that exact calling convention.
+The ``delegate_<slug>`` tool built by :func:`runner._build_delegate_tool`
+is a hand-written ``@tool(schema=...)`` function tool (FRD 0006 §5
+Decision #20) whose handler calls ``await specialist_agent.run(task)`` —
+plain, non-streaming ``agent_framework.Agent`` usage, never MAF's
+``BaseAgent.as_tool()``. So a usable fake specialist only needs an
+``async def run(self, task, **kwargs)`` returning an object with a
+``.text`` attribute (mirroring ``agent_framework.AgentResponse.text``) —
+no ``BaseAgent`` subclassing, streaming, or ``get_final_response()``
+plumbing required. ``_FakeSpecialistAgent`` below is that minimal double.
 """
 
 from __future__ import annotations
@@ -30,7 +32,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
-from agent_framework import BaseAgent, MCPStreamableHTTPTool, tool
+from agent_framework import MCPStreamableHTTPTool, tool
 
 import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
@@ -96,13 +98,15 @@ class _RunnableFakeChatClient:
     ``SimpleNamespace`` (good enough for construction/tool-listing assertions,
     but not runnable).
 
-    ``BaseAgent.as_tool()``'s wrapper always calls ``Agent.run(stream=True,
-    ...)`` (never ``stream=False``), which calls
-    ``self.client.get_response(stream=True, ...)`` and expects a real
-    ``ResponseStream`` back — so only the ``stream=True`` branch needs to work
-    for a REAL ``agent_framework.Agent`` to be driven end to end through
-    MAF's own machinery (including ``AgentTelemetryLayer``, which is what
-    actually stamps ``gen_ai.agent.name`` on the ``invoke_agent`` span).
+    Supports both ``stream=False`` (used by the rewritten, non-streaming
+    ``delegate_<slug>`` handler's own ``agent.run(task)`` call) and
+    ``stream=True`` (still used by ``test_real_maf_agent_run_raises_on_
+    expanded_mcp_function_collision`` below, which drives a real *coordinator*
+    ``Agent`` — an unrelated, streaming code path this module's delegation
+    changes do not touch) so a REAL ``agent_framework.Agent`` can be driven
+    end to end through MAF's own machinery either way (including
+    ``AgentTelemetryLayer``, which is what actually stamps ``gen_ai.agent.name``
+    on the ``invoke_agent`` span).
     """
 
     additional_properties: ClassVar[dict[str, Any]] = {}
@@ -111,15 +115,25 @@ class _RunnableFakeChatClient:
         self._text = text
 
     def get_response(self, messages: Any, *, stream: bool = False, **kwargs: Any) -> Any:
-        from agent_framework import ChatResponseUpdate, Content, ResponseStream
+        from agent_framework import (
+            ChatResponse,
+            ChatResponseUpdate,
+            Content,
+            Message,
+            ResponseStream,
+        )
 
-        if not stream:
-            raise NotImplementedError("only the stream=True branch is exercised by as_tool()")
+        if stream:
 
-        async def _stream() -> Any:
-            yield ChatResponseUpdate(contents=[Content.from_text(self._text)], role="assistant")
+            async def _stream() -> Any:
+                yield ChatResponseUpdate(contents=[Content.from_text(self._text)], role="assistant")
 
-        return ResponseStream(_stream())
+            return ResponseStream(_stream())
+
+        async def _get_response() -> Any:
+            return ChatResponse(messages=[Message("assistant", [self._text])])
+
+        return _get_response()
 
 
 class _RunnableFakeClientManager(ClientManager):
@@ -209,46 +223,24 @@ def _install_counter_capture(monkeypatch: pytest.MonkeyPatch) -> list[bool]:
     return calls
 
 
-class _FakeStream:
-    """Stands in for MAF's ``ResponseStream`` — only ``get_final_response()`` is used."""
+class _FakeSpecialistAgent:
+    """A specialist double for the rewritten, non-streaming delegate handler.
 
-    def __init__(self, message: str, respond: Callable[[str], Awaitable[str]]) -> None:
-        self._message = message
-        self._respond = respond
-
-    async def get_final_response(self) -> Any:
-        text = await self._respond(self._message)
-        return SimpleNamespace(text=text, user_input_requests=[])
-
-
-class _FakeSpecialistAgent(BaseAgent):
-    """A specialist double: subclasses ``BaseAgent`` (required for ``as_tool()``).
-
-    ``run()`` is a plain, non-``async`` method — see module docstring for why
-    this exact shape (rather than ``async def run``) is required to match
-    ``as_tool()``'s ``_agent_wrapper`` calling convention.
+    ``_build_delegate_tool``'s handler calls ``await specialist_agent.run
+    (task)`` directly — plain, non-streaming ``agent_framework.Agent`` usage,
+    never MAF's ``BaseAgent.as_tool()`` / ``stream=True`` calling convention —
+    so this fake only needs a minimal async ``run()`` returning an object
+    with a ``.text`` attribute (mirroring ``agent_framework.AgentResponse
+    .text``). No ``BaseAgent`` subclassing or stream shape required.
     """
 
     def __init__(self, slug: str, respond: Callable[[str], Awaitable[str]]) -> None:
-        super().__init__(id=slug, name=slug, description=f"{slug} specialist")
+        self.slug = slug
         self._respond = respond
 
-    def run(
-        self,
-        messages: Any = None,
-        *,
-        stream: bool = False,
-        session: Any = None,
-        function_invocation_kwargs: dict[str, Any] | None = None,
-        **kwargs: Any,
-    ) -> Any:
-        return _FakeStream(str(messages or ""), self._respond)
-
-    async def create_session(self, **kwargs: Any) -> Any:
-        raise NotImplementedError
-
-    async def get_session(self, session_id: str, **kwargs: Any) -> Any:
-        raise NotImplementedError
+    async def run(self, task: Any = None, **kwargs: Any) -> Any:
+        text = await self._respond(str(task or ""))
+        return SimpleNamespace(text=text)
 
 
 def _tool_names(agent: Any) -> set[str]:
@@ -539,7 +531,19 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
 async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_does_not_recurse(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    set_client_manager(_FakeClientManager())
+    """End-to-end (not just ``_build_delegated_agent`` in isolation): proves
+    single-level structural enforcement (Decision #6) holds through the real
+    ``build_subagent_tools`` -> ``_build_delegate_tool`` -> handler ->
+    ``_build_delegated_agent`` chain, including an actual specialist call —
+    not merely that the tool was *built*.
+
+    Since each call now builds its specialist ``Agent`` fresh, INSIDE the
+    handler, rather than at tool-build time (FRD 0006 §5 Decision #20),
+    ``_build_delegated_agent`` is not called at all until the tool is
+    actually invoked — this test calls it via ``_RunnableFakeClientManager``
+    so the specialist's ``run()`` genuinely succeeds end to end.
+    """
+    set_client_manager(_RunnableFakeClientManager())
 
     resolved_a = _make_resolved(slug="a", subagents=[SubagentRef(agent="b")])
     resolved_b = _make_resolved(slug="b", subagents=[SubagentRef(agent="a")])
@@ -560,10 +564,19 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
         [SubagentRef(agent="a")], catalog, coordinator_deadline=loop.time() + 30
     )
 
-    # The coordinator gets exactly delegate_a — B is never touched, and A
-    # (despite declaring `subagents: [b]` itself) was built with zero tools
-    # at all, so it has no way to further delegate to B.
+    # The coordinator gets exactly delegate_a — B is never touched. Building
+    # the tool itself builds no specialist Agent yet: that now happens per
+    # CALL, not at tool-build time.
     assert [t.name for t in tools] == ["delegate_a"]
+    assert built_agents == []
+
+    result = await tools[0].func(task="go")
+
+    # Calling delegate_a built exactly one specialist Agent, for A. Despite A
+    # declaring `subagents: [b]` itself, `_build_delegated_agent` never reads
+    # `resolved.subagents`, so A was built with zero tools at all and has no
+    # way to further delegate to B.
+    assert result == "specialist response"
     assert tracker.count == 0
     assert len(built_agents) == 1
     assert _tool_names(built_agents[0]) == set()
@@ -646,7 +659,7 @@ async def test_delegate_adapter_success_records_span_and_metrics(monkeypatch: py
 
     tool, tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+    result = await tool.func(task="invoice #42")
 
     assert result == "handled: invoice #42"
     assert tracker.count == 0
@@ -668,7 +681,7 @@ async def test_delegate_adapter_recovers_from_specialist_exception_with_sanitize
 
     tool, tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+    result = await tool.func(task="invoice #42")
 
     assert "billing" in result
     assert "hunter2" not in result  # sanitized: raw detail never reaches the model
@@ -691,7 +704,7 @@ async def test_delegate_adapter_specialist_timeout_is_recoverable(monkeypatch: p
         monkeypatch, slug="billing", respond=slow_respond, resolved_timeout=0.05
     )
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+    result = await tool.func(task="invoice #42")
 
     assert "did not respond in time" in result
     assert tracker.count == 1
@@ -707,15 +720,15 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
     even when the specialist's own configured timeout is generous — proving
     effective_timeout = min(specialist_timeout, coordinator_remaining).
 
-    S3b (round 4): this is the *pre-dispatch* budget-exhausted path
-    (``effective_timeout <= 0`` before ``original_func`` is ever invoked,
-    proven here by ``body_ran is False``) — unambiguously a genuine deadline
-    expiry, never an inner specialist exception, so it must ALWAYS classify
-    as ``outcome=timeout`` regardless of the elapsed-time heuristic used to
-    distinguish the other two cases (a real ``wait_for`` expiry vs. an inner
-    ``TimeoutError`` the specialist's own code happens to raise) — the
-    heuristic doesn't even apply here since ``original_func`` was never
-    called at all.
+    This is the *pre-dispatch* budget-exhausted path
+    (``effective_timeout <= 0`` before the specialist ``Agent`` is even
+    built, proven here by ``body_ran is False``) — unambiguously a genuine
+    deadline expiry, never an inner specialist exception, so it must ALWAYS
+    classify as ``outcome=timeout`` regardless of the elapsed-time heuristic
+    used to distinguish the other two cases (a real ``wait_for`` expiry vs.
+    an inner ``TimeoutError`` the specialist's own code happens to raise) —
+    the heuristic doesn't even apply here since the specialist was never
+    built or called at all.
     """
     span = _install_span_capture(monkeypatch)
     _install_counter_capture(monkeypatch)
@@ -736,73 +749,12 @@ async def test_delegate_adapter_effective_timeout_uses_coordinator_remaining_whe
         coordinator_deadline=loop.time() - 100.0,  # already expired
     )
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+    result = await tool.func(task="invoice #42")
 
     assert "did not respond in time" in result
     assert tracker.count == 1
-    assert body_ran is False  # wait_for(timeout<=0) cancels before the body ever runs
+    assert body_ran is False  # the pre-dispatch check returns before the specialist is ever built/called
     assert span.attributes["af.delegate.outcome"] == "timeout"
-
-
-@pytest.mark.asyncio
-async def test_delegate_adapter_counts_lock_wait_time_against_coordinator_deadline(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """B1 regression: time spent waiting for the per-specialist lock (Decision
-    #14 — concurrent calls to the *same* specialist are serialized) must count
-    against the coordinator's *absolute* deadline, not be measured from a
-    stale pre-lock snapshot.
-
-    Two concurrent calls to the same specialist: the first holds the lock
-    until the coordinator's deadline is already exhausted (its own
-    ``wait_for`` cancels it right at the deadline); the second is queued
-    behind the lock for that entire time. If ``remaining``/``effective_
-    timeout`` were computed *before* acquiring the lock (the pre-fix bug),
-    the second call would see a stale, still-positive budget and actually
-    attempt (and here, complete) its specialist call well past the
-    coordinator's real deadline. With the fix, the second call recomputes
-    ``remaining`` *after* the lock and finds it already <= 0, so it never
-    even attempts the call.
-    """
-    _install_span_capture(monkeypatch)
-    _install_counter_capture(monkeypatch)
-
-    call_n = 0
-    second_call_body_ran = False
-
-    async def respond(task: str) -> str:
-        # `_delegate_adapter` closes over one `specialist_lock` per
-        # `build_subagent_tools()` call, so both concurrent invocations must
-        # go through the *same* built tool (hence the shared `respond`,
-        # routed by call order) to actually exercise lock serialization.
-        nonlocal call_n, second_call_body_ran
-        call_n += 1
-        if call_n == 1:
-            # Never completes on its own — only the coordinator deadline
-            # (via this call's own `wait_for`) ends it, at t ~= deadline.
-            await asyncio.sleep(5.0)
-            return "unreachable"
-        second_call_body_ran = True
-        return "second should never get here"
-
-    loop = asyncio.get_event_loop()
-    tool, tracker = await _build_single_delegate_tool(
-        monkeypatch,
-        slug="billing",
-        respond=respond,
-        resolved_timeout=60.0,
-        coordinator_deadline=loop.time() + 0.2,
-    )
-
-    first_call = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="first"))
-    second_call = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="second"))
-
-    first_result, second_result = await asyncio.gather(first_call, second_call)
-
-    assert "did not respond in time" in first_result
-    assert "did not respond in time" in second_result
-    assert second_call_body_ran is False  # never attempted: budget was already gone post-lock
-    assert tracker.count == 2  # both calls recorded a (timeout) delegate error
 
 
 @pytest.mark.asyncio
@@ -818,7 +770,7 @@ async def test_delegate_adapter_propagates_cancellation_without_recording_a_dele
 
     tool, tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
 
-    task = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="invoice #42"))
+    task = asyncio.ensure_future(tool.func(task="invoice #42"))
     await asyncio.sleep(0.01)
     task.cancel()
 
@@ -838,36 +790,65 @@ async def test_delegate_adapter_propagates_cancellation_without_recording_a_dele
 
 
 # ---------------------------------------------------------------------------
-# Concurrency (Decision #14): serialize same-specialist, parallel different
+# Concurrency (Decision #14, revised): each call builds its own specialist
+# instance, so same-specialist AND cross-specialist calls both run in
+# parallel — no shared-instance lock.
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_delegate_adapter_serializes_concurrent_calls_to_same_specialist(
+async def test_delegate_adapter_concurrent_calls_to_same_specialist_run_on_independent_instances_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """FRD 0006 §5 Decision #20 (revised #14): no per-specialist lock.
+
+    Because ``_build_delegate_tool``'s handler builds a FRESH specialist
+    ``Agent`` on every call (:func:`runner._build_delegated_agent`), two
+    concurrent calls to the *same* declared specialist never share a live
+    agent instance to race — or serialize — on. This replaces the old
+    lock-based design's ``test_delegate_adapter_serializes_concurrent_calls_
+    to_same_specialist`` test with the simpler reality: both calls run
+    concurrently, each on its own instance, and both produce correct,
+    independent results.
+    """
     _install_span_capture(monkeypatch)
     _install_counter_capture(monkeypatch)
 
     log: list[str] = []
+    built_instances: list[_FakeSpecialistAgent] = []
 
-    async def respond(task: str) -> str:
-        log.append("start")
-        await asyncio.sleep(0.05)
-        log.append("end")
-        return "ok"
+    def _fake_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+        async def respond(task: str) -> str:
+            log.append(f"start:{task}")
+            await asyncio.sleep(0.05)
+            log.append(f"end:{task}")
+            return f"handled:{task}"
 
-    tool, _tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
-    ctx = SimpleNamespace(kwargs={})
+        agent = _FakeSpecialistAgent(resolved.slug, respond)
+        built_instances.append(agent)
+        return agent
 
-    await asyncio.gather(
-        tool.func(ctx, task="first"),
-        tool.func(ctx, task="second"),
+    monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
+
+    catalog = _catalog_of(("billing", _make_resolved(slug="billing")))
+    loop = asyncio.get_event_loop()
+    tools, tracker = await runner.build_subagent_tools(
+        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
     )
+    tool = tools[0]
 
-    # The per-specialist asyncio.Lock guarantees the second call's body
-    # cannot begin until the first has fully finished.
-    assert log == ["start", "end", "start", "end"]
+    results = await asyncio.gather(tool.func(task="first"), tool.func(task="second"))
+
+    assert set(results) == {"handled:first", "handled:second"}
+    assert tracker.count == 0
+    # Two calls to the same specialist -> two independently built agent
+    # instances, never one shared/reused object.
+    assert len(built_instances) == 2
+    assert built_instances[0] is not built_instances[1]
+    # Both calls actually overlapped in time -- proving no lock serialized
+    # them: each starts before the other ends.
+    assert log.index("start:first") < log.index("end:second")
+    assert log.index("start:second") < log.index("end:first")
 
 
 @pytest.mark.asyncio
@@ -907,14 +888,13 @@ async def test_delegate_adapter_runs_different_specialists_in_parallel(
         catalog,
         coordinator_deadline=loop.time() + 30,
     )
-    ctx = SimpleNamespace(kwargs={})
 
-    results = await asyncio.gather(*(t.func(ctx, task="go") for t in tools))
+    results = await asyncio.gather(*(t.func(task="go") for t in tools))
 
     assert set(results) == {"billing-done", "shipping-done"}
     # Different specialists run concurrently: billing's whole run overlaps
-    # with shipping's, regardless of exact micro-ordering of lock
-    # acquisition — proven by each starting before the other ends.
+    # with shipping's, regardless of exact micro-ordering — proven by each
+    # starting before the other ends.
     assert log.index("start:billing") < log.index("end:shipping")
     assert log.index("start:shipping") < log.index("end:billing")
 
@@ -962,15 +942,14 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
     tools, _tracker = await runner.build_subagent_tools(
         [SubagentRef(agent="a"), SubagentRef(agent="b")], catalog, coordinator_deadline=loop.time() + 30
     )
-    ctx = SimpleNamespace(kwargs={})
 
     async def _call_with_nested_span(tool: Any) -> str:
         # Mimics MAF's FunctionTool.invoke(), which auto-nests an
         # `execute_tool <name>` span around every tool call — the delegate
-        # adapter's current_span() then annotates *that* span rather than
+        # handler's current_span() then annotates *that* span rather than
         # opening a second one (FRD 0006 §4.12).
         with tracer.start_as_current_span(f"execute_tool {tool.name}"):
-            return str(await tool.func(ctx, task="do it"))
+            return str(await tool.func(task="do it"))
 
     with tracer.start_as_current_span("agent.run coordinator"):
         results = await asyncio.gather(*(_call_with_nested_span(t) for t in tools))
@@ -994,8 +973,8 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
 # ---------------------------------------------------------------------------
 #
 # Every other test in this module that inspects delegate telemetry uses
-# `_FakeSpecialistAgent`, a hand-rolled `BaseAgent` subclass that never mixes
-# in `agent_framework.observability.AgentTelemetryLayer` and therefore never
+# `_FakeSpecialistAgent`, a minimal double that never mixes in
+# `agent_framework.observability.AgentTelemetryLayer` and therefore never
 # actually creates MAF's own `invoke_agent` span. Those tests prove this
 # repo's *own* `af.delegate.*` span attributes are correct, but they cannot
 # prove the separate MAF-side contract this file's other assertions rely on:
@@ -1022,7 +1001,7 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
     -> ``_build_delegated_agent`` -> ``_build_role_agent`` chain (no
     monkeypatching of any of those, unlike every other test in this module)
     so the specialist really is a MAF ``Agent`` instance, and invokes the
-    resulting ``delegate_billing`` tool's adapter exactly as the coordinator's
+    resulting ``delegate_billing`` tool's handler exactly as the coordinator's
     model would. ``_RunnableFakeClientManager`` supplies the only fake in this
     test: a chat client, standing in for the network call to a real model
     provider.
@@ -1067,8 +1046,7 @@ async def test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name(
     tool = tools[0]
     assert tool.name == "delegate_billing"
 
-    ctx = SimpleNamespace(kwargs={})
-    result = await tool.func(ctx, task="Explain this month's invoice.")
+    result = await tool.func(task="Explain this month's invoice.")
 
     assert result == "specialist response"
 
@@ -1195,31 +1173,35 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
 
 
 # ---------------------------------------------------------------------------
-# Real MAF stream finalization on timeout/cancellation (round-3 M2)
+# Real MAF span finalization on timeout/cancellation (FRD 0006 §5 Decision #20)
 # ---------------------------------------------------------------------------
 #
-# `_FakeStream`/`_FakeSpecialistAgent` (used by every other test in this
-# module) never touch MAF's real `ResponseStream`, so they cannot prove M2:
-# that a specialist call stopped by `asyncio.wait_for`'s timeout/cancellation
-# still finalizes MAF's own stream (closing its `invoke_agent` span
-# deterministically) rather than leaving it open until a nondeterministic
-# GC-timed `weakref.finalize` safety net eventually runs. The tests below go
-# through the real (unmocked) `_build_delegated_agent` -> `_build_role_agent`
-# -> `Agent(...)` chain, exactly like B2's
+# `_FakeSpecialistAgent` (used by every other test in this module) never
+# touches a real MAF `Agent`/OTel span, so it cannot prove that a specialist
+# call stopped by `asyncio.wait_for`'s timeout/cancellation still finalizes
+# MAF's own `invoke_agent` span deterministically. The tests below go through
+# the real (unmocked) `_build_delegated_agent` -> `_build_role_agent` ->
+# `Agent(...)` chain, exactly like B2's
 # `test_real_maf_agent_invoke_span_reports_specialist_slug_as_agent_name`,
-# with a chat client whose stream never yields — modeling a hung specialist
-# call — so the adapter's own `wait_for`/outer cancellation is what actually
-# stops it, and inspect the real exported span to prove finalization ran.
+# with a chat client whose non-streaming response never resolves — modeling a
+# hung specialist call — so the handler's own `wait_for`/outer cancellation is
+# what actually stops it. Unlike the old streaming design, no explicit
+# finalize call is needed in the handler for this to work deterministically
+# (verified in STEP 1 against installed `agent-framework-core==1.3.0`): a
+# non-streaming `agent.run()`'s OTel spans are opened with an ordinary
+# `with`/context-manager (`AgentTelemetryLayer._run` /
+# `ChatTelemetryLayer._get_response`), which closes on *any* exception,
+# `asyncio.CancelledError` included, via the standard `with` statement's
+# `__exit__` guarantee — so these tests inspect the real exported span to
+# prove that guarantee holds in practice, not just on paper.
 
 
 class _NeverRespondingChatClient:
-    """Mirrors ``_RunnableFakeChatClient``, but its stream never yields.
+    """Mirrors ``_RunnableFakeChatClient``, but its non-streaming response never resolves.
 
     Models a specialist call that hangs until an outer timeout/cancellation
-    forces it to stop — the scenario M2's fix (``_finalize_maf_stream``)
-    exists for. ``additional_properties`` matches ``_RunnableFakeChatClient``
-    (required by MAF's construction path); only the ``stream=True`` branch is
-    exercised by ``as_tool()``, same as its sibling fake.
+    forces it to stop. ``additional_properties`` matches
+    ``_RunnableFakeChatClient`` (required by MAF's construction path).
     """
 
     additional_properties: ClassVar[dict[str, Any]] = {}
@@ -1227,14 +1209,19 @@ class _NeverRespondingChatClient:
     def get_response(self, messages: Any, *, stream: bool = False, **kwargs: Any) -> Any:
         from agent_framework import ResponseStream
 
-        if not stream:
-            raise NotImplementedError("only the stream=True branch is exercised by as_tool()")
+        if stream:
 
-        async def _stream() -> Any:
+            async def _stream() -> Any:
+                await asyncio.sleep(30.0)
+                yield None  # pragma: no cover - never reached within any test's timeout budget
+
+            return ResponseStream(_stream())
+
+        async def _get_response() -> Any:
             await asyncio.sleep(30.0)
-            yield None  # pragma: no cover - never reached within any test's timeout budget
+            return None  # pragma: no cover - never reached within any test's timeout budget
 
-        return ResponseStream(_stream())
+        return _get_response()
 
 
 class _NeverRespondingClientManager(ClientManager):
@@ -1278,20 +1265,24 @@ def _install_maf_tracer(monkeypatch: pytest.MonkeyPatch) -> Any:
 
 
 @pytest.mark.asyncio
-async def test_delegate_adapter_finalizes_real_maf_stream_on_specialist_timeout(
+async def test_delegate_handler_finalizes_real_maf_agent_span_on_specialist_timeout(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M2: a specialist call that times out must still finalize MAF's own
-    ``ResponseStream`` — closing its ``invoke_agent`` span deterministically —
-    rather than leaving it open until a nondeterministic GC-timed
-    ``weakref.finalize`` safety net eventually runs.
+    """A specialist call that times out must still close MAF's own
+    ``invoke_agent`` span deterministically — rather than leaving it open
+    until a nondeterministic GC-timed ``weakref.finalize`` safety net
+    eventually runs.
 
-    ``_NeverRespondingClientManager`` makes the specialist's stream never
-    yield, forcing the adapter's own ``asyncio.wait_for`` to time out while
-    awaiting ``original_func(ctx, **kwargs)`` — the ``except TimeoutError``
-    branch this proves exercises is exactly the one that calls
-    ``_finalize_maf_stream`` before returning the recoverable, model-facing
-    "did not respond in time" text.
+    ``_NeverRespondingClientManager`` makes the specialist's non-streaming
+    response never resolve, forcing the handler's own ``asyncio.wait_for`` to
+    time out while awaiting ``specialist_agent.run(task)`` — the
+    ``except TimeoutError`` branch this proves exercises returns the
+    recoverable, model-facing "did not respond in time" text. Unlike the old
+    streaming design, the handler makes no explicit finalize call for this to
+    happen: a non-streaming ``agent.run()``'s OTel spans are opened with an
+    ordinary ``with``/context-manager, which closes deterministically on any
+    exception — ``asyncio.CancelledError`` included (see STEP 1 verification,
+    FRD 0006 §5 Decision #20).
     """
     exporter = _install_maf_tracer(monkeypatch)
     span = _install_span_capture(monkeypatch)
@@ -1312,7 +1303,7 @@ async def test_delegate_adapter_finalizes_real_maf_stream_on_specialist_timeout(
     )
     tool = tools[0]
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="Explain this month's invoice.")
+    result = await tool.func(task="Explain this month's invoice.")
 
     assert "did not respond in time" in result
     assert tracker.count == 1
@@ -1326,22 +1317,24 @@ async def test_delegate_adapter_finalizes_real_maf_stream_on_specialist_timeout(
     )
     # A span only appears in `get_finished_spans()` once `.end()` has actually
     # been called on it (the in-memory exporter is fed by a `SimpleSpanProcessor`,
-    # which exports `on_end`) — proving `_finalize_maf_stream`'s explicit
-    # `_run_cleanup_hooks()` call ran deterministically, not via GC.
+    # which exports `on_end`) — proving the span closed deterministically on
+    # `asyncio.wait_for`'s timeout, with no adapter-side finalize call at all.
     assert invoke_spans[0].end_time is not None
 
 
 @pytest.mark.asyncio
-async def test_delegate_adapter_finalizes_real_maf_stream_on_outer_cancellation(
+async def test_delegate_handler_finalizes_real_maf_agent_span_on_outer_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """M2 (outer cancellation): mirrors the timeout test above, but the
+    """Mirrors the timeout test above, but the
     delegate call is stopped by an OUTER task cancellation (e.g. the whole
-    coordinator run itself being cancelled) rather than the adapter's own
-    ``wait_for`` expiring — proving ``_finalize_maf_stream`` runs from the
-    ``except asyncio.CancelledError`` branch too, not only the
-    ``TimeoutError`` branch. Cancellation is never a recoverable delegate
-    failure (Decision #12), so the tracker/counter must NOT record anything.
+    coordinator run itself being cancelled) rather than the handler's own
+    ``wait_for`` expiring — proving the real ``invoke_agent`` span still
+    closes deterministically from the ``except asyncio.CancelledError``
+    branch too, not only the ``TimeoutError`` branch, with no explicit
+    finalize call needed either way. Cancellation is never a recoverable
+    delegate failure (Decision #12), so the tracker/counter must NOT record
+    anything.
     """
     exporter = _install_maf_tracer(monkeypatch)
     span = _install_span_capture(monkeypatch)
@@ -1362,10 +1355,8 @@ async def test_delegate_adapter_finalizes_real_maf_stream_on_outer_cancellation(
     )
     tool = tools[0]
 
-    task = asyncio.ensure_future(
-        tool.func(SimpleNamespace(kwargs={}), task="Explain this month's invoice.")
-    )
-    await asyncio.sleep(0.1)  # let the call actually reach the never-responding stream
+    task = asyncio.ensure_future(tool.func(task="Explain this month's invoice."))
+    await asyncio.sleep(0.1)  # let the call actually reach the never-responding chat client
     task.cancel()
 
     with pytest.raises(asyncio.CancelledError):
@@ -1381,133 +1372,6 @@ async def test_delegate_adapter_finalizes_real_maf_stream_on_outer_cancellation(
         f"expected exactly one finalized invoke_agent span, got: {[s.name for s in finished]}"
     )
     assert invoke_spans[0].end_time is not None
-
-
-@pytest.mark.asyncio
-async def test_delegate_adapter_queued_cancellation_does_not_finalize_other_calls_stream(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """B1 (round 4): a SECOND call to the same specialist that is cancelled
-    while still queued on ``specialist_lock`` — never having acquired it,
-    never having reached the rebind-and-dispatch step, never itself having
-    called ``original_func`` — must NOT finalize the FIRST call's still-live
-    MAF stream.
-
-    Pre-fix, ``captured_stream``/``_capturing_run`` were built ONCE per tool
-    at tool-build time and shared across every future invocation. The first
-    call (A) reaching the rebind step overwrote that one shared slot with
-    its own live ``ResponseStream``; the second call (B), still queued on
-    the lock, would then have its ``except asyncio.CancelledError`` handler
-    fire on cancellation (the cancelled lock-acquire's ``CancelledError``
-    propagates into the very same ``try/except`` that wraps the whole
-    ``async with specialist_lock:`` block) and read that SAME shared slot —
-    now holding A's live stream, not B's (B never had one) — finalizing A's
-    in-flight ``invoke_agent`` span/stream out from under it while A was
-    still using it.
-
-    Post-fix, ``my_stream`` is a fresh local created at the top of every
-    ``_delegate_adapter`` call, and the rebind only happens *inside* the
-    lock, immediately before dispatch. B, cancelled while still queued,
-    never reaches the rebind, so its own ``my_stream["value"]`` is still
-    ``None`` when its handler runs — ``_finalize_maf_stream(None, ...)`` is
-    a safe no-op that can never reach into another call's state.
-
-    Uses the same real (unmocked) MAF ``Agent``/``ResponseStream`` +
-    ``_NeverRespondingChatClient`` scaffolding as the two
-    ``test_delegate_adapter_finalizes_real_maf_stream_on_*`` tests above, so
-    A's stream is a genuine, still-open, span-bearing MAF object — not a
-    hand-rolled fake — making the "was A's real span/stream finalized"
-    assertion below a meaningful, non-tautological check.
-    """
-    exporter = _install_maf_tracer(monkeypatch)
-    _install_span_capture(monkeypatch)
-    calls = _install_counter_capture(monkeypatch)
-
-    real_finalize = runner._finalize_maf_stream
-    finalize_calls: list[tuple[Any, BaseException]] = []
-
-    async def spy_finalize(stream: Any, exc: BaseException) -> None:
-        finalize_calls.append((stream, exc))
-        await real_finalize(stream, exc)
-
-    monkeypatch.setattr(runner, "_finalize_maf_stream", spy_finalize)
-
-    set_client_manager(_NeverRespondingClientManager())
-
-    resolved = _make_resolved(
-        name="Billing Specialist",
-        slug="billing",
-        instructions="Handle billing questions.",
-        timeout=30.0,
-    )
-    catalog = _catalog_of(("billing", resolved))
-    loop = asyncio.get_event_loop()
-    tools, tracker = await runner.build_subagent_tools(
-        [SubagentRef(agent="billing")], catalog, coordinator_deadline=loop.time() + 30
-    )
-    tool = tools[0]
-
-    # Call A: acquires `specialist_lock` uncontended and blocks mid-flight
-    # inside the never-responding real MAF stream.
-    call_a = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="first (mid-flight)"))
-    await asyncio.sleep(0.1)  # let A actually reach the never-responding stream (mirrors the sibling test above)
-
-    # Call B: same tool -> same specialist -> same `specialist_lock`,
-    # already held by A -> B suspends waiting for the lock, never reaching
-    # the rebind/dispatch step at all.
-    call_b = asyncio.ensure_future(tool.func(SimpleNamespace(kwargs={}), task="second (queued)"))
-    await asyncio.sleep(0.05)  # let B actually start running and suspend on the lock acquire
-    call_b.cancel()
-
-    with pytest.raises(asyncio.CancelledError):
-        await call_b
-
-    # The core B1 assertion: B's own `except asyncio.CancelledError` handler
-    # still unconditionally calls `_finalize_maf_stream` (it has no way to
-    # know it was never dispatched) -- so exactly one call is expected here
-    # -- but the crucial thing is *which* stream it was called with: it must
-    # be B's own `my_stream["value"]`, which is `None` (B never reached the
-    # rebind), NOT A's live stream. Pre-fix, this slot would have been the
-    # ONE tool-level shared dict, already overwritten with A's real,
-    # still-in-use `ResponseStream` -- finalizing it here.
-    assert len(finalize_calls) == 1
-    assert finalize_calls[0][0] is None, (
-        "B's queued cancellation must finalize a None stream (its own, "
-        f"never-populated slot), not some other object: {finalize_calls[0][0]!r}"
-    )
-    assert isinstance(finalize_calls[0][1], asyncio.CancelledError)
-
-    finished = exporter.get_finished_spans()
-    invoke_spans = [s for s in finished if s.name.startswith("invoke_agent")]
-    assert invoke_spans == [], (
-        "A's real MAF invoke_agent span must still be open after B's "
-        f"queued cancellation, but found finished spans: {[s.name for s in finished]}"
-    )
-
-    # Confirm A is still fully intact and independently finalizable: cancel
-    # it too now, and prove ITS OWN cancellation finalizes its OWN stream
-    # exactly once, normally — i.e. B's cancellation did not silently
-    # corrupt or already half-finalize A's stream out from under it.
-    call_a.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await call_a
-
-    assert len(finalize_calls) == 2  # B's (None, ...) no-op, then A's own real finalize
-    finalized_stream, finalized_exc = finalize_calls[-1]
-    assert finalized_stream is not None
-    assert isinstance(finalized_exc, asyncio.CancelledError)
-
-    finished = exporter.get_finished_spans()
-    invoke_spans = [s for s in finished if s.name.startswith("invoke_agent")]
-    assert len(invoke_spans) == 1, (
-        f"expected exactly one finalized invoke_agent span (A's), got: {[s.name for s in finished]}"
-    )
-    assert invoke_spans[0].end_time is not None
-
-    # Both outcomes were cancellations, never recoverable delegate failures
-    # (Decision #12) -- neither call should have touched the tracker/counter.
-    assert tracker.count == 0
-    assert calls == []
 
 
 # ---------------------------------------------------------------------------
@@ -1551,7 +1415,7 @@ async def test_delegate_adapter_timeout_records_the_exact_wait_for_exception_obj
         monkeypatch, slug="billing", respond=slow_respond, resolved_timeout=0.05
     )
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+    result = await tool.func(task="invoice #42")
 
     assert "did not respond in time" in result
     assert tracker.count == 1
@@ -1596,7 +1460,7 @@ async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_teleme
 
     tool, tracker = await _build_single_delegate_tool(monkeypatch, slug="billing", respond=respond)
 
-    result = await tool.func(SimpleNamespace(kwargs={}), task="invoice #42")
+    result = await tool.func(task="invoice #42")
 
     assert "did not respond in time" not in result  # not a deadline/timeout outcome (S3b)
     assert "could not complete this task" in result  # generic sanitized failure message instead
@@ -1655,7 +1519,7 @@ async def test_real_delegate_tool_invoke_produces_nested_execute_tool_and_invoke
 
     tracer = ot_trace.get_tracer("test-coordinator")
     with tracer.start_as_current_span("agent.run coordinator"):
-        # `skip_parsing=True` returns the delegate adapter's raw `str` return
+        # `skip_parsing=True` returns the delegate tool's raw `str` return
         # value directly (matching `tool.func(...)`'s own return shape used
         # by every other test in this module) instead of MAF's default
         # `list[Content]` wrapping — the wrapping itself is orthogonal to

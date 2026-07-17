@@ -421,7 +421,7 @@ class _FakeHookStream:
     ``_inner_stream``/``_stream_error`` surface ``_finalize_maf_stream``
     (``runner.py``) probes — for a *direct*, isolated unit test of its
     ``_inner_stream``-chain walk (B2c, round 4), independent of any real
-    ``run_agent_stream``/``_delegate_adapter`` caller or real ``MAF`` object.
+    ``run_agent_stream`` caller or real ``MAF`` object.
     """
 
     def __init__(self, *, inner: _FakeHookStream | None = None, raise_on_cleanup: bool = False) -> None:
@@ -439,9 +439,9 @@ class _FakeHookStream:
 
 
 def test_finalize_maf_stream_is_a_safe_no_op_for_none() -> None:
-    """``stream=None`` (nothing was ever captured, e.g. a call cancelled
-    while still queued on ``specialist_lock`` before it ever ran
-    ``original_func`` — the exact B1 scenario) must not raise.
+    """``stream=None`` (nothing was ever captured — e.g. ``run_agent_stream``'s
+    own ``agent.run(..., stream=True)`` call raising before ``stream`` is ever
+    assigned) must not raise.
     """
     asyncio.run(runner._finalize_maf_stream(None, asyncio.CancelledError()))
 

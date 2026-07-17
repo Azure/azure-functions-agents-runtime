@@ -199,8 +199,9 @@ subagents:
 Route the user's request to the right specialist, or answer directly for anything general.
 ```
 
-Each entry becomes a `delegate_<slug>` function tool (via MAF's `BaseAgent.as_tool()`) on the
-coordinator, built eagerly at startup but only *run* if the coordinator's model selects it. A few
+Each entry becomes a hand-written `delegate_<slug>` function tool on the
+coordinator, built eagerly for each request but only *run* (building the specialist's own agent)
+if the coordinator's model selects it. A few
 rules to know before you reach for this:
 
 - **Trust boundary**: `subagents` is an authoring-time capability grant. One app is one trust

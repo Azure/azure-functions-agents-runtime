@@ -177,7 +177,8 @@ the span ERROR with `af.fault_domain=web_request`.
 ### Span `execute_tool delegate_<slug>` (chat-time sub-agent delegation)
 
 Chat-time delegation ([FRD 0006](./frds/0006-multi-agent-delegation.md)) needs **no new span** —
-`as_tool()` just calls the specialist's `.run()`, and MAF already traces every `Agent.run()` and
+the `delegate_<slug>` tool's handler calls the specialist's plain, non-streaming `Agent.run(task)`
+directly, and MAF already traces every `Agent.run()` and
 every `FunctionTool.invoke()`. A coordinator that declares `subagents:` gets this nested span tree
 for free the moment a `delegate_<slug>` tool is called:
 
