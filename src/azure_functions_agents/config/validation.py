@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from azure_functions_agents._logger import logger as _logger
 
@@ -38,7 +37,7 @@ def _format_error(
 
 
 def validate_resolved_agent(
-    resolved: Any,
+    resolved: ResolvedAgent,
     *,
     discovered_mcp_names: list[str],
     discovered_skills: list[str],
@@ -94,7 +93,7 @@ def validate_resolved_agent(
             )
 
     known_mcp = set(discovered_mcp_names)
-    for name in getattr(resolved, "mcp_exclude_names", []) or []:
+    for name in resolved.mcp_exclude_names:
         if name not in known_mcp:
             raise ValueError(
                 _format_error(
@@ -106,7 +105,7 @@ def validate_resolved_agent(
             )
 
     known_skills = set(discovered_skills)
-    for name in getattr(resolved, "skills_exclude_names", []):
+    for name in resolved.skills_exclude_names:
         if name not in known_skills:
             _logger.warning(
                 "%s: field `skills.exclude`: Unknown skill reference `%s`. See docs/front-matter-spec.md#skills",
@@ -114,7 +113,7 @@ def validate_resolved_agent(
                 name,
             )
 
-    for name in getattr(resolved, "tool_exclude_names", []):
+    for name in resolved.tool_exclude_names:
         _logger.warning(
             "%s: field `tools.exclude`: Could not verify tool reference `%s` during config validation. See docs/front-matter-spec.md#tools",
             source_file,
