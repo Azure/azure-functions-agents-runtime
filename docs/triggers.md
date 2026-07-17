@@ -514,6 +514,11 @@ plain blob URL with no SAS token, that tool must provide its own storage credent
 connection string, or a managed identity granted the **Storage Blob Data Reader** role on the
 account/container.
 
+> Richer content access — a built-in in-memory blob-reading tool (no extra storage call or
+> credentials) and native multimodal ingestion (images/PDF/audio) — is tracked separately in
+> [Azure/azure-functions-bucees-planning#1200](https://github.com/Azure/azure-functions-bucees-planning/issues/1200).
+> The metadata-only payload here is the deliberate first step.
+
 ```json
 {
   "name": "uploads/x.png",
