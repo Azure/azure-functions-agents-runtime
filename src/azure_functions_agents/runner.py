@@ -101,7 +101,7 @@ if TYPE_CHECKING:
     # call-time `from agent_framework import ...` imports below (this
     # module's established pattern for the heavier agent-construction
     # symbols), so this adds no import-time cost.
-    from agent_framework import Agent, ContextProvider, SupportsChatGetResponse
+    from agent_framework import Agent, AgentResponse, ContextProvider, SupportsChatGetResponse
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -892,7 +892,7 @@ async def run_agent(
             remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
             if remaining_after_lock <= 0:
                 raise TimeoutError
-            response = await asyncio.wait_for(
+            response: AgentResponse[Any] = await asyncio.wait_for(
                 agent.run(
                     prompt,
                     session=session,
@@ -906,13 +906,13 @@ async def run_agent(
     # Extract assistant text from the final response.
     text = ""
     try:
-        text = str(getattr(response, "text", "") or "")
+        text = response.text
     except Exception:
         text = ""
     if not text:
         # Fallback: walk messages → contents and pick out text items.
         try:
-            for msg in getattr(response, "messages", None) or []:
+            for msg in response.messages:
                 for item in getattr(msg, "contents", None) or []:
                     if _content_type(item) == "text":
                         text += _content_text(item)
@@ -922,7 +922,7 @@ async def run_agent(
     # Walk content items for tool-call records (best-effort metadata for callers).
     tool_calls: list[dict[str, Any]] = []
     try:
-        for msg in getattr(response, "messages", None) or []:
+        for msg in response.messages:
             for item in getattr(msg, "contents", None) or []:
                 ctype = _content_type(item)
                 if ctype == "function_call":
