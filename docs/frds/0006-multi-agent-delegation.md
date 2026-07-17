@@ -1,7 +1,7 @@
 ---
 frd: 0006
 title: Multi-agent delegation (agent-as-tool)
-status: Draft            # Draft → In review → Finalized  (→ Implemented after merge)
+status: In review         # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
 created: 2026-07-14
 updated: 2026-07-17
@@ -740,8 +740,9 @@ handoff participant may itself declare `subagents` and delegate.
   monkeypatch with it, at no behavior change to the coordinator.
   **No mechanical blockers remain; the final verdict is Go.** Both product
   choices previously open here are now decided by the reviewer (#5, #18).
-- **Human sign-off: Pending.** No open questions remain. `status` stays `Draft`
-  until the reviewer records final sign-off here; it then moves to `Finalized`.
+- **Human sign-off: Pending.** No open questions remain. `status` is `In review`
+  while this PR is under review; it moves to `Finalized` once the reviewer
+  records final sign-off here.
 
 ### Resolved product questions
 
