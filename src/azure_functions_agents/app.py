@@ -111,10 +111,24 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
         for spec in agent_specs
     ]
-    workflows_requested = any(
-        resolved.is_main and _workflows_requested(resolved.workflows)
+    workflow_main_agents = [
+        resolved
         for resolved in resolved_agents
-    )
+        if resolved.is_main and _workflows_requested(resolved.workflows)
+    ]
+    if len(workflow_main_agents) > 1:
+        conflicting_agents = ", ".join(
+            sorted(
+                f"{resolved.name} ({source_marker(resolved.source_file)})"
+                for resolved in workflow_main_agents
+            )
+        )
+        raise ValueError(
+            "workflows.enabled can be set on at most one main agent; "
+            f"found: {conflicting_agents}"
+        )
+
+    workflows_requested = bool(workflow_main_agents)
     app: func.FunctionApp = (
         df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
         if workflows_requested

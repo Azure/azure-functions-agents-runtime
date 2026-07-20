@@ -152,12 +152,12 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
         instructions = post.content
 
     # Normalize bare agent.md → default.agent.md for internal processing
-    normalized_file = _normalize_agent_filename(source_file)
+    normalized_file = _normalize_agent_filename(source_file.resolve())
 
     normalized["substitute_variables"] = substitute_variables
     normalized["instructions"] = instructions
     # Store the normalized filename for function name generation
-    normalized["source_file"] = str(normalized_file.resolve())
+    normalized["source_file"] = str(normalized_file)
     # agent.md and main.agent.md are both treated as main agents
     normalized["is_main"] = normalized_file.name in ("main.agent.md", "default.agent.md")
 

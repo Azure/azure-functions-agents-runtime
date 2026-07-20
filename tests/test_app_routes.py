@@ -88,6 +88,17 @@ def test_workflow_app_uses_durable_function_app(tmp_path: Path):
     assert isinstance(function_app, df.DFApp)
 
 
+def test_multiple_main_agents_cannot_enable_workflows(tmp_path: Path):
+    _write_agent(tmp_path, "main.agent.md", name="Main", workflows=True)
+    _write_agent(tmp_path, "agent.md", name="Default", workflows=True)
+
+    with pytest.raises(
+        ValueError,
+        match=r"workflows\.enabled can be set on at most one main agent.*Default.*Main",
+    ):
+        app_module.create_function_app(app_root=tmp_path)
+
+
 def test_non_main_workflows_enabled_warns_and_does_not_enable_durable(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):
