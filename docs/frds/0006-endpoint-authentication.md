@@ -82,7 +82,8 @@ registration never consumed it.
 - **Entra ID** support for the chat API via two accepted proofs of identity:
   Easy Auth principal header **and** in-app bearer-token (JWT) validation.
 - Optional claim allow-lists: `tenant_id`, `allowed_audiences`,
-  `allowed_client_ids`, each with an environment-variable fallback.
+  `allowed_client_ids`, authored in frontmatter (secrets referenced via the
+  runtime's `$VAR`/`%VAR%` substitution — see Decision #21).
 - Clear, documented behavior for the MCP endpoint, whose HTTP surface is owned by
   the Functions MCP extension and therefore authenticated at the platform layer.
 - Extend the identical `auth` policy (including `entra`) to arbitrary
@@ -152,9 +153,12 @@ validated Easy Auth principal, else returns `401`:
 
 After the principal is accepted, optional allow-lists are enforced (a configured
 list must contain the claim): `tenant_id` vs `tid`, `allowed_audiences` vs `aud`,
-`allowed_client_ids` vs `appid`/`azp`. Each config value falls back to an env var
-(`AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID`, `…_ENTRA_AUDIENCES`,
-`…_ENTRA_CLIENT_IDS`) so credentials stay out of source.
+`allowed_client_ids` vs `appid`/`azp`. Allow-list values come solely from the
+authored `http_auth.entra` config; to keep credentials out of source, authors
+reference environment variables inline via the runtime's existing `$VAR`/`%VAR%`
+substitution (resolved at load time), so frontmatter stays the single source of
+truth (see Decision #20 / Amendment B, superseding the earlier dedicated
+`AZURE_FUNCTIONS_AGENTS_ENTRA_*` fallback variables).
 
 ### MCP endpoint
 
@@ -238,6 +242,7 @@ warning. Agents with no auth declared keep the default `function` key check.
 | 18 | Flat `auth_level` handling on `http_trigger` | hard-remove / **keep + deprecate** / silently alias | **Keep + deprecate** — backward compatible; emits a warning and maps to the equivalent `auth.mode`. | Human | 2026-07-16 |
 | 19 | Conflict when both `auth` and `auth_level` are set | error / **`auth` wins + warn** / `auth_level` wins | **`auth` wins + warn** — least disruptive and steers authors to the richer `auth` model. | Human | 2026-07-16 |
 | 20 | Name + scope of the endpoint-auth key (revisits #1) & the MCP-webhook divergence logging (revisits #12/#15) | keep `auth` + keep MCP divergence-logging / **rename to `http_auth` + drop MCP logging** | **Rename `auth` → `http_auth`** everywhere it is authored (global `agents.config.yaml`, `builtin_endpoints`, and `http_trigger`) to make explicit that the policy governs only HTTP endpoints and never the MCP endpoint. Because the key no longer implies any MCP relationship, **remove** the MCP-webhook divergence info/warning logging (`_log_mcp_auth_policy`) and its tests; docs now carry a single callout that `http_auth` is HTTP-only. Decisions #12/#15 (and the `mcp.json` outbound `auth` block) are unaffected in concept but the in-app logging they described is gone. | Human + Agent | 2026-07-17 |
+| 21 | How do Entra allow-list values (`tenant_id`/`allowed_audiences`/`allowed_client_ids`) stay out of source? (revises #7) | keep dedicated `AZURE_FUNCTIONS_AGENTS_ENTRA_*` fallback env vars / **rely on the existing `$VAR`/`%VAR%` frontmatter substitution** | **Drop the dedicated fallbacks.** The runtime already resolves `$VAR`/`%VAR%` placeholders in every frontmatter string at load time, so an author can write `tenant_id: $ENTRA_TENANT_ID` and let a deployment set the variable — no runtime-reserved names needed. This keeps frontmatter the single source of truth, shrinks the env-var surface the runtime owns, and removes `_env_list` / `_resolved_*` fallbacks from `_auth.py`. The Easy Auth *enforcement gate* vars (`WEBSITE_AUTH_ENABLED`, `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`) are unaffected — they are non-spoofable security evidence, not authored allow-list values, so they stay as genuine env vars. | Human + Agent | 2026-07-20 |
 
 ## 6. Test plan
 

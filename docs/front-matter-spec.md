@@ -298,9 +298,9 @@ builtin_endpoints:
   http_auth:
     mode: entra          # function | admin | anonymous | entra
     entra:               # only used when mode == "entra"
-      tenant_id: "<tenant-guid>"           # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID
-      allowed_audiences: ["api://agents"]  # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES
-      allowed_client_ids: ["<app-id>"]     # optional; falls back to AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS
+      tenant_id: "<tenant-guid>"           # optional; inline value or a $VAR/%VAR% placeholder
+      allowed_audiences: ["api://agents"]  # optional; placeholders are resolved at load time
+      allowed_client_ids: ["<app-id>"]     # optional
 ```
 
 | Mode | Behavior |
@@ -308,7 +308,7 @@ builtin_endpoints:
 | `function` (default) | API key required — a valid function/host key (`AuthLevel.FUNCTION`). |
 | `admin` | Master key required (`AuthLevel.ADMIN` maps to the Functions `_master` key — the most privileged app credential, distinct from an extension system key). |
 | `anonymous` | No auth — open endpoint (`AuthLevel.ANONYMOUS`). |
-| `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions key layer; each request is then enforced against the platform-injected Easy Auth `x-ms-client-principal` header (App Service Authentication validates the token — the runtime never validates JWTs itself). Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid principal, 403 on allowlist mismatch). **Requires Easy Auth to be enabled** — because the route is anonymous, the runtime only trusts the injected principal when it has non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED`, or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting), and otherwise fails closed (401). |
+| `entra` | Entra ID (Azure AD). Routes are registered as anonymous at the Functions key layer; each request is then enforced against the platform-injected Easy Auth `x-ms-client-principal` header (App Service Authentication validates the token — the runtime never validates JWTs itself). Optional `tenant_id`/`allowed_audiences`/`allowed_client_ids` allowlists are enforced (401 on missing/invalid principal, 403 on allowlist mismatch); reference environment variables inline with `$VAR`/`%VAR%` substitution to keep secrets out of source. **Requires Easy Auth to be enabled** — because the route is anonymous, the runtime only trusts the injected principal when it has non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED`, or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting), and otherwise fails closed (401). |
 
 **App-wide default:** You can set a top-level `http_auth` in `agents.config.yaml` to apply one policy to every agent (see [Global Configuration](#global-configuration-agentsconfigyaml)). Resolution precedence is: the agent's own `builtin_endpoints.http_auth` → the global `agents.config.yaml` `http_auth` → the built-in `function` default. An agent authoring its own `http_auth` always wins, even if it is weaker than the app-wide default.
 

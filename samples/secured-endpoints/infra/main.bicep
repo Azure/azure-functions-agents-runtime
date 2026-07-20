@@ -136,9 +136,10 @@ module api './app/api.bicep' = {
       AZURE_CLIENT_ID: apiUserAssignedIdentity.outputs.clientId
       // Entra ID endpoint auth for the entra-secured agent. App Service
       // Authentication (Easy Auth) validates tokens; these allow-lists are
-      // enforced in-app against the injected client principal's claims.
-      AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID: tenant().tenantId
-      AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES: entraAllowedAudiences
+      // consumed by the agent frontmatter via $VAR substitution and enforced
+      // in-app against the injected client principal's claims.
+      ENTRA_TENANT_ID: tenant().tenantId
+      ENTRA_AUDIENCE: entraAllowedAudiences
       // Assert that Easy Auth is configured so the runtime trusts the injected
       // principal. Set only when an app registration (and thus authsettingsV2)
       // is provided; otherwise the entra agent fails closed.
@@ -213,7 +214,7 @@ output AZURE_LOCATION string = location
 output AZURE_FUNCTION_NAME string = api.outputs.SERVICE_API_NAME
 output FOUNDRY_PROJECT_ENDPOINT string = foundry.outputs.projectEndpoint
 output FOUNDRY_MODEL string = foundry.outputs.modelDeploymentName
-output AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID string = tenant().tenantId
-output AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES string = entraAllowedAudiences
+output ENTRA_TENANT_ID string = tenant().tenantId
+output ENTRA_AUDIENCE string = entraAllowedAudiences
 output AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_ID string = entraClientId
 output AZURE_FUNCTIONS_AGENTS_EASY_AUTH_ENABLED bool = !empty(entraClientId)

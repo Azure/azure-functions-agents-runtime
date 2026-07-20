@@ -36,11 +36,12 @@ class ToolsFilter(BaseModel):
 class EntraAuthConfig(BaseModel):
     """Entra ID (Azure AD) validation settings for built-in endpoint auth.
 
-    Every field is optional; each falls back to an environment variable at
-    enforcement time so secrets stay out of source
-    (``AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID`` / ``…_ENTRA_AUDIENCES`` /
-    ``…_ENTRA_CLIENT_IDS``). A configured allow-list must contain the caller's
-    matching claim; an empty/unset allow-list skips that check.
+    Every field is optional. To keep secrets out of source, reference an
+    environment variable inline with the runtime's ``$VAR`` / ``%VAR%``
+    substitution (e.g. ``tenant_id: $MY_TENANT_ID``); the placeholder is
+    resolved at load time so frontmatter stays the single source of truth. A
+    configured allow-list must contain the caller's matching claim; an
+    empty/unset allow-list skips that check.
     """
 
     model_config = ConfigDict(extra="forbid")

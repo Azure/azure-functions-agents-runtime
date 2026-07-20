@@ -82,13 +82,6 @@ def resolve_endpoint_auth_level(auth: EndpointAuthConfig) -> func.AuthLevel:
     return _AUTH_LEVEL_BY_MODE.get(auth.mode, func.AuthLevel.FUNCTION)
 
 
-def _env_list(name: str) -> list[str]:
-    raw = runtime_env_value(name)
-    if not raw:
-        return []
-    return [item.strip() for item in raw.split(",") if item.strip()]
-
-
 def _easy_auth_enforced() -> bool:
     """Return True only with positive evidence that Easy Auth is enforced.
 
@@ -101,24 +94,6 @@ def _easy_auth_enforced() -> bool:
         runtime_env_value(_PLATFORM_EASY_AUTH_ENV).lower() in _TRUTHY_VALUES
         or runtime_env_value(_EASY_AUTH_ASSERTION_ENV).lower() in _TRUTHY_VALUES
     )
-
-
-def _resolved_tenant_id(entra: EntraAuthConfig | None) -> str | None:
-    if entra and entra.tenant_id:
-        return entra.tenant_id
-    return runtime_env_value("AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID") or None
-
-
-def _resolved_audiences(entra: EntraAuthConfig | None) -> list[str]:
-    if entra and entra.allowed_audiences:
-        return list(entra.allowed_audiences)
-    return _env_list("AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES")
-
-
-def _resolved_client_ids(entra: EntraAuthConfig | None) -> list[str]:
-    if entra and entra.allowed_client_ids:
-        return list(entra.allowed_client_ids)
-    return _env_list("AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS")
 
 
 def _short_claim_name(claim_type: str) -> str:
@@ -155,18 +130,20 @@ def _flatten_claims(principal: dict[str, Any]) -> dict[str, list[str]]:
 def _check_allowlists(
     flat: dict[str, list[str]], entra: EntraAuthConfig | None
 ) -> AuthError | None:
-    tenant_id = _resolved_tenant_id(entra)
-    if tenant_id and tenant_id not in flat.get("tid", []):
+    if entra is None:
+        return None
+
+    if entra.tenant_id and entra.tenant_id not in flat.get("tid", []):
         return AuthError(403, "Token tenant is not allowed.")
 
-    audiences = _resolved_audiences(entra)
-    if audiences and not (set(audiences) & set(flat.get("aud", []))):
+    if entra.allowed_audiences and not (
+        set(entra.allowed_audiences) & set(flat.get("aud", []))
+    ):
         return AuthError(403, "Token audience is not allowed.")
 
-    client_ids = _resolved_client_ids(entra)
-    if client_ids:
+    if entra.allowed_client_ids:
         caller = set(flat.get("appid", [])) | set(flat.get("azp", []))
-        if not (set(client_ids) & caller):
+        if not (set(entra.allowed_client_ids) & caller):
             return AuthError(403, "Caller application is not allowed.")
     return None
 

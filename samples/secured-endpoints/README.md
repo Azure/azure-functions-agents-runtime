@@ -65,7 +65,7 @@ No Entra app registration is created by the template. You create one yourself an
 
    When it finishes, note these outputs (also visible via `azd env get-values`):
    - `AZURE_FUNCTION_NAME` — the Function App name
-   - `AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID` — the tenant the entra agent trusts
+   - `ENTRA_TENANT_ID` — the tenant the entra agent trusts
    - `AZURE_FUNCTIONS_AGENTS_EASY_AUTH_ENABLED` — whether Easy Auth was configured
 
 ## Test 1 — API key agent
@@ -146,13 +146,13 @@ curl -i -X POST "https://$APP.azurewebsites.net/agents/entra/chat" \
   -d '{"prompt": "Say hello in one sentence"}'
 ```
 
-A token whose `aud` is not in `AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES` returns
+A token whose `aud` is not in the agent's `allowed_audiences` returns
 `403 Forbidden`; a token from a different tenant returns `403`; a missing or
 platform-rejected token returns `401`.
 
-To also require a specific **caller application**, set
-`AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS` (comma-separated `appid`/`azp` values) as
-an app setting, or add `allowed_client_ids` to the agent frontmatter.
+To also require a specific **caller application**, add `allowed_client_ids`
+(`appid`/`azp` values) to the agent frontmatter — inline, or via a `$VAR`
+placeholder resolved from an app setting.
 
 ### Browser / delegated sign-in
 
@@ -170,31 +170,9 @@ for details.
 - **API key:** protect it with the runtime **system key** (`az functionapp keys list --query systemKeys`).
 - **Entra ID:** enable App Service Easy Auth on the Function App (see [Test 2](#test-2--entra-id-agent)).
 
-Because the MCP handler never sees HTTP headers in-process, `auth.mode: entra` cannot be enforced in-app for MCP. When an agent enables both `mcp` and `auth: entra`, the runtime logs a one-time note pointing to platform Easy Auth.
+Because the MCP handler never sees HTTP headers in-process, `http_auth: entra` cannot be enforced in-app for MCP. When an agent enables both `mcp` and `http_auth: entra`, the runtime logs a one-time note pointing to platform Easy Auth.
 
-## Configuration reference
-
-`builtin_endpoints.http_auth` accepts a shorthand string (`http_auth: function`) or an object:
-
-```yaml
-builtin_endpoints:
-  chat_api: true
-  http_auth:
-    mode: entra            # function (default) | admin | anonymous | entra
-    entra:                 # only used when mode == entra
-      tenant_id: "<guid>"                  # or env AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID
-      allowed_audiences: ["api://agents"]  # or env AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES
-      allowed_client_ids: ["<app-id>"]     # or env AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS
-```
-
-| Mode | Behavior |
-|---|---|
-| `function` (default) | Requires a function/host key (`AuthLevel.FUNCTION`). |
-| `admin` | Requires the master key (`AuthLevel.ADMIN` maps to the Functions `_master` key — the most privileged app credential, distinct from an extension system key). |
-| `anonymous` | No auth. |
-| `entra` | Route is anonymous at the Functions key layer; App Service Authentication (Easy Auth) validates the Entra token and the runtime enforces the injected client principal with optional tenant/audience/client-id allowlists. Requires Easy Auth to be configured. |
-
-See [`docs/front-matter-spec.md`](../../docs/front-matter-spec.md#http_auth--endpoint-authentication) for the full schema.
+For the full `http_auth` schema and all supported modes, see [`docs/front-matter-spec.md`](../../docs/front-matter-spec.md#http_auth--endpoint-authentication).
 
 ## Run locally
 
@@ -202,7 +180,7 @@ Follow the [shared local development guide](../README.md#run-locally). Set these
 
 - `AZURE_FUNCTIONS_AGENTS_PROVIDER`: `foundry`
 - `FOUNDRY_PROJECT_ENDPOINT`, `FOUNDRY_MODEL`: your Foundry project and model deployment
-- `AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID`, `AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES`: to exercise the entra agent locally
+- `ENTRA_TENANT_ID`, `ENTRA_AUDIENCE`: allow-list values the entra agent's frontmatter interpolates via `$VAR` substitution
 
 Locally, `func start` serves function keys from the emulator for the `apikey` agent. Easy Auth is not available locally, so the `entra` agent has no platform-injected principal and returns `401`. To exercise the entra path locally, set `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH=true` (asserting Easy Auth) and send a mock principal header (`x-ms-client-principal`, base64-encoded JSON with `auth_typ: aad`) — the runtime reads it exactly as it reads the platform-injected one. Only do this locally; never set that assertion in a deployment that lacks Easy Auth.
 

@@ -21,9 +21,6 @@ from azure_functions_agents.registration._auth import (
 )
 
 _ENV_KEYS = (
-    "AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID",
-    "AZURE_FUNCTIONS_AGENTS_ENTRA_AUDIENCES",
-    "AZURE_FUNCTIONS_AGENTS_ENTRA_CLIENT_IDS",
     "AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH",
     "WEBSITE_AUTH_ENABLED",
 )
@@ -187,12 +184,27 @@ def test_entra_easy_auth_client_id_allowlist_mismatch_is_forbidden() -> None:
     assert error.status_code == 403
 
 
-def test_entra_allowlists_fall_back_to_env(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_entra_allowlists_come_only_from_config(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The runtime no longer reads dedicated AZURE_FUNCTIONS_AGENTS_ENTRA_* fallback
+    # variables — allow-lists are sourced solely from the authored config (authors
+    # keep secrets out of source via $VAR/%VAR% frontmatter substitution). Setting
+    # the old env var must NOT constrain a request whose config declares no tenant.
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID", "t-env")
     auth = EndpointAuthConfig(mode="entra")
-    ok = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-env"}])}
+    headers = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-other"}])}
+    assert authorize_entra_request(_header_getter(headers), auth) is None
+
+
+def test_entra_config_tenant_is_enforced_regardless_of_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A configured allow-list is enforced from config alone; the legacy env var is
+    # ignored and does not widen or override it.
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ENTRA_TENANT_ID", "t-env")
+    auth = EndpointAuthConfig(mode="entra", entra=EntraAuthConfig(tenant_id="t-config"))
+    ok = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-config"}])}
     assert authorize_entra_request(_header_getter(ok), auth) is None
-    bad = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-other"}])}
+    bad = {"X-MS-CLIENT-PRINCIPAL": _principal_header([{"typ": "tid", "val": "t-env"}])}
     error = authorize_entra_request(_header_getter(bad), auth)
     assert error is not None
     assert error.status_code == 403
