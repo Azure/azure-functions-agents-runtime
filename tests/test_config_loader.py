@@ -1218,6 +1218,9 @@ def test_load_agent_specs_uppercase_agent_md_suffix(tmp_path: Path) -> None:
     assert "report.agent.md" in str(specs[0].source_file).lower()
     assert specs[0].is_main is False
 
+    from azure_functions_agents.registration._naming import allocate_unique_function_name
+
+    assert allocate_unique_function_name(specs[0].source_file, specs[0].name, set()) == "report"
 
 def test_load_agent_specs_uppercase_claude_md_suffix(tmp_path: Path) -> None:
     """Files with uppercase .CLAUDE.md suffix are discovered (case-insensitive)."""
