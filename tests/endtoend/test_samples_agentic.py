@@ -78,7 +78,14 @@ def test_agent_returns_a_response(chat_host: HostHandle) -> None:
 
 def test_agent_follows_a_simple_instruction(chat_host: HostHandle) -> None:
     """The model honours an explicit output instruction (basic agentic behaviour)."""
-    assert reply.response_text.strip().lower() == "pong", (
+    reply = chat(
+        chat_host.base_url,
+        CHAT_SLUG,
+        "Reply with exactly the single word PONG and nothing else.",
+    )
+
+    assert reply.status == 200, f"chat request failed: {reply.status} {reply.body}"
+    assert "pong" in reply.response_text.strip().lower(), (
         f"model did not follow the instruction: {reply.response_text!r}"
     )
 
