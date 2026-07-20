@@ -4,8 +4,10 @@ trigger:
     include:
       - main
 
-# CI only, does not trigger on PRs.
-pr: none
+pr:
+  branches:
+    include:
+    - main
 
 schedules:
   - cron: '0 0 * * MON'
