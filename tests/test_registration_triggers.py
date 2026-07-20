@@ -442,6 +442,158 @@ def test_register_agent_accepts_valid_auth_levels(
     ]
 
 
+@pytest.mark.parametrize(
+    ("auth", "expected"),
+    [
+        ("anonymous", func.AuthLevel.ANONYMOUS),
+        ("function", func.AuthLevel.FUNCTION),
+        ("admin", func.AuthLevel.ADMIN),
+        ("entra", func.AuthLevel.ANONYMOUS),
+    ],
+)
+def test_register_agent_accepts_nested_auth_string_shorthand(
+    monkeypatch: pytest.MonkeyPatch,
+    auth: str,
+    expected: func.AuthLevel,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": f"{auth}-reports", "http_auth": auth},
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    register_agent(app, resolved, AgentCapabilities())
+
+    assert app.trigger_calls == [
+        (
+            "route",
+            {
+                "route": f"{auth}-reports",
+                "methods": ["POST"],
+                "auth_level": expected,
+            },
+        )
+    ]
+
+
+def test_register_agent_accepts_nested_auth_object_with_entra_allowlists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def _capture(resolved: Any, capabilities: Any, *, auth: Any) -> Any:
+        captured["auth"] = auth
+        return _stub_handler
+
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={
+                "route": "secured",
+                "http_auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}},
+            },
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        _capture,
+    )
+
+    register_agent(app, resolved, AgentCapabilities())
+
+    assert captured["auth"].mode == "entra"
+    assert captured["auth"].entra is not None
+    assert captured["auth"].entra.tenant_id == "t-1"
+    assert app.trigger_calls == [
+        (
+            "route",
+            {"route": "secured", "methods": ["POST"], "auth_level": func.AuthLevel.ANONYMOUS},
+        )
+    ]
+
+
+def test_register_agent_nested_auth_wins_over_flat_auth_level(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": "secured", "http_auth": "entra", "auth_level": "function"},
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        register_agent(app, resolved, AgentCapabilities())
+
+    assert "'auth_level' is deprecated and ignored" in caplog.text
+    assert app.trigger_calls == [
+        (
+            "route",
+            {"route": "secured", "methods": ["POST"], "auth_level": func.AuthLevel.ANONYMOUS},
+        )
+    ]
+
+
+def test_register_agent_flat_auth_level_logs_deprecation_warning(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": "reports", "auth_level": "admin"},
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    with caplog.at_level(logging.WARNING):
+        register_agent(app, resolved, AgentCapabilities())
+
+    assert "'auth_level' is deprecated" in caplog.text
+    assert app.trigger_calls == [
+        (
+            "route",
+            {"route": "reports", "methods": ["POST"], "auth_level": func.AuthLevel.ADMIN},
+        )
+    ]
+
+
+def test_register_agent_raises_on_invalid_nested_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"route": "reports", "http_auth": {"mode": "nope"}},
+        )
+    )
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_http_agent_handler",
+        lambda *args, **kwargs: _stub_handler,
+    )
+
+    with pytest.raises(ValueError, match="invalid http_trigger 'http_auth'"):
+        register_agent(app, resolved, AgentCapabilities())
+
+
 def test_register_agent_propagates_connector_trigger_registration_failures(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

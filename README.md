@@ -154,6 +154,10 @@ Any `.agent.md` file can opt into built-in endpoints with `builtin_endpoints`. T
 
 If any built-in endpoint is enabled, `trigger` is optional. This allows endpoint-only agents as well as triggered agents that also expose a chat UI or API. `builtin_endpoints.debug_chat_ui: true` automatically enables the backing chat APIs. `builtin_endpoints: true` is shorthand for enabling all built-in endpoints, including the MCP tool. See [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
 
+#### Securing endpoints
+
+By default the chat API requires a function/host key (`http_auth: function`). Configure `builtin_endpoints.http_auth` to change the policy — `admin` (system key), `anonymous`, or `entra` (Entra ID / Azure AD). In `entra` mode the runtime relies on platform App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal` (with optional tenant/audience/client-id allowlists). Because the `entra` route is anonymous, the runtime trusts that header only with non-spoofable evidence Easy Auth is enforced (`WEBSITE_AUTH_ENABLED` or the `AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH` app setting) and fails closed (401) otherwise. `http_auth` applies only to HTTP endpoints and does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions host and always requires the MCP extension system key. See [`docs/front-matter-spec.md#http_auth--endpoint-authentication`](docs/front-matter-spec.md#http_auth--endpoint-authentication).
+
 ### Event-driven agents (`<name>.agent.md`)
 
 Define event-triggered agents with `.agent.md` files. Each file corresponds to a single Azure Function. Supported trigger types:
