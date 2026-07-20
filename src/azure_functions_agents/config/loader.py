@@ -48,8 +48,12 @@ def _find_agent_files_with_suffix(directory: Path) -> list[Path]:
     Excludes bare agent.md and CLAUDE.md variants as those are handled separately.
     """
     agent_files: list[Path] = []
-    for md_file in directory.glob("*.md"):
+    for md_file in directory.iterdir():
+        if not md_file.is_file():
+            continue
         lower_name = md_file.name.lower()
+        if not lower_name.endswith(".md"):
+            continue
         # Check if it ends with .agent.md or .claude.md (case-insensitive)
         # and exclude bare single-agent files (handled separately)
         if lower_name.endswith((".agent.md", ".claude.md")) and not _is_single_agent_file(md_file.name):
@@ -77,7 +81,12 @@ def _normalize_agent_filename(source_file: Path) -> Path:
         # Preserve the prefix, just change .claude.md to .agent.md
         prefix = filename[:-len(".claude.md")]
         return source_file.with_name(f"{prefix}.agent.md")
-    
+
+    # Normalize mixed-case *.agent.md suffix (e.g., report.AGENT.md → report.agent.md)
+    if lower_filename.endswith(".agent.md") and not filename.endswith(".agent.md"):
+        prefix = filename[:-len(".agent.md")]
+        return source_file.with_name(f"{prefix}.agent.md")
+
     return source_file
 
 
@@ -248,16 +257,13 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
     agent_files: list[Path] = _find_agent_files_with_suffix(root)
     
     # Also check for single-agent files: agent.md and CLAUDE.md (case-insensitive)
-    # Check each variant separately to avoid duplicate case variants
-    for candidate_name in ("agent.md", "Agent.md", "AGENT.MD"):
-        candidate = root / candidate_name
-        if candidate.exists() and candidate.is_file():
+    for candidate in sorted(root.iterdir()):
+        if candidate.is_file() and _is_bare_agent_md(candidate.name):
             agent_files.append(candidate)
             break  # Only add one agent.md variant
-    
-    for candidate_name in ("claude.md", "Claude.md", "CLAUDE.md", "CLAUDE.MD"):
-        candidate = root / candidate_name
-        if candidate.exists() and candidate.is_file():
+
+    for candidate in sorted(root.iterdir()):
+        if candidate.is_file() and _is_claude_md(candidate.name):
             agent_files.append(candidate)
             break  # Only add one CLAUDE.md variant
     
@@ -266,15 +272,13 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
         # Find prefixed agent files with case-insensitive suffix matching
         agent_files.extend(_find_agent_files_with_suffix(agents_dir))
         # Also check for single-agent files in agents folder (case-insensitive)
-        for candidate_name in ("agent.md", "Agent.md", "AGENT.MD"):
-            candidate = agents_dir / candidate_name
-            if candidate.exists() and candidate.is_file():
+        for candidate in sorted(agents_dir.iterdir()):
+            if candidate.is_file() and _is_bare_agent_md(candidate.name):
                 agent_files.append(candidate)
                 break  # Only add one agent.md variant
-        
-        for candidate_name in ("claude.md", "Claude.md", "CLAUDE.md", "CLAUDE.MD"):
-            candidate = agents_dir / candidate_name
-            if candidate.exists() and candidate.is_file():
+
+        for candidate in sorted(agents_dir.iterdir()):
+            if candidate.is_file() and _is_claude_md(candidate.name):
                 agent_files.append(candidate)
                 break  # Only add one CLAUDE.md variant
 
