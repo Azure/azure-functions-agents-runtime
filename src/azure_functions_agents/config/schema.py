@@ -258,6 +258,7 @@ GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS: dict[str, str] = {
     "dynamic_sessions_code_interpreter": "ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter)",
+    "web_request": "Outbound HTTP request tool configuration. Enabled by default; set to `false` to disable app-wide. [Details](#global-system_tools-web_request)",
 }
 
 DYNAMIC_SESSIONS_DESCRIPTIONS: dict[str, str] = {
@@ -285,6 +286,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS: dict[str, str] = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
+    "workflows": "Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows)",
     "input_schema": "JSON Schema for HTTP request validation",
     "response_schema": "JSON Schema for response validation",
     "response_example": "Example response structure (multiline string)",
@@ -304,6 +306,7 @@ BUILTIN_ENDPOINTS_DESCRIPTIONS: dict[str, str] = {
 
 SYSTEM_TOOLS_AGENT_DESCRIPTIONS: dict[str, str] = {
     "dynamic_sessions_code_interpreter": "Set to `false` to opt out of code execution capabilities",
+    "web_request": "Set to `false` to opt out of the default-on `web_request` tool for this agent",
 }
 
 MCP_FILTER_DESCRIPTIONS: dict[str, str] = {
@@ -316,4 +319,12 @@ SKILLS_FILTER_DESCRIPTIONS: dict[str, str] = {
 
 AGENT_TOOLS_FILTER_DESCRIPTIONS: dict[str, str] = {
     "exclude": "Tool names to exclude (in addition to global excludes)",
+}
+
+WEB_REQUEST_DESCRIPTIONS: dict[str, str] = {
+    "allowed_hosts": "Exact-match allowlist of hostnames the tool may call. Omit to allow any public host (still subject to the SSRF floor).",
+    "require_https": "Require `https://` URLs. Set to `false` to also allow `http://`.",
+    "timeout_seconds": "Per-request timeout in seconds, clamped to a runtime-defined ceiling (120 s).",
+    "max_response_bytes": "Maximum response body size read before truncating, clamped to a runtime-defined ceiling (10 MB).",
+    "max_request_bytes": "Maximum request body size accepted, clamped to a runtime-defined ceiling (10 MB).",
 }
