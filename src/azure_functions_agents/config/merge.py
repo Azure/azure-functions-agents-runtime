@@ -20,13 +20,26 @@ from azure_functions_agents.config.schema import (
 DEFAULT_TIMEOUT = 900.0
 
 
-def _resolve_builtin_endpoints(spec: AgentSpec) -> BuiltinEndpointsConfig:
+def _resolve_builtin_endpoints(
+    spec: AgentSpec, global_config: GlobalConfig
+) -> BuiltinEndpointsConfig:
     builtin_endpoints = spec.builtin_endpoints
     if isinstance(builtin_endpoints, BuiltinEndpointsConfig):
-        return builtin_endpoints
-    if builtin_endpoints is True:
-        return BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
-    return BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
+        resolved = builtin_endpoints
+    elif builtin_endpoints is True:
+        resolved = BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+    else:
+        resolved = BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
+
+    # Inherit the app-wide auth default (agents.config.yaml `http_auth`) unless the
+    # agent authored its own builtin_endpoints.http_auth, which always overrides.
+    authored_http_auth = (
+        isinstance(builtin_endpoints, BuiltinEndpointsConfig)
+        and "http_auth" in builtin_endpoints.model_fields_set
+    )
+    if not authored_http_auth and global_config.http_auth is not None:
+        resolved = resolved.model_copy(update={"http_auth": global_config.http_auth})
+    return resolved
 
 
 def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
@@ -174,7 +187,7 @@ def compose(
         trigger=spec.trigger,
         instructions=spec.instructions,
         is_main=spec.is_main,
-        builtin_endpoints=_resolve_builtin_endpoints(spec),
+        builtin_endpoints=_resolve_builtin_endpoints(spec, global_config),
         model=_resolve_model(spec, global_config),
         timeout=_resolve_timeout(spec, global_config),
         enabled_mcp_names=enabled_mcp,

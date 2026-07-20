@@ -71,6 +71,8 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
     model_class_names = [
         "BuiltinEndpointsConfig", "BuiltinEndpointegersConfig",  # Handle both (typo variant too)
         "DynamicSessionsCodeInterpreterConfig",
+        "EndpointAuthConfig",
+        "EntraAuthConfig",
         "McpFilter",
         "SkillsFilter",
         "ToolsFilter",
@@ -228,6 +230,7 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
+    "http_auth": "App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`.",
 }
 
 GLOBAL_CONFIG_DEFAULTS = {
@@ -235,6 +238,7 @@ GLOBAL_CONFIG_DEFAULTS = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
+    "http_auth": "`function` (per-agent default)",
 }
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS = {

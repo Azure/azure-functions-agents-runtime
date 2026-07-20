@@ -10,7 +10,12 @@ from typing import Any, get_type_hints
 
 import azure.functions as func
 
-from azure_functions_agents.config.schema import BuiltinEndpointsConfig, ResolvedAgent, ToolsFilter
+from azure_functions_agents.config.schema import (
+    BuiltinEndpointsConfig,
+    EndpointAuthConfig,
+    ResolvedAgent,
+    ToolsFilter,
+)
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _run_builtin_agent,
@@ -854,3 +859,168 @@ def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
     assert response.status_code == 200
     assert run_calls["kwargs"]["workflows_enabled"] is False
     assert run_calls["kwargs"]["durable_client"] is None
+
+
+def _chat_api_agent(tmp_path: Path, auth: EndpointAuthConfig) -> ResolvedAgent:
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    return _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True, http_auth=auth),
+        source_file=source_file,
+    )
+
+
+def test_chat_routes_default_to_function_auth_level(tmp_path: Path) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+
+    for name in ("agents/test_agent/chat", "agents/test_agent/chatstream"):
+        route = next(route for route in app.routes if route["route"] == name)
+        assert route["auth_level"] == func.AuthLevel.FUNCTION
+
+
+def test_chat_routes_admin_and_anonymous_auth_levels(tmp_path: Path) -> None:
+    for mode, expected in (
+        ("admin", func.AuthLevel.ADMIN),
+        ("anonymous", func.AuthLevel.ANONYMOUS),
+        ("entra", func.AuthLevel.ANONYMOUS),
+    ):
+        app = FakeFunctionApp()
+        resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode=mode))  # type: ignore[arg-type]
+        register_builtin_endpoints(app, resolved, AgentCapabilities())
+        route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+        assert route["auth_level"] == expected
+
+
+def test_entra_chat_without_identity_is_unauthorized(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 401
+
+
+def test_entra_chatstream_without_identity_emits_sse_error(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    stream_route = next(
+        route for route in app.routes if route["route"] == "agents/test_agent/chatstream"
+    )
+
+    response = asyncio.run(stream_route["handler"](DummyRequest({"prompt": "hi"})))
+
+    assert response.status_code == 401
+
+
+def test_entra_chat_with_easy_auth_principal_proceeds(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    import base64
+    import json as _json
+
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        return SimpleNamespace(session_id="s-1", content="ok", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    principal = base64.b64encode(
+        _json.dumps(
+            {"auth_typ": "aad", "claims": [{"typ": "tid", "val": "t-1"}]}
+        ).encode("utf-8")
+    ).decode("ascii")
+    request = DummyRequest({"prompt": "hello"}, headers={"x-ms-client-principal": principal})
+    response = asyncio.run(chat_route["handler"](request))
+
+    assert response.status_code == 200
+
+
+def test_entra_chat_without_easy_auth_rejects_principal(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    import base64
+    import json as _json
+
+    # Easy Auth is NOT enforced, so a client-supplied principal header must be
+    # rejected rather than trusted (authentication-bypass guard).
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities())
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    principal = base64.b64encode(
+        _json.dumps(
+            {"auth_typ": "aad", "claims": [{"typ": "tid", "val": "t-1"}]}
+        ).encode("utf-8")
+    ).decode("ascii")
+    request = DummyRequest({"prompt": "hello"}, headers={"x-ms-client-principal": principal})
+    response = asyncio.run(chat_route["handler"](request))
+
+    assert response.status_code == 401
+
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+
+    for name in ("agents/test_agent/workflows", "agents/test_agent/workflow-status"):
+        route = next(route for route in app.routes if route["route"] == name)
+        assert route["auth_level"] == func.AuthLevel.FUNCTION
+
+
+def test_workflow_endpoints_apply_configured_auth_level(tmp_path: Path) -> None:
+    for mode, expected in (
+        ("admin", func.AuthLevel.ADMIN),
+        ("anonymous", func.AuthLevel.ANONYMOUS),
+        ("entra", func.AuthLevel.ANONYMOUS),
+    ):
+        app = FakeFunctionApp()
+        resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode=mode))  # type: ignore[arg-type]
+        register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+        for name in ("agents/test_agent/workflows", "agents/test_agent/workflow-status"):
+            route = next(route for route in app.routes if route["route"] == name)
+            assert route["auth_level"] == expected
+
+
+def test_entra_workflow_endpoints_without_identity_are_unauthorized(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra"))
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+
+    for name in ("agents/test_agent/workflows", "agents/test_agent/workflow-status"):
+        route = next(route for route in app.routes if route["route"] == name)
+        response = asyncio.run(route["handler"](DummyRequest({}), client=object()))
+        assert response.status_code == 401
+

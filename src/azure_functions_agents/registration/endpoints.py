@@ -14,7 +14,8 @@ from azurefunctions.extensions.http.fastapi import Request, Response, StreamingR
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._source_marker import source_marker
-from ..config import ResolvedAgent
+from ..config import EndpointAuthConfig, ResolvedAgent
+from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
@@ -251,6 +252,7 @@ def _register_http_chat(
     *,
     route: str,
     function_name: str,
+    auth: EndpointAuthConfig,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
@@ -278,6 +280,11 @@ def _register_http_chat(
             },
         ) as span:
             try:
+                auth_error = authorize_entra_request(req.headers.get, auth)
+                if auth_error is not None:
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
+                    return _json_error(auth_error.message, status_code=auth_error.status_code)
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 result = await _run_builtin_agent(
@@ -325,7 +332,11 @@ def _register_http_chat(
     else:
         decorated = _chat_handler_without_client(handle_chat)
 
-    decorated = app.route(route=route, methods=["POST"])(decorated)
+    decorated = app.route(
+        route=route,
+        methods=["POST"],
+        auth_level=resolve_endpoint_auth_level(auth),
+    )(decorated)
     app.function_name(name=function_name)(decorated)
 
 
@@ -336,6 +347,7 @@ def _register_http_chat_stream(
     *,
     route: str,
     function_name: str,
+    auth: EndpointAuthConfig,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
@@ -345,6 +357,9 @@ def _register_http_chat_stream(
         durable_client: Any | None,
     ) -> StreamingResponse:
         try:
+            auth_error = authorize_entra_request(req.headers.get, auth)
+            if auth_error is not None:
+                return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
             session_id = req.headers.get("x-ms-session-id")
@@ -379,7 +394,11 @@ def _register_http_chat_stream(
     else:
         decorated = _chat_stream_handler_without_client(handle_chat_stream)
 
-    decorated = app.route(route=route, methods=["POST"])(decorated)
+    decorated = app.route(
+        route=route,
+        methods=["POST"],
+        auth_level=resolve_endpoint_auth_level(auth),
+    )(decorated)
     app.function_name(name=function_name)(decorated)
 
 
@@ -480,13 +499,19 @@ def _register_workflow_status_endpoints(
     *,
     slug: str,
     base_function_name: str,
+    auth: EndpointAuthConfig,
 ) -> None:
     from ..workflows.tools import (
         fetch_session_workflow_status,
         fetch_session_workflows,
     )
 
+    auth_level = resolve_endpoint_auth_level(auth)
+
     async def list_session_workflows(req: Request, client: str) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
         session_id = req.headers.get("x-ms-session-id") or ""
         if not session_id:
             return Response(
@@ -511,9 +536,14 @@ def _register_workflow_status_endpoints(
         list_session_workflows
     )
     decorated_list = app.durable_client_input(client_name="client")(decorated_list)
-    app.route(route=f"agents/{slug}/workflows", methods=["GET"])(decorated_list)
+    app.route(route=f"agents/{slug}/workflows", methods=["GET"], auth_level=auth_level)(
+        decorated_list
+    )
 
     async def get_session_workflow_status(req: Request, client: str) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
         session_id = req.headers.get("x-ms-session-id") or ""
         workflow_id = (req.query_params or {}).get("workflow_id", "") or ""
         if not session_id or not workflow_id:
@@ -543,7 +573,9 @@ def _register_workflow_status_endpoints(
         get_session_workflow_status
     )
     decorated_status = app.durable_client_input(client_name="client")(decorated_status)
-    app.route(route=f"agents/{slug}/workflow-status", methods=["GET"])(decorated_status)
+    app.route(route=f"agents/{slug}/workflow-status", methods=["GET"], auth_level=auth_level)(
+        decorated_status
+    )
 
 
 def register_builtin_endpoints(
@@ -562,6 +594,7 @@ def register_builtin_endpoints(
     builtin_endpoints = resolved.builtin_endpoints
 
     base_function_name = _safe_function_name(f"agent_{slug}_builtin")
+    auth = builtin_endpoints.http_auth
 
     if builtin_endpoints.debug_chat_ui:
         route = f"agents/{slug}/"
@@ -581,6 +614,7 @@ def register_builtin_endpoints(
             capabilities,
             route=chat_route,
             function_name=f"{base_function_name}_chat",
+            auth=auth,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
@@ -591,6 +625,7 @@ def register_builtin_endpoints(
             capabilities,
             route=stream_route,
             function_name=f"{base_function_name}_chatstream",
+            auth=auth,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
@@ -600,6 +635,7 @@ def register_builtin_endpoints(
                 app,
                 slug=slug,
                 base_function_name=base_function_name,
+                auth=auth,
             )
 
     if builtin_endpoints.mcp:

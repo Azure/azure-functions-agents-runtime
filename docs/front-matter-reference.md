@@ -18,6 +18,7 @@ Optional file in the root directory. All properties are optional.
 | `model` | string | No | Resolved from env/provider | Default LLM model identifier for all agents |
 | `timeout` | number | No | `900` | Default execution timeout in seconds |
 | `tools` | object | No | `{}` | Global tool filtering configuration. [Details](#global-tools) |
+| `http_auth` | object | No | `function` (per-agent default) | App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`. |
 
 ### Global: `system_tools`
 
@@ -118,6 +119,7 @@ Enable built-in endpoints for interactive testing, programmatic access, and agen
 | `debug_chat_ui` | boolean | No | `false` | Enable browser-based chat UI at `/agents/{slug}/` plus backing chat APIs |
 | `chat_api` | boolean | No | `false` | Enable REST API endpoints (`/agents/{slug}/chat`, `/agents/{slug}/chatstream`) |
 | `mcp` | boolean | No | `false` | Expose agent as MCP tool on shared runtime MCP transport |
+| `http_auth` | object | No | `{}` | Inbound authentication policy for the HTTP chat API endpoints (chat_api / debug_chat_ui). Applies only to HTTP endpoints and does not affect the MCP endpoint. Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID). |
 
 **Note:** `debug_chat_ui: true` automatically enables `chat_api: true`
 
