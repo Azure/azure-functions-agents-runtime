@@ -614,64 +614,41 @@ def _get_header_value(headers: dict[str, str] | Any, name: str) -> str | None:
 
 
 def get_forwarded_header_names() -> list[str]:
-    """Return the configured header whitelist, or the default trusted headers.
+    """Return the configured header whitelist, or an empty list when unset.
 
     Reads the ``AGENTS_HEADER_WHITELIST`` environment variable, which holds a
-    comma-separated list of header names to forward downstream. When the variable
-    is unset or empty, falls back to :data:`DEFAULT_FORWARDED_HEADERS`.
+    comma-separated list of header names to forward downstream. Returns an empty
+    list when the variable is unset or contains no header names; in that case the
+    runtime falls back to the default trusted headers
+    (:data:`DEFAULT_FORWARDED_HEADERS`) at the forwarding site.
     """
     raw = os.environ.get(AGENTS_HEADER_WHITELIST_ENV, "")
-    names = [part.strip() for part in raw.split(",") if part.strip()]
-    if names:
-        return names
-    return list(DEFAULT_FORWARDED_HEADERS)
+    return [part.strip() for part in raw.split(",") if part.strip()]
 
 
-def extract_forwardable_headers(
-    headers: dict[str, str] | Any,
-    access_token: str | None = None,
-    hooks_session_token: str | None = None,
-) -> dict[str, str]:
-    """Resolve the set of headers to forward downstream for this request.
+def extract_forwardable_headers(headers: dict[str, str] | Any) -> dict[str, str]:
+    """Resolve the whitelisted headers to forward downstream for this request.
 
     When ``AGENTS_HEADER_WHITELIST`` is configured, each whitelisted header is
     read from the inbound request (case-insensitively) and forwarded under its
-    configured name.
-
-    When no whitelist is configured, the default trusted BigMac headers are
-    forwarded using the already-resolved ``access_token`` and
-    ``hooks_session_token`` values (which honor EasyAuth/Authorization
-    normalization) rather than a raw header lookup.
+    configured name. When no whitelist is configured, this returns an empty
+    mapping and the runtime falls back to the default trusted headers at the
+    forwarding site.
 
     Parameters
     ----------
     headers:
         The inbound request headers (dict-like or object with ``get``).
-    access_token:
-        The resolved user access token, used for the default header set.
-    hooks_session_token:
-        The resolved hooks session token, used for the default header set.
 
     Returns
     -------
     dict[str, str]
-        A mapping of header name to value to forward downstream.
+        A mapping of header name to value to forward downstream. Empty when no
+        whitelist is configured or no whitelisted headers are present on the
+        request.
     """
-    raw = os.environ.get(AGENTS_HEADER_WHITELIST_ENV, "")
-    names = [part.strip() for part in raw.split(",") if part.strip()]
-
-    if not names:
-        # Default: forward the trusted headers using resolved token values.
-        result: dict[str, str] = {}
-        if access_token:
-            result[BIGMAC_ACCESS_TOKEN_HEADER] = access_token
-        if hooks_session_token:
-            result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = hooks_session_token
-        return result
-
-    # Custom whitelist: forward each configured header found on the request.
     forwarded: dict[str, str] = {}
-    for name in names:
+    for name in get_forwarded_header_names():
         value = _get_header_value(headers, name)
         if value:
             forwarded[name] = value

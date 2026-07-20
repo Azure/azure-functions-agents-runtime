@@ -133,7 +133,20 @@ def _build_obo_header_provider(scope: str, static_headers: dict[str, str]) -> An
     def obo_header_provider(_ctx: Any) -> dict[str, str]:
         user_context = get_current_user_context()
 
-        # BigMac callback flow: forward whitelisted headers and always use MI auth.
+        # Forward user headers and always use MI auth. A configured header
+        # whitelist (AGENTS_HEADER_WHITELIST) takes precedence and is honored
+        # whenever it produced matching headers, regardless of the BigMac tokens.
+        forwardable = getattr(user_context, "forwardable_headers", None) or {}
+        if user_context is not None and forwardable:
+            mi_token = _get_or_refresh_managed_identity_token()
+            result = dict(static_headers)
+            result.update(forwardable)
+            result["Authorization"] = f"Bearer {mi_token}"
+            logger.debug("MCP: Forwarding whitelisted headers for scope %s", scope)
+            return result
+
+        # Otherwise, fall back to the trusted BigMac headers when both tokens
+        # are present.
         if (
             user_context is not None
             and user_context.hooks_session_token
@@ -141,13 +154,8 @@ def _build_obo_header_provider(scope: str, static_headers: dict[str, str]) -> An
         ):
             mi_token = _get_or_refresh_managed_identity_token()
             result = dict(static_headers)
-            forwardable = getattr(user_context, "forwardable_headers", None) or {}
-            if forwardable:
-                result.update(forwardable)
-            else:
-                # Fall back to the trusted headers currently implemented.
-                result[BIGMAC_ACCESS_TOKEN_HEADER] = user_context.access_token
-                result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = user_context.hooks_session_token
+            result[BIGMAC_ACCESS_TOKEN_HEADER] = user_context.access_token
+            result[BIGMAC_HOOKS_SESSION_TOKEN_HEADER] = user_context.hooks_session_token
             result["Authorization"] = f"Bearer {mi_token}"
             logger.debug("MCP: Using BigMac hook-session callback headers for scope %s", scope)
             return result

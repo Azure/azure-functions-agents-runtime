@@ -115,9 +115,7 @@ async def _build_user_context_from_request(req: Request) -> UserContext:
     access_token = extract_user_token_from_headers(headers)
     hooks_session_token = extract_hooks_session_token_from_headers(headers)
     user_id = extract_user_id_from_headers(headers)
-    forwardable_headers = extract_forwardable_headers(
-        headers, access_token, hooks_session_token
-    )
+    forwardable_headers = extract_forwardable_headers(headers)
 
     return create_user_context(
         access_token=access_token,
