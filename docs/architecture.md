@@ -47,10 +47,12 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/discovery/mcp.py` | Loads `mcp.json`, applies `resolve_env_vars_in_data()`, and translates remote HTTP server definitions into MAF MCP tool wrappers. | `discover_mcp_servers()` |
 | `azure_functions_agents/registration/capabilities.py` | Applies per-agent MCP/skills/tools filters and packages the final runtime inventory. | `AgentCapabilities`, `build_capabilities()` |
 | `azure_functions_agents/registration/_naming.py` | Derives Azure-safe function names and built-in endpoint slugs from `.agent.md` filenames; allocates unique function names via `allocate_unique_function_name()` when sanitized stems collide. | `_safe_function_name()`, `_function_name_from_source()` |
-| `azure_functions_agents/registration/_handlers.py` | Builds the callable closures that turn incoming trigger data or HTTP bodies into runner prompts. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()` |
+| `azure_functions_agents/registration/_handlers.py` | Builds callable closures that turn incoming trigger data or HTTP bodies into runner prompts; delegates non-HTTP binding payloads to the trigger serializer. | `make_agent_handler()`, `make_http_agent_handler()`, `build_sandbox_tools_for_session()` |
+| `azure_functions_agents/registration/_trigger_serialization.py` | Uses native data contracts and public Azure Functions binding adapters to produce JSON-safe non-HTTP trigger payloads. | `serialize_trigger_data()`, `TriggerBindingSerializer` |
 | `azure_functions_agents/registration/triggers.py` | Registers each agent trigger, dispatching between the runtime HTTP adapter and Azure Functions trigger decorators. | `register_agent()` |
 | `azure_functions_agents/registration/endpoints.py` | Registers debug chat UI, REST chat, SSE streaming, and MCP tools for agents with built-in endpoints. | `register_builtin_endpoints()` |
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
+| `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming. | `run_agent()`, `run_agent_stream()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool registry, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()` |
@@ -143,21 +145,22 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 ### Where the registration stage hands off to execution
 
-Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities`; the runner then asks the active `ClientManager` to build a chat client and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
+Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
 ### Registration paths in practice
 
 - **Endpoint-only agent (no trigger):** `create_function_app()` skips `register_agent()` whenever an agent has no `trigger`. If built-in endpoints are enabled, `register_builtin_endpoints()` can still expose the chat UI, REST, SSE, and MCP surfaces for interactive use.
 - **HTTP agent:** `registration/triggers.py` routes `http_trigger` to `make_http_agent_handler()`, which validates JSON input and optionally validates the model's JSON-shaped response before replying. Before the decorator is applied, `create_function_app()` and `register_agent()` coordinate through a shared `registered_names` set so duplicate sanitized stems become `name`, `name_2`, `name_3`, and so on.
-- **Built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which serializes the trigger payload to JSON, turns it into a prompt, and sends it to `runner.run_agent()`. The same shared `registered_names` tracking means host-level Azure Function names auto-suffix on collision rather than failing registration.
+- **Built-in trigger:** `registration/triggers.py` calls `make_agent_handler()`, which uses the native-contract-first, adapter-based trigger serializer to turn public binding data into JSON before sending the prompt to `runner.run_agent()`. The same shared `registered_names` tracking means host-level Azure Function names auto-suffix on collision rather than failing registration.
 - **Connector trigger:** `connector_trigger` uses the Azure Functions Python `app.connector_trigger(...)` decorator when available, falling back to the equivalent generic `connectorTrigger` binding on older Azure Functions packages. It then reuses the same `make_agent_handler()` closure pattern as the built-in trigger path. Connector-triggered agents participate in the same per-app `registered_names` allocation flow.
 
-### Where MCP and sandbox tools enter
+### Where MCP, sandbox, and web_request tools enter
 
 - MCP server definitions are read from `mcp.json`, translated into MAF MCP tool wrappers by `discover_mcp_servers()`, and filtered per agent through capability settings.
 - Connector actions are surfaced through connector-backed MCP servers. This keeps connector integration on the standard MCP discovery path and lets each server define its own transport, auth, and allowed tool set.
 - Code interpreter configuration is read from `GlobalConfig.system_tools.dynamic_sessions_code_interpreter`, carried into `ResolvedAgent.sandbox_config`, and turned into per-session `execute_python` tool closures by `build_sandbox_tools_for_session()` right before a request is executed.
 - Sandbox tools are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
+- `web_request` configuration is resolved by `config/merge.py:_resolve_web_request()` into `ResolvedAgent.web_request_config` — **default-on** (enabled unless explicitly disabled globally or per agent), unlike the opt-in sandbox. `registration/capabilities.py:build_capabilities()` builds the tool **once per agent** at registration time (it needs no Azure resource, so there is no reason to defer it to invocation time like the sandbox) and carries it on `AgentCapabilities.web_request_tools`. It flows to the runner through a dedicated `web_request_tools` parameter parallel to (not merged with) `sandbox_tools`.
 
 ### What the runner receives from registration
 
@@ -169,6 +172,7 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `AgentCapabilities.filtered_workflow_tools` becomes the workflow Activity target inventory used by `build_workflow_integration()` for the main agent when workflows are enabled.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
+- `AgentCapabilities.web_request_tools` becomes the concrete `web_request` tool list, passed to the runner via its own `web_request_tools` parameter.
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
 
 The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, and streaming/non-streaming response handling.
@@ -185,7 +189,7 @@ These are the main "passport" objects that move through the pipeline:
   - **Consumed by:** `config/merge.py:compose()`
 - `ResolvedAgent` — post-merge per-agent runtime config after defaults, overrides, and filters are applied. Defined in `src/azure_functions_agents/config/schema.py` as `ResolvedAgent`.
   - **Created by:** `config/merge.py:compose()`
-  - **Consumed by:** validation, capability building, trigger registration, endpoint registration, and sandbox-tool assembly
+  - **Consumed by:** validation, capability building, trigger registration, endpoint registration, and sandbox/web_request-tool assembly
 - `AgentCapabilities` — final filtered bundle of user tools, MCP tools, and skill directories. Defined in `src/azure_functions_agents/registration/capabilities.py` as `AgentCapabilities`.
   - **Created by:** `registration/capabilities.py:build_capabilities()`
   - **Consumed by:** `registration/triggers.py`, `registration/endpoints.py`, and the handler closures they create
@@ -225,7 +229,7 @@ This extension point is deliberately below the registration layer: no trigger or
 
 To add project-specific tools, drop a `.py` file into `tools/` and expose either `@tool`-decorated functions or plain functions that can be auto-wrapped into `FunctionTool` objects. Discovery lives in `src/azure_functions_agents/discovery/tools.py:discover_project_tools()` (with `discover_user_tools()` kept as the normal-tool compatibility API), and the local decorator shim is in `src/azure_functions_agents/_function_tool.py:tool()`.
 
-These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools and MCP tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
+These tools enter the pipeline during discovery, are filtered in `build_capabilities()`, and are finally passed into `runner.run_agent()` alongside sandbox tools, the `web_request` tool, and MCP tools. In other words, adding a file under `tools/` affects discovery only; the rest of the pipeline remains unchanged.
 
 Dynamic Workflow Activity targets use the same folder but require explicit `@workflow_tool` opt-in. A function decorated only with `@workflow_tool` is workflow-only; a plain public function or `@tool` value is normal-tool-only; using both decorators exposes the same callable in both places. This keeps Durable Activity execution explicit while preserving the existing plain-function normal-tool UX.
 
@@ -240,7 +244,7 @@ This design keeps global config declarative: shared config says what exists, whi
 - **Skills:** discovered as `SKILL.md` directories and handed to MAF's `SkillsProvider`. The provider exposes `load_skill` / `read_skill_resource` tools to the agent and scopes file access to the skill directory by design — no runtime-wide file tools required.
 - **Connectors:** connector actions are exposed to agents through MCP servers in `mcp.json`; connector-triggered agents use `trigger.type: connector_trigger`.
 - **Built-in endpoints:** endpoint registration is a separate module so the trigger-registration path stays focused on Azure Function bindings rather than UI and chat surface concerns.
-- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span) and `system_tools/sandbox.py` (the `dynamic_session.execute` span). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
+- **Observability:** telemetry is a cross-cutting concern rather than a pipeline stage. `_observability.py` is bootstrapped once from `create_function_app()`, and spans are emitted where the work happens — `registration/_handlers.py` (the `agent.run` parent span), `system_tools/sandbox.py` (the `dynamic_session.execute` span), and `system_tools/web_request.py` (the `web_request` span, attributed by host only — never the full URL with query string or secrets). It intentionally holds the only Azure-Monitor/ACA-aware calls outside registration, because exporting telemetry and correlating an execution are *observing* the pipeline, not wiring agents into it. Attributes use the `af.` prefix, and content is gated behind `ENABLE_SENSITIVE_DATA` (default off).
 
 ## 7. Related docs
 

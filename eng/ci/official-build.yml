@@ -50,3 +50,11 @@ extends:
           - template: /eng/templates/jobs/ci-tests.yml@self
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+
+      - stage: RunE2ETests
+        dependsOn: Build
+        jobs:
+          - template: /eng/templates/official/jobs/e2e-tests.yml@self
+            parameters:
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              PoolName: 1es-pool-azfunc

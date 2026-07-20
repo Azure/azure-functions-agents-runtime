@@ -1,0 +1,64 @@
+parameters:
+  - name: artifactFeed
+    type: string
+    default: 'public/PythonSDK_PublicPackages'
+  - name: PoolName
+    type: string
+    default: '1es-pool-azfunc'
+
+jobs:
+  - job: "E2ETests"
+    displayName: 'Run Azure Functions Agent Runtime E2E Tests'
+
+    pool:
+      name: ${{ parameters.PoolName }}
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    strategy:
+      matrix:
+        Python313:
+          PYTHON_VERSION: '3.13'
+        Python314:
+          PYTHON_VERSION: '3.14'
+
+    steps:
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: $(PYTHON_VERSION)
+      - bash: |
+          python --version
+        displayName: 'Check python version'
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - bash: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -e .[dev]
+        displayName: 'Install dependencies for $(PYTHON_VERSION)'
+
+      - template: /eng/scripts/install-core-tools.yml@self
+
+      - bash: |
+          docker run -d --name azurite \
+            -p 10000:10000 -p 10001:10001 -p 10002:10002 \
+            mcr.microsoft.com/azure-storage/azurite \
+            azurite --skipApiVersionCheck \
+              --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+          echo "Waiting for Azurite to start..."
+          for i in $(seq 1 30); do
+            if curl -s http://127.0.0.1:10000/ > /dev/null; then
+              echo "Azurite is up."
+              break
+            fi
+            sleep 1
+          done
+        displayName: 'Start Azurite'
+
+      - bash: |
+          python -m pytest -m e2e tests/endtoend -v
+        displayName: 'Run E2E sample startup tests'
+        env:
+          AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+          FUNCTIONS_WORKER_RUNTIME: 'python'

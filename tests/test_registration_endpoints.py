@@ -5,7 +5,7 @@ import json
 import logging
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, get_type_hints
 
 import azure.functions as func
 import pytest
@@ -22,10 +22,15 @@ from azure_functions_agents.registration.endpoints import (
 class FakeFunctionApp:
     def __init__(self) -> None:
         self.routes: list[dict[str, Any]] = []
+        self.durable_clients: dict[Any, str] = {}  # handler -> client_name mapping
 
     def route(self, **kwargs: Any) -> Any:
         def decorator(handler: Any) -> Any:
-            self.routes.append({"handler": handler, **kwargs})
+            route_info = {"handler": handler, **kwargs}
+            # Check if this handler has a durable client input
+            if handler in self.durable_clients:
+                route_info["durable_client_input"] = self.durable_clients[handler]
+            self.routes.append(route_info)
             return handler
 
         return decorator
@@ -36,6 +41,30 @@ class FakeFunctionApp:
                 if route["handler"] is handler:
                     route["function_name"] = name
                     break
+            return handler
+
+        return decorator
+
+    def durable_client_input(self, *, client_name: str) -> Any:
+        def decorator(handler: Any) -> Any:
+            # Store the client name for this handler
+            self.durable_clients[handler] = client_name
+            # Also update any existing routes with this handler
+            for route in self.routes:
+                if route["handler"] is handler:
+                    route["durable_client_input"] = client_name
+                    break
+            return handler
+
+        return decorator
+
+    def mcp_tool_trigger(self, **kwargs: Any) -> Any:
+        def decorator(handler: Any) -> Any:
+            route_info = {"handler": handler, "mcp_tool_trigger": True, **kwargs}
+            # Check if this handler has a durable client input
+            if handler in self.durable_clients:
+                route_info["durable_client_input"] = self.durable_clients[handler]
+            self.routes.append(route_info)
             return handler
 
         return decorator
@@ -441,3 +470,205 @@ def test_debug_chat_stream_endpoint_skips_input_schema_validation(
     assert response.status_code == 200
     assert response.media_type == "text/event-stream"
     assert run_calls["prompt"] == "hello"
+
+
+def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(
+    tmp_path: Path,
+) -> None:
+    """When workflows_enabled=False, chat endpoints should not have a client parameter."""
+    import inspect
+
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=False)
+
+    # Check chat endpoint
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+    chat_handler = chat_route["handler"]
+    chat_params = inspect.signature(chat_handler).parameters
+    assert "client" not in chat_params, "Chat handler should not have 'client' parameter when workflows disabled"
+    assert "__signature__" not in chat_handler.__dict__, "Chat handler should expose its natural signature"
+    assert "durable_client_input" not in chat_route, "Chat handler should not have durable_client_input decorator"
+
+    # Check chatstream endpoint
+    stream_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chatstream")
+    stream_handler = stream_route["handler"]
+    stream_params = inspect.signature(stream_handler).parameters
+    assert "client" not in stream_params, "Stream handler should not have 'client' parameter when workflows disabled"
+    assert "__signature__" not in stream_handler.__dict__, "Stream handler should expose its natural signature"
+    assert "durable_client_input" not in stream_route, "Stream handler should not have durable_client_input decorator"
+
+
+def test_register_builtin_endpoints_with_workflows_has_client_parameter(
+    tmp_path: Path,
+) -> None:
+    """When workflows_enabled=True, chat endpoints should have a client parameter with durable_client_input."""
+    import inspect
+
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+
+    # Check chat endpoint
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+    chat_handler = chat_route["handler"]
+    chat_params = inspect.signature(chat_handler).parameters
+    assert "client" in chat_params, "Chat handler should have 'client' parameter when workflows enabled"
+    assert chat_params["client"].default is inspect.Parameter.empty
+    assert get_type_hints(chat_handler)["client"] is str
+    assert "durable_client_input" in chat_route, "Chat handler should have durable_client_input decorator"
+    assert chat_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
+
+    # Check chatstream endpoint
+    stream_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chatstream")
+    stream_handler = stream_route["handler"]
+    stream_params = inspect.signature(stream_handler).parameters
+    assert "client" in stream_params, "Stream handler should have 'client' parameter when workflows enabled"
+    assert stream_params["client"].default is inspect.Parameter.empty
+    assert get_type_hints(stream_handler)["client"] is str
+    assert "durable_client_input" in stream_route, "Stream handler should have durable_client_input decorator"
+    assert stream_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
+
+
+def test_register_builtin_endpoints_mcp_without_workflows_has_no_client_parameter(
+    tmp_path: Path,
+) -> None:
+    """When workflows_enabled=False, MCP endpoint should not have a client parameter."""
+    import inspect
+
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=False)
+
+    # Find the MCP route (it uses mcp_tool_trigger decorator)
+    mcp_routes = [route for route in app.routes if route.get("mcp_tool_trigger")]
+    assert len(mcp_routes) == 1, "Should have exactly one MCP route"
+    mcp_handler = mcp_routes[0]["handler"]
+    mcp_params = inspect.signature(mcp_handler).parameters
+    assert "client" not in mcp_params, "MCP handler should not have 'client' parameter when workflows disabled"
+    assert "__signature__" not in mcp_handler.__dict__, "MCP handler should expose its natural signature"
+    assert "durable_client_input" not in mcp_routes[0], "MCP handler should not have durable_client_input decorator"
+
+
+def test_register_builtin_endpoints_mcp_with_workflows_has_client_parameter(
+    tmp_path: Path,
+) -> None:
+    """When workflows_enabled=True, MCP endpoint should have a client parameter with durable_client_input."""
+    import inspect
+
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        source_file=source_file,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+
+    # Find the MCP route (it uses mcp_tool_trigger decorator)
+    mcp_routes = [route for route in app.routes if route.get("mcp_tool_trigger")]
+    assert len(mcp_routes) == 1, "Should have exactly one MCP route"
+    mcp_handler = mcp_routes[0]["handler"]
+    mcp_params = inspect.signature(mcp_handler).parameters
+    assert "client" in mcp_params, "MCP handler should have 'client' parameter when workflows enabled"
+    assert mcp_params["client"].default is inspect.Parameter.empty
+    assert get_type_hints(mcp_handler)["client"] is str
+    assert "durable_client_input" in mcp_routes[0], "MCP handler should have durable_client_input decorator"
+    assert mcp_routes[0]["durable_client_input"] == "client", "Durable client input should be named 'client'"
+
+
+def test_workflows_enabled_passes_client_to_run_builtin_agent(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """When workflows enabled, the client parameter should be passed to _run_builtin_agent."""
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=source_file,
+    )
+    run_calls: dict[str, Any] = {}
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        run_calls["kwargs"] = kwargs
+        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=True)
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    # Call with a mock durable client
+    mock_client = SimpleNamespace(name="mock_durable_client")
+    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"}), client=mock_client))
+
+    assert response.status_code == 200
+    assert run_calls["kwargs"]["workflows_enabled"] is True
+    assert run_calls["kwargs"]["durable_client"] is mock_client
+
+
+def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    """When workflows disabled, durable_client should be None in _run_builtin_agent."""
+    app = FakeFunctionApp()
+    source_file = tmp_path / "test_agent.agent.md"
+    source_file.write_text("---\nname: Test Agent\n---\n", encoding="utf-8")
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=source_file,
+    )
+    run_calls: dict[str, Any] = {}
+
+    async def fake_run_builtin_agent(prompt: str, **kwargs: Any) -> Any:
+        run_calls["kwargs"] = kwargs
+        return SimpleNamespace(session_id="session-123", content="ok", tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_builtin_agent",
+        fake_run_builtin_agent,
+    )
+
+    register_builtin_endpoints(app, resolved, AgentCapabilities(), workflows_enabled=False)
+    chat_route = next(route for route in app.routes if route["route"] == "agents/test_agent/chat")
+
+    response = asyncio.run(chat_route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert run_calls["kwargs"]["workflows_enabled"] is False
+    assert run_calls["kwargs"]["durable_client"] is None

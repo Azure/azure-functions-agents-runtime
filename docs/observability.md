@@ -80,6 +80,7 @@ Two sub-namespaces group the detail, plus two cross-cutting attributes:
 | --- | --- |
 | `af.agent.*` | attributes on the per-run `agent.run {name}` span |
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
+| `af.web_request.*` | attributes on the `web_request` (outbound HTTP tool) span |
 | `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on any runtime span |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
@@ -92,13 +93,13 @@ name — for example `server.address` for the session-pool host. MAF keeps emitt
 
 | Attribute | Meaning |
 | --- | --- |
-| `af.fault_domain` | Whose fault a failure is: `app`, `runtime`, `platform`, `model`, `connector`, `sandbox`, `unknown`. Set **only on failing spans**. |
+| `af.fault_domain` | Whose fault a failure is: `app`, `runtime`, `platform`, `model`, `connector`, `sandbox`, `web_request`, `unknown`. Set **only on failing spans**. |
 | `af.lifecycle_stage` | Which run stage the span represents, e.g. `agent_run`, `tool_execution`. |
 
 ### Span `agent.run {name}`
 
 One per agent invocation (timer, connector, HTTP, …). It is the parent that ties the MAF `gen_ai`
-spans and the sandbox span together.
+spans and the sandbox/`web_request` tool spans together.
 
 | Attribute | Meaning |
 | --- | --- |
@@ -153,6 +154,25 @@ Plus `af.lifecycle_stage=tool_execution`. When stderr is present or the call thr
 marked ERROR with `af.fault_domain=sandbox`. This is the key fix: a broken execution no longer
 looks like a successful tool call.
 
+### Span `web_request`
+
+One per `web_request` tool call, as a child of `agent.run`. Attributes are deliberately
+**host-only** — the full URL (with query string, and any userinfo) is never attached to the span,
+and secrets are never logged, regardless of `ENABLE_SENSITIVE_DATA`.
+
+| Attribute | Meaning |
+| --- | --- |
+| `http.request.method` | HTTP verb used (`GET`, `POST`, …). |
+| `server.address` | Target host (OTel semconv) — set once the SSRF validator has approved a host. |
+| `url.scheme` | `http` or `https`. |
+| `http.response.status_code` | Response status code, when a response was received. |
+| `af.web_request.blocked_reason` | Present only when the SSRF validator rejects the request (e.g. `private_ip`, `imds`, `allowlist_denied`). |
+| `af.web_request.response_bytes` | Size of the response body actually read (before truncation applies). |
+| `af.web_request.body_truncated` | `true` when the response exceeded `max_response_bytes` and was truncated. |
+
+Plus `af.lifecycle_stage=tool_execution`. SSRF rejections, timeouts, and transport errors all mark
+the span ERROR with `af.fault_domain=web_request`.
+
 ### Metrics
 
 Namespace `azure_functions_agents.*`:
@@ -161,6 +181,8 @@ Namespace `azure_functions_agents.*`:
 | --- | --- |
 | `azure_functions_agents.dynamic_session.executions` | Count of `execute_python` calls. |
 | `azure_functions_agents.dynamic_session.errors` | Count that failed or produced stderr. |
+| `azure_functions_agents.web_request.requests` | Count of `web_request` tool calls. |
+| `azure_functions_agents.web_request.errors` | Count that were blocked by the SSRF validator, timed out, or otherwise failed. |
 
 ## Sensitive data
 
@@ -173,7 +195,10 @@ Microsoft Agent Framework, **default off**.
   `af.dynamic_session.code` / `.stdout` / `.stderr`, plus MAF prompt/response/tool-arg content
   (via `enable_instrumentation(enable_sensitive_data=True)`).
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
-  connection strings, and the ACA system key. Endpoints are reduced to host only.
+  connection strings, and the ACA system key. Endpoints are reduced to host only. The `web_request`
+  span never carries the full request URL (query string or userinfo stripped), request/response
+  bodies, or header values — it is host/status/size metadata only, unaffected by
+  `ENABLE_SENSITIVE_DATA`.
 
 ## Noise & cost control
 
@@ -317,5 +342,6 @@ ACA correlation; the `agent.run` summary span; sensitive-data gating (default of
 | Bootstrap call site | `src/azure_functions_agents/app.py` |
 | Sensitive-data env handling (`ENABLE_SENSITIVE_DATA`) | `src/azure_functions_agents/_observability.py` |
 | Sandbox span + stderr surfacing + ACA correlation | `src/azure_functions_agents/system_tools/sandbox.py` |
+| `web_request` span, SSRF blocking, and truncation reporting | `src/azure_functions_agents/system_tools/web_request.py` |
 | `agent.run` span + sensitive-log gating | `src/azure_functions_agents/registration/_handlers.py` |
-| Tests | `tests/test_observability.py`, `tests/test_system_tools_sandbox.py` |
+| Tests | `tests/test_observability.py`, `tests/test_system_tools_sandbox.py`, `tests/test_web_request.py` |
