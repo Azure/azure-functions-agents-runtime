@@ -1,9 +1,25 @@
 // Signed-in identity, the subscriptions the user can see, and the currently
 // selected subscription (which drives live agent discovery). The user signs in
 // via MSAL; the forwarded ARM token authorises every backend call.
+//
+// Identity and the subscription list are cached with React Query (see
+// ./query), so they survive navigation and are only refetched once stale. The
+// selected subscription is persisted to localStorage.
 
-import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react'
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react'
+import { useQuery } from '@tanstack/react-query'
 import { api, type Identity, type Subscription } from './api'
+import { queryKeys, staleTimes } from './query'
+
+const SELECTED_SUB_KEY = 'serverless-portal:selected-subscription'
 
 interface IdentityState {
   identity: Identity | null
@@ -17,39 +33,57 @@ interface IdentityState {
 const IdentityContext = createContext<IdentityState | null>(null)
 
 export function IdentityProvider({ children }: { children: ReactNode }) {
-  const [identity, setIdentity] = useState<Identity | null>(null)
-  const [subscriptions, setSubscriptions] = useState<Subscription[]>([])
-  const [selected, setSelected] = useState<string>('')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
+  const identityQuery = useQuery({
+    queryKey: queryKeys.identity,
+    queryFn: () => api.identity(),
+    staleTime: staleTimes.identity,
+  })
+  const subsQuery = useQuery({
+    queryKey: queryKeys.subscriptions,
+    queryFn: () => api.listSubscriptions(),
+    staleTime: staleTimes.subscriptions,
+  })
 
-  useEffect(() => {
-    let cancelled = false
-    Promise.all([api.identity(), api.listSubscriptions()])
-      .then(([id, subs]) => {
-        if (cancelled) return
-        setIdentity(id)
-        setSubscriptions(subs)
-        // Default to the backend's subscription; fall back to the first listed.
-        const preferred = subs.some((s) => s.id === id.subscription.id)
-          ? id.subscription.id
-          : (subs[0]?.id ?? id.subscription.id)
-        setSelected(preferred)
-      })
-      .catch((e) => {
-        if (!cancelled) setError((e as Error).message)
-      })
-      .finally(() => {
-        if (!cancelled) setLoading(false)
-      })
-    return () => {
-      cancelled = true
+  const identity = identityQuery.data ?? null
+  const subscriptions = useMemo(() => subsQuery.data ?? [], [subsQuery.data])
+
+  const [selected, setSelectedState] = useState<string>(() => {
+    try {
+      return localStorage.getItem(SELECTED_SUB_KEY) ?? ''
+    } catch {
+      return ''
+    }
+  })
+
+  const setSelected = useCallback((id: string) => {
+    setSelectedState(id)
+    try {
+      localStorage.setItem(SELECTED_SUB_KEY, id)
+    } catch {
+      /* private mode / storage disabled — selection stays in memory */
     }
   }, [])
 
+  // Once identity + subscriptions load, pick a default if the persisted
+  // selection is empty or no longer valid for this tenant.
+  useEffect(() => {
+    if (!identity || subscriptions.length === 0) return
+    if (selected && subscriptions.some((s) => s.id === selected)) return
+    const preferred = subscriptions.some((s) => s.id === identity.subscription.id)
+      ? identity.subscription.id
+      : (subscriptions[0]?.id ?? identity.subscription.id)
+    setSelected(preferred)
+  }, [identity, subscriptions, selected, setSelected])
+
+  const loading = identityQuery.isLoading || subsQuery.isLoading
+  const error =
+    (identityQuery.error as Error | null)?.message ??
+    (subsQuery.error as Error | null)?.message ??
+    null
+
   const value = useMemo<IdentityState>(
     () => ({ identity, subscriptions, selected, setSelected, loading, error }),
-    [identity, subscriptions, selected, loading, error],
+    [identity, subscriptions, selected, setSelected, loading, error],
   )
 
   return <IdentityContext.Provider value={value}>{children}</IdentityContext.Provider>
