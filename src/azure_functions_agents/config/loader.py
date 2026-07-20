@@ -159,7 +159,7 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     # Store the normalized filename for function name generation
     normalized["source_file"] = str(normalized_file)
     # agent.md and main.agent.md are both treated as main agents
-    normalized["is_main"] = normalized_file.name in ("main.agent.md", "default.agent.md")
+normalized["is_main"] = normalized_file.name.lower() in ("main.agent.md", "default.agent.md")
 
     try:
         return AgentSpec.model_validate(normalized)
