@@ -231,7 +231,7 @@ def _terminate(proc: subprocess.Popen[str]) -> None:
 
 
 def _free_port() -> int:
-    """Reserve an ephemeral localhost port for a ``func start`` instance."""
+    """Choose an available ephemeral localhost port for a ``func start`` instance."""
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])

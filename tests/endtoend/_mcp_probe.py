@@ -51,7 +51,10 @@ class McpCallResult:
     text: str
 
     def json(self) -> Any:
-        return json.loads(self.text)
+        try:
+            return json.loads(self.text) if self.text else {}
+        except json.JSONDecodeError:
+            return {"raw": self.text}
 
 
 async def _open_and_run[T](
