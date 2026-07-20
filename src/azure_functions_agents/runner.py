@@ -160,7 +160,7 @@ async def _session_lock_bounded_by(session_id: str, deadline: float) -> AsyncIte
     cancellation.
     """
     lock = await _get_session_lock(session_id)
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     await asyncio.wait_for(lock.acquire(), timeout=max(0.0, deadline - loop.time()))
     try:
         yield
@@ -547,7 +547,7 @@ def _build_delegate_tool(
         approval_mode="never_require",
     )
     async def delegate(params: _DelegateTaskParams) -> str:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         task_text = params.task
 
         span = current_span()
@@ -692,7 +692,7 @@ async def _build_agent_session_history(
         effective_deadline = (
             coordinator_deadline
             if coordinator_deadline is not None
-            else asyncio.get_event_loop().time() + DEFAULT_TIMEOUT
+            else asyncio.get_running_loop().time() + DEFAULT_TIMEOUT
         )
         delegate_tools, delegate_error_tracker = await build_subagent_tools(
             subagents, catalog, coordinator_deadline=effective_deadline
@@ -862,7 +862,7 @@ async def run_agent(
     # left" (FRD 0006 Decision #12: "effective timeout = min(specialist,
     # coordinator remaining)"). `loop` is reused below (M1) to bound the
     # session-lock wait itself by this same absolute deadline.
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     coordinator_deadline = loop.time() + timeout
 
     agent, session, resolved_id, delegate_error_tracker = await _build_agent_session_history(
@@ -1016,7 +1016,7 @@ async def run_agent_stream(
     # adapter can cap its own specialist timeout at this run's remaining
     # budget. Reused, unchanged, as `deadline` further down for the existing
     # per-update stream timeout check.
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     deadline = loop.time() + timeout
 
     try:

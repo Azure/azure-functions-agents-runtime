@@ -1,9 +1,4 @@
-"""Built-in HTTP/UI/MCP endpoint registration for resolved agents.
-
-Per-app built-in endpoint slugs are tracked on the ``FunctionApp`` instance
-via a private ``_afa_builtin_slug_names`` set. Storing the registry on the app
-keeps tests isolated without relying on global module state.
-"""
+"""Built-in HTTP/UI/MCP endpoint registration for resolved agents."""
 
 from __future__ import annotations
 
@@ -21,7 +16,7 @@ from .._observability import FaultDomain, LifecycleStage, start_span
 from .._source_marker import source_marker
 from ..config import ResolvedAgent
 from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
-from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
+from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
 
@@ -36,8 +31,6 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
         }
     ]
 )
-
-_BUILTIN_SLUG_ATTR = "_afa_builtin_slug_names"
 
 type ChatHandler = Callable[[Request, Any | None], Awaitable[Response]]
 type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[StreamingResponse]]
@@ -68,22 +61,6 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
-
-
-def _builtin_slug_registry(app: func.FunctionApp) -> set[str]:
-    registry = getattr(app, _BUILTIN_SLUG_ATTR, None)
-    if registry is None:
-        registry = set()
-        setattr(app, _BUILTIN_SLUG_ATTR, registry)
-    return registry
-
-
-def _ensure_unique_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
-    return allocate_unique_builtin_slug(
-        resolved.source_file,
-        resolved.name,
-        _builtin_slug_registry(app),
-    )
 
 
 def _index_path() -> Path:
@@ -583,11 +560,6 @@ def register_builtin_endpoints(
 
     slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
     builtin_endpoints = resolved.builtin_endpoints
-    if builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp:
-        if slug in _builtin_slug_registry(app):
-            slug = _ensure_unique_slug(app, resolved)
-        else:
-            _builtin_slug_registry(app).add(slug)
 
     base_function_name = _safe_function_name(f"agent_{slug}_builtin")
 
