@@ -376,7 +376,7 @@ def start_and_verify(
     if func_exe is None:
         return FuncStartResult(False, "`func` executable not found on PATH", "")
 
-    host = _spawn(func_exe, app_dir)
+    host = _spawn(func_exe, app_dir, port=_free_port())
     try:
         ready, failed, reason = _await_ready(host, timeout=timeout, ready_grace=ready_grace)
     finally:

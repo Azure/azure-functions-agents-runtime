@@ -55,11 +55,14 @@ Served = tuple[HostHandle, HttpClient]
 
 
 def _provider_configured() -> bool:
-    """Whether an LLM provider appears configured in the environment."""
+    """Whether an LLM provider appears configured (env vars or app settings)."""
+    from tests.endtoend._func_host import configured_provider
+
     return bool(
         os.environ.get("OPENAI_API_KEY")
         or os.environ.get("AZURE_OPENAI_ENDPOINT")
         or os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+        or configured_provider(APPS_DIR / "builtin-endpoints") is not None
     )
 
 
