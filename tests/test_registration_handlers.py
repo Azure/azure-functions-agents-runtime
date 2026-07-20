@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from contextlib import contextmanager
@@ -11,6 +12,7 @@ from typing import Any
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
+    EndpointAuthConfig,
     ResolvedAgent,
     ToolsFilter,
 )
@@ -536,3 +538,107 @@ def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:
         assert str(exc) == "agent failed"
     else:
         raise AssertionError("Expected RuntimeError to be re-raised")
+
+
+def _principal_header(claims: list[dict[str, str]], *, auth_typ: str = "aad") -> str:
+    payload = json.dumps({"auth_typ": auth_typ, "claims": claims})
+    return base64.b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def test_http_handler_entra_without_easy_auth_returns_401(monkeypatch: Any) -> None:
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+
+    called = False
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        nonlocal called
+        called = True
+        return SimpleNamespace(content="ok", session_id="s")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"x-ms-client-principal": _principal_header([{"typ": "tid", "val": "t"}])},
+            )
+        )
+    )
+
+    assert response.status_code == 401
+    assert called is False
+
+
+def test_http_handler_entra_without_principal_returns_401(monkeypatch: Any) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 401
+
+
+def test_http_handler_entra_with_valid_principal_proceeds(monkeypatch: Any) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="plain text", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"x-ms-client-principal": _principal_header([{"typ": "tid", "val": "t"}])},
+            )
+        )
+    )
+
+    assert response.status_code == 200
+
+
+def test_http_handler_default_auth_does_not_gate_requests(monkeypatch: Any) -> None:
+    # No Easy Auth env, no principal header: a non-entra (default) handler must
+    # still serve the request -- key enforcement is handled by the route AuthLevel.
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="plain text", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 200
