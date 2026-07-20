@@ -257,8 +257,8 @@ GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
 }
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS: dict[str, str] = {
-    "dynamic_sessions_code_interpreter": "ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_tools-dynamic_sessions_code_interpreter)",
-    "web_request": "Outbound HTTP request tool configuration. Enabled by default; set to `false` to disable app-wide. [Details](#global-system_tools-web_request)",
+    "dynamic_sessions_code_interpreter": "ACA Dynamic Sessions code interpreter configuration. [Details](#global-system_toolsdynamic_sessions_code_interpreter)",
+    "web_request": "Outbound HTTP request tool configuration. Enabled by default; set to `false` to disable app-wide. [Details](#global-system_toolsweb_request)",
 }
 
 DYNAMIC_SESSIONS_DESCRIPTIONS: dict[str, str] = {
