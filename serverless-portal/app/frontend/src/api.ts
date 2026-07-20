@@ -46,6 +46,16 @@ export interface LiveDiscovery {
   agents: LiveAgent[]
 }
 
+// Error carrying the HTTP status so React Query's retry guard can skip 4xx.
+export class ApiError extends Error {
+  readonly status: number
+  constructor(message: string, status: number) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+  }
+}
+
 async function req<T>(method: string, url: string): Promise<T> {
   const token = await acquireArmToken()
   const res = await fetch(url, {
@@ -64,7 +74,7 @@ async function req<T>(method: string, url: string): Promise<T> {
       data && typeof data === 'object' && 'detail' in data
         ? (data as { detail: unknown }).detail
         : `HTTP ${res.status}`
-    throw new Error(typeof detail === 'string' ? detail : JSON.stringify(detail))
+    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail), res.status)
   }
   return data as T
 }

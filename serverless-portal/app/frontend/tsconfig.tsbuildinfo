@@ -1,1 +1,1 @@
-{"root":["./src/app.tsx","./src/api.ts","./src/auth.ts","./src/identity.tsx","./src/main.tsx","./src/components/shell.tsx","./src/pages/agentspage.tsx","./src/pages/loginpage.tsx"],"version":"5.9.3"}
+{"root":["./src/app.tsx","./src/api.ts","./src/auth.ts","./src/identity.tsx","./src/main.tsx","./src/query.ts","./src/components/shell.tsx","./src/pages/agentspage.tsx","./src/pages/loginpage.tsx"],"version":"5.9.3"}

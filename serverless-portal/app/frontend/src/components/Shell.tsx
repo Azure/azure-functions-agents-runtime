@@ -33,7 +33,7 @@ export default function Shell({ children }: { children: ReactNode }) {
 
       <nav className="nav">
         <div className="group-label">Build</div>
-        <NavLink className={itemClass} to="/" end>
+        <NavLink className={itemClass} to="/agents">
           <span className="ico">🤖</span> Agents
         </NavLink>
       </nav>

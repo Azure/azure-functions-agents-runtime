@@ -1,6 +1,22 @@
-import { useCallback, useEffect, useState } from 'react'
-import { api, type LiveDiscovery } from '../api'
+import { useEffect, useMemo } from 'react'
+import { useNavigate, useParams } from 'react-router-dom'
+import { useQuery } from '@tanstack/react-query'
+import { api } from '../api'
 import { useIdentity } from '../identity'
+import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
+
+function formatCachedAt(ms: number): string {
+  if (!ms) return ''
+  const d = new Date(ms)
+  const now = Date.now()
+  const secs = Math.round((now - ms) / 1000)
+  let rel: string
+  if (secs < 5) rel = 'just now'
+  else if (secs < 60) rel = `${secs}s ago`
+  else if (secs < 3600) rel = `${Math.floor(secs / 60)}m ago`
+  else rel = `${Math.floor(secs / 3600)}h ago`
+  return `${d.toLocaleString()} (${rel})`
+}
 
 export default function AgentsPage() {
   const {
@@ -10,27 +26,67 @@ export default function AgentsPage() {
     loading: identityLoading,
     error: identityError,
   } = useIdentity()
-  const [data, setData] = useState<LiveDiscovery | null>(null)
-  const [error, setError] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
-    if (!selected) return
-    setData(null)
-    setError(null)
-    try {
-      setData(await api.liveAgents(selected))
-    } catch (e) {
-      setError((e as Error).message)
-    }
-  }, [selected])
+  const { subscriptionId } = useParams<{ subscriptionId: string }>()
+  const navigate = useNavigate()
 
-  // Re-scan whenever the selected subscription changes.
+  // Deeplink → state: adopt the subscription from the URL so a shared/reloaded
+  // `/agents/:subscriptionId` restores the exact view (even before the
+  // subscription list has loaded).
   useEffect(() => {
-    load()
-  }, [load])
+    if (subscriptionId && subscriptionId !== selected) {
+      setSelected(subscriptionId)
+    }
+  }, [subscriptionId, selected, setSelected])
 
+  // State → deeplink: keep the URL in sync with the selected subscription so it
+  // is always shareable (replace so it doesn't spam browser history).
+  useEffect(() => {
+    if (selected && selected !== subscriptionId) {
+      navigate(`/agents/${selected}`, { replace: true })
+    }
+  }, [selected, subscriptionId, navigate])
+
+  // Live agent discovery is cached per subscription and persisted to
+  // localStorage, so a shared/reloaded deeplink hydrates instantly from cache.
+  // The data never auto-refetches (staleTime Infinity + refetchOnMount off) — a
+  // network scan only happens on the first load of a subscription with no
+  // cached snapshot, or when the user presses Hard refresh.
+  const snapshot = useMemo(() => readAgentsSnapshot(selected), [selected])
+  const {
+    data,
+    error: queryError,
+    isFetching,
+    refetch,
+    dataUpdatedAt,
+  } = useQuery({
+    queryKey: queryKeys.liveAgents(selected),
+    queryFn: () => api.liveAgents(selected),
+    enabled: !!selected,
+    staleTime: Infinity,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
+    initialData: snapshot?.data,
+    initialDataUpdatedAt: snapshot?.updatedAt,
+  })
+
+  // Persist each successful scan (and its timestamp) so the deeplink survives
+  // full page reloads.
+  useEffect(() => {
+    if (selected && data) {
+      writeAgentsSnapshot(selected, data, dataUpdatedAt)
+    }
+  }, [selected, data, dataUpdatedAt])
+
+  const error = queryError ? (queryError as Error).message : null
   const agents = data?.agents ?? []
+  const scanning = !!selected && !data && !error
   const subName = subscriptions.find((s) => s.id === selected)?.name ?? 'the subscription'
+
+  const onPickSubscription = (id: string) => {
+    setSelected(id)
+    navigate(`/agents/${id}`)
+  }
 
   return (
     <>
@@ -51,7 +107,7 @@ export default function AgentsPage() {
           <span className="sub-picker-label">Subscription</span>
           <select
             value={selected}
-            onChange={(e) => setSelected(e.target.value)}
+            onChange={(e) => onPickSubscription(e.target.value)}
             disabled={identityLoading || !!identityError || subscriptions.length === 0}
           >
             {identityLoading && <option value="">Loading…</option>}
@@ -65,8 +121,18 @@ export default function AgentsPage() {
               ))}
           </select>
         </label>
-        <button className="btn" onClick={load} disabled={!selected}>
-          ⟳ Refresh
+        {data && (
+          <span className="cache-stamp" title="When this subscription's agents were last fetched">
+            Cached {formatCachedAt(dataUpdatedAt)}
+          </span>
+        )}
+        <button
+          className="btn"
+          onClick={() => refetch()}
+          disabled={!selected || isFetching}
+          title="Force a fresh scan of the selected subscription"
+        >
+          {isFetching ? '⟳ Refreshing…' : '⟳ Hard refresh'}
         </button>
       </div>
 
@@ -83,7 +149,7 @@ export default function AgentsPage() {
             </tr>
           </thead>
           <tbody>
-            {data === null && !error && (
+            {scanning && (
               <tr>
                 <td colSpan={6} className="empty">
                   Scanning subscription…
