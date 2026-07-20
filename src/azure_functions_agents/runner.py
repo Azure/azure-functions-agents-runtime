@@ -23,7 +23,7 @@ Architecture
   existing SSE vocabulary (``session`` / ``delta`` / ``message`` /
   ``intermediate`` / ``tool_start`` / ``tool_end`` / ``done`` / ``error``)
   so the chat UI doesn't change.
-* Chat-time sub-agent delegation (FRD 0006): when the resolved agent
+* Chat-time sub-agent delegation (FRD 0007): when the resolved agent
   declares ``subagents``, :func:`build_subagent_tools` builds one
   hand-written ``delegate_<slug>`` :class:`~agent_framework.FunctionTool`
   per reference (the same ``@tool(schema=...)`` pattern as the
@@ -185,7 +185,7 @@ class AgentResult:
     events: list[dict[str, Any]] = field(default_factory=list)
     # Delegate (``delegate_<slug>``) calls that failed or timed out this run.
     # Tracked separately from ``tool_calls`` because a specialist failure is
-    # sanitized to free text (FRD 0006 Decision #12) and wouldn't be
+    # sanitized to free text (FRD 0007 Decision #12) and wouldn't be
     # recognized by ``_looks_like_tool_error``'s JSON heuristic — see
     # ``registration._handlers._total_tool_error_count``.
     delegate_error_count: int = 0
@@ -272,7 +272,7 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# Chat-time sub-agent delegation (FRD 0006)
+# Chat-time sub-agent delegation (FRD 0007)
 # ---------------------------------------------------------------------------
 #
 # A coordinator agent that declares ``subagents:`` gets one hand-written
@@ -280,7 +280,7 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 # — the same ``@tool(schema=...)`` pattern as the ``web_request``/
 # ``execute_python`` system tools, not MAF's ``BaseAgent.as_tool()``) and run
 # inside the coordinator's normal ``agent.run()`` tool-calling loop — no
-# ``HandoffBuilder``, no HITL (out of scope for v1; see FRD 0006 §2).
+# ``HandoffBuilder``, no HITL (out of scope for v1; see FRD 0007 §2).
 #
 # Delegation is single-level (Decision #6): a specialist built here is always
 # built in the *delegated* execution role (:func:`_build_delegated_agent`),
@@ -445,7 +445,7 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
     OTel span, flushing usage) on success/ordinary-exception, never on
     cancellation — so this force-runs them so spans close deterministically
     instead of via GC. Used by ``run_agent_stream`` only; the non-streaming
-    delegate path doesn't need it (FRD 0006 §5 Decision #20). Known gap: one
+    delegate path doesn't need it (FRD 0007 §5 Decision #20). Known gap: one
     chat-level span MAF never exposes externally can only close via GC — no
     workaround exists. Defensive throughout: safe if ``stream`` is ``None``.
     """
@@ -528,7 +528,7 @@ def _build_delegate_tool(
     """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
 
     A hand-written ``@tool(schema=...)`` function tool (not MAF's
-    ``BaseAgent.as_tool()`` — see FRD 0006 §5 Decision #20): the handler
+    ``BaseAgent.as_tool()`` — see FRD 0007 §5 Decision #20): the handler
     builds a fresh specialist :class:`agent_framework.Agent` per call and
     awaits its plain, non-streaming ``run(task)`` directly, so no lock,
     monkeypatch, or stream capture is needed.
@@ -842,7 +842,7 @@ async def run_agent(
         ``None``/``[]`` adds no ``web_request`` tool.
     subagents:
         Optional ``subagents:`` references resolved from this agent's front
-        matter (FRD 0006). Each reference gets a ``delegate_<slug>`` tool
+        matter (FRD 0007). Each reference gets a ``delegate_<slug>`` tool
         appended to this agent's tool list, built from ``catalog`` — see
         :func:`build_subagent_tools`. ``None``/``[]`` adds no delegation
         tools.
@@ -859,7 +859,7 @@ async def run_agent(
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     # Computed before building the agent so a delegate tool's adapter can cap
     # its own specialist timeout at "however much of *this* run's budget is
-    # left" (FRD 0006 Decision #12: "effective timeout = min(specialist,
+    # left" (FRD 0007 Decision #12: "effective timeout = min(specialist,
     # coordinator remaining)"). `loop` is reused below (M1) to bound the
     # session-lock wait itself by this same absolute deadline.
     loop = asyncio.get_running_loop()
@@ -988,7 +988,7 @@ async def run_agent_stream(
       ``web_request`` tool; pass a list to enable it.
     * ``skill_paths`` enables MAF's :class:`SkillsProvider` for the listed
       directories. ``None`` or ``[]`` disables skills.
-    * ``subagents``/``catalog`` add ``delegate_<slug>`` tools (FRD 0006), one
+    * ``subagents``/``catalog`` add ``delegate_<slug>`` tools (FRD 0007), one
       per reference — see :func:`run_agent`. Delegate calls surface through
       the same ``tool_start``/``tool_end`` events as any other tool call; the
       per-run delegate-error count is not surfaced in the SSE vocabulary

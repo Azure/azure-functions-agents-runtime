@@ -81,7 +81,7 @@ def _resolved_agent(
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None = None,
     tools_disabled: bool = False,
     # Deliberately distinct from `name` below (S1): identity/telemetry call
-    # sites must key off `slug`, never the mutable display `name` (FRD 0006
+    # sites must key off `slug`, never the mutable display `name` (FRD 0007
     # §4.3, "Display `name` is never an identity"). Defaulted so existing
     # callers of this factory are unaffected.
     slug: str = "resolved-agent-slug",
@@ -552,7 +552,7 @@ def test_total_tool_error_count_combines_heuristic_and_delegate_errors() -> None
     # `_looks_like_tool_error`'s JSON `{error}`/stderr heuristic recognizes the
     # sandbox-style tool_calls entry below as one failure; a specialist's
     # sanitized free-text delegate failure is invisible to that heuristic
-    # (FRD 0006 §4.12), so `AgentResult.delegate_error_count` must be added
+    # (FRD 0007 §4.12), so `AgentResult.delegate_error_count` must be added
     # on top rather than relying on the heuristic to catch it too.
     result = SimpleNamespace(
         tool_calls=[
@@ -594,7 +594,7 @@ def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
     """S1: the coordinator/direct-role agent must be identified by `resolved.slug`.
 
     Round 2's B2 fix already made *delegated* specialists use `resolved.slug`
-    for telemetry identity rather than the mutable display `name` (FRD 0006
+    for telemetry identity rather than the mutable display `name` (FRD 0007
     §4.3, "Display `name` is never an identity"). This asserts the direct/
     coordinator role gets the same treatment on the non-HTTP trigger path.
     """

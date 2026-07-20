@@ -120,7 +120,7 @@ class TriggerSpec(BaseModel):
 class SubagentRef(BaseModel):
     """A coordinator's reference to one specialist agent it may delegate to.
 
-    Object form only (no string shorthand) — see FRD 0006 §5 Decision #16.
+    Object form only (no string shorthand) — see FRD 0007 §5 Decision #16.
     ``agent`` is the specialist's identity slug (its file stem, sanitized;
     see :mod:`azure_functions_agents._slug`). ``when`` is an optional
     routing hint surfaced to the coordinator model as the ``delegate_<slug>``

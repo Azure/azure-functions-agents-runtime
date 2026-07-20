@@ -227,7 +227,7 @@ def test_build_capabilities_tools_disabled_suppresses_web_request_tool_and_skips
 
 # ---------------------------------------------------------------------------
 # existing_tool_names / validate_subagent_tool_names — delegate_<slug>
-# collision fail-fast (FRD 0006 §4.9, §5 Decision log).
+# collision fail-fast (FRD 0007 §4.9, §5 Decision log).
 # ---------------------------------------------------------------------------
 
 

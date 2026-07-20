@@ -1,4 +1,4 @@
-"""Tests for chat-time sub-agent delegation (FRD 0006 v1).
+"""Tests for chat-time sub-agent delegation (FRD 0007 v1).
 
 Covers the pieces added to :mod:`azure_functions_agents.runner` for
 delegation: the ``direct``/``delegated`` execution-role split
@@ -13,7 +13,7 @@ Fake specialist harness
 ------------------------
 
 The ``delegate_<slug>`` tool built by :func:`runner._build_delegate_tool`
-is a hand-written ``@tool(schema=...)`` function tool (FRD 0006 §5
+is a hand-written ``@tool(schema=...)`` function tool (FRD 0007 §5
 Decision #20) whose handler calls ``await specialist_agent.run(task)`` —
 plain, non-streaming ``agent_framework.Agent`` usage, never MAF's
 ``BaseAgent.as_tool()``. So a usable fake specialist only needs an
@@ -170,7 +170,7 @@ class _RecordingSpan:
 
     Stands in for ``current_span()``'s return value: the delegate adapter
     *annotates* the tool-call span MAF already opened rather than starting a
-    new one (FRD 0006 §4.12), so this fake only needs to record attributes/
+    new one (FRD 0007 §4.12), so this fake only needs to record attributes/
     errors, not manage a span lifecycle.
     """
 
@@ -267,7 +267,7 @@ def test_delegate_error_tracker_starts_at_zero_and_increments() -> None:
 
 
 def test_sanitize_delegate_failure_includes_slug_but_not_type_or_raw_detail() -> None:
-    """The model-facing message must be class-independent (FRD 0006 Decision #12).
+    """The model-facing message must be class-independent (FRD 0007 Decision #12).
 
     Neither the raw exception detail NOR ``type(exc).__name__`` may leak
     into the string returned to the coordinator's model context — only the
@@ -393,7 +393,7 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
 def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and_skills_not_coordinators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """"Runs as itself" (FRD 0006 §5 Decisions #13/#15) — a deeper, end-to-end check.
+    """"Runs as itself" (FRD 0007 §5 Decisions #13/#15) — a deeper, end-to-end check.
 
     ``test_build_delegated_agent_never_wires_its_own_declared_subagents``
     above proves the *no-subagents-leak* half of "runs as itself". It does
@@ -500,7 +500,7 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     not merely that the tool was *built*.
 
     Since each call now builds its specialist ``Agent`` fresh, INSIDE the
-    handler, rather than at tool-build time (FRD 0006 §5 Decision #20),
+    handler, rather than at tool-build time (FRD 0007 §5 Decision #20),
     ``_build_delegated_agent`` is not called at all until the tool is
     actually invoked — this test calls it via ``_RunnableFakeClientManager``
     so the specialist's ``run()`` genuinely succeeds end to end.
@@ -845,7 +845,7 @@ async def test_delegate_adapter_propagates_cancellation_recording_a_call_but_not
 async def test_delegate_adapter_concurrent_calls_to_same_specialist_run_on_independent_instances_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FRD 0006 §5 Decision #20 (revised #14): no per-specialist lock.
+    """FRD 0007 §5 Decision #20 (revised #14): no per-specialist lock.
 
     Because ``_build_delegate_tool``'s handler builds a FRESH specialist
     ``Agent`` on every call (:func:`runner._build_delegated_agent`), two
@@ -945,7 +945,7 @@ async def test_delegate_adapter_runs_different_specialists_in_parallel(
 
 
 # ---------------------------------------------------------------------------
-# Real-span sharing under concurrent asyncio.gather (FRD 0006 §4.12)
+# Real-span sharing under concurrent asyncio.gather (FRD 0007 §4.12)
 # ---------------------------------------------------------------------------
 
 
@@ -992,7 +992,7 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
         # Mimics MAF's FunctionTool.invoke(), which auto-nests an
         # `execute_tool <name>` span around every tool call — the delegate
         # handler's current_span() then annotates *that* span rather than
-        # opening a second one (FRD 0006 §4.12).
+        # opening a second one (FRD 0007 §4.12).
         with tracer.start_as_current_span(f"execute_tool {tool.name}"):
             return str(await tool.func(task="do it"))
 
@@ -1014,7 +1014,7 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
 
 
 # ---------------------------------------------------------------------------
-# Real MAF `Agent` instrumentation (FRD 0006 §5 Decision #19) — B2
+# Real MAF `Agent` instrumentation (FRD 0007 §5 Decision #19) — B2
 # ---------------------------------------------------------------------------
 #
 # Every other test in this module that inspects delegate telemetry uses
@@ -1170,7 +1170,7 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
 
 
 # ---------------------------------------------------------------------------
-# Real MAF span finalization on timeout/cancellation (FRD 0006 §5 Decision #20)
+# Real MAF span finalization on timeout/cancellation (FRD 0007 §5 Decision #20)
 # ---------------------------------------------------------------------------
 #
 # `_FakeSpecialistAgent` (used by every other test in this module) never
@@ -1279,7 +1279,7 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_specialist_time
     happen: a non-streaming ``agent.run()``'s OTel spans are opened with an
     ordinary ``with``/context-manager, which closes deterministically on any
     exception — ``asyncio.CancelledError`` included (see STEP 1 verification,
-    FRD 0006 §5 Decision #20).
+    FRD 0007 §5 Decision #20).
     """
     exporter = _install_maf_tracer(monkeypatch)
     span = _install_span_capture(monkeypatch)

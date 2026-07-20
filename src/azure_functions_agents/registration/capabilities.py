@@ -142,7 +142,7 @@ def validate_subagent_tool_names(resolved: ResolvedAgent, capabilities: AgentCap
 
     Collisions between two different specialists' own ``delegate_<slug>``
     names are structurally impossible (agent slugs are globally unique —
-    FRD 0006 §5 Decision #17), so this only needs to check the auto-derived
+    FRD 0007 §5 Decision #17), so this only needs to check the auto-derived
     name against the coordinator's *own* other tools.
     """
     if not resolved.subagents:

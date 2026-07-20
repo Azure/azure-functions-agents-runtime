@@ -653,7 +653,7 @@ def generate_markdown() -> str:
         "(including a collision between the root directory and `agents/`), app startup now **fails fast** "
         "with an actionable rename error rather than silently auto-suffixing (`_2`, `_3`, ...).",
         "",
-        "> **Breaking change (FRD 0006):** Earlier versions silently resolved duplicate slugs by appending "
+        "> **Breaking change (FRD 0007):** Earlier versions silently resolved duplicate slugs by appending "
         "`_2`, `_3`, etc. This is no longer the behavior — rename one of the colliding files "
         "(e.g. `daily_report_v2.agent.md`) so every agent slug is unique.",
         "",

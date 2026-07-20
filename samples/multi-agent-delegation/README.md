@@ -87,5 +87,5 @@ authorization — treat one deployed app as one trust domain, and only
 delegate to specialists you're comfortable exposing this way. See the
 [`subagents` front-matter reference](../../docs/front-matter-spec.md#subagents)
 for the full field spec, trust boundary, and task-isolation details, and
-[FRD 0006](../../docs/frds/0006-multi-agent-delegation.md) for the design
+[FRD 0007](../../docs/frds/0007-multi-agent-delegation.md) for the design
 rationale.

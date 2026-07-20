@@ -182,7 +182,7 @@ def test_subagent_ref_rejects_empty_agent() -> None:
 
 @pytest.mark.parametrize("forbidden_field", ["id", "tool_name"])
 def test_subagent_ref_extra_forbidden(forbidden_field: str) -> None:
-    """No `id` or `tool_name` override field exists — identity is the slug only (FRD 0006 §5 Decision #16)."""
+    """No `id` or `tool_name` override field exists — identity is the slug only (FRD 0007 §5 Decision #16)."""
     with pytest.raises(ValidationError):
         SubagentRef.model_validate({"agent": "billing-specialist", forbidden_field: "x"})
 

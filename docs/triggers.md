@@ -28,7 +28,7 @@ Runtime rules:
 
 An agent may omit **both** `trigger` and `builtin_endpoints` if — and only if — it is referenced by
 another agent's `subagents:` list ([chat-time delegation](./front-matter-spec.md#subagents), FRD
-0006). Such an agent registers no Azure Function trigger and no `/agents/{slug}/*` routes of its own;
+0007). Such an agent registers no Azure Function trigger and no `/agents/{slug}/*` routes of its own;
 it is reachable only as a `delegate_<slug>` tool on whichever coordinator(s) declare it as a
 specialist. This is checked globally across the whole app — the specialist file can live anywhere
 (root or `agents/`) and can appear before or after the coordinator that references it in discovery

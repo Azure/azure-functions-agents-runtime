@@ -176,7 +176,7 @@ the span ERROR with `af.fault_domain=web_request`.
 
 ### Span `execute_tool delegate_<slug>` (chat-time sub-agent delegation)
 
-Chat-time delegation ([FRD 0006](./frds/0006-multi-agent-delegation.md)) needs **no new span** —
+Chat-time delegation ([FRD 0007](./frds/0007-multi-agent-delegation.md)) needs **no new span** —
 the `delegate_<slug>` tool's handler calls the specialist's plain, non-streaming `Agent.run(task)`
 directly, and MAF already traces every `Agent.run()` and
 every `FunctionTool.invoke()`. A coordinator that declares `subagents:` gets this nested span tree
@@ -214,7 +214,7 @@ delegation timeout — `min(specialist timeout, coordinator's remaining time)` �
 **parent/request cancellation** (`asyncio.CancelledError`) is different: the handler tags the span
 `outcome=cancelled` and still counts it in the delegate *call* metric (it was genuinely dispatched),
 but never converts it into a recoverable error — it re-raises immediately and aborts the whole run,
-rather than being recorded as a delegate error (FRD 0006 Decision #12).
+rather than being recorded as a delegate error (FRD 0007 Decision #12).
 
 **Error accounting.** `_looks_like_tool_error` (the sandbox/`web_request` JSON `{"error": …}` /
 non-empty-`stderr` heuristic) does not understand a specialist's sanitized free-text failure message,
@@ -403,7 +403,7 @@ wants richer dashboards. They build on the spans/metrics above.
 **Implemented (must-have):** runtime-owned OTel bootstrap + Azure Monitor auto-configuration via
 the optional `[monitor]` extra; fault-domain / lifecycle-stage conventions; sandbox truth-telling +
 ACA correlation; the `agent.run` summary span; sensitive-data gating (default off); chat-time
-sub-agent delegation span enrichment + error accounting (FRD 0006).
+sub-agent delegation span enrichment + error accounting (FRD 0007).
 
 **Follow-ups (good-to-have):**
 
@@ -413,7 +413,7 @@ sub-agent delegation span enrichment + error accounting (FRD 0006).
 - Automatic per-tool span enrichment via the tool wrapper.
 - The Tier-1/2 dashboards and alerts above, shipped as reusable infra.
 - Delegation SSE passthrough (surface a specialist's internal stream deltas through the
-  coordinator's stream) and cross-boundary token roll-up (FRD 0006 §4.12 accepted limitations).
+  coordinator's stream) and cross-boundary token roll-up (FRD 0007 §4.12 accepted limitations).
 
 ## Implementation map
 
@@ -425,5 +425,5 @@ sub-agent delegation span enrichment + error accounting (FRD 0006).
 | Sandbox span + stderr surfacing + ACA correlation | `src/azure_functions_agents/system_tools/sandbox.py` |
 | `web_request` span, SSRF blocking, and truncation reporting | `src/azure_functions_agents/system_tools/web_request.py` |
 | `agent.run` span + sensitive-log gating | `src/azure_functions_agents/registration/_handlers.py` |
-| `delegate_<slug>` tool build, failure/cancellation adapter, span annotation (FRD 0006) | `src/azure_functions_agents/runner.py` |
+| `delegate_<slug>` tool build, failure/cancellation adapter, span annotation (FRD 0007) | `src/azure_functions_agents/runner.py` |
 | Tests | `tests/test_observability.py`, `tests/test_system_tools_sandbox.py`, `tests/test_web_request.py`, `tests/test_runner_delegation.py` |

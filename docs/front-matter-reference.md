@@ -341,7 +341,7 @@ Both identifiers are the same value: the agent's **identity slug**, also used as
 
 **Slugs are globally unique across the app.** If two agent files sanitize to the same slug (including a collision between the root directory and `agents/`), app startup now **fails fast** with an actionable rename error rather than silently auto-suffixing (`_2`, `_3`, ...).
 
-> **Breaking change (FRD 0006):** Earlier versions silently resolved duplicate slugs by appending `_2`, `_3`, etc. This is no longer the behavior — rename one of the colliding files (e.g. `daily_report_v2.agent.md`) so every agent slug is unique.
+> **Breaking change (FRD 0007):** Earlier versions silently resolved duplicate slugs by appending `_2`, `_3`, etc. This is no longer the behavior — rename one of the colliding files (e.g. `daily_report_v2.agent.md`) so every agent slug is unique.
 
 **See:** [Front Matter Spec - File Naming Conventions](./front-matter-spec.md#file-naming-conventions)
 

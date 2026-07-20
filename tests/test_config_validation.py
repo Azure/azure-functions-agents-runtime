@@ -341,7 +341,7 @@ def test_validate_resolved_agent_warns_on_tool_exclude(
 
 def test_validate_resolved_agent_relaxes_trigger_requirement_when_referenced_as_subagent() -> None:
     """An agent reachable only as another agent's delegation target does not need its own
-    trigger/builtin_endpoints (FRD 0006 Decision #18)."""
+    trigger/builtin_endpoints (FRD 0007 Decision #18)."""
     resolved = _make_resolved(trigger=None, builtin_endpoints=BuiltinEndpointsConfig())
 
     validate_resolved_agent(

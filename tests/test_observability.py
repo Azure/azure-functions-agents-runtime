@@ -267,7 +267,7 @@ def test_record_sandbox_execution_is_safe() -> None:
     obs.record_sandbox_execution(error=True)
 
 
-# --- delegation (FRD 0006) observability --------------------------------------------------------
+# --- delegation (FRD 0007) observability --------------------------------------------------------
 
 
 def test_fault_domain_delegate_value() -> None:

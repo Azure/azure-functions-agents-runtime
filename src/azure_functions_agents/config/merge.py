@@ -138,7 +138,7 @@ def _resolve_slug(spec: AgentSpec) -> str:
     endpoint routes (see ``_slug.py``), so an agent's slug, function name,
     and ``/agents/<slug>/`` route are always identical. It is also the
     identifier ``subagents[].agent`` references point at and the suffix of
-    the ``delegate_<slug>`` tool name (FRD 0006 §4.8).
+    the ``delegate_<slug>`` tool name (FRD 0007 §4.8).
 
     ``compose()`` must stay warning-free (validation-time concerns belong
     to ``config.validation``), so a missing ``source_file`` — common for

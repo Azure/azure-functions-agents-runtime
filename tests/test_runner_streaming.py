@@ -515,7 +515,7 @@ def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) ->
     after the lock wait) — so a long lock wait let total wall-clock exceed
     ``timeout``, and once the real ``coordinator_deadline`` had already
     passed, the run kept going on a fresh/unbounded budget instead of
-    aborting the whole turn (FRD 0006 §4.6). Simulate lock contention the
+    aborting the whole turn (FRD 0007 §4.6). Simulate lock contention the
     same way a concurrent turn on the same ``session_id`` would: acquire
     the session's lock *before* calling ``run_agent``.
     """

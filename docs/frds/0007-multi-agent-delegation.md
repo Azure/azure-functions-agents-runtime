@@ -1,5 +1,5 @@
 ---
-frd: 0006
+frd: 0007
 title: Multi-agent delegation (agent-as-tool)
 status: In review         # Draft → In review → Finalized  (→ Implemented after merge)
 author: larohra
@@ -10,7 +10,7 @@ pull_requests: []
 branch: larohra/multi-agent-delegation
 ---
 
-# FRD 0006 — Multi-agent delegation (agent-as-tool)
+# FRD 0007 — Multi-agent delegation (agent-as-tool)
 
 ## 1. Summary
 
@@ -710,7 +710,7 @@ handoff participant may itself declare `subagents` and delegate.
       internal specialist.
 - [ ] `README.md` — add a `subagents:` quickstart with the trust boundary and
       self-contained-`task` guidance.
-- [ ] `docs/frds/README.md` — add FRD 0006 to the index.
+- [ ] `docs/frds/README.md` — add FRD 0007 to the index.
 
 ## 8. Status & sign-off
 

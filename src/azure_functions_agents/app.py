@@ -93,7 +93,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     Two-pass composition: resolve, validate, and freeze every agent into a
     read-only ``AgentCatalog`` (pass 1) before registering any trigger or
     endpoint (pass 2), so `subagents:` references always see the full,
-    already-validated app. See FRD 0006 §4.2 for the full pipeline stages.
+    already-validated app. See FRD 0007 §4.2 for the full pipeline stages.
     """
     if app_root is not None:
         set_app_root(app_root)
@@ -136,7 +136,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         for spec in agent_specs
     ]
 
-    # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0006 §4.2). ---
+    # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---
     # Must run before any other cross-agent validation: `validate_subagent_references`
     # needs a collision-free slug set, and nothing below may assume slugs are unique
     # until this has actually verified it.
@@ -170,7 +170,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if not (global_config.system_tools and global_config.system_tools.web_request is False):
         system_tools_used.add("web_request")
 
-    # --- Two-pass composition, pass 1b (FRD 0006 §4.2): validate + build capabilities ---
+    # --- Two-pass composition, pass 1b (FRD 0007 §4.2): validate + build capabilities ---
     # for every agent and freeze the result into a read-only AgentCatalog. Nothing here
     # touches `app` — a coordinator's `delegate_<slug>` tools must be able to resolve
     # *any* specialist by slug at request time, including ones registered later in
@@ -197,7 +197,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     catalog: AgentCatalog = build_catalog(catalog_entries)
 
-    # --- Two-pass composition, pass 2 (FRD 0006 §4.2): mutate `app` --------------------
+    # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:
         capabilities = catalog[resolved.slug].capabilities
 

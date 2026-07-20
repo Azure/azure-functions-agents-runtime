@@ -40,7 +40,7 @@ from .config.env import _to_bool, runtime_env_value
 #   * ``af.agent.*``            — attributes on the per-run ``agent.run {name}`` span.
 #   * ``af.dynamic_session.*``  — attributes on the ``dynamic_session.execute`` (sandbox) span.
 #   * ``af.delegate.*``         — attributes on the ``execute_tool delegate_<slug>`` span added
-#                                 for a chat-time sub-agent delegation (FRD 0006).
+#                                 for a chat-time sub-agent delegation (FRD 0007).
 #
 # Three ``af.*`` attributes are cross-cutting and can appear on any runtime span: fault domain,
 # lifecycle stage, and operation id (below). We reuse standard OTel semantic-convention attributes
@@ -325,7 +325,7 @@ def current_span() -> RuntimeSpan:
     Used by the ``delegate_<slug>`` tool adapter (``runner.build_subagent_tools``)
     to annotate the *existing* ``execute_tool delegate_<slug>`` span (opened by
     MAF's ``FunctionTool.invoke()``) with ``af.delegate.*`` attributes, rather
-    than nesting a second span underneath it — see FRD 0006 §4.12, whose span
+    than nesting a second span underneath it — see FRD 0007 §4.12, whose span
     diagram shows exactly one ``execute_tool delegate_<slug>`` span per
     delegation. Contrast with :func:`start_span`, which always creates a new
     span. Returns a no-op :class:`RuntimeSpan` when tracing is unavailable or
@@ -549,7 +549,7 @@ def record_delegate_call(*, error: bool) -> None:
 
     ``error`` covers a specialist run that failed, raised, or exceeded the
     effective delegation timeout — any outcome the adapter sanitized into a
-    recoverable error string for the coordinator (FRD 0006 Decision #12). It
+    recoverable error string for the coordinator (FRD 0007 Decision #12). It
     does not cover parent/request cancellation, which propagates instead of
     being recorded as a delegate error.
     """

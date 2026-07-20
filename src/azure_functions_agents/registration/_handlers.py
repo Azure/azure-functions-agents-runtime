@@ -142,7 +142,7 @@ def _total_tool_error_count(result: Any) -> int:
     ``_tool_error_count`` only recognizes the sandbox error envelope /
     non-empty ``stderr`` heuristic (:func:`_looks_like_tool_error`), which
     cannot classify a specialist's sanitized free-text delegation failure
-    (FRD 0006 §4.12: "do NOT rely on `_looks_like_tool_error`'s JSON
+    (FRD 0007 §4.12: "do NOT rely on `_looks_like_tool_error`'s JSON
     `{error}`/stderr heuristic for a specialist's sanitized free-text
     failure"). ``AgentResult.delegate_error_count`` is incremented
     explicitly by the ``delegate_<slug>`` adapter instead, and is added

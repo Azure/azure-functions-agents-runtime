@@ -561,7 +561,7 @@ def test_web_request_fixture() -> None:
 
 # ---------------------------------------------------------------------------
 # 15 — multi-agent delegation: coordinator + specialists via `subagents:`
-# (FRD 0006). One specialist (billing) is independently runnable; the other
+# (FRD 0007). One specialist (billing) is independently runnable; the other
 # (shipping) is endpoint-less and reachable only as an internal specialist.
 # ---------------------------------------------------------------------------
 
@@ -610,7 +610,7 @@ def test_multi_agent_delegation_fixture() -> None:
 
     # Shipping has no trigger and no builtin_endpoints: on its own this is an
     # error, but once it is known to be referenced as a subagent the
-    # requirement relaxes (FRD 0006 Decision #18).
+    # requirement relaxes (FRD 0007 Decision #18).
     with pytest.raises(ValueError, match="field `trigger`"):
         validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(
@@ -622,9 +622,9 @@ def test_multi_agent_delegation_fixture() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 16 — pre-FRD-0006-style multi-agent fixture with NO ``subagents:`` anywhere.
+# 16 — pre-FRD-0007-style multi-agent fixture with NO ``subagents:`` anywhere.
 #
-# Regression coverage for the two-pass composition introduced by FRD 0006:
+# Regression coverage for the two-pass composition introduced by FRD 0007:
 # a fixture that declares zero delegation must load, compose, and validate
 # identically to how a single-pass pipeline would have handled it, and one
 # agent's ``tools: false`` must only ever affect that agent's own capability
@@ -646,7 +646,7 @@ def test_no_subagent_regression_fixture() -> None:
     assert set(by_name) == {"Main Chat", "Nightly Report", "Resource Summary"}
 
     # None of these specs declare `subagents:` — this fixture predates (in
-    # spirit) FRD 0006 delegation and must be unaffected by it.
+    # spirit) FRD 0007 delegation and must be unaffected by it.
     for spec in specs:
         assert not spec.subagents
 
@@ -665,14 +665,14 @@ def test_no_subagent_regression_fixture() -> None:
     known_slugs = {main.slug, nightly_report.slug, resource_summary.slug}
 
     # No subagents: declared anywhere, so reference validation is a no-op for
-    # all three — same as it always was pre-FRD-0006.
+    # all three — same as it always was pre-FRD-0007.
     validate_subagent_references(main, known_slugs=known_slugs)
     validate_subagent_references(nightly_report, known_slugs=known_slugs)
     validate_subagent_references(resource_summary, known_slugs=known_slugs)
 
     # Every agent here is independently runnable (trigger or builtin_endpoints)
     # and none of them are referenced as a subagent, so none of them need (or
-    # get) the FRD 0006 Decision #18 endpoint-less relaxation.
+    # get) the FRD 0007 Decision #18 endpoint-less relaxation.
     validate_resolved_agent(main, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(nightly_report, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(resource_summary, discovered_mcp_names=[], discovered_skills=[])

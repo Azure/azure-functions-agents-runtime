@@ -92,7 +92,7 @@ def _resolved_agent(
     source_file: str | Path | None = None,
     input_schema: dict[str, Any] | None = None,
     # Deliberately distinct from `name` above (S1): identity/telemetry call
-    # sites must key off `slug`, never the mutable display `name` (FRD 0006
+    # sites must key off `slug`, never the mutable display `name` (FRD 0007
     # §4.3, "Display `name` is never an identity"). Defaulted so existing
     # callers of this factory are unaffected; note route paths (e.g.
     # `agents/daily_report_a/`) are derived from `source_file`/`name` via
@@ -301,7 +301,7 @@ def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     assert result.session_id == "generated-session-id"
     # S1: the coordinator/direct-role agent must be identified by
     # `resolved.slug` for telemetry, not the mutable display `name` (FRD
-    # 0006 §4.3) -- matches round 2's B2 fix for delegated specialists.
+    # 0007 §4.3) -- matches round 2's B2 fix for delegated specialists.
     assert calls["run_agent"]["agent_name"] == resolved.slug
     assert calls["run_agent"]["agent_name"] != resolved.name
 
@@ -558,7 +558,7 @@ def test_handle_chat_reports_delegate_error_count_on_span(
     # previously dropped on this surface.
     assert span.attributes["af.agent.tool_error_count"] == 2
     # S1: this endpoint's own span must identify the coordinator agent by
-    # `resolved.slug`, not the mutable display `name` (FRD 0006 §4.3).
+    # `resolved.slug`, not the mutable display `name` (FRD 0007 §4.3).
     assert span.attributes["af.agent.name"] == resolved.slug
     assert span.attributes["af.agent.name"] != resolved.name
 

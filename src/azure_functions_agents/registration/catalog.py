@@ -1,7 +1,7 @@
 """Read-only, process-wide index of every resolved agent + its capabilities.
 
 Built once by the ``app.py`` composition root (pass 1, before any
-``FunctionApp`` mutation — FRD 0006 §4.2) and threaded read-only into
+``FunctionApp`` mutation — FRD 0007 §4.2) and threaded read-only into
 request handlers so a coordinator's ``delegate_<slug>`` tools can look up
 *any* specialist by identity slug at request time, without holding a live
 reference to a mutable MAF ``Agent`` (those are built fresh per request —

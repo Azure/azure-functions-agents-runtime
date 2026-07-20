@@ -207,7 +207,7 @@ def test_function_name_from_source_falls_back_to_display_name(
 def test_allocate_unique_function_name_fails_fast_on_collision(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """Duplicate slugs fail fast instead of silently auto-suffixing (FRD 0006 Decision #17)."""
+    """Duplicate slugs fail fast instead of silently auto-suffixing (FRD 0007 Decision #17)."""
     registered_names = {"daily_report"}
 
     with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match="Function name collision"):
@@ -266,7 +266,7 @@ def test_register_agent_fails_fast_on_duplicate_function_names_with_registry(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
-    """Same-slug collisions fail fast instead of auto-suffixing (FRD 0006 Decision #17)."""
+    """Same-slug collisions fail fast instead of auto-suffixing (FRD 0007 Decision #17)."""
     _write_timer_agent(tmp_path, "daily-report.agent.md", "Daily Report Dash")
     _write_timer_agent(tmp_path, "daily_report.agent.md", "Daily Report Underscore")
     resolved_agents = _resolve_agents(tmp_path)

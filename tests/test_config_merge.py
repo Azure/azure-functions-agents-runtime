@@ -355,7 +355,7 @@ def test_resolve_web_request_per_agent_true_or_absent_inherits_global() -> None:
 
 
 def test_compose_derives_slug_from_source_file_stem() -> None:
-    """Identity slug = sanitized file stem, same derivation as function/endpoint names (FRD 0006 §4.2)."""
+    """Identity slug = sanitized file stem, same derivation as function/endpoint names (FRD 0007 §4.2)."""
     spec = AgentSpec(
         name="Billing Specialist",
         description="d",
@@ -367,7 +367,7 @@ def test_compose_derives_slug_from_source_file_stem() -> None:
 
 def test_compose_slug_matches_function_name_derivation() -> None:
     """The slug must equal exactly what `_naming.py`'s function-name allocator would compute
-    for the same source file — this equivalence is load-bearing for FRD 0006 Decision #17."""
+    for the same source file — this equivalence is load-bearing for FRD 0007 Decision #17."""
     from azure_functions_agents._slug import _function_name_from_source
 
     spec = AgentSpec(

@@ -54,7 +54,7 @@ def delegate_tool_name(slug: str) -> str:
     """Return the auto-derived tool name for delegating to the agent ``slug``.
 
     Always ``delegate_<slug>`` — no user-configurable ``tool_name`` override
-    exists (FRD 0006 §4.8, §5 Decision #16). Centralized here so the
+    exists (FRD 0007 §4.8, §5 Decision #16). Centralized here so the
     tool-name-collision check (``registration/capabilities.py``) and the
     actual tool construction (``runner.py``) can never drift apart.
     """

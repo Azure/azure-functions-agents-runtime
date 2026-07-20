@@ -188,7 +188,7 @@ my-app/
 ### Multi-agent delegation (`subagents`)
 
 Any independently runnable agent can declare `subagents:` to call other agents as chat-time tools —
-no `HandoffBuilder`, no HITL, no new dependency ([FRD 0006](docs/frds/0006-multi-agent-delegation.md)):
+no `HandoffBuilder`, no HITL, no new dependency ([FRD 0007](docs/frds/0007-multi-agent-delegation.md)):
 
 ```yaml
 ---

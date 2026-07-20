@@ -49,7 +49,7 @@ def test_create_function_app_fails_fast_on_duplicate_function_names(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
-    """Same-slug collisions fail fast at composition time (FRD 0006 Decision #17)."""
+    """Same-slug collisions fail fast at composition time (FRD 0007 Decision #17)."""
     _write_agent(
         tmp_path,
         "daily-report.agent.md",
@@ -138,7 +138,7 @@ def test_create_function_app_fails_fast_on_duplicate_slug_across_root_and_agents
     tmp_path: Path,
 ) -> None:
     """Same-stem collisions fail fast even when one file is at the root and the
-    other lives in the agents/ subfolder (FRD 0006 Decision #17)."""
+    other lives in the agents/ subfolder (FRD 0007 Decision #17)."""
     (tmp_path / "agents").mkdir()
     _write_agent(
         tmp_path,
@@ -182,7 +182,7 @@ def test_create_function_app_registers_distinct_slugs_without_collision(
 ) -> None:
     """Regression: genuinely distinct slugs (no subagents involved) continue to
     register exactly as before the app-wide fail-fast slug-uniqueness check was
-    added (FRD 0006 Decision #17) — the check must be a no-op for the happy path."""
+    added (FRD 0007 Decision #17) — the check must be a no-op for the happy path."""
     _write_agent(
         tmp_path,
         "report-alpha.agent.md",
@@ -303,7 +303,7 @@ def test_create_function_app_skips_malformed_yaml_but_registers_valid(tmp_path: 
 
 # ---------------------------------------------------------------------------
 # End-to-end delegation regressions through the real create_function_app()
-# pipeline (FRD 0006 §6 test plan) — on-disk fixtures, not manually
+# pipeline (FRD 0007 §6 test plan) — on-disk fixtures, not manually
 # reconstructed catalogs.
 # ---------------------------------------------------------------------------
 
@@ -312,7 +312,7 @@ def test_create_function_app_accepts_endpoint_less_specialist_referenced_only_vi
     """An internal-only specialist (no trigger, no builtin_endpoints) must be
     accepted end-to-end when it is reachable solely through another agent's
     ``subagents:`` — and must register *zero* external entry points of its
-    own (FRD 0006 Decision #18).
+    own (FRD 0007 Decision #18).
 
     ``test_multi_agent_delegation_fixture`` in test_config_fixtures.py
     already covers this fixture at the loader/validation layer by calling
@@ -351,11 +351,11 @@ def test_create_function_app_accepts_endpoint_less_specialist_referenced_only_vi
 def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffected_by_two_pass_composition() -> (
     None
 ):
-    """A collision-free, pre-FRD-0006-style multi-agent fixture (none of its
+    """A collision-free, pre-FRD-0007-style multi-agent fixture (none of its
     agents declare ``subagents:``) must register identical function names,
     routes, and tool assembly under the new two-pass composition
     (``validate_subagent_references``/``build_catalog`` added ahead of
-    per-agent registration) as it would have before FRD 0006.
+    per-agent registration) as it would have before FRD 0007.
 
     None of the pre-existing fixtures under ``fixtures/config_scenarios/``
     (01-14) can actually run through ``create_function_app()`` as-is: they
