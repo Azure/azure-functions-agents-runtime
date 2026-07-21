@@ -7,10 +7,45 @@ import pytest
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     ResolvedAgent,
+    SubagentRef,
     ToolsFilter,
     TriggerSpec,
 )
-from azure_functions_agents.config.validation import validate_resolved_agent
+from azure_functions_agents.config.validation import (
+    validate_resolved_agent,
+    validate_subagent_references,
+)
+
+
+def _make_resolved(**overrides: object) -> ResolvedAgent:
+    """Build a minimal ResolvedAgent for validation tests, with sensible defaults.
+
+    Only used by the newer subagents-focused tests below; existing tests in this
+    file intentionally keep constructing ResolvedAgent(...) inline for clarity.
+    """
+    defaults: dict[str, object] = dict(
+        name="Agent",
+        slug="agent",
+        description="desc",
+        trigger=None,
+        instructions="x",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(),
+        model=None,
+        timeout=1.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(),
+        subagents=[],
+        sandbox_config=None,
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+        metadata={},
+        source_file="agent.agent.md",
+    )
+    defaults.update(overrides)
+    return ResolvedAgent(**defaults)  # type: ignore[arg-type]
 
 
 def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(
@@ -302,3 +337,88 @@ def test_validate_resolved_agent_warns_on_tool_exclude(
         )
 
     assert any("bash" in record.getMessage() for record in caplog.records)
+
+
+def test_validate_resolved_agent_relaxes_trigger_requirement_when_referenced_as_subagent() -> None:
+    """An agent reachable only as another agent's delegation target does not need its own
+    trigger/builtin_endpoints (FRD 0007 Decision #18)."""
+    resolved = _make_resolved(trigger=None, builtin_endpoints=BuiltinEndpointsConfig())
+
+    validate_resolved_agent(
+        resolved,
+        discovered_mcp_names=[],
+        discovered_skills=[],
+        is_referenced_as_subagent=True,
+    )
+
+
+def test_validate_resolved_agent_still_requires_trigger_when_not_referenced() -> None:
+    """Regression: default `is_referenced_as_subagent=False` preserves the original requirement."""
+    resolved = _make_resolved(trigger=None, builtin_endpoints=BuiltinEndpointsConfig())
+
+    with pytest.raises(ValueError, match="field `trigger`"):
+        validate_resolved_agent(resolved, discovered_mcp_names=[], discovered_skills=[])
+
+
+def test_validate_subagent_references_accepts_known_references() -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        subagents=[SubagentRef(agent="billing-specialist"), SubagentRef(agent="shipping-specialist")],
+    )
+
+    validate_subagent_references(
+        resolved,
+        known_slugs={"coordinator", "billing-specialist", "shipping-specialist"},
+    )
+
+
+def test_validate_subagent_references_accepts_no_subagents() -> None:
+    resolved = _make_resolved(slug="coordinator", subagents=[])
+    validate_subagent_references(resolved, known_slugs={"coordinator"})
+
+
+def test_validate_subagent_references_rejects_self_reference() -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        subagents=[SubagentRef(agent="coordinator")],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_subagent_references(resolved, known_slugs={"coordinator"})
+
+    message = str(exc_info.value)
+    assert "field `subagents`" in message
+    assert "delegate to itself" in message
+    assert "coordinator" in message
+
+
+def test_validate_subagent_references_rejects_unknown_reference() -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        subagents=[SubagentRef(agent="does-not-exist")],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_subagent_references(resolved, known_slugs={"coordinator", "billing-specialist"})
+
+    message = str(exc_info.value)
+    assert "field `subagents`" in message
+    assert "Unknown agent reference" in message
+    assert "does-not-exist" in message
+
+
+def test_validate_subagent_references_rejects_duplicate_reference() -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        subagents=[SubagentRef(agent="billing-specialist"), SubagentRef(agent="billing-specialist")],
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        validate_subagent_references(
+            resolved, known_slugs={"coordinator", "billing-specialist"}
+        )
+
+    message = str(exc_info.value)
+    assert "field `subagents`" in message
+    assert "Duplicate reference" in message
+    assert "billing-specialist" in message
