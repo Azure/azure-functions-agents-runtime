@@ -289,7 +289,7 @@ async def _default_resolve_host(host: str) -> list[str]:
     seen: set[str] = set()
     ips: list[str] = []
     for _family, _socktype, _proto, _canonname, sockaddr in infos:
-        ip = sockaddr[0]
+        ip = str(sockaddr[0])
         if ip not in seen:
             seen.add(ip)
             ips.append(ip)
