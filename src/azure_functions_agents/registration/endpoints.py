@@ -1,9 +1,4 @@
-"""Built-in HTTP/UI/MCP endpoint registration for resolved agents.
-
-Per-app built-in endpoint slugs are tracked on the ``FunctionApp`` instance
-via a private ``_afa_builtin_slug_names`` set. Storing the registry on the app
-keeps tests isolated without relying on global module state.
-"""
+"""Built-in HTTP/UI/MCP endpoint registration for resolved agents."""
 
 from __future__ import annotations
 
@@ -17,12 +12,14 @@ import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
 from .._logger import logger
+from .._observability import FaultDomain, LifecycleStage, start_span
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
-from ._handlers import build_sandbox_tools_for_session
-from ._naming import _function_name_from_source, _safe_function_name, allocate_unique_builtin_slug
+from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
+from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
+from .catalog import AgentCatalog
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     [
@@ -35,8 +32,6 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
         }
     ]
 )
-
-_BUILTIN_SLUG_ATTR = "_afa_builtin_slug_names"
 
 type ChatHandler = Callable[[Request, Any | None], Awaitable[Response]]
 type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[StreamingResponse]]
@@ -67,32 +62,6 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
-
-
-def _builtin_slug_registry(app: func.FunctionApp) -> set[str]:
-    registry = getattr(app, _BUILTIN_SLUG_ATTR, None)
-    if registry is None:
-        registry = set()
-        setattr(app, _BUILTIN_SLUG_ATTR, registry)
-    return registry
-
-
-def reset_builtin_slug_registry(app: func.FunctionApp) -> None:
-    """Clear stored built-in endpoint slugs for ``app``.
-
-    Tests can call this before registering a fresh set of agents on the same
-    ``FunctionApp`` instance.
-    """
-
-    setattr(app, _BUILTIN_SLUG_ATTR, set())
-
-
-def _ensure_unique_slug(app: func.FunctionApp, resolved: ResolvedAgent) -> str:
-    return allocate_unique_builtin_slug(
-        resolved.source_file,
-        resolved.name,
-        _builtin_slug_registry(app),
-    )
 
 
 def _index_path() -> Path:
@@ -162,6 +131,7 @@ async def _run_builtin_agent(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -179,7 +149,9 @@ async def _run_builtin_agent(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
-        agent_name=resolved.name,
+        agent_name=resolved.slug,
+        subagents=resolved.subagents,
+        catalog=catalog,
     )
 
 
@@ -192,6 +164,7 @@ def _run_builtin_agent_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -209,7 +182,15 @@ def _run_builtin_agent_stream(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
-        agent_name=resolved.name,
+        agent_name=resolved.slug,
+        # S1b: `_register_http_chat_stream`'s `handle_chat_stream` (unlike
+        # `handle_chat`/`handle_mcp_agent_chat` above) opens no span of its
+        # own around this call, so `run_agent_stream`'s own internal
+        # `agent.run {name}` span is the only place `af.agent.display_name`
+        # can be recorded for the streaming surface — thread it through.
+        display_name=resolved.name,
+        subagents=resolved.subagents,
+        catalog=catalog,
     )
 
 
@@ -274,45 +255,75 @@ def _register_http_chat(
     auth: EndpointAuthConfig,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
-        try:
-            auth_error = authorize_entra_request(req.headers.get, auth)
-            if auth_error is not None:
-                return _json_error(auth_error.message, status_code=auth_error.status_code)
-            body = await req.json()
-            prompt = _extract_prompt_from_body(body)
-            session_id = req.headers.get("x-ms-session-id")
-            result = await _run_builtin_agent(
-                prompt,
-                resolved=resolved,
-                capabilities=capabilities,
-                session_id=session_id,
-                workflows_enabled=workflows_enabled,
-                workflow_system_addendum=workflow_system_addendum,
-                durable_client=durable_client,
-            )
-            return Response(
-                json.dumps(
-                    {
-                        "session_id": result.session_id,
-                        "response": result.content,
-                        "tool_calls": result.tool_calls,
-                    }
-                ),
-                media_type="application/json",
-                headers={"x-ms-session-id": result.session_id},
-            )
-        except ValueError as exc:
-            return _json_error(str(exc), status_code=400)
-        except Exception as exc:
-            error_msg = _format_exception_message(exc)
-            logger.error(
-                "Built-in chat API error: source_file=%s error=%s",
-                source_marker(resolved.source_file),
-                error_msg,
-            )
-            return _json_error(error_msg)
+        resolved_session_id = _resolve_builtin_endpoints_session_id(
+            req.headers.get("x-ms-session-id")
+        )
+        # This endpoint calls `run_agent` directly rather than going through
+        # `_handlers.py`'s trigger-registered handlers, so — unlike a
+        # user-defined `trigger:` agent — nothing upstream opens an
+        # `agent.run {name}` span for it. Opened here so this built-in
+        # surface gets the same run-level span/attributes (including B3's
+        # `af.agent.tool_error_count`, which folds in delegate errors) that
+        # `make_agent_handler`/`make_http_agent_handler` already provide.
+        with start_span(
+            f"agent.run {resolved.slug}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
+                "af.agent.trigger_type": "builtin_chat",
+                "af.agent.session_id": resolved_session_id,
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
+            try:
+                auth_error = authorize_entra_request(req.headers.get, auth)
+                if auth_error is not None:
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
+                    return _json_error(auth_error.message, status_code=auth_error.status_code)
+                body = await req.json()
+                prompt = _extract_prompt_from_body(body)
+                result = await _run_builtin_agent(
+                    prompt,
+                    resolved=resolved,
+                    capabilities=capabilities,
+                    session_id=resolved_session_id,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    durable_client=durable_client,
+                    catalog=catalog,
+                )
+                _set_run_result_attributes(span, result)
+                span.set_attribute("af.agent.outcome", "success")
+                return Response(
+                    json.dumps(
+                        {
+                            "session_id": result.session_id,
+                            "response": result.content,
+                            "tool_calls": result.tool_calls,
+                        }
+                    ),
+                    media_type="application/json",
+                    headers={"x-ms-session-id": result.session_id},
+                )
+            except ValueError as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.set_error(str(exc), fault_domain=FaultDomain.APP)
+                return _json_error(str(exc), status_code=400)
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                error_msg = _format_exception_message(exc)
+                logger.error(
+                    "Built-in chat API error: source_file=%s error=%s",
+                    source_marker(resolved.source_file),
+                    error_msg,
+                )
+                return _json_error(error_msg)
 
     decorated: Any
     if workflows_enabled:
@@ -339,6 +350,7 @@ def _register_http_chat_stream(
     auth: EndpointAuthConfig,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_chat_stream(
         req: Request,
@@ -360,6 +372,7 @@ def _register_http_chat_stream(
                     workflows_enabled=workflows_enabled,
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
+                    catalog=catalog,
                 ),
                 media_type="text/event-stream",
             )
@@ -398,40 +411,72 @@ def _register_mcp_endpoint(
     function_name: str,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
-        try:
-            payload = json.loads(context) if context else {}
-            arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
-            prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
-            if not isinstance(prompt, str) or not prompt.strip():
-                return json.dumps({"error": "Missing 'prompt'"})
+        # Same rationale as `handle_chat` above: this built-in MCP surface
+        # calls `run_agent` directly, so nothing upstream opens an
+        # `agent.run {name}` span for it — open one here to get the same
+        # run-level attributes (including B3's `af.agent.tool_error_count`).
+        with start_span(
+            f"agent.run {resolved.slug}",
+            lifecycle_stage=LifecycleStage.AGENT_RUN,
+            attributes={
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
+                "af.agent.trigger_type": "builtin_mcp",
+                "af.agent.model": resolved.model,
+            },
+        ) as span:
+            try:
+                payload = json.loads(context) if context else {}
+                arguments = payload.get("arguments", {}) if isinstance(payload, dict) else {}
+                prompt = arguments.get("prompt") if isinstance(arguments, dict) else None
+                if not isinstance(prompt, str) or not prompt.strip():
+                    span.set_attribute("af.agent.outcome", "error")
+                    span.set_error("Missing 'prompt'", fault_domain=FaultDomain.APP)
+                    return json.dumps({"error": "Missing 'prompt'"})
 
-            session_id = _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
-            result = await _run_builtin_agent(
-                prompt.strip(),
-                resolved=resolved,
-                capabilities=capabilities,
-                session_id=session_id,
-                workflows_enabled=workflows_enabled,
-                workflow_system_addendum=workflow_system_addendum,
-                durable_client=durable_client,
-            )
-            return json.dumps(
-                {
-                    "session_id": result.session_id,
-                    "response": result.content,
-                    "tool_calls": result.tool_calls,
-                }
-            )
-        except Exception as exc:
-            error_msg = _format_exception_message(exc)
-            logger.error(
-                "Built-in MCP error: source_file=%s error=%s",
-                source_marker(resolved.source_file),
-                error_msg,
-            )
-            return json.dumps({"error": error_msg})
+                session_id = (
+                    _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
+                )
+                span.set_attribute("af.agent.session_id", session_id)
+                result = await _run_builtin_agent(
+                    prompt.strip(),
+                    resolved=resolved,
+                    capabilities=capabilities,
+                    session_id=session_id,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    durable_client=durable_client,
+                    catalog=catalog,
+                )
+                # When the caller supplies no explicit session id (`session_id`
+                # is `None` above), the runner still resolves/generates one for
+                # this turn (`result.session_id`) — refresh the span attribute
+                # with it (N1) instead of leaving the pre-call `None` in place,
+                # which otherwise left this attribute permanently unset for
+                # every caller-omitted-session-id turn.
+                span.set_attribute("af.agent.session_id", result.session_id)
+                _set_run_result_attributes(span, result)
+                span.set_attribute("af.agent.outcome", "success")
+                return json.dumps(
+                    {
+                        "session_id": result.session_id,
+                        "response": result.content,
+                        "tool_calls": result.tool_calls,
+                    }
+                )
+            except Exception as exc:
+                span.set_attribute("af.agent.outcome", "error")
+                span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
+                error_msg = _format_exception_message(exc)
+                logger.error(
+                    "Built-in MCP error: source_file=%s error=%s",
+                    source_marker(resolved.source_file),
+                    error_msg,
+                )
+                return json.dumps({"error": error_msg})
 
     decorated: Any
     if workflows_enabled:
@@ -541,16 +586,12 @@ def register_builtin_endpoints(
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
     slug = slug or _function_name_from_source(resolved.source_file, resolved.name)
     builtin_endpoints = resolved.builtin_endpoints
-    if builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp:
-        if slug in _builtin_slug_registry(app):
-            slug = _ensure_unique_slug(app, resolved)
-        else:
-            _builtin_slug_registry(app).add(slug)
 
     base_function_name = _safe_function_name(f"agent_{slug}_builtin")
     auth = builtin_endpoints.http_auth
@@ -576,6 +617,7 @@ def register_builtin_endpoints(
             auth=auth,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
         )
         _register_http_chat_stream(
             app,
@@ -586,6 +628,7 @@ def register_builtin_endpoints(
             auth=auth,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
@@ -604,4 +647,5 @@ def register_builtin_endpoints(
             function_name=f"{base_function_name}_mcp",
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            catalog=catalog,
         )
