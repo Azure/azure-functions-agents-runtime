@@ -24,9 +24,24 @@ def _function_name_from_source(source_file: str | Path | None, fallback_name: st
         return _safe_function_name(fallback_name)
 
     source_name = Path(source_value).name
-    base_name = source_name.removesuffix(".agent.md")
-    if base_name == source_name:
-        base_name = Path(source_name).stem
+    lower_name = source_name.lower()
+
+    # Single-agent files (bare agent.md or CLAUDE.md, any casing) → "default"
+    if lower_name in ("agent.md", "claude.md"):
+        return "default"
+
+    # *.claude.md → strip the suffix to get the prefix
+    if lower_name.endswith(".claude.md"):
+        prefix = source_name[: -len(".claude.md")]
+        return _safe_function_name(prefix)
+
+    # *.agent.md (case-insensitive suffix)
+    if lower_name.endswith(".agent.md"):
+        prefix = source_name[: -len(".agent.md")]
+        return _safe_function_name(prefix)
+
+    # Fallback: use the stem
+    base_name = Path(source_name).stem
     return _safe_function_name(base_name)
 
 

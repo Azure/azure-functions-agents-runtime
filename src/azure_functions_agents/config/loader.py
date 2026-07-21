@@ -156,10 +156,11 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
 
     normalized["substitute_variables"] = substitute_variables
     normalized["instructions"] = instructions
-    # Store the normalized filename for function name generation
-    normalized["source_file"] = str(normalized_file)
-    # agent.md and main.agent.md are both treated as main agents
-normalized["is_main"] = normalized_file.name.lower() in ("main.agent.md", "default.agent.md")
+    # Keep the real on-disk path so diagnostics reference the file the user can actually edit
+    normalized["source_file"] = str(source_file.resolve())
+    # agent.md and CLAUDE.md (and their case variants) map to default.agent.md internally;
+    # check the normalized name to determine main-agent status
+    normalized["is_main"] = normalized_file.name.lower() in ("main.agent.md", "default.agent.md")
 
     try:
         return AgentSpec.model_validate(normalized)
