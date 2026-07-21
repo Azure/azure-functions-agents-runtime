@@ -52,6 +52,7 @@ from ._logger import logger
 from .client_manager import get_client_manager
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
+from .config.schema import HarnessAgentConfig
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
 
@@ -286,6 +287,124 @@ async def _build_agent_session_history(
     return agent, session, resolved_id
 
 
+async def _build_harness_agent_session(
+    *,
+    instructions: str | None,
+    session_id: str | None,
+    tools: list[Any] | None,
+    mcp_tools: list[Any] | None,
+    skill_paths: list[Path] | None,
+    model: str | None,
+    sandbox_tools: list[Any] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    agent_name: str | None,
+    web_request_tools: list[Any] | None = None,
+    harness_config: HarnessAgentConfig | None = None,
+) -> tuple[Any, Any, str]:
+    """Construct an agent/session using MAF's ``create_harness_agent``.
+
+    Falls back to :func:`_build_agent_session_history` (plain ``Agent``) with a
+    warning when ``create_harness_agent`` is not available in the installed
+    version of ``agent_framework``.
+
+    Returns ``(agent, session, resolved_session_id)``.
+    """
+    import warnings
+
+    try:
+        from agent_framework import create_harness_agent  # type: ignore[attr-defined]
+        from agent_framework._feature_stage import ExperimentalWarning
+    except ImportError:
+        logger.warning(
+            "create_harness_agent is not available in the installed agent_framework "
+            "version; falling back to plain Agent"
+        )
+        return await _build_agent_session_history(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+        )
+
+    resolved_config = harness_config if harness_config is not None else HarnessAgentConfig()
+
+    from agent_framework import AgentSession
+
+    client_manager = get_client_manager()
+    chat_client = client_manager.build_chat_client(model)
+
+    validated_id = _validate_session_id(session_id)
+    if validated_id is None:
+        session = AgentSession()
+        resolved_id = session.session_id
+    else:
+        resolved_id = validated_id
+        session = AgentSession(session_id=resolved_id)
+
+    history_provider = _build_history_provider()
+
+    # Tool list: identical assembly logic to _build_agent_session_history.
+    app_root = get_app_root()
+    resolved_tools: list[Any] = (
+        discover_user_tools(app_root).tools if tools is None else list(tools)
+    )
+
+    if sandbox_tools:
+        resolved_tools.extend(sandbox_tools)
+
+    if web_request_tools:
+        resolved_tools.extend(web_request_tools)
+
+    if workflow_enabled:
+        from .workflows.tools import build_workflow_tools
+
+        resolved_tools.extend(
+            build_workflow_tools(
+                session_id=resolved_id,
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+            )
+        )
+
+    resolved_mcp_tools = (
+        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
+    )
+    if resolved_mcp_tools:
+        resolved_tools.extend(resolved_mcp_tools)
+
+    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective_instructions = (effective_instructions or "") + system_addendum
+
+    # create_harness_agent takes skills_paths natively; no SkillsProvider in context_providers.
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", category=ExperimentalWarning)
+        agent = create_harness_agent(
+            chat_client,
+            agent_instructions=effective_instructions,
+            tools=resolved_tools or None,
+            history_provider=history_provider,
+            skills_paths=skill_paths or None,
+            disable_tool_auto_approval=True,
+            disable_web_search=True,
+            max_context_window_tokens=resolved_config.max_context_window_tokens,
+            max_output_tokens=resolved_config.max_output_tokens,
+            disable_file_memory=resolved_config.disable_file_memory,
+        )
+
+    return agent, session, resolved_id
+
+
 # ---------------------------------------------------------------------------
 # Content-item classification helpers (MAF AgentResponseUpdate.contents)
 # ---------------------------------------------------------------------------
@@ -364,6 +483,7 @@ async def run_agent(
     workflow_durable_client: Any | None = None,
     agent_name: str | None = None,
     web_request_tools: list[Any] | None = None,
+    harness_config: HarnessAgentConfig | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -414,7 +534,8 @@ async def run_agent(
     """
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
-    agent, session, resolved_id = await _build_agent_session_history(
+    _builder = _build_harness_agent_session if harness_config is not None else _build_agent_session_history
+    agent, session, resolved_id = await _builder(
         instructions=instructions,
         session_id=session_id,
         tools=tools,
@@ -427,6 +548,7 @@ async def run_agent(
         workflow_durable_client=workflow_durable_client,
         agent_name=agent_name,
         web_request_tools=web_request_tools,
+        **({"harness_config": harness_config} if harness_config is not None else {}),
     )
 
     lock = await _get_session_lock(resolved_id)
@@ -507,6 +629,7 @@ async def run_agent_stream(
     workflow_durable_client: Any | None = None,
     agent_name: str | None = None,
     web_request_tools: list[Any] | None = None,
+    harness_config: HarnessAgentConfig | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -542,7 +665,8 @@ async def run_agent_stream(
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
 
     try:
-        agent, session, resolved_id = await _build_agent_session_history(
+        _builder = _build_harness_agent_session if harness_config is not None else _build_agent_session_history
+        agent, session, resolved_id = await _builder(
             instructions=instructions,
             session_id=session_id,
             tools=tools,
@@ -555,6 +679,7 @@ async def run_agent_stream(
             workflow_durable_client=workflow_durable_client,
             agent_name=agent_name,
             web_request_tools=web_request_tools,
+            **({"harness_config": harness_config} if harness_config is not None else {}),
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)

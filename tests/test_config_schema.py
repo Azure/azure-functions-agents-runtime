@@ -10,7 +10,9 @@ from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
+    HarnessAgentConfig,
     McpFilter,
+    ResolvedAgent,
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
@@ -80,6 +82,63 @@ def test_trigger_spec_rejects_empty_type() -> None:
 def test_global_config_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
         GlobalConfig.model_validate({"extra_field": 1})
+
+
+# ---------------------------------------------------------------------------
+# HarnessAgentConfig
+# ---------------------------------------------------------------------------
+
+
+def test_harness_agent_config_defaults() -> None:
+    config = HarnessAgentConfig()
+    assert config.max_context_window_tokens is None
+    assert config.max_output_tokens is None
+    assert config.disable_file_memory is False
+
+
+def test_harness_agent_config_with_fields() -> None:
+    config = HarnessAgentConfig(max_context_window_tokens=128_000, max_output_tokens=4_096)
+    assert config.max_context_window_tokens == 128_000
+    assert config.max_output_tokens == 4_096
+
+
+def test_harness_agent_config_extra_forbidden() -> None:
+    with pytest.raises(ValidationError):
+        HarnessAgentConfig.model_validate({"unknown_field": True})
+
+
+@pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig(max_context_window_tokens=8192)])
+def test_agent_spec_harness_variants(value: bool | None | HarnessAgentConfig) -> None:
+    spec = AgentSpec(name="X", description="Y", harness=value)
+    assert spec.harness == value
+
+
+@pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig()])
+def test_global_config_harness_variants(value: bool | None | HarnessAgentConfig) -> None:
+    config = GlobalConfig(harness=value)
+    assert config.harness == value
+
+
+def test_resolved_agent_harness_config_defaults_none() -> None:
+    resolved = ResolvedAgent(
+        name="X",
+        description="desc",
+        trigger=None,
+        instructions="",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(),
+        model=None,
+        timeout=900.0,
+        enabled_mcp_names=[],
+        enabled_skills_names=[],
+        tool_filter=ToolsFilter(),
+        sandbox_config=None,
+        input_schema=None,
+        response_schema=None,
+        response_example=None,
+    )
+    assert resolved.harness_config is None
+
 
 
 def test_system_tools_config_parses() -> None:

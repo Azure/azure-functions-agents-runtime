@@ -108,6 +108,26 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
+class HarnessAgentConfig(BaseModel):
+    """Configuration for harness-mode agents (``create_harness_agent``).
+
+    When an agent opts into harness mode (``harness: true`` in frontmatter or
+    ``agents.config.yaml``), the runtime uses MAF's ``create_harness_agent``
+    instead of the plain ``Agent`` constructor.  The harness manages context
+    compaction so the agent's system prompt is **not** re-sent on every turn,
+    reducing token usage for long-running conversations.
+
+    All fields are optional; an empty object (``harness: true`` short-hand)
+    uses the harness defaults with no compaction configured.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    disable_file_memory: bool = False
+
+
 class GlobalConfig(BaseModel):
     """Top-level agents.config.yaml schema."""
 
@@ -117,6 +137,7 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
+    harness: bool | HarnessAgentConfig | None = None
 
 
 class AgentSpec(BaseModel):
@@ -144,6 +165,7 @@ class AgentSpec(BaseModel):
     instructions: str = ""
     source_file: str | None = None
     is_main: bool = False
+    harness: bool | HarnessAgentConfig | None = None
 
 
 class ResolvedAgent(BaseModel):
@@ -177,6 +199,7 @@ class ResolvedAgent(BaseModel):
     substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
+    harness_config: HarnessAgentConfig | None = None
 
 
 GlobalConfig.model_rebuild()

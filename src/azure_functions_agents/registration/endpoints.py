@@ -179,6 +179,7 @@ async def _run_builtin_agent(
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
         agent_name=resolved.name,
+        harness_config=resolved.harness_config,
     )
 
 
@@ -209,6 +210,7 @@ def _run_builtin_agent_stream(
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
         agent_name=resolved.name,
+        harness_config=resolved.harness_config,
     )
 
 

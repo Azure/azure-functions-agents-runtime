@@ -255,6 +255,7 @@ def make_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    harness_config=resolved.harness_config,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -360,6 +361,7 @@ def make_http_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    harness_config=resolved.harness_config,
                 )
 
                 _set_run_result_attributes(span, result)

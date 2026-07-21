@@ -8,6 +8,7 @@ import pytest
 from azure_functions_agents.config.merge import (
     DEFAULT_TIMEOUT,
     _resolve_builtin_endpoints,
+    _resolve_harness,
     _resolve_model,
     _resolve_sandbox,
     _resolve_timeout,
@@ -22,6 +23,7 @@ from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
+    HarnessAgentConfig,
     McpFilter,
     SkillsFilter,
     SystemToolsAgentOverride,
@@ -336,6 +338,72 @@ def test_apply_tools_filter_no_global_no_agent_returns_empty_filter() -> None:
     effective, disabled = apply_tools_filter(None, None)
     assert disabled is False
     assert effective.exclude == []
+
+
+# ---------------------------------------------------------------------------
+# _resolve_harness
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_harness_default_is_none() -> None:
+    """No harness config anywhere → plain Agent path (None)."""
+    spec = AgentSpec(name="A", description="B")
+    assert _resolve_harness(spec, GlobalConfig()) is None
+
+
+def test_resolve_harness_global_true_enables_defaults() -> None:
+    """global harness: true → HarnessAgentConfig with defaults."""
+    spec = AgentSpec(name="A", description="B")
+    result = _resolve_harness(spec, GlobalConfig(harness=True))
+    assert result == HarnessAgentConfig()
+
+
+def test_resolve_harness_global_object_preserved() -> None:
+    """global harness object fields are returned as-is."""
+    cfg = HarnessAgentConfig(max_context_window_tokens=128_000, max_output_tokens=4_096)
+    result = _resolve_harness(AgentSpec(name="A", description="B"), GlobalConfig(harness=cfg))
+    assert result is cfg
+
+
+def test_resolve_harness_per_agent_true_overrides_missing_global() -> None:
+    """per-agent harness: true enables harness even when global is silent."""
+    spec = AgentSpec(name="A", description="B", harness=True)
+    result = _resolve_harness(spec, GlobalConfig())
+    assert result == HarnessAgentConfig()
+
+
+def test_resolve_harness_per_agent_object_overrides_global_true() -> None:
+    """per-agent harness object takes precedence over global true."""
+    agent_cfg = HarnessAgentConfig(max_context_window_tokens=64_000)
+    spec = AgentSpec(name="A", description="B", harness=agent_cfg)
+    result = _resolve_harness(spec, GlobalConfig(harness=True))
+    assert result is agent_cfg
+
+
+def test_resolve_harness_per_agent_false_opts_out_of_global_true() -> None:
+    """per-agent harness: false opts out even when global is enabled."""
+    spec = AgentSpec(name="A", description="B", harness=False)
+    assert _resolve_harness(spec, GlobalConfig(harness=True)) is None
+
+
+def test_resolve_harness_global_false_disables_app_wide() -> None:
+    """global harness: false disables it for every agent that doesn't explicitly opt in."""
+    spec = AgentSpec(name="A", description="B")
+    assert _resolve_harness(spec, GlobalConfig(harness=False)) is None
+
+
+def test_compose_wires_harness_config() -> None:
+    """compose() propagates harness_config from _resolve_harness."""
+    spec = AgentSpec(name="A", description="desc", harness=True)
+    resolved = compose(spec, GlobalConfig())
+    assert resolved.harness_config == HarnessAgentConfig()
+
+
+def test_compose_harness_config_none_by_default() -> None:
+    """compose() leaves harness_config as None when harness is not configured."""
+    spec = AgentSpec(name="A", description="desc")
+    resolved = compose(spec, GlobalConfig())
+    assert resolved.harness_config is None
 
 
 def test_compose_enables_all_discovered_mcp_when_no_per_agent_filter() -> None:

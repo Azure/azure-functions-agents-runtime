@@ -65,6 +65,7 @@ def test_load_global_config_missing_returns_empty(tmp_path: Path) -> None:
         "model": None,
         "timeout": None,
         "tools": None,
+        "harness": None,
     }
 
 
