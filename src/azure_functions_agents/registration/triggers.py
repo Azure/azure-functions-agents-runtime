@@ -19,6 +19,7 @@ from ._handlers import (
 )
 from ._naming import allocate_unique_function_name
 from .capabilities import AgentCapabilities
+from .catalog import AgentCatalog
 
 __all__ = [
     "allocate_unique_function_name",
@@ -40,6 +41,7 @@ def _register_builtin_agent(
     function_name: str,
     trigger_params: dict[str, Any],
     trigger_type: str,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     trigger_params = dict(trigger_params)
     decorator_fn = getattr(app, trigger_type, None)
@@ -58,7 +60,7 @@ def _register_builtin_agent(
     if trigger_type == "timer_trigger" and "schedule" in trigger_params:
         trigger_params["schedule"] = normalize_timer_schedule(str(trigger_params["schedule"]))
 
-    handler = make_agent_handler(resolved, trigger_type, capabilities)
+    handler = make_agent_handler(resolved, trigger_type, capabilities, catalog)
     trigger_params["arg_name"] = "trigger_data"
 
     decorated = decorator_fn(**trigger_params)(handler)
@@ -125,6 +127,7 @@ def _register_http_agent(
     capabilities: AgentCapabilities,
     function_name: str,
     trigger_params: dict[str, Any],
+    catalog: AgentCatalog | None = None,
 ) -> None:
     route = trigger_params.get("route")
     if not route:
@@ -136,7 +139,7 @@ def _register_http_agent(
 
     methods = trigger_params.get("methods", ["POST"])
     auth = _resolve_http_trigger_auth(resolved, trigger_params)
-    handler = make_http_agent_handler(resolved, capabilities, auth=auth)
+    handler = make_http_agent_handler(resolved, capabilities, catalog, auth=auth)
 
     decorated = app.route(
         route=route,
@@ -152,6 +155,7 @@ def register_agent(
     capabilities: AgentCapabilities,
     registered_names: set[str] | None = None,
     function_name: str | None = None,
+    catalog: AgentCatalog | None = None,
 ) -> None:
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
@@ -174,7 +178,7 @@ def register_agent(
         )
 
     if trigger_type == "http_trigger":
-        _register_http_agent(app, resolved, capabilities, function_name, trigger_params)
+        _register_http_agent(app, resolved, capabilities, function_name, trigger_params, catalog)
         logger.info(
             "Registered trigger: source_file=%s function=%s trigger_type=http_trigger route=%s methods=%s",
             source_marker(resolved.source_file),
@@ -193,6 +197,7 @@ def register_agent(
         function_name,
         trigger_params,
         trigger_type,
+        catalog,
     )
     logger.info(
         "Registered trigger: source_file=%s function=%s trigger_type=%s",
