@@ -26,7 +26,7 @@ src/
 ├── function_app.py
 ├── host.json
 ├── agents.config.yaml
-├── main.agent.md              # Coordinator (is_main, builtin_endpoints, subagents:)
+├── main.agent.md              # Coordinator (named "main.agent.md"; builtin_endpoints, subagents:)
 ├── agents/
 │   ├── billing.agent.md       # Specialist with its own HTTP endpoint
 │   └── tech.agent.md          # Specialist with NO trigger/endpoint (internal only)

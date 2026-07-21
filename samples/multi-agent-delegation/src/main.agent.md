@@ -6,6 +6,9 @@ builtin_endpoints: true
 
 subagents:
   - agent: billing               # references agents/billing.agent.md by its file-stem slug
+                                  # (slugs are resolved app-wide, not by path — this works the
+                                  # same whether billing.agent.md lives in agents/ or beside
+                                  # this coordinator at the app's top level)
     when: Invoices, charges, refunds, or subscription questions
   - agent: tech                  # `when` omitted -> uses tech's own `description` as the routing hint
 ---
