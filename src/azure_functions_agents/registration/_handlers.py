@@ -26,6 +26,7 @@ from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
+from .catalog import AgentCatalog
 
 AUTH_LEVEL_MAP = {
     "anonymous": func.AuthLevel.ANONYMOUS,
@@ -135,12 +136,29 @@ def _tool_error_count(tool_calls: list[dict[str, Any]] | None) -> int:
     return sum(1 for call in tool_calls if _looks_like_tool_error(call.get("result")))
 
 
+def _total_tool_error_count(result: Any) -> int:
+    """Combine tool-call error heuristics with explicit delegate-error accounting.
+
+    ``_tool_error_count`` only recognizes the sandbox error envelope /
+    non-empty ``stderr`` heuristic (:func:`_looks_like_tool_error`), which
+    cannot classify a specialist's sanitized free-text delegation failure
+    (FRD 0007 §4.12: "do NOT rely on `_looks_like_tool_error`'s JSON
+    `{error}`/stderr heuristic for a specialist's sanitized free-text
+    failure"). ``AgentResult.delegate_error_count`` is incremented
+    explicitly by the ``delegate_<slug>`` adapter instead, and is added
+    here so both the run span and the response log see one combined count.
+    """
+    tool_calls = list(getattr(result, "tool_calls", None) or [])
+    delegate_error_count = int(getattr(result, "delegate_error_count", 0) or 0)
+    return _tool_error_count(tool_calls) + delegate_error_count
+
+
 def _set_run_result_attributes(span: Any, result: Any) -> None:
     """Attach non-sensitive run-summary attributes; content only when opted in."""
     tool_calls = list(getattr(result, "tool_calls", None) or [])
     content = str(getattr(result, "content", "") or "")
     span.set_attribute("af.agent.tool_call_count", len(tool_calls))
-    span.set_attribute("af.agent.tool_error_count", _tool_error_count(tool_calls))
+    span.set_attribute("af.agent.tool_error_count", _total_tool_error_count(result))
     span.set_attribute("af.agent.response_bytes", len(content))
     span.set_content("af.agent.response", content)
 
@@ -153,7 +171,7 @@ def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
         "session_id": getattr(result, "session_id", None),
         "response_bytes": len(content),
         "tool_call_count": len(tool_calls),
-        "tool_error_count": _tool_error_count(tool_calls),
+        "tool_error_count": _total_tool_error_count(result),
     }
     if capture_sensitive_data():
         payload["response"] = content
@@ -210,6 +228,7 @@ def make_agent_handler(
     resolved: ResolvedAgent,
     trigger_type: str,
     capabilities: AgentCapabilities,
+    catalog: AgentCatalog | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
 
@@ -227,10 +246,11 @@ def make_agent_handler(
 
         session_id = _new_session_id()
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": trigger_type,
                 "af.agent.session_id": session_id,
                 "af.agent.model": resolved.model,
@@ -256,6 +276,9 @@ def make_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    subagents=resolved.subagents,
+                    catalog=catalog,
+                    agent_name=resolved.slug,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -293,6 +316,7 @@ def make_agent_handler(
 def make_http_agent_handler(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
+    catalog: AgentCatalog | None = None,
     auth: EndpointAuthConfig | None = None,
 ) -> Callable[[Request], Any]:
     """Create an async handler for an HTTP-triggered agent.
@@ -319,10 +343,11 @@ def make_http_agent_handler(
         )
 
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": "http",
                 "af.agent.model": resolved.model,
             },
@@ -377,6 +402,9 @@ def make_http_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    subagents=resolved.subagents,
+                    catalog=catalog,
+                    agent_name=resolved.slug,
                 )
 
                 _set_run_result_attributes(span, result)

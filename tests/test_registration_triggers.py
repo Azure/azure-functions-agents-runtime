@@ -204,24 +204,23 @@ def test_function_name_from_source_falls_back_to_display_name(
     assert "missing source_file" in caplog.text
 
 
-def test_allocate_unique_function_name_warns_on_collision(
+def test_allocate_unique_function_name_fails_fast_on_collision(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    """Duplicate slugs fail fast instead of silently auto-suffixing (FRD 0007 Decision #17)."""
     registered_names = {"daily_report"}
 
-    with caplog.at_level(logging.WARNING):
-        function_name = allocate_unique_function_name(
+    with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match="Function name collision"):
+        allocate_unique_function_name(
             "/path/daily-report.agent.md",
             "Daily Report",
             registered_names,
         )
 
-    assert function_name == "daily_report_2"
-    assert registered_names == {"daily_report", "daily_report_2"}
+    assert registered_names == {"daily_report"}
     assert "Function name collision" in caplog.text
     assert "/path/daily-report.agent.md" in caplog.text
     assert "'daily_report'" in caplog.text
-    assert "'daily_report_2'" in caplog.text
 
 
 def test_allocate_unique_function_name_no_warning_for_unique_name(
@@ -262,11 +261,12 @@ def test_register_agent_missing_source_file_warns_and_falls_back(
     assert "missing source_file" in caplog.text
 
 
-def test_register_agent_auto_suffixes_duplicate_function_names_with_registry(
+def test_register_agent_fails_fast_on_duplicate_function_names_with_registry(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
+    """Same-slug collisions fail fast instead of auto-suffixing (FRD 0007 Decision #17)."""
     _write_timer_agent(tmp_path, "daily-report.agent.md", "Daily Report Dash")
     _write_timer_agent(tmp_path, "daily_report.agent.md", "Daily Report Underscore")
     resolved_agents = _resolve_agents(tmp_path)
@@ -277,12 +277,12 @@ def test_register_agent_auto_suffixes_duplicate_function_names_with_registry(
         lambda *args, **kwargs: _stub_handler,
     )
 
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.ERROR), pytest.raises(ValueError, match="Function name collision"):
         for resolved in resolved_agents:
             register_agent(app, resolved, AgentCapabilities(), registered_names=registered_names)
 
-    assert app.function_names == ["daily_report", "daily_report_2"]
-    assert registered_names == {"daily_report", "daily_report_2"}
+    assert app.function_names == ["daily_report"]
+    assert registered_names == {"daily_report"}
     assert "Function name collision" in caplog.text
     assert "daily_report.agent.md" in caplog.text
 
@@ -487,7 +487,7 @@ def test_register_agent_accepts_nested_auth_object_with_entra_allowlists(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def _capture(resolved: Any, capabilities: Any, *, auth: Any) -> Any:
+    def _capture(resolved: Any, capabilities: Any, catalog: Any = None, *, auth: Any) -> Any:
         captured["auth"] = auth
         return _stub_handler
 
@@ -634,6 +634,7 @@ def test_register_agent_dispatches_connector_trigger_to_builtin_registration(
             _function_name_from_source(resolved.source_file, resolved.name),
             {"connection": "example"},
             "connector_trigger",
+            None,
         )
     ]
 
@@ -709,6 +710,7 @@ def test_register_agent_registers_non_http_trigger_on_main_agent(
             _function_name_from_source(resolved.source_file, resolved.name),
             {"schedule": "0 0 * * * *"},
             "timer_trigger",
+            None,
         )
     ]
 
@@ -738,6 +740,7 @@ def test_register_agent_registers_http_trigger_on_main_agent(
             capabilities,
             _function_name_from_source(resolved.source_file, resolved.name),
             {"route": "reports"},
+            None,
         )
     ]
     assert app.trigger_calls == []
@@ -767,6 +770,7 @@ def test_register_agent_dispatches_non_connector_trigger_types_to_builtin_regist
             _function_name_from_source(resolved.source_file, resolved.name),
             {"queue_name": "reports"},
             "queue_trigger",
+            None,
         )
     ]
 
