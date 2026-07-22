@@ -10,5 +10,4 @@ trigger:
     auth_level: anonymous
 ---
 
-You operate in region $DEPLOY_REGION and alert the %ALERT_CHANNEL% channel. Both
-placeholders above are replaced from app settings before you ever see them.
+You operate in region $DEPLOY_REGION and alert the %ALERT_CHANNEL% channel.

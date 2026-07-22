@@ -9,7 +9,5 @@ trigger:
     auth_level: anonymous
 ---
 
-You have two custom tools — `slugify` and `word_count` — plus the `api-guide`
-skill. Use `slugify` to make slugs, `word_count` to count words, and the
-`read_skill_resource` tool to open the skill's reference or example files when the
-user asks about the Widget API. Keep answers short.
+Help the user with their request, using any tools and skills available to you.
+Keep answers short.

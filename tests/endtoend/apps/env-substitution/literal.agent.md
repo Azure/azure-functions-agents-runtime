@@ -10,5 +10,4 @@ trigger:
     auth_level: anonymous
 ---
 
-Substitution is disabled for this agent, so the text $DEPLOY_REGION and
-%ALERT_CHANNEL% must remain exactly as written and not be replaced.
+Escalate incidents in $DEPLOY_REGION to the %ALERT_CHANNEL% channel.

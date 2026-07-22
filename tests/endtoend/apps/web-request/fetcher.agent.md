@@ -9,6 +9,5 @@ trigger:
     auth_level: anonymous
 ---
 
-You can make a single outbound request with the `web_request` tool. Only
-`https://example.com` is allow-listed. When the user asks about that page, fetch
-it and summarize the response in one short sentence.
+When the user asks about a web page, use the `web_request` tool to fetch it and
+summarize the response in one short sentence.

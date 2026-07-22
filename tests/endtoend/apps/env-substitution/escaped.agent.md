@@ -9,11 +9,9 @@ trigger:
     auth_level: anonymous
 ---
 
-Escaped placeholders stay literal: $$API_TOKEN and %%TENANT_ID%%.
+Store the $$API_TOKEN for tenant %%TENANT_ID%%.
 
-Normal placeholders still resolve: contact $CONTACT_EMAIL in region $DEPLOY_REGION.
-
-The following fenced block must NOT be substituted:
+Contact $CONTACT_EMAIL in region $DEPLOY_REGION.
 
 ```bash
 export API_TOKEN=$API_TOKEN
@@ -21,4 +19,4 @@ echo "Channel: %ALERT_CHANNEL%"
 curl https://api.example.test/$ENDPOINT
 ```
 
-After the fence, substitution resumes for the %ALERT_CHANNEL% channel.
+Escalate to the %ALERT_CHANNEL% channel.

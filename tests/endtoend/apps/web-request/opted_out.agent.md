@@ -11,5 +11,4 @@ system_tools:
   web_request: false
 ---
 
-You have no outbound web access. Answer using only your own knowledge, and say so
-if the user asks you to fetch a URL.
+Answer using only your own knowledge, in one short sentence.
