@@ -12,5 +12,4 @@ skills: false
 mcp: false
 ---
 
-You have no external tools, skills, or MCP servers. Answer using only your own
-knowledge, in one short sentence.
+Answer using only your own knowledge, in one short sentence.

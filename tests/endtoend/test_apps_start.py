@@ -12,6 +12,7 @@ runs them explicitly with ``-m e2e``.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -19,6 +20,11 @@ import pytest
 from tests.endtoend._func_host import start_and_verify
 
 APPS_DIR = Path(__file__).resolve().parent / "apps"
+
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.skipif(shutil.which("func") is None, reason="Azure Functions Core Tools not found"),
+]
 
 
 def _discover_e2e_apps() -> list[Path]:
@@ -29,7 +35,6 @@ def _discover_e2e_apps() -> list[Path]:
 E2E_APPS = _discover_e2e_apps()
 
 
-@pytest.mark.e2e
 @pytest.mark.parametrize(
     "app_dir",
     E2E_APPS,

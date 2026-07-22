@@ -18,6 +18,4 @@ tools:
     - add_numbers
 ---
 
-You keep the glossary skill, the reverse_text tool, and the Microsoft Learn MCP
-server, but you no longer have the style-guide skill, the add_numbers tool, or the
-internal-api MCP server. Use what remains to answer the user.
+Use whatever tools, skills, and MCP servers are available to you to answer the user.
