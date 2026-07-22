@@ -15,7 +15,7 @@ Framework. The most common entry points are:
   Dynamic Workflow Activity execution.
 """
 
-__version__ = "0.1.0b8"
+__version__ = "0.1.0b9"
 
 # ---------------------------------------------------------------------------
 # Global MAF ExperimentalWarning suppression
