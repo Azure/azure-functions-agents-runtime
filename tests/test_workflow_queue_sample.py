@@ -110,6 +110,10 @@ def test_html_renderer_preserves_repository_order_and_escapes() -> None:
     assert "owner/&lt;first&gt;" in result["html"]
     assert "P0: &lt;unsafe&gt;" in result["html"]
     assert result["html"].index("owner/&lt;first&gt;") < result["html"].index("owner/second")
+    assert '<section class="metrics"' in result["html"]
+    assert '<div class="repository-grid">' in result["html"]
+    assert "Healthy repositories" in result["html"]
+    assert "Attention required" in result["html"]
 
 
 def test_blob_publisher_uploads_html(monkeypatch: Any) -> None:
