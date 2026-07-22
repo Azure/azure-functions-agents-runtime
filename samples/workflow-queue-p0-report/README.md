@@ -20,6 +20,12 @@ Queue message
 The independent inspection tasks have no dependencies and can execute in
 parallel. The queue message is the repository registry for that report:
 
+![Parallel repository inspection Activities in the DTS dashboard](../../docs/images/workflow-queue-p0-report/dts-parallel-activities.png)
+
+The terminal Activity publishes a responsive portfolio dashboard to Blob Storage:
+
+![Generated P0 issue portfolio dashboard](../../docs/images/workflow-queue-p0-report/p0-report-dashboard.png)
+
 ```json
 {
   "repositories": [
