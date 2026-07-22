@@ -290,12 +290,12 @@ def _apply_workflow_exclude(
 
 
 def _build_tool_section(allowed_tools: frozenset[str]) -> str:
-    """Return the effective workflow-tool section shared by both channels.
+    """Return the dynamic workflow-tool section shared by both channels.
 
-    Includes the static "when to use workflows" prose plus a dynamic
-    "Available workflow tools" section listing each allowed tool's
-    name and engine-owned description. This is the single place the
-    LLM learns which tool names are valid as workflow node targets.
+    Lists each allowed tool's name and engine-owned description. This is the
+    single place the LLM learns which tool names are valid as workflow node
+    targets. ``_build_addendum`` combines it with the shared and
+    channel-specific guidance.
 
     Computed once at app start and threaded through ``extra_tools`` /
     ``system_addendum``; M1 does not support runtime allowlist changes.

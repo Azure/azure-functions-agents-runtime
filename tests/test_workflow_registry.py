@@ -353,6 +353,10 @@ def test_addendum_enforces_fire_and_forget_no_poll_guidance():
     assert "do not call `get_workflow_status` to wait" in addendum
     assert "End workflows with a small summary task" in addendum
     assert "Do not return large raw evidence" in addendum
+    trigger_addendum = result.trigger_system_addendum
+    assert "fire-and-forget" in trigger_addendum
+    assert "end this agent turn promptly" in trigger_addendum
+    assert "do not poll `get_workflow_status`" in trigger_addendum.lower()
     # Tool descriptions must not encourage polling either, otherwise the
     # tool-call contract overrides the addendum.
     descriptions = {tool.name: tool.description for tool in result.workflow_tools}
@@ -420,6 +424,11 @@ def test_addendum_documents_workflow_notification_contract():
     # The legacy free-form prefix must not creep back in — it would
     # produce conflicting guidance and confuse the agent.
     assert "[Workflow notification]" not in addendum
+    trigger_addendum = result.trigger_system_addendum
+    assert "There is no built-in chat poller" in trigger_addendum
+    assert "synthetic `<workflow-notification>` turn" in trigger_addendum
+    assert "chat client injects a synthetic user message" not in trigger_addendum
+    assert "do not poll" in trigger_addendum.lower()
     # Tool descriptions must reinforce the same envelope so the LLM
     # sees it both at system-prompt time and at tool-call selection time.
     descriptions = {tool.name: tool.description for tool in result.workflow_tools}

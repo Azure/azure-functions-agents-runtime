@@ -14,7 +14,7 @@ The Durable orchestration then runs independently:
 
 ## Run locally
 
-Follow the [shared sample setup](../README.md#run-locally) to create a Python
+Follow the [shared sample setup](../README.md#run-locally-optional) to create a Python
 environment, copy `src/local.settings.template.json` to
 `src/local.settings.json`, start Azurite, and configure a supported model
 provider. Then run:
