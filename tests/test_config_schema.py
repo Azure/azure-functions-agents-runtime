@@ -13,6 +13,7 @@ from azure_functions_agents.config.schema import (
     HarnessAgentConfig,
     McpFilter,
     ResolvedAgent,
+    SubagentRef,
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
@@ -44,6 +45,49 @@ def test_builtin_endpoints_debug_chat_ui_enables_chat_api() -> None:
     config = BuiltinEndpointsConfig(debug_chat_ui=True)
     assert config.debug_chat_ui is True
     assert config.chat_api is True
+
+
+def test_builtin_endpoints_auth_defaults_to_function() -> None:
+    config = BuiltinEndpointsConfig(chat_api=True)
+    assert config.http_auth.mode == "function"
+    assert config.http_auth.entra is None
+
+
+def test_builtin_endpoints_auth_string_shorthand() -> None:
+    config = BuiltinEndpointsConfig.model_validate({"chat_api": True, "http_auth": "entra"})
+    assert config.http_auth.mode == "entra"
+
+
+def test_builtin_endpoints_auth_full_object() -> None:
+    config = BuiltinEndpointsConfig.model_validate(
+        {
+            "chat_api": True,
+            "http_auth": {
+                "mode": "entra",
+                "entra": {
+                    "tenant_id": "t-1",
+                    "allowed_audiences": ["api://app"],
+                    "allowed_client_ids": ["caller"],
+                },
+            },
+        }
+    )
+    assert config.http_auth.mode == "entra"
+    assert config.http_auth.entra is not None
+    assert config.http_auth.entra.tenant_id == "t-1"
+    assert config.http_auth.entra.allowed_audiences == ["api://app"]
+
+
+def test_builtin_endpoints_auth_rejects_unknown_mode() -> None:
+    with pytest.raises(ValidationError):
+        BuiltinEndpointsConfig.model_validate({"chat_api": True, "http_auth": "basic"})
+
+
+def test_builtin_endpoints_auth_rejects_extra_keys() -> None:
+    with pytest.raises(ValidationError):
+        BuiltinEndpointsConfig.model_validate(
+            {"chat_api": True, "http_auth": {"mode": "entra", "bogus": 1}}
+        )
 
 
 @pytest.mark.parametrize(
@@ -140,6 +184,30 @@ def test_resolved_agent_harness_config_defaults_none() -> None:
     assert resolved.harness_config is None
 
 
+def test_global_config_auth_defaults_to_none() -> None:
+    assert GlobalConfig().http_auth is None
+
+
+def test_global_config_auth_string_shorthand() -> None:
+    config = GlobalConfig.model_validate({"http_auth": "entra"})
+    assert config.http_auth is not None
+    assert config.http_auth.mode == "entra"
+
+
+def test_global_config_auth_full_object() -> None:
+    config = GlobalConfig.model_validate(
+        {"http_auth": {"mode": "entra", "entra": {"tenant_id": "t-1"}}}
+    )
+    assert config.http_auth is not None
+    assert config.http_auth.mode == "entra"
+    assert config.http_auth.entra is not None
+    assert config.http_auth.entra.tenant_id == "t-1"
+
+
+def test_global_config_auth_rejects_unknown_mode() -> None:
+    with pytest.raises(ValidationError):
+        GlobalConfig.model_validate({"http_auth": "basic"})
+
 
 def test_system_tools_config_parses() -> None:
     payload: dict[str, Any] = {
@@ -149,3 +217,59 @@ def test_system_tools_config_parses() -> None:
     assert config.dynamic_sessions_code_interpreter == DynamicSessionsCodeInterpreterConfig(
         endpoint="https://example.test"
     )
+
+
+def test_subagent_ref_object_form_parses() -> None:
+    ref = SubagentRef.model_validate({"agent": "billing-specialist"})
+    assert ref.agent == "billing-specialist"
+    assert ref.when is None
+
+
+def test_subagent_ref_object_form_with_when_parses() -> None:
+    ref = SubagentRef.model_validate(
+        {"agent": "billing-specialist", "when": "Route billing questions here."}
+    )
+    assert ref.agent == "billing-specialist"
+    assert ref.when == "Route billing questions here."
+
+
+def test_subagent_ref_rejects_empty_agent() -> None:
+    with pytest.raises(ValidationError):
+        SubagentRef(agent="   ")
+
+
+@pytest.mark.parametrize("forbidden_field", ["id", "tool_name"])
+def test_subagent_ref_extra_forbidden(forbidden_field: str) -> None:
+    """No `id` or `tool_name` override field exists — identity is the slug only (FRD 0007 §5 Decision #16)."""
+    with pytest.raises(ValidationError):
+        SubagentRef.model_validate({"agent": "billing-specialist", forbidden_field: "x"})
+
+
+def test_agent_spec_subagents_object_form_parses() -> None:
+    spec = AgentSpec.model_validate(
+        {
+            "name": "Coordinator",
+            "description": "desc",
+            "subagents": [{"agent": "billing-specialist", "when": "Billing questions."}],
+        }
+    )
+    assert spec.subagents == [
+        SubagentRef(agent="billing-specialist", when="Billing questions.")
+    ]
+
+
+def test_agent_spec_subagents_rejects_string_shorthand() -> None:
+    """String shorthand (`subagents: [billing-specialist]`) is rejected — object form only."""
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(
+            {
+                "name": "Coordinator",
+                "description": "desc",
+                "subagents": ["billing-specialist"],
+            }
+        )
+
+
+def test_agent_spec_subagents_defaults_to_none() -> None:
+    spec = AgentSpec(name="X", description="Y")
+    assert spec.subagents is None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import re
 from contextlib import contextmanager
@@ -11,11 +12,14 @@ from typing import Any
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
+    EndpointAuthConfig,
     HarnessAgentConfig,
     ResolvedAgent,
     ToolsFilter,
 )
 from azure_functions_agents.registration._handlers import (
+    _tool_error_count,
+    _total_tool_error_count,
     build_sandbox_tools_for_session,
     make_agent_handler,
     make_http_agent_handler,
@@ -77,10 +81,16 @@ def _resolved_agent(
     input_schema: dict[str, Any] | None = None,
     sandbox_config: DynamicSessionsCodeInterpreterConfig | None = None,
     tools_disabled: bool = False,
+    # Deliberately distinct from `name` below (S1): identity/telemetry call
+    # sites must key off `slug`, never the mutable display `name` (FRD 0007
+    # §4.3, "Display `name` is never an identity"). Defaulted so existing
+    # callers of this factory are unaffected.
+    slug: str = "resolved-agent-slug",
 ) -> ResolvedAgent:
     source = Path(__file__).resolve()
     return ResolvedAgent(
         name="Report",
+        slug=slug,
         description="desc",
         trigger=None,
         instructions="Return JSON",
@@ -537,6 +547,204 @@ def test_non_http_handler_reraises_agent_failures(monkeypatch: Any) -> None:
         assert str(exc) == "agent failed"
     else:
         raise AssertionError("Expected RuntimeError to be re-raised")
+
+
+def test_total_tool_error_count_combines_heuristic_and_delegate_errors() -> None:
+    # `_looks_like_tool_error`'s JSON `{error}`/stderr heuristic recognizes the
+    # sandbox-style tool_calls entry below as one failure; a specialist's
+    # sanitized free-text delegate failure is invisible to that heuristic
+    # (FRD 0007 §4.12), so `AgentResult.delegate_error_count` must be added
+    # on top rather than relying on the heuristic to catch it too.
+    result = SimpleNamespace(
+        tool_calls=[
+            {"name": "run_code", "result": json.dumps({"error": "boom"})},
+            {"name": "run_code", "result": json.dumps({"stdout": "ok"})},
+        ],
+        delegate_error_count=2,
+    )
+
+    assert _total_tool_error_count(result) == 1 + 2
+
+
+def test_total_tool_error_count_does_not_misclassify_sanitized_delegate_text() -> None:
+    # A delegate failure's sanitized message ("The 'x' specialist could not
+    # complete this task ...") is plain text, not the sandbox JSON envelope —
+    # `_looks_like_tool_error` must NOT flag it, proving the two accounting
+    # paths are additive rather than double-counting or mis-classifying.
+    sanitized_message = (
+        "The 'billing' specialist could not complete this task. "
+        "Consider trying again, rephrasing the request, or proceeding without it."
+    )
+    result = SimpleNamespace(
+        tool_calls=[{"name": "delegate_billing", "result": sanitized_message}],
+        delegate_error_count=1,
+    )
+
+    assert _tool_error_count(result.tool_calls) == 0
+    assert _total_tool_error_count(result) == 1
+
+
+def test_total_tool_error_count_handles_missing_fields_gracefully() -> None:
+    assert _total_tool_error_count(SimpleNamespace()) == 0
+    assert _total_tool_error_count(None) == 0
+
+
+def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
+    monkeypatch: Any,
+) -> None:
+    """S1: the coordinator/direct-role agent must be identified by `resolved.slug`.
+
+    Round 2's B2 fix already made *delegated* specialists use `resolved.slug`
+    for telemetry identity rather than the mutable display `name` (FRD 0007
+    §4.3, "Display `name` is never an identity"). This asserts the direct/
+    coordinator role gets the same treatment on the non-HTTP trigger path.
+    """
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured["agent_name"] = kwargs.get("agent_name")
+        return SimpleNamespace(content="ok", session_id=kwargs["session_id"], tool_calls=[])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    resolved = _resolved_agent(response_schema=None, slug="report-slug")
+    handler = make_agent_handler(resolved, "queue_trigger", AgentCapabilities())
+
+    asyncio.run(handler({"message": "hello"}))
+
+    assert captured["agent_name"] == "report-slug"
+    assert captured["agent_name"] != resolved.name
+
+
+def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
+    monkeypatch: Any,
+) -> None:
+    """S1: same contract as the non-HTTP handler test above, for the HTTP trigger path."""
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured["agent_name"] = kwargs.get("agent_name")
+        return SimpleNamespace(content="ok", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    resolved = _resolved_agent(response_schema=None, slug="report-slug")
+    handler = make_http_agent_handler(resolved, AgentCapabilities())
+
+    asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert captured["agent_name"] == "report-slug"
+    assert captured["agent_name"] != resolved.name
+
+
+def _principal_header(claims: list[dict[str, str]], *, auth_typ: str = "aad") -> str:
+    payload = json.dumps({"auth_typ": auth_typ, "claims": claims})
+    return base64.b64encode(payload.encode("utf-8")).decode("ascii")
+
+
+def test_http_handler_entra_without_easy_auth_returns_401(monkeypatch: Any) -> None:
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+
+    called = False
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        nonlocal called
+        called = True
+        return SimpleNamespace(content="ok", session_id="s")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"x-ms-client-principal": _principal_header([{"typ": "tid", "val": "t"}])},
+            )
+        )
+    )
+
+    assert response.status_code == 401
+    assert called is False
+
+
+def test_http_handler_entra_without_principal_returns_401(monkeypatch: Any) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 401
+
+
+def test_http_handler_entra_with_valid_principal_proceeds(monkeypatch: Any) -> None:
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="plain text", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"x-ms-client-principal": _principal_header([{"typ": "tid", "val": "t"}])},
+            )
+        )
+    )
+
+    assert response.status_code == 200
+
+
+def test_http_handler_default_auth_does_not_gate_requests(monkeypatch: Any) -> None:
+    # No Easy Auth env, no principal header: a non-entra (default) handler must
+    # still serve the request -- key enforcement is handled by the route AuthLevel.
+    monkeypatch.delenv("WEBSITE_AUTH_ENABLED", raising=False)
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH", raising=False)
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(content="plain text", session_id="session-123")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(_resolved_agent(response_schema=None), AgentCapabilities())
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 200
 
 
 # ---------------------------------------------------------------------------

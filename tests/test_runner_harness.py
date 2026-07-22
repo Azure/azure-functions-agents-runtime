@@ -108,9 +108,9 @@ def test_run_agent_uses_plain_builder_when_config_is_none(monkeypatch: Any) -> N
         harness_called.append(kwargs)
         return _FakeAgent(), object(), "harness-session"
 
-    async def fake_plain_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
+    async def fake_plain_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str, None]:
         plain_called.append(kwargs)
-        return _FakeAgent("plain response"), object(), "plain-session"
+        return _FakeAgent("plain response"), object(), "plain-session", None
 
     monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_plain_builder)
