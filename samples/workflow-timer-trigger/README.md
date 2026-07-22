@@ -12,17 +12,38 @@ The Durable orchestration then runs independently:
 3. `publish_timer_result` acts as the terminal sink and writes a
    `TIMER_WORKFLOW_COMPLETED` structured log marker.
 
-## Run locally
+## Run locally with the Durable Task Scheduler emulator
 
 Follow the [shared sample setup](../README.md#run-locally-optional) to create a Python
 environment, copy `src/local.settings.template.json` to
 `src/local.settings.json`, start Azurite, and configure a supported model
-provider. Then run:
+provider.
+
+This sample uses the Durable Task Scheduler backend. Start its emulator in a
+separate terminal:
+
+```powershell
+docker run --rm --name dts-emulator `
+  -p 8080:8080 `
+  -p 8082:8082 `
+  mcr.microsoft.com/dts/dts-emulator:latest
+```
+
+The template connects to the emulator with:
+
+```text
+Endpoint=http://localhost:8080;TaskHub=default;Authentication=None
+```
+
+Keep both the DTS emulator and Azurite running, then start the Functions host:
 
 ```powershell
 Set-Location samples\workflow-timer-trigger\src
 func start
 ```
+
+Open the emulator dashboard at <http://localhost:8082> to inspect workflow
+instances and task history.
 
 The committed sample runs every five minutes. For an immediate local demo, add
 `run_on_startup: true` under `trigger.args`, start the host once, then remove the
@@ -55,3 +76,5 @@ start the plan.
   or notification Activity.
 - Use Durable Functions or Durable Task Scheduler tooling for operational
   status, cancellation, and termination.
+- The DTS emulator is for local development only. Azure deployment requires a
+  provisioned Durable Task Scheduler task hub and managed-identity access.

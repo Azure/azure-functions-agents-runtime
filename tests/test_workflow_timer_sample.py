@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import azure.durable_functions as df
@@ -17,6 +18,26 @@ SAMPLE_SRC = (
 
 def test_workflow_timer_sample_exists() -> None:
     assert SAMPLE_SRC.is_dir()
+
+
+def test_workflow_timer_sample_uses_dts_emulator_backend() -> None:
+    host_config = json.loads((SAMPLE_SRC / "host.json").read_text(encoding="utf-8"))
+    durable_config = host_config["extensions"]["durableTask"]
+    assert durable_config == {
+        "hubName": "default",
+        "storageProvider": {
+            "type": "azureManaged",
+            "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+        },
+    }
+    assert host_config["extensionBundle"]["version"] == "[4.32.0, 5.0.0)"
+
+    local_settings = json.loads(
+        (SAMPLE_SRC / "local.settings.template.json").read_text(encoding="utf-8")
+    )
+    assert local_settings["Values"]["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] == (
+        "Endpoint=http://localhost:8080;TaskHub=default;Authentication=None"
+    )
 
 
 def test_workflow_timer_sample_declares_workflow_timer() -> None:
