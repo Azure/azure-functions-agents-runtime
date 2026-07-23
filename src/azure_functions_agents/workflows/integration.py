@@ -1,25 +1,25 @@
 """System-prompt addendum + integration entry point for the workflows feature.
 
-Behavioral guidance for the workflow tools is owned by the engine, not
+Behavioral guidance for the workflow tools is owned by the runtime, not
 by the agent markdown (see ``docs/workflows.md`` / "DX split"). When an
 agent enables workflows in its frontmatter, the framework appends a
-short addendum below to the agent's system prompt — covering both
-*when* to reach for a workflow and *which* tools the workflow can call —
-so every workflow-enabled agent gets the same heuristics without the
-author having to copy-paste prose into every agent file.
+channel-specific addendum to the agent's system prompt. Chat endpoints
+describe polling and synthetic completion notifications; declared triggers
+describe short-lived starter behavior and terminal result sinks. Both cover
+when to reach for a workflow and which tools the workflow can call.
 
 ``build_workflow_integration`` is the one call the app factory makes
 to turn on workflows for the main agent: it registers the Durable
 engine on the app, registers the discovered ``@workflow_tool`` inventory,
 applies the optional ``workflows.exclude`` filter, stashes the effective
 tool set on the workflows registry for ``start_workflow`` to read, and
-returns the tool list + addendum the chat handlers should thread through
-to the agent loop.
+returns the management tools plus both channel addenda.
 """
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from dataclasses import dataclass
 from typing import Any
 
 import azure.functions as func
@@ -51,7 +51,7 @@ _ALLOWED_WORKFLOWS_KEYS: frozenset[str] = frozenset({
 # per-tool specifics. This is only about when the LLM should reach for
 # a workflow instead of driving the work from chat directly. The
 # "Available workflow tools" section is appended dynamically per-app.
-_BASE_ADDENDUM = (
+_SHARED_ADDENDUM = (
     "\n\n"
     "## Long-running work: workflows\n\n"
     "You have access to workflow tools (`start_workflow`, `get_workflow_status`, "
@@ -60,17 +60,20 @@ _BASE_ADDENDUM = (
     "- would take longer than a single chat turn, or\n"
     "- has steps that can run in parallel and you want them to, or\n"
     "- needs to survive a conversation pause / reconnect.\n\n"
+    "End workflows with a small summary task (or a delivery task for a declared "
+    "trigger) whenever the plan gathers more than one piece of evidence. "
+    "Do not return large raw evidence blobs, logs, "
+    "or per-item lists as the final workflow output unless the request explicitly "
+    "requires raw data; summarize the useful signal inside the workflow.\n\n"
+)
+
+_CHAT_ADDENDUM = (
     "`start_workflow` is fire-and-forget. It returns a `workflow_id` immediately "
     "and the orchestration runs in the background. After it returns, briefly "
     "tell the user that work is in flight (include the `workflow_id`) and end "
     "your turn — **do not call `get_workflow_status` to wait for completion.** "
     "The chat client renders live per-task progress next to the conversation "
     "and will notify you when the workflow reaches a terminal state.\n\n"
-    "End workflows with a small summary task whenever the plan gathers more "
-    "than one piece of evidence. Do not return large raw evidence blobs, logs, "
-    "or per-item lists as the final workflow output unless the user explicitly "
-    "asked for raw data; summarize the useful signal inside the workflow so the "
-    "later `get_workflow_status` call keeps the model context small.\n\n"
     "When a workflow you started reaches a terminal state, the chat client "
     "injects a synthetic user message containing one or more "
     "`<workflow-notification>` envelopes — one per finished workflow. Each "
@@ -105,10 +108,51 @@ _BASE_ADDENDUM = (
     "direct tool calls — workflows add overhead."
 )
 
-# Backwards-compat: tests import this constant. With per-app tool
-# listings the *complete* addendum is now built by
-# ``_build_addendum``; this constant is the static prefix only.
-WORKFLOW_SYSTEM_ADDENDUM = _BASE_ADDENDUM
+_TRIGGER_ADDENDUM = (
+    "This agent invocation came from a declared Azure Functions trigger. "
+    "`start_workflow` is fire-and-forget: it returns a `workflow_id` immediately "
+    "while the Durable orchestration continues independently. After it returns, "
+    "retain or report the `workflow_id` as the trigger's response contract allows, "
+    "then end this agent turn promptly. Do not poll `get_workflow_status` or wait "
+    "for terminal workflow status inside this trigger invocation.\n\n"
+    "There is no built-in chat poller, synthetic `<workflow-notification>` turn, "
+    "or automatic agent reactivation for declared triggers. For timer, queue, "
+    "blob, event, and similar non-HTTP triggers, include an explicit final "
+    "tool task that delivers the result to a domain sink such as "
+    "a queue, database, webhook, or notification tool. Operators can observe the "
+    "Durable instance through Durable Functions or Durable Task Scheduler tooling.\n\n"
+    "For an HTTP trigger, always honor its configured response schema or response "
+    "example. Include `workflow_id` in the HTTP response only when that authored "
+    "response format permits it."
+)
+
+
+@dataclass(frozen=True)
+class WorkflowIntegrationResult:
+    """Workflow registration output for each invocation channel.
+
+    Iteration preserves the original public two-value return contract:
+    ``workflow_tools, system_addendum = build_workflow_integration(...)``.
+    The legacy addendum is the chat-channel addendum.
+    """
+
+    workflow_tools: list[Any]
+    chat_system_addendum: str | None
+    trigger_system_addendum: str | None
+
+    def __iter__(self) -> Iterator[Any]:
+        """Yield the legacy ``(workflow_tools, system_addendum)`` pair."""
+        yield self.workflow_tools
+        yield self.chat_system_addendum
+
+    @property
+    def enabled(self) -> bool:
+        """Return whether both workflow invocation channels are enabled."""
+        chat_enabled = self.chat_system_addendum is not None
+        trigger_enabled = self.trigger_system_addendum is not None
+        if chat_enabled != trigger_enabled:
+            raise RuntimeError("workflow channel addenda must be enabled or disabled together")
+        return chat_enabled
 
 
 def _validate_workflows_block(metadata: dict[str, Any]) -> None:
@@ -236,13 +280,13 @@ def _apply_workflow_exclude(
     return tuple(tool for tool in workflow_tools if tool.name not in excluded)
 
 
-def _build_addendum(allowed_tools: frozenset[str]) -> str:
-    """Return the per-app system-prompt addendum.
+def _build_tool_section(allowed_tools: frozenset[str]) -> str:
+    """Return the dynamic workflow-tool section shared by both channels.
 
-    Includes the static "when to use workflows" prose plus a dynamic
-    "Available workflow tools" section listing each allowed tool's
-    name and engine-owned description. This is the single place the
-    LLM learns which tool names are valid as workflow node targets.
+    Lists each allowed tool's name and engine-owned description. This is the
+    single place the LLM learns which tool names are valid as workflow node
+    targets. ``_build_addendum`` combines it with the shared and
+    channel-specific guidance.
 
     Computed once at app start and threaded through ``extra_tools`` /
     ``system_addendum``; M1 does not support runtime allowlist changes.
@@ -262,20 +306,24 @@ def _build_addendum(allowed_tools: frozenset[str]) -> str:
             description = entry.description if entry is not None else ""
             lines.append(f"- `{name}` — {description}")
         tool_section = "\n".join(lines)
-    return _BASE_ADDENDUM + tool_section
+    return tool_section
+
+
+def _build_addendum(allowed_tools: frozenset[str], *, trigger_invocation: bool) -> str:
+    channel_addendum = _TRIGGER_ADDENDUM if trigger_invocation else _CHAT_ADDENDUM
+    return _SHARED_ADDENDUM + channel_addendum + _build_tool_section(allowed_tools)
 
 
 def build_workflow_integration(
     app: func.FunctionApp,
     metadata: dict[str, Any],
     workflow_tools: Sequence[WorkflowTool] | None = None,
-) -> tuple[list[Any], str | None]:
+) -> WorkflowIntegrationResult:
     """Enable workflows for the app if the main agent opted in.
 
-    Returns ``(workflow_tools, system_addendum)``. Both are empty /
-    ``None`` when the agent hasn't set ``workflows.enabled: true`` — the
-    caller can unconditionally extend its tool list and concat the
-    addendum without branching.
+    Returns a :class:`WorkflowIntegrationResult` containing management tools
+    plus chat and declared-trigger system addenda. The tools are empty and both
+    addenda are ``None`` when workflows are disabled.
     """
     # Shape-check the workflows block first so typos surface at app
     # start regardless of whether workflows are enabled. A typo'd key
@@ -289,7 +337,7 @@ def build_workflow_integration(
         # configured allowlist (if any) is intentionally left untouched
         # so this function is safe to call multiple times in test
         # scenarios that toggle metadata.
-        return [], None
+        return WorkflowIntegrationResult([], None, None)
     register_workflows(app)
     filtered_workflow_tools = _apply_workflow_exclude(tuple(workflow_tools or ()), metadata)
     effective = _register_workflow_tools(filtered_workflow_tools)
@@ -299,10 +347,14 @@ def build_workflow_integration(
         len(effective),
         ", ".join(sorted(effective)) or "<none>",
     )
-    return build_workflow_tools(), _build_addendum(effective)
+    return WorkflowIntegrationResult(
+        workflow_tools=build_workflow_tools(),
+        chat_system_addendum=_build_addendum(effective, trigger_invocation=False),
+        trigger_system_addendum=_build_addendum(effective, trigger_invocation=True),
+    )
 
 
 __all__ = [
-    "WORKFLOW_SYSTEM_ADDENDUM",
+    "WorkflowIntegrationResult",
     "build_workflow_integration",
 ]

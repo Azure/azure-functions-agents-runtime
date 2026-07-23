@@ -4,10 +4,9 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-07-06
-issues: []
-pull_requests: [#77]
-branch: TsuyoshiUshio/dynamic-workflows-conflicts
+updated: 2026-07-23
+issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112]
 ---
 
 # FRD 0004 — Dynamic workflows
@@ -21,6 +20,9 @@ built-in endpoints/UI, and receive final workflow notifications in the chat
 session. Workflow task tools are authored under the existing `tools/` directory
 but opt into Durable Activity execution explicitly with a new `@workflow_tool`
 decorator; normal plain-function tool discovery remains backward compatible.
+Workflow-enabled main agents can also start the same Durable workflows from any
+supported Markdown-declared trigger; the trigger starts the workflow
+asynchronously and does not wait for it to finish.
 
 ## 2. Motivation / problem
 
@@ -66,6 +68,8 @@ explicitly opt a function into the Durable Activity execution path.
   warning rather than failing startup when safe to do so.
 - Keep discovery read-only and keep Azure Functions/Durable registration in the
   registration/integration stage.
+- Enable every supported Markdown-declared trigger on a workflow-enabled
+  `main.agent.md` to start Dynamic Workflows through the existing runner.
 - Document the workflow authoring surface in `docs/workflows.md`,
   `docs/front-matter-spec.md`, and `docs/architecture.md`.
 
@@ -87,8 +91,8 @@ explicitly opt a function into the Durable Activity execution path.
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `_function_tool.py` | Load `tools/*.py` once, preserving normal `FunctionTool` discovery while also discovering explicit workflow tool declarations. Add a public `workflow_tool` decorator that records workflow metadata without making the function a normal MAF tool by itself. |
 | translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled` plus optional `exclude`) and compute the concrete per-agent workflow tool set for the main agent. Unknown workflow excludes warn, mirroring `tools.exclude`. |
-| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py` | When the main agent enables workflows, consume the already-filtered workflow tool set, register compatible handlers into the workflow registry, register the Durable blueprint, store the effective workflow tool names, and expose workflow HTTP/status routes and durable client bindings. |
-| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Durable Activity invokes registered workflow handlers with `dict` args and JSON-serializable results. UI polls workflow status and injects terminal notifications. |
+| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | When the main agent enables workflows, consume the already-filtered workflow tool set, register compatible handlers into the workflow registry, register the Durable blueprint, store the effective workflow tool names, and add Durable client bindings to built-in endpoints and Markdown-declared triggers. |
+| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Durable Activity invokes registered workflow handlers with `dict` args and JSON-serializable results. Trigger handlers pass the bound Durable client and trigger-specific workflow guidance to the runner. UI polls workflow status and injects terminal notifications. |
 
 ### Authoring / API surface
 
@@ -117,6 +121,21 @@ workflows:
 - If `workflows.enabled: true` is set on a non-main agent in v1, the runtime
   logs a startup warning and ignores the workflows block for that agent. This
   matches the current v1 constraint without failing unrelated agents.
+
+#### Markdown-declared trigger starters
+
+When a supported Markdown-declared trigger belongs to a workflow-enabled
+`main.agent.md`, registration adds a Durable client input to that generated
+Function. The handler passes the bound client, workflow enablement, the agent
+identity slug, and trigger-specific system guidance to the existing runner.
+Workflow-disabled and non-main handlers retain their original signatures.
+
+`start_workflow` schedules the orchestration and returns a `workflow_id` to the
+agent. The initial trigger Function ends after that agent turn instead of
+polling for terminal workflow status. An HTTP caller receives the immediate
+agent response; non-HTTP triggers have no response channel, so applications can
+provide a workflow tool that delivers the eventual result to an appropriate
+destination. This evolution adds no new frontmatter fields.
 
 #### Tool decorators
 
@@ -266,6 +285,9 @@ execution.
 | 9 | Incompatible workflow candidates | Fail all startup / silently skip / warn and skip where safe | Warn and skip incompatible workflow tool declarations where safe | Human | 2026-07-06 |
 | 10 | Workflow filtering stage | Apply `workflows.exclude` in integration/register / compute concrete workflow tools in capabilities | Compute the concrete workflow tool set before registration so registration consumes objects, not exclude policy | Agent | 2026-07-06 |
 | 11 | Dual decorator order | Require one order / support both orders | Support both orders by attaching workflow metadata to both callables and `FunctionTool` objects | Agent | 2026-07-06 |
+| 12 | Record trigger support | Create a second Dynamic Workflows FRD / evolve this FRD | Update FRD 0004 because Markdown-declared trigger support extends the existing feature without redesigning it | Human | 2026-07-23 |
+| 13 | Declared-trigger scope | Add named trigger types individually / use generic trigger registration | Add the Durable client binding generically to every supported Markdown-declared trigger for the workflow-enabled main agent | Human + Agent | 2026-07-17 |
+| 14 | Trigger lifetime | Wait for terminal status / start asynchronously | End the initial trigger Function after the agent starts the workflow; Durable execution continues independently | Human + Agent | 2026-07-17 |
 
 ## 6. Test plan
 
@@ -303,6 +325,12 @@ execution.
   sample layout.
 - [ ] E2E: run the `workflow-incident-triage` sample locally with Azurite/Durable
   storage and confirm a workflow can start, execute sample tools, and complete.
+- [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
+  Durable client and trigger addendum while disabled/non-main handlers keep
+  their existing signatures.
+- [x] Evolution #112: timer and queue samples index their trigger, Durable
+  client, orchestrator, and Activity bindings and complete model-backed local
+  runs.
 
 ## 7. Docs impact
 
@@ -317,6 +345,8 @@ execution.
 - [ ] `samples/workflow-incident-triage/README.md` — update authoring and local
   run instructions for auto-registration.
 - [ ] `docs/frds/README.md` — add FRD 0004 to the index.
+- [x] Evolution #112: update `docs/triggers.md`, `docs/workflows.md`, and
+  `docs/architecture.md` for trigger-started workflows.
 
 ## 8. Status & sign-off
 
@@ -326,3 +356,5 @@ execution.
   names, and unknown decorator kwargs were addressed. Re-review found no
   remaining blocking issues and deemed the FRD ready for human sign-off.
 - **Human sign-off:** TsuyoshiUshio, 2026-07-06 → `status: Finalized`.
+- **Evolution review:** Markdown-declared trigger support reviewed by
+  TsuyoshiUshio and Chris Gillum in PR #112, 2026-07-23.

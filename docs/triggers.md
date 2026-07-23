@@ -39,6 +39,22 @@ referenced by any other agent's `subagents:`, is invalid and fails validation â€
 completely unreachable. See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/)
 for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
 
+### Starting Dynamic Workflows
+
+When `main.agent.md` sets `workflows.enabled: true`, every supported declared
+trigger can initiate a Dynamic Workflow. The runtime schedules the workflow
+asynchronously, and the trigger Function does not wait for it to finish.
+
+This behavior is generic across HTTP, timer, queue, blob, Event Grid, Service
+Bus, connector, and the other supported trigger decorators. It is still limited
+to `main.agent.md`; workflow settings on other agent files are ignored with a
+startup warning.
+
+See [Trigger-started workflows](./workflows.md#trigger-started-workflows) for
+HTTP and non-HTTP completion behavior, and the
+[queue workflow sample](../samples/workflow-queue-p0-report/README.md) for a
+runnable example.
+
 ## Supported Trigger Types
 
 | Agent `trigger.type` | Azure Functions decorator | Status | Notes |
@@ -130,6 +146,13 @@ See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentica
 By default, the handler returns the agent response as `text/plain`. When `response_example` or `response_schema` is configured at the top level, the runtime instructs the model to return JSON, validates the result, and returns `application/json`.
 
 HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header.
+
+An HTTP request receives the agent's immediate response, not the eventual
+workflow result. The configured response schema/example continues to govern the
+immediate response. Runtime workflow monitoring routes are available only when
+the same main agent also enables the built-in chat API. For non-HTTP result
+delivery, see
+[Trigger-started workflows](./workflows.md#trigger-started-workflows).
 
 Use `response_example` or `response_schema` at the top level, not under `trigger`.
 
