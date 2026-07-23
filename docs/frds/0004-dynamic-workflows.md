@@ -287,8 +287,10 @@ name: Support Coordinator
 workflows:
   enabled: true
   allowed_sub_agents:
-    - agent: billing
-      when: Use for durable invoice and payment analysis
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an actionable portfolio report
 ---
 ```
 
@@ -304,18 +306,31 @@ The Workflow plan uses a `sub_agent` task:
 
 ```json
 {
-  "id": "analyze_billing",
+  "id": "analyze_pr_42",
   "type": "sub_agent",
-  "agent": "billing",
-  "task": "Analyze ${collect.result} and return a concise billing assessment.",
-  "depends_on": ["collect"]
+  "agent": "pr_status_analyst",
+  "task": "Review pull request https://github.com/owner/repo/pull/42 and summarize its current status."
+}
+```
+
+The reduce node uses the same task type and depends on every map result:
+
+```json
+{
+  "id": "write_report",
+  "type": "sub_agent",
+  "agent": "actionable_report_writer",
+  "task": "Create an actionable report from PR 42: ${analyze_pr_42.result.text}; PR 43: ${analyze_pr_43.result.text}.",
+  "depends_on": ["analyze_pr_42", "analyze_pr_43"]
 }
 ```
 
 `task` must be a self-contained string and may template upstream results. A
 successful v1 node returns
-`{"agent": "billing", "text": "...", "child_workflow_id": "..."}`; downstream
-tasks can reference `${analyze_billing.result.text}`. The child id provides
+`{"agent": "pr_status_analyst", "text": "...", "child_workflow_id": "..."}`;
+downstream tasks can reference `${analyze_pr_42.result.text}`. Independent Sub
+Agent tasks can fan out without dependencies, and another authorized Sub Agent
+can depend on all of them to reduce their summaries. The child id provides
 durable status and lineage for the leaf execution; leaf-only means that child
 cannot start another Workflow or delegate again.
 

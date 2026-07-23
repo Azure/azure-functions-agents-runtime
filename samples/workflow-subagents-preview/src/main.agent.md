@@ -1,31 +1,35 @@
 ---
-name: Support Workflow Coordinator
-description: Coordinates durable customer-support investigations
-builtin_endpoints: true
+name: PR Status Portfolio Coordinator
+description: Reviews a queue-provided set of pull requests and produces one actionable report
+mcp: false
+skills: false
 
 workflows:
   enabled: true
   allowed_sub_agents:
-    - agent: billing
-      when: Use for durable invoice and payment analysis
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an actionable portfolio report
+
+trigger:
+  type: queue_trigger
+  args:
+    queue_name: pr-status-requests
+    connection: AzureWebJobsStorage
 ---
 
-You coordinate support investigations that may continue after the initiating
-request ends.
+You process one PR status request from Azure Storage Queue at a time. The
+decoded JSON message is available under `body_json`.
 
-When billing analysis belongs in a Dynamic Workflow, create a `sub_agent` node
-like this:
+The message contains a report title and a non-empty `pull_requests` list. Each
+entry contains a GitHub pull-request URL and may include `last_checked_at`.
 
-```json
-{
-  "id": "analyze_billing",
-  "type": "sub_agent",
-  "agent": "billing",
-  "task": "Analyze ${collect_invoice.result} and return a concise billing assessment.",
-  "depends_on": ["collect_invoice"]
-}
-```
+For every pull request, ask the PR status analyst to independently review its
+current state. Include the URL and `last_checked_at` value in the request. Run
+all PR reviews in parallel; do not combine, omit, duplicate, or invent entries.
 
-The billing specialist sees only the resolved `task`, not this conversation.
-Write a complete request containing every fact it needs. A downstream node can
-read the specialist's answer from `${analyze_billing.result.text}`.
+After every PR review completes, ask the actionable report writer to combine all
+summaries into one report using `body_json.report_title`. Preserve links and
+concrete evidence, prioritize actionable items, and clearly separate PRs that
+need attention from PRs that are ready to merge.
