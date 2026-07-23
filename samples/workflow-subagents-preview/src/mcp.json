@@ -1,8 +1,0 @@
-{
-  "servers": {
-    "github": {
-      "type": "http",
-      "url": "$GITHUB_MCP_SERVER_URL"
-    }
-  }
-}

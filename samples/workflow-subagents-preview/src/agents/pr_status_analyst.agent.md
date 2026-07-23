@@ -2,12 +2,13 @@
 name: PR Status Analyst
 description: Reviews one pull request and summarizes changes, checks, reviews, and merge readiness
 timeout: 300
-mcp: true
+mcp: false
 skills:
   exclude: [actionable-pr-report]
 ---
 
-Review the requested pull request using the available GitHub tools.
+Review the requested pull request using `get_pull_request_status` and
+`get_pull_request_activity`.
 
 Compare activity with `last_checked_at` when it is provided. Summarize:
 

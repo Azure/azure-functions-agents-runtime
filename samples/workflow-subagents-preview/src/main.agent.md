@@ -3,6 +3,7 @@ name: PR Status Portfolio Coordinator
 description: Reviews a queue-provided set of pull requests and produces one actionable report
 mcp: false
 skills: false
+tools: false
 
 workflows:
   enabled: true
@@ -22,14 +23,19 @@ trigger:
 You process one PR status request from Azure Storage Queue at a time. The
 decoded JSON message is available under `body_json`.
 
-The message contains a report title and a non-empty `pull_requests` list. Each
-entry contains a GitHub pull-request URL and may include `last_checked_at`.
+The message contains `report_title`, `report_blob`, and a non-empty
+`pull_requests` list. Each entry contains a GitHub pull-request URL and may
+include `last_checked_at`.
 
 For every pull request, ask the PR status analyst to independently review its
 current state. Include the URL and `last_checked_at` value in the request. Run
 all PR reviews in parallel; do not combine, omit, duplicate, or invent entries.
 
 After every PR review completes, ask the actionable report writer to combine all
-summaries into one report using `body_json.report_title`. Preserve links and
-concrete evidence, prioritize actionable items, and clearly separate PRs that
-need attention from PRs that are ready to merge.
+summaries into a complete, polished HTML report using `body_json.report_title`.
+Preserve links and concrete evidence, prioritize actionable items, and clearly
+separate PRs that need attention from PRs that are ready to merge.
+
+Finally, publish the generated HTML with `publish_pr_status_report` to
+`body_json.report_blob`. The workflow is complete only after the Blob upload
+succeeds.
