@@ -84,6 +84,7 @@ Create the input queue and enqueue a request:
 ```powershell
 $connection = "DefaultEndpointsProtocol=http;" +
   "AccountName=devstoreaccount1;" +
+  # [SuppressMessage("Microsoft.Security", "CS002:SecretInNextLine", Justification="Azurite uses a public emulator account key")]
   "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
   "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;" +
   "QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;" +
