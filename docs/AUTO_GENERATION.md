@@ -96,7 +96,7 @@ Trigger type documentation is defined in the `TRIGGER_TYPES` dictionary in `src/
 
 ### Field Descriptions
 
-Enhanced descriptions are in `*_DESCRIPTIONS` dictionaries in the script. These complement the Pydantic model docstrings and add links to other docs sections.
+Enhanced descriptions are in `*_DESCRIPTIONS` dictionaries in `src/azure_functions_agents/config/schema.py` alongside the Pydantic models. These complement the Pydantic model docstrings and add markdown formatting and links to other docs sections. To update field descriptions, edit the appropriate description dictionary in `schema.py`.
 
 ### Static Sections
 
