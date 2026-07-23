@@ -141,7 +141,7 @@ Only the enabled closure passes:
 - `workflow_enabled=True`
 - `workflow_durable_client=client`
 - the trigger workflow system addendum
-- `agent_name=resolved.name`
+- `agent_name=resolved.slug`
 
 All existing prompt construction, trigger serialization, request/response
 schema validation, sessions, observability, logging, and error handling remain
@@ -260,7 +260,8 @@ declared trigger can replace `timer_trigger`.
   - sample contract expects the dedicated timer app and its workflow tools.
 - [x] Unit: `tests/test_registration_handlers.py`
   - enabled handler signatures accept a required client;
-  - runner receives client, enabled state, trigger addendum, and agent name;
+  - runner receives client, enabled state, trigger addendum, and agent identity
+    slug;
   - disabled handlers preserve their old signatures and runner args.
 - [x] Unit: `tests/test_registration_triggers.py`
   - HTTP and non-HTTP trigger decorators preserve all args;

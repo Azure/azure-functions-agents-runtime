@@ -131,6 +131,9 @@ Start-Process .\p0-issues.html
 ## Production adaptation
 
 Replace `inspect_repository_p0_issues` with a GitHub API implementation and use
-managed identity for Azure Storage. Keep the same bounded Activity contract:
-one repository per Activity, JSON-serializable results, a fan-in renderer, and a
+managed identity for Azure Storage. The sample publisher currently reads the
+`AzureWebJobsStorage` connection string; an identity-based adaptation should
+construct `BlobServiceClient` with the storage account URL and
+`DefaultAzureCredential`. Keep the same bounded Activity contract: one
+repository per Activity, JSON-serializable results, a fan-in renderer, and a
 terminal delivery Activity.
