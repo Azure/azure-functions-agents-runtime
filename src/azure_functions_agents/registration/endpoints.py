@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -57,11 +59,27 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
     return runner_module.run_agent_stream(*args, **kwargs)
 
 
+# Mirror of ``runner._SESSION_ID_PATTERN`` (kept local so this module does not
+# eagerly import the heavy ``runner`` module). The runner uses the session id as
+# a filename component, so it rejects anything outside this safe set.
+_SAFE_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+
+
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     value = payload.get("sessionId") or payload.get("sessionid")
-    if isinstance(value, str) and value.strip():
-        return value.strip()
-    return None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    value = value.strip()
+    if _SAFE_SESSION_ID_PATTERN.match(value):
+        return value
+    # The MCP extension mints its own transport session id (e.g. the
+    # streamable-HTTP ``Mcp-Session-Id``), whose format we do not control and
+    # which may contain characters the runner rejects or exceed its length
+    # cap. Map any such value deterministically into the safe space so the same
+    # MCP session still resolves to the same agent session (conversation
+    # continuity) without tripping the runner's validation.
+    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
+    return f"mcp-{digest}"
 
 
 def _index_path() -> Path:
