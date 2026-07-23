@@ -8,6 +8,7 @@ with ``-m e2e``.
 
 from __future__ import annotations
 
+import shutil
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,11 @@ from tests.endtoend._func_host import start_and_verify
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SAMPLES_DIR = REPO_ROOT / "samples"
+
+pytestmark = [
+    pytest.mark.e2e,
+    pytest.mark.skipif(shutil.which("func") is None, reason="Azure Functions Core Tools not found"),
+]
 
 
 def _discover_sample_apps() -> list[Path]:
@@ -26,7 +32,6 @@ def _discover_sample_apps() -> list[Path]:
 SAMPLE_APPS = _discover_sample_apps()
 
 
-@pytest.mark.e2e
 @pytest.mark.parametrize(
     "app_dir",
     SAMPLE_APPS,

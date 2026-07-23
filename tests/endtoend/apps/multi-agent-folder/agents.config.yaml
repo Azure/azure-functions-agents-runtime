@@ -1,0 +1,2 @@
+# Global defaults inherited by every agent in this app.
+timeout: 120
