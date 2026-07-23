@@ -22,3 +22,4 @@ pipelines:
           lastModifiedDate: 2026-07-23
         armory:
           lastModifiedDate: 2026-07-23
+    usedNonDefaultBranch: true
