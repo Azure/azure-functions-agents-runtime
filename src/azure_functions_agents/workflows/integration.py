@@ -117,23 +117,14 @@ _TRIGGER_ADDENDUM = (
     "for terminal workflow status inside this trigger invocation.\n\n"
     "There is no built-in chat poller, synthetic `<workflow-notification>` turn, "
     "or automatic agent reactivation for declared triggers. For timer, queue, "
-    "blob, event, and similar non-HTTP triggers, include an explicit terminal "
-    "workflow Activity that delivers the final result to a domain sink such as "
+    "blob, event, and similar non-HTTP triggers, include an explicit final "
+    "tool task that delivers the result to a domain sink such as "
     "a queue, database, webhook, or notification tool. Operators can observe the "
     "Durable instance through Durable Functions or Durable Task Scheduler tooling.\n\n"
     "For an HTTP trigger, always honor its configured response schema or response "
     "example. Include `workflow_id` in the HTTP response only when that authored "
-    "response format permits it.\n\n"
-    "Individual workflow Activities are normal Function executions. Keep each "
-    "Activity bounded and within the hosting plan's Function timeout; use Durable "
-    "timers or additional Activities instead of blocking one Activity for a "
-    "long-running wait."
+    "response format permits it."
 )
-
-# Backwards-compat: tests import this constant. With per-app tool
-# listings the *complete* addendum is now built by
-# ``_build_addendum``; this constant is the static prefix only.
-WORKFLOW_SYSTEM_ADDENDUM = _SHARED_ADDENDUM + _CHAT_ADDENDUM
 
 
 @dataclass(frozen=True)
@@ -364,7 +355,6 @@ def build_workflow_integration(
 
 
 __all__ = [
-    "WORKFLOW_SYSTEM_ADDENDUM",
     "WorkflowIntegrationResult",
     "build_workflow_integration",
 ]

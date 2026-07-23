@@ -4,7 +4,7 @@ This sample receives a repository portfolio from Azure Storage Queue, asks the
 agent to create a Dynamic Workflow, inspects every repository in parallel,
 renders one HTML summary, and uploads it to Azure Blob Storage.
 
-The issue inspection Activity is deterministic and synthetic, so the sample
+The issue inspection tool is deterministic and synthetic, so the sample
 needs no GitHub token. The Queue trigger and Blob terminal sink use Azurite, and
 orchestration state uses the Durable Task Scheduler emulator.
 
@@ -20,9 +20,9 @@ Queue message
 The independent inspection tasks have no dependencies and can execute in
 parallel. The queue message is the repository registry for that report:
 
-![Parallel repository inspection Activities in the DTS dashboard](../../docs/images/workflow-queue-p0-report/dts-parallel-activities.png)
+![Parallel repository inspection tasks in the DTS dashboard](../../docs/images/workflow-queue-p0-report/dts-parallel-activities.png)
 
-The terminal Activity publishes a responsive portfolio dashboard to Blob Storage:
+The final tool task publishes a responsive portfolio dashboard to Blob Storage:
 
 ![Generated P0 issue portfolio dashboard](../../docs/images/workflow-queue-p0-report/p0-report-dashboard.png)
 
@@ -79,38 +79,15 @@ Start the Functions host:
 func start
 ```
 
-Create the input queue and enqueue a request:
+Create the input queue and submit the default report request:
 
 ```powershell
-$connection = "DefaultEndpointsProtocol=http;" +
-  "AccountName=devstoreaccount1;" +
-  # [SuppressMessage("Microsoft.Security", "CS002:SecretInNextLine", Justification="Azurite uses a public emulator account key")]
-  "AccountKey=Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==;" +
-  "BlobEndpoint=http://127.0.0.1:10000/devstoreaccount1;" +
-  "QueueEndpoint=http://127.0.0.1:10001/devstoreaccount1;" +
-  "TableEndpoint=http://127.0.0.1:10002/devstoreaccount1;"
-az storage queue create `
-  --name issue-report-requests `
-  --connection-string $connection
-
-$request = @{
-  repositories = @(
-    "Azure/azure-functions-host"
-    "Azure/azure-functions-python-worker"
-    "Azure/azure-functions-durable-python"
-  )
-  report_blob = "reports/p0-issues.html"
-} | ConvertTo-Json -Compress
-
-$encodedRequest = [Convert]::ToBase64String(
-  [Text.Encoding]::UTF8.GetBytes($request)
-)
-
-az storage message put `
-  --queue-name issue-report-requests `
-  --connection-string $connection `
-  --content $encodedRequest
+Set-Location samples\workflow-queue-p0-report
+.\local-report.ps1 -Action Submit
 ```
+
+Pass `-Repositories owner/repo,owner/another-repo` or
+`-ReportBlob reports/custom.html` to customize the request.
 
 Watch the Function logs for `workflow started` followed by
 `P0_REPORT_PUBLISHED`. Inspect task parallelism and history in the DTS dashboard
@@ -119,14 +96,7 @@ at <http://localhost:8082>.
 Download the generated report:
 
 ```powershell
-az storage blob download `
-  --container-name workflow-reports `
-  --name reports/p0-issues.html `
-  --file .\p0-issues.html `
-  --connection-string $connection `
-  --overwrite
-
-Start-Process .\p0-issues.html
+.\local-report.ps1 -Action Download
 ```
 
 ## Production adaptation
@@ -135,6 +105,6 @@ Replace `inspect_repository_p0_issues` with a GitHub API implementation and use
 managed identity for Azure Storage. The sample publisher currently reads the
 `AzureWebJobsStorage` connection string; an identity-based adaptation should
 construct `BlobServiceClient` with the storage account URL and
-`DefaultAzureCredential`. Keep the same bounded Activity contract: one
-repository per Activity, JSON-serializable results, a fan-in renderer, and a
-terminal delivery Activity.
+`DefaultAzureCredential`. Keep the same workflow shape: one inspection task per
+repository, JSON-serializable results, a fan-in renderer, and a final delivery
+task.

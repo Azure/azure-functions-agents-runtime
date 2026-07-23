@@ -1,4 +1,4 @@
-"""Workflow Activities for the queue-triggered P0 portfolio report sample."""
+"""Workflow tools for the queue-triggered P0 portfolio report sample."""
 
 from __future__ import annotations
 
@@ -193,7 +193,7 @@ def render_p0_html_report(args: dict[str, Any]) -> dict[str, Any]:
         f'<strong class="metric-value">{healthy_repositories}</strong></div>'
         f'</section><div class="repository-grid">{"".join(sections)}</div></main>'
         '<footer class="footer">Generated from deterministic sample data. '
-        "Replace the inspection Activity with the GitHub API for production use.</footer>"
+        "Replace the inspection tool with the GitHub API for production use.</footer>"
         "</body></html>"
     )
     return {

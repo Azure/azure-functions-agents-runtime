@@ -32,6 +32,15 @@ def test_workflow_queue_sample_declares_workflow_queue() -> None:
         "connection": "AzureWebJobsStorage",
     }
     assert spec.workflows == {"enabled": True}
+    assert "create exactly one Dynamic Workflow" in spec.instructions
+    for internal_term in (
+        "start_workflow",
+        "workflow_id",
+        "depends_on",
+        "${",
+        "Durable Functions",
+    ):
+        assert internal_term not in spec.instructions
 
 
 def test_workflow_queue_sample_uses_dts_backend() -> None:

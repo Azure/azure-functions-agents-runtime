@@ -44,8 +44,8 @@ def _startup_env(app_dir: Path) -> dict[str, str]:
 
 
 def test_startup_env_disables_timer_functions_only() -> None:
-    assert _startup_env(SAMPLES_DIR / "workflow-timer-trigger" / "src") == {
-        "AzureWebJobs.main.Disabled": "true"
+    assert _startup_env(SAMPLES_DIR / "daily-tech-news-email" / "src") == {
+        "AzureWebJobs.daily_tech_news.Disabled": "true"
     }
     assert _startup_env(SAMPLES_DIR / "workflow-queue-p0-report" / "src") == {}
 

@@ -6,7 +6,7 @@
 > the supported v1 surface. Run the
 > [workflow-incident-triage sample](../samples/workflow-incident-triage/README.md)
 > for the interactive experience, or the
-> [timer-trigger sample](../samples/workflow-timer-trigger/README.md) for a
+> [queue-trigger sample](../samples/workflow-queue-p0-report/README.md) for a
 > non-interactive starter. Larger features such as sub-orchestrations,
 > sub-agent tasks, configurable retry policies, and MCP Tasks integration
 > are tracked as v2 follow-up work.
@@ -391,14 +391,13 @@ Any supported Markdown-declared trigger on a workflow-enabled `main.agent.md`
 can start a Dynamic Workflow:
 
 1. The agent receives the trigger payload and authors a workflow plan.
-2. `start_workflow` schedules the orchestration and immediately returns a
-   `workflow_id`.
-3. The trigger Function returns after the agent's initial turn; Durable
-   Functions executes the workflow independently.
+2. The runtime schedules the workflow asynchronously.
+3. The trigger Function returns after the agent's initial turn while the
+   workflow continues independently.
 
 For an HTTP trigger, the caller receives the agent's immediate HTTP response,
-not the eventual workflow result. The response may include `workflow_id` when
-its authored schema/example permits it; response validation is unchanged.
+not the eventual workflow result. Its authored schema/example and response
+validation are unchanged.
 
 Non-HTTP triggers have no response channel. Applications that need the eventual
 result should provide a project workflow tool that writes or sends it to an
@@ -421,7 +420,7 @@ existence cannot be probed by guessing IDs across sessions).
 - **Live-progress chat UI** — built-in poll loop renders per-node state
   in the chat session.
 - **Terminal trigger sink** — non-interactive workflows publish their result
-  from a final Activity chosen by the application.
+  from a final tool task chosen by the application.
 - **Durable Task Scheduler portal** — when the app's
   `host.json` is configured with the DTS `storageProvider`, each
   workflow appears as a queryable instance with per-task state and retry

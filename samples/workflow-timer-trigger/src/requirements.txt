@@ -1,2 +1,0 @@
--e ../../..
-azure-functions-durable>=1.2.9

@@ -536,7 +536,6 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
 - [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
-- [`workflow-timer-trigger`](samples/workflow-timer-trigger) — timer-started Dynamic Workflow with a terminal result sink
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 
 ## Deployment Notes

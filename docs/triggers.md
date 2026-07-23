@@ -42,9 +42,8 @@ for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
 ### Starting Dynamic Workflows
 
 When `main.agent.md` sets `workflows.enabled: true`, every supported declared
-trigger also receives a Durable client binding. The triggered agent can call
-`start_workflow`; the workflow is scheduled asynchronously and the trigger
-Function does not wait for it to finish.
+trigger can initiate a Dynamic Workflow. The runtime schedules the workflow
+asynchronously, and the trigger Function does not wait for it to finish.
 
 This behavior is generic across HTTP, timer, queue, blob, Event Grid, Service
 Bus, connector, and the other supported trigger decorators. It is still limited
@@ -53,7 +52,7 @@ startup warning.
 
 See [Trigger-started workflows](./workflows.md#trigger-started-workflows) for
 HTTP and non-HTTP completion behavior, and the
-[timer workflow sample](../samples/workflow-timer-trigger/README.md) for a
+[queue workflow sample](../samples/workflow-queue-p0-report/README.md) for a
 runnable example.
 
 ## Supported Trigger Types
@@ -149,10 +148,10 @@ By default, the handler returns the agent response as `text/plain`. When `respon
 HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header.
 
 An HTTP request receives the agent's immediate response, not the eventual
-workflow result. If the caller needs the workflow ID, include `workflow_id` in
-the configured response schema/example. Runtime workflow polling routes are
-available only when the same main agent also enables the built-in chat API. For
-non-HTTP result delivery, see
+workflow result. The configured response schema/example continues to govern the
+immediate response. Runtime workflow monitoring routes are available only when
+the same main agent also enables the built-in chat API. For non-HTTP result
+delivery, see
 [Trigger-started workflows](./workflows.md#trigger-started-workflows).
 
 Use `response_example` or `response_schema` at the top level, not under `trigger`.

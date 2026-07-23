@@ -352,5 +352,6 @@ def test_enabled_builds_channel_specific_workflow_guidance():
     assert "do not poll" in result.trigger_system_addendum.lower()
     assert "terminal" in result.trigger_system_addendum.lower()
     assert "sink" in result.trigger_system_addendum.lower()
-    assert "Function timeout" in result.trigger_system_addendum
-    assert "Durable timers" in result.trigger_system_addendum
+    assert "final tool task" in result.trigger_system_addendum
+    assert "Activity" not in result.trigger_system_addendum
+    assert "Durable timers" not in result.trigger_system_addendum

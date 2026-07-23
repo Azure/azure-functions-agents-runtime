@@ -22,25 +22,19 @@ The message must have this shape:
 }
 ```
 
-For every valid request, call `start_workflow` exactly once with this DAG:
+For every valid request, create exactly one Dynamic Workflow that:
 
-1. Create one `inspect_repository_p0_issues` tool task per repository. Pass that
-   repository as `repository`. These tasks are independent: do not add
-   `depends_on`, so Durable Functions can execute every repository check in
-   parallel.
-2. Create one `render_p0_html_report` tool task that depends on every inspection
-   task. Its `repository_reports` argument must be a list containing each whole
-   inspection result as `${inspection_task_id.result}`.
-3. Create one terminal `publish_p0_html_report` tool task that depends on the
-   render task. Pass the whole rendered result as
-   `report: ${render_task_id.result}` and pass `body_json.report_blob` as
-   `blob_name`.
+1. Contains exactly one `inspect_repository_p0_issues` task for each requested
+   repository. Every inspection must run independently and in parallel; never
+   combine, omit, duplicate, or invent repository results.
+2. Contains exactly one `render_p0_html_report` task after all inspections.
+   Give it every complete inspection result in the same order as the request.
+   Do not generate the HTML yourself.
+3. Contains exactly one final `publish_p0_html_report` task. Give it only the
+   renderer's complete result and publish to `body_json.report_blob`.
 
-Use short, unique task IDs derived from repository names. Preserve the exact
-repository order from the request in `repository_reports`. After
-`start_workflow` returns, log a short response containing the `workflow_id` and
-end the turn immediately. Do not poll workflow status.
+The workflow is complete only after the report has been published.
 
 If `body_json.repositories` is missing, empty, or not a list of non-empty
-strings, do not start a workflow; explain the validation error in the Function
+strings, do not create a workflow; explain the validation error in the Function
 log.
