@@ -23,16 +23,16 @@ jobs:
           PYTHON_VERSION: '3.14'
 
     steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
       - task: UsePythonVersion@0
         inputs:
           versionSpec: $(PYTHON_VERSION)
       - bash: |
           python --version
         displayName: 'Check python version'
-      - task: PipAuthenticate@1
-        displayName: 'Pip Authenticate'
-        inputs:
-          artifactFeeds: ${{ parameters.artifactFeed }}
       - bash: |
           python -m pip install --upgrade pip
           python -m pip install -U -e .[dev]
@@ -75,5 +75,6 @@ jobs:
         env:
           AzureWebJobsStorage: 'UseDevelopmentStorage=true'
           FUNCTIONS_WORKER_RUNTIME: 'python'
+          AZURE_TOKEN_CREDENTIALS: 'dev'
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
