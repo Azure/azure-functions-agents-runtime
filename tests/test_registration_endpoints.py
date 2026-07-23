@@ -18,6 +18,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
+    _SAFE_SESSION_ID_PATTERN,
     _extract_mcp_session_id,
     _run_builtin_agent,
     _run_builtin_agent_stream,
@@ -671,6 +672,18 @@ def test_extract_mcp_session_id_returns_none_when_absent_or_blank() -> None:
     assert _extract_mcp_session_id({}) is None
     assert _extract_mcp_session_id({"sessionId": "   "}) is None
     assert _extract_mcp_session_id({"sessionId": 123}) is None
+
+
+def test_safe_session_id_pattern_matches_runner_pattern() -> None:
+    """``endpoints._SAFE_SESSION_ID_PATTERN`` is a local mirror of
+    ``runner._SESSION_ID_PATTERN`` (kept separate to avoid eagerly importing the
+    heavy runner module). Pass-through session ids validated here must remain
+    valid in the runner, so the two patterns must stay identical. This test
+    catches future drift between them.
+    """
+    assert _SAFE_SESSION_ID_PATTERN.pattern == _SESSION_ID_PATTERN.pattern
+    assert _SAFE_SESSION_ID_PATTERN.flags == _SESSION_ID_PATTERN.flags
+
 
 
 def test_extract_mcp_session_id_sanitizes_transport_ids() -> None:

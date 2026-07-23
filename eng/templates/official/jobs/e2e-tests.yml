@@ -64,15 +64,6 @@ jobs:
       # "Azure AI User" where available) on the target Foundry (AIServices)
       # account so it can create/run agents (agents/write). See the RBAC command
       # in the PR / repo notes.
-      #
-      # AZURE_TOKEN_CREDENTIALS=dev pins DefaultAzureCredential to the developer
-      # credentials (AzureCliCredential first) and skips ManagedIdentityCredential.
-      # Without it, the chain probes IMDS on the build agent first: on 1ES pools
-      # that either binds to the agent VM's own identity (which lacks Foundry
-      # data-plane RBAC, so the Agents endpoint resets the connection and the
-      # OpenAI client surfaces it as APIConnectionError('Connection error.'))
-      # or adds a flaky IMDS round-trip. Forcing the CLI login makes the worker
-      # reuse the `saf-foundry-connection` identity deterministically.
       - task: AzureCLI@2
         displayName: 'Run E2E tests'
         inputs:
