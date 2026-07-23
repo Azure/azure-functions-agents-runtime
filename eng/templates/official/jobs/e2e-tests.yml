@@ -38,7 +38,7 @@ jobs:
           python -m pip install -U -e .[dev]
         displayName: 'Install dependencies for $(PYTHON_VERSION)'
 
-      - template: /eng/scripts/install-core-tools.yml@self
+      - template: /eng/templates/install-core-tools.yml@self
 
       - bash: |
           docker run -d --name azurite \
@@ -56,9 +56,24 @@ jobs:
           done
         displayName: 'Start Azurite'
 
-      - bash: |
-          python -m pytest -m e2e tests/endtoend -v
-        displayName: 'Run E2E sample startup tests'
+      # Run under AzureCLI@2 so the task performs `az login` as the service
+      # connection's identity. The `func` host and its Python worker are child
+      # processes that inherit AZURE_CONFIG_DIR, so DefaultAzureCredential's
+      # AzureCliCredential reuses that login when the agents call Foundry.
+      # The connection's identity must hold "Cognitive Services User" (or
+      # "Azure AI User" where available) on the target Foundry (AIServices)
+      # account so it can create/run agents (agents/write). See the RBAC command
+      # in the PR / repo notes.
+      - task: AzureCLI@2
+        displayName: 'Run E2E tests'
+        inputs:
+          azureSubscription: 'saf-foundry-connection'
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            python -m pytest -m e2e tests/endtoend -v
         env:
           AzureWebJobsStorage: 'UseDevelopmentStorage=true'
           FUNCTIONS_WORKER_RUNTIME: 'python'
+          FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
+          FOUNDRY_MODEL: $(FOUNDRY_MODEL)

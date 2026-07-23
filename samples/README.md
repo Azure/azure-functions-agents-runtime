@@ -5,7 +5,6 @@ Each subdirectory is a standalone Azure Functions app deployable with [`azd up`]
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
 | [basic-chat](basic-chat/) | HTTP | | | | | ✅ | ✅ |
-| [multi-agent-folder](multi-agent-folder/) | HTTP | | | | | | ✅ |
 | [multi-agent-delegation](multi-agent-delegation/) | HTTP | | | | | | ✅ |
 | [outlook-reply-agent](outlook-reply-agent/) | Office 365 Outlook | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
 | [daily-tech-news-email](daily-tech-news-email/) | Timer | | ✅ Office 365 Outlook | ✅ Office 365 Outlook | | ✅ | |
@@ -13,7 +12,6 @@ Each subdirectory is a standalone Azure Functions app deployable with [`azd up`]
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
 | [workflow-timer-trigger](workflow-timer-trigger/) | Timer | ✅ workflow-safe | | | | | |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
-| [skill-includes-demo](skill-includes-demo/) | HTTP | | | | ✅ (with includes) | | ✅ |
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
 
 ## Run Locally (optional)

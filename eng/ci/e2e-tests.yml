@@ -7,7 +7,7 @@ trigger:
 pr:
   branches:
     include:
-      - main
+    - main
 
 schedules:
   - cron: '0 0 * * MON'
@@ -23,30 +23,32 @@ resources:
       type: git
       name: 1ESPipelineTemplates/1ESPipelineTemplates
       ref: refs/tags/release
+    - repository: eng
+      type: git
+      name: engineering
+      ref: refs/tags/release
+
+variables:
+  - template: ci/variables/build.yml@eng
+  - template: ci/variables/cfs.yml@eng
 
 extends:
-  template: v1/1ES.Unofficial.PipelineTemplate.yml@1es
+  template: v1/1ES.Official.PipelineTemplate.yml@1es
   parameters:
     pool:
-      name: 1es-pool-azfunc-public
+      name: 1es-pool-azfunc
       image: 1es-windows-2022
       os: windows
-    sdl:
-      codeql:
-         compiled:
-           enabled: true # still only runs for default branch
-         runSourceLanguagesInSourceAnalysis: true
-    settings:
-      skipBuildTagsForGitHubPullRequests: ${{ variables['System.PullRequest.IsFork'] }}
 
     stages:
       - stage: Build
         jobs:
-          - template: /eng/templates/jobs/build.yml@self
+          - template: /eng/templates/official/jobs/build-artifacts.yml@self
 
-      - stage: RunTests
+      - stage: RunE2ETests
         dependsOn: Build
         jobs:
-          - template: /eng/templates/jobs/ci-tests.yml@self
+          - template: /eng/templates/official/jobs/e2e-tests.yml@self
             parameters:
-              artifactFeed: 'public/PythonSDK_PublicPackages'
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              PoolName: 1es-pool-azfunc
