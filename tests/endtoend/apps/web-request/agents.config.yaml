@@ -1,0 +1,9 @@
+# Configure the built-in, default-on web_request tool with an allow-list and limits.
+system_tools:
+  web_request:
+    allowed_hosts:
+      - example.com
+    require_https: true
+    timeout_seconds: 10
+    max_response_bytes: 1000000
+    max_request_bytes: 200000
