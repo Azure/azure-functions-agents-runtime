@@ -6,7 +6,7 @@ author: TsuyoshiUshio
 created: 2026-07-06
 updated: 2026-07-23
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117]
 ---
 
 # FRD 0004 — Dynamic workflows
