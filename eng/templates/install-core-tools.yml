@@ -17,7 +17,17 @@ steps:
 
       if [ "$HTTP_CODE" -eq 200 ] && [ -f coretools.zip ] && [ "$(stat -c%s coretools.zip 2>/dev/null || echo 0)" -gt 1000 ]; then
         sudo mkdir -p /opt/coretools
-        sudo unzip -o coretools.zip -d /opt/coretools
+        # The minimal 1ES image does not ship `unzip`. Prefer installing it, but
+        # fall back to Python's zipfile module so extraction works either way.
+        if ! command -v unzip >/dev/null 2>&1; then
+          echo "unzip not found; attempting to install it..."
+          sudo apt-get update && sudo apt-get install -y unzip || echo "##[warning]Could not install unzip; will use python zipfile fallback."
+        fi
+        if command -v unzip >/dev/null 2>&1; then
+          sudo unzip -o coretools.zip -d /opt/coretools
+        else
+          sudo python3 -c "import zipfile, sys; zipfile.ZipFile('coretools.zip').extractall('/opt/coretools')"
+        fi
         sudo chmod +x /opt/coretools/func
         echo "Installed to /opt/coretools via zip download"
         echo "##vso[task.prependpath]/opt/coretools"
