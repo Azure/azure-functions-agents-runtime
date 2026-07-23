@@ -10,6 +10,7 @@ from typing import Any, get_type_hints
 
 import azure.functions as func
 
+from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     EndpointAuthConfig,
@@ -675,14 +676,14 @@ def test_extract_mcp_session_id_returns_none_when_absent_or_blank() -> None:
 
 
 def test_safe_session_id_pattern_matches_runner_pattern() -> None:
-    """``endpoints._SAFE_SESSION_ID_PATTERN`` is a local mirror of
-    ``runner._SESSION_ID_PATTERN`` (kept separate to avoid eagerly importing the
-    heavy runner module). Pass-through session ids validated here must remain
-    valid in the runner, so the two patterns must stay identical. This test
-    catches future drift between them.
+    """The endpoint layer and the runner both validate session ids against the
+    same rule. They now share a single source of truth
+    (``_session_id.SESSION_ID_PATTERN``) rather than duplicating the regex, so
+    pass-through session ids validated here remain valid in the runner. Assert
+    both reference that shared object to catch any future re-duplication.
     """
-    assert _SAFE_SESSION_ID_PATTERN.pattern == _SESSION_ID_PATTERN.pattern
-    assert _SAFE_SESSION_ID_PATTERN.flags == _SESSION_ID_PATTERN.flags
+    assert _SAFE_SESSION_ID_PATTERN is SESSION_ID_PATTERN
+    assert _SESSION_ID_PATTERN is SESSION_ID_PATTERN
 
 
 
