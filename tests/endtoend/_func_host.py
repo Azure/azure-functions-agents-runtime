@@ -363,6 +363,7 @@ def start_and_verify(
     timeout: float = 150.0,
     ready_grace: float = 5.0,
     func_path: str | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> FuncStartResult:
     """Run ``func start`` in ``app_dir`` and verify a clean startup.
 
@@ -376,7 +377,7 @@ def start_and_verify(
     if func_exe is None:
         return FuncStartResult(False, "`func` executable not found on PATH", "")
 
-    host = _spawn(func_exe, app_dir, port=_free_port())
+    host = _spawn(func_exe, app_dir, port=_free_port(), env=env)
     try:
         ready, failed, reason = _await_ready(host, timeout=timeout, ready_grace=ready_grace)
     finally:
@@ -430,4 +431,3 @@ def running_host(
         _terminate(host.proc)
         host.reader.join(timeout=5)
         _drain(host)
-

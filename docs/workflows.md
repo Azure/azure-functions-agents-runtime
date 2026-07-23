@@ -388,35 +388,24 @@ turn.
 ### Trigger-started workflows
 
 Any supported Markdown-declared trigger on a workflow-enabled `main.agent.md`
-can start a Dynamic Workflow. The initial trigger Function is only a Durable
-client/starter:
+can start a Dynamic Workflow:
 
 1. The agent receives the trigger payload and authors a workflow plan.
 2. `start_workflow` schedules the orchestration and immediately returns a
    `workflow_id`.
-3. The agent records or returns that ID as appropriate and ends its turn.
-4. Durable Functions checkpoints and executes the workflow independently.
+3. The trigger Function returns after the agent's initial turn; Durable
+   Functions executes the workflow independently.
 
-The starter's model call remains subject to the normal agent and Azure Functions
-timeout. The orchestration can run for hours or days, but each tool Activity is
-still a normal Function execution and must stay within the hosting plan's
-Function timeout. Split large work into bounded Activities and use durable
-timers instead of sleeping inside an Activity.
+For an HTTP trigger, the caller receives the agent's immediate HTTP response,
+not the eventual workflow result. The response may include `workflow_id` when
+its authored schema/example permits it; response validation is unchanged.
 
-There is no built-in chat poller, synthetic `<workflow-notification>` turn, or
-automatic agent reactivation for declared triggers. Timer, queue, blob, event,
-and similar trigger sessions are ephemeral; after the starter exits, a later
-agent turn cannot use session-scoped workflow management tools for that
-instance. End these workflows with an Activity that publishes the final result
-to an explicit queue, database, webhook, notification service, or other domain
-sink. Use Durable Functions or Durable Task Scheduler tooling for operational
-status, cancellation, and termination.
-
-A declared HTTP trigger has a synchronous response and returns
-`x-ms-session-id`. It may include `workflow_id` when its authored response
-schema/example permits it. The runtime does not weaken response validation.
-Built-in workflow polling routes are present only when the same main agent also
-enables the built-in chat API.
+Non-HTTP triggers have no response channel. Applications that need the eventual
+result should provide a project workflow tool that writes or sends it to an
+appropriate destination, such as a queue, database, webhook, or notification
+service. The trigger-specific system guidance directs the agent to use that tool
+as the workflow's final step. Use Durable Functions or Durable Task Scheduler
+tooling for operational monitoring and control.
 
 ## Ownership
 

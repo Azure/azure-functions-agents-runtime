@@ -4,9 +4,9 @@ title: Dynamic workflows from Markdown-declared triggers
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-17
-updated: 2026-07-17
+updated: 2026-07-22
 issues: [#108]
-pull_requests: []
+pull_requests: [#112]
 branch: tsuyoshiushio-dynamic-workflow-design
 ---
 
@@ -32,18 +32,9 @@ Durable client, or the agent name. An agent invoked by an HTTP, timer, queue,
 blob, Event Grid, Service Bus, connector, or other supported trigger therefore
 cannot call `start_workflow`.
 
-Long-running execution also requires a clear lifetime boundary. The initial
-trigger Function must not stay open and poll for orchestration completion.
-Instead, it should perform one agent turn, start the orchestration, receive the
-workflow ID, and return promptly. Durable Functions then checkpoints and resumes
-the orchestration independently. Each workflow Activity remains a normal
-Function execution and must stay within the hosting plan's Function timeout.
-
-Interactive chat has a poller and synthetic completion notifications.
-Non-interactive triggers do not have a universal reply destination, so they
-must not be promised the same completion behavior. When delivery is required,
-the authored workflow should end with an Activity that writes or sends the
-result to an explicit domain sink.
+The declared-trigger path should use the same existing workflow integration as
+built-in endpoints: one agent turn starts the orchestration and then returns
+without polling for completion.
 
 ## 3. Goals / Non-goals
 
@@ -62,22 +53,16 @@ result to an explicit domain sink.
 - Separate chat completion guidance from non-interactive trigger guidance while
   sharing workflow selection heuristics and the effective workflow-tool list.
 - Add a minimal timer-triggered workflow sample that demonstrates the starter,
-  a durable wait, bounded Activities, and a terminal result sink.
+  a durable wait, and a terminal result tool.
 - Develop the change test-first and validate both registration and a live local
   timer-triggered workflow when required external prerequisites are available.
 
 **Non-goals**
 
 - Waiting for workflow completion inside the initial trigger Function.
-- Automatically reactivating the agent when a triggered workflow completes.
-- Adding framework-level callbacks, output bindings, or a universal
-  notification destination for non-interactive triggers.
 - Enabling workflows for non-main agents.
 - Changing the frontmatter schema or adding trigger-specific workflow config.
-- Removing normal Function timeout constraints from individual workflow
-  Activities.
-- Adding retries, per-Activity timeouts, sub-orchestrations, or large-output
-  storage to Dynamic Workflows v1.
+- Changing existing workflow execution, management, or completion semantics.
 
 ## 4. Proposed design
 
@@ -165,46 +150,25 @@ unchanged.
 For declared HTTP triggers, `response_schema` and `response_example` continue to
 take precedence over conversational workflow guidance. The trigger addendum
 will tell the agent to end promptly while honoring the configured response
-format. It will include the workflow ID in its synchronous response only when
-that format permits it. Authors who need the caller to receive the ID should add
-`workflow_id` to their response schema/example. The runtime will not bypass or
-silently weaken response validation.
+format. It will include the workflow ID in the immediate HTTP response only when
+that format permits it. Authors who need the caller to receive the ID in the
+immediate HTTP response should add `workflow_id` to their response
+schema/example. The runtime will not bypass or silently weaken response
+validation.
 
-### Starter, orchestration, Activity, and delivery lifetimes
+### Asynchronous workflow start
 
-The trigger invocation is a client/starter Function:
+This feature changes only how a declared trigger starts an existing Dynamic
+Workflow:
 
 1. The trigger invokes the main agent.
 2. The agent authors a validated plan and calls `start_workflow`.
 3. `start_workflow` calls Durable `start_new`, receives the instance ID, and
    returns `{"workflow_id": ...}` immediately.
-4. The agent records/reports the ID as appropriate and ends its turn.
-5. The trigger Function exits; it never polls terminal status.
-6. The Durable orchestrator executes independently through checkpointed replay,
-   Activities, and durable timers.
+4. The agent ends its turn and the trigger Function exits without polling.
 
-The orchestration can outlive the starter Function. Individual tool Activities
-cannot exceed the hosting plan's normal Function execution timeout and should be
-bounded and restart-safe where practical. A workflow that needs an externally
-visible result should include a terminal Activity that writes to a queue,
-database, webhook, notification service, or other domain-specific sink.
-
-Non-HTTP trigger invocations keep their current generated session ID. The
-workflow ID is session-prefixed, so later agent management calls require that
-same session. Because timer, queue, blob, event, and similar generated handlers
-discard their ephemeral session when the starter turn ends, a later agent turn
-cannot use `get_workflow_status`, `list_workflows`, `cancel_workflow`, or
-`terminate_workflow` for that workflow. In practice, these workflows require a
-terminal sink for result delivery and use Durable/DTS operational surfaces for
-external observation or control. No framework callback is added in this
-feature.
-
-A declared HTTP trigger is different: it has a synchronous response destination
-and returns `x-ms-session-id`. A caller can retain that session and workflow ID
-for its own correlation. Runtime workflow polling routes exist only when the
-same agent also enables the built-in chat API; otherwise exposing a status
-endpoint is application-specific and outside this feature. This distinction
-does not change the fire-and-forget orchestration lifetime.
+The existing Durable orchestrator, workflow tools, ownership rules, and
+completion behavior are unchanged.
 
 ### Channel-specific system guidance
 
@@ -215,9 +179,8 @@ selection rules and the same effective workflow-tool inventory:
   follow-up status guidance.
 - **Declared trigger:** direct the agent to start the workflow once, retain the
   workflow ID, end promptly, never poll, honor any configured HTTP response
-  schema, and include an explicit terminal sink Activity for non-HTTP result
-  delivery. It must not claim that a chat poller or automatic completion turn
-  exists.
+  schema, and use an available result-delivery tool as the final step for
+  non-HTTP triggers.
 
 Registration receives the finished addendum; it does not own prompt policy.
 
@@ -229,9 +192,10 @@ Add `samples/workflow-timer-trigger/` with:
 - `main.agent.md` declaring `workflows.enabled: true` and a timer schedule;
 - small `@workflow_tool` handlers for capturing trigger information and
   publishing a distinctive structured completion log;
-- a short durable wait between bounded Activities;
+- a short workflow with a terminal result tool;
 - local settings, host configuration, requirements, and instructions for
-  running against Azurite and a configured model provider.
+  running against the Durable Task Scheduler emulator and a configured model
+  provider.
 
 The sample README will explain how to temporarily add `run_on_startup` for an
 immediate local demonstration and warn against committing it for production.
@@ -274,10 +238,8 @@ declared trigger can replace `timer_trigger`.
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
 | 1 | Design record | Amend FRD 0004 / create a focused follow-up FRD | Create a focused follow-up FRD and reference FRD 0004 | Human | 2026-07-17 |
-| 9 | FRD number after rebasing | Keep 0006 / use the next available number on `main` | Renumber to FRD 0008 because 0006 and 0007 are already allocated | Human + Agent | 2026-07-22 |
 | 2 | Trigger scope | Eight types named in #108 / every supported declared trigger | Apply generically to every supported Markdown trigger | Human | 2026-07-17 |
 | 3 | Workflow lifetime | Keep starter open / fire-and-forget Durable start / framework callback | End the starter after the workflow ID; Durable execution continues independently | Human + Agent | 2026-07-17 |
-| 4 | Completion delivery | Chat semantics everywhere / terminal domain sink / automatic agent reactivation | Trigger guidance uses a terminal domain sink; callback/reactivation is a separate feature | Human | 2026-07-17 |
 | 5 | Prompt guidance | Reuse chat addendum unchanged / channel-specific completion sections | Share workflow/tool guidance but render chat and trigger completion behavior separately | Human + Agent | 2026-07-17 |
 | 6 | Registration policy | Re-read metadata in registration / pass resolved state explicitly | Pass `workflows_enabled` and addendum from `app.py` | Agent | 2026-07-17 |
 | 7 | Durable client conversion | Construct in runtime / trust Durable v2 middleware | Use the rich client supplied by `durable_client_input` middleware and retain its worker-facing `str` annotation | Agent | 2026-07-17 |
@@ -285,9 +247,8 @@ declared trigger can replace `timer_trigger`.
 | 9 | Demonstration | Modify interactive sample / add dedicated timer sample | Add `samples/workflow-timer-trigger/` | Human | 2026-07-17 |
 | 10 | Integration return contract | Extend tuple / second global render call / typed result | Return `WorkflowIntegrationResult` with channel addenda and derived enablement | Agent | 2026-07-17 |
 | 11 | HTTP response schema | Bypass validation / reject combination / preserve validation | Preserve strict validation; include workflow ID only when the authored response format permits it | Agent | 2026-07-17 |
-| 12 | Non-HTTP post-start management | Persist synthetic session / framework callback / terminal sink plus Durable operations | Keep ephemeral session semantics; require terminal sink for delivery and use Durable/DTS operational surfaces | Human + Agent | 2026-07-17 |
-| 13 | HTTP workflow polling | Always add status routes / require built-in chat API / leave application-specific | Reuse workflow status routes only when built-in chat API is enabled; otherwise status exposure is out of scope | Agent | 2026-07-17 |
 | 14 | Existing integration helper compatibility | Break tuple unpacking / separate legacy wrapper / make typed result iterable | Preserve `tools, addendum = build_workflow_integration(...)`; iteration yields tools and the chat addendum while channel fields remain available by name | Agent | 2026-07-17 |
+| 15 | FRD number after rebasing | Keep 0006 / use the next available number on `main` | Renumber to FRD 0008 because 0006 and 0007 are already allocated | Human + Agent | 2026-07-22 |
 
 ## 6. Test plan
 
@@ -327,22 +288,19 @@ declared trigger can replace `timer_trigger`.
     bindings.
 - [x] E2E startup: existing sample discovery boots the new sample with `func
   start` and Azurite.
-- [ ] Live local sample: with a configured model provider, observe timer firing,
+- [x] Live local sample: with Foundry `gpt-5.4-mini`, observed timer firing,
   a logged workflow ID, prompt starter completion, terminal sink marker, and a
-  terminal Durable instance. Not run in the development environment because no
-  Foundry endpoint/model or Azure OpenAI deployment was configured.
+  terminal Durable instance using the Durable Task Scheduler emulator.
 - [x] Full gate: `ruff`, strict `mypy`, and coverage-enabled `pytest`.
 
 ## 7. Docs impact
 
 - [x] `docs/architecture.md` - document Durable trigger binding and
-  starter/orchestrator/Activity lifetime boundaries.
+  asynchronous workflow start.
 - [x] `docs/triggers.md` - document workflow-enabled main-agent triggers and
-  fire-and-forget behavior.
-- [x] `docs/workflows.md` - document channel-specific completion behavior,
-  Activity timeout constraints, session ownership, and terminal sinks. Add a
-  "trigger-started workflows" subsection and replace the current
-  interactive-only framing where it no longer applies.
+  link to the consolidated workflow behavior.
+- [x] `docs/workflows.md` - document HTTP and non-HTTP trigger-started workflow
+  behavior in one place.
 - [x] `samples/workflow-timer-trigger/README.md` - local run and verification
   guide.
 - [x] `samples/README.md` and `README.md` - add the timer workflow sample.
@@ -354,9 +312,9 @@ declared trigger can replace `timer_trigger`.
 - **Architecture review (phase 2):** Completed by two independent
   `rubber-duck` passes on 2026-07-17. The initial review requested a concrete
   integration return contract, explicit HTTP response-schema behavior,
-  accurate ephemeral-session management limits, and reconciliation of the
-  interactive-only workflow docs. All findings were incorporated; re-review
-  found no blocking inconsistencies and declared the FRD ready for sign-off.
+  and reconciliation of the interactive-only workflow docs. All findings were
+  incorporated; re-review found no blocking inconsistencies and declared the
+  FRD ready for sign-off.
 - **Human sign-off:** TsuyoshiUshio approved the implementation plan, TDD
-  method, fire-and-forget lifetime, separate callback scope, and dedicated
-  timer sample on 2026-07-17. Status set to `Finalized`.
+  method, asynchronous start behavior, and dedicated timer sample on
+  2026-07-17. Status set to `Finalized`.
