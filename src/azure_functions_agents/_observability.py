@@ -256,9 +256,9 @@ def _configure_azure_monitor(connection_string: str) -> None:
         # telemetry even though normal export works fine. Disable Live Metrics in this case to
         # avoid the noise; it only removes the real-time Portal dashboard, not telemetry export.
         # Remove this workaround once azure-monitor-opentelemetry-exporter resolves credentials
-        # for QuickPulse the same way it does for the other exporters (upstream gap; filed against
-        # Azure/azure-sdk-for-python, distinct from #37209 which fixed the no-AAD-support-at-all
-        # case in exporter 1.0.0b29).
+        # for QuickPulse the same way it does for the other exporters. Tracked upstream at
+        # https://github.com/Azure/azure-sdk-for-python/issues/48251 (distinct from #37209,
+        # which fixed the no-AAD-support-at-all case in exporter 1.0.0b29).
         kwargs["enable_live_metrics"] = False
     try:
         configure_azure_monitor(**kwargs)
