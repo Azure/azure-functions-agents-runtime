@@ -729,17 +729,18 @@ def test_load_agent_specs_flexible_naming_variants_coexist(tmp_path: Path) -> No
     assert Path(specs_by_name["Data Agent"].source_file).name == "data.Agent.MD"
 
 
-def test_load_agent_specs_multiple_main_aliases_can_coexist(tmp_path: Path) -> None:
-    """Bare aliases and main.agent.md can all remain main when loaded together."""
+def test_load_agent_specs_bare_agent_and_main_agent_md_can_coexist(tmp_path: Path) -> None:
+    """agent.md and main.agent.md can coexist and both be marked is_main.
+
+    These produce distinct slugs ("default" and "main" respectively), so they
+    are valid at the loader level. Note: agent.md and CLAUDE.md must NOT coexist
+    in the same directory because both derive the same slug ("default") and
+    app construction fails fast on duplicate slugs.
+    """
     _write_valid_agent_markdown(
         tmp_path / "agent.md",
         name="Default Agent",
         description="Bare agent alias",
-    )
-    _write_valid_agent_markdown(
-        tmp_path / "CLAUDE.md",
-        name="Claude Agent",
-        description="Bare claude alias",
     )
     _write_valid_agent_markdown(
         tmp_path / "main.agent.md",
@@ -749,10 +750,9 @@ def test_load_agent_specs_multiple_main_aliases_can_coexist(tmp_path: Path) -> N
 
     specs = load_agent_specs(tmp_path)
 
-    assert len(specs) == 3
-    assert {spec.name for spec in specs} == {"Default Agent", "Claude Agent", "Main Agent"}
-    assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Claude Agent", "Main Agent"}
+    assert len(specs) == 2
+    assert {spec.name for spec in specs} == {"Default Agent", "Main Agent"}
+    assert {spec.name for spec in specs if spec.is_main} == {"Default Agent", "Main Agent"}
     assert Path(next(spec for spec in specs if spec.name == "Default Agent").source_file).name == "agent.md"
-    assert Path(next(spec for spec in specs if spec.name == "Claude Agent").source_file).name == "CLAUDE.md"
     assert Path(next(spec for spec in specs if spec.name == "Main Agent").source_file).name == "main.agent.md"
 
