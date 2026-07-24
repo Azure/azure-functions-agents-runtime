@@ -71,19 +71,23 @@ Azurite must still be running when this sample uses the Durable Task Scheduler
 (DTS), because the queue, report Blob, and Functions host storage remain in
 Azurite.
 
-In another terminal, start the DTS emulator. Dynamic Task Hubs let it create
-the configured `prstatusreports` hub automatically:
+In another terminal, start the DTS emulator with the sample's
+`prstatusreports` Task Hub explicitly registered. Emulator environment
+variables are read only when its container is created, so remove and recreate
+an existing container when changing this setting:
 
 ```powershell
+docker rm -f workflow-subagents-dts 2>$null
 docker run --rm --name workflow-subagents-dts `
-  -e DTS_USE_DYNAMIC_TASK_HUBS=true `
+  -e DTS_TASK_HUB_NAMES=prstatusreports `
   -p 8080:8080 -p 8082:8082 `
   mcr.microsoft.com/dts/dts-emulator:latest
 ```
 
 Port `8080` is the scheduler endpoint used by the Functions host. Open the DTS
 dashboard at <http://localhost:8082> to inspect workflow instances and their
-progress.
+progress. Restart the Functions host after recreating the DTS emulator so it
+connects to the newly registered Task Hub.
 
 With both emulators running, start the Functions host from the activated
 environment:

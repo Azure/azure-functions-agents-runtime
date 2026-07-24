@@ -119,10 +119,13 @@ def test_sample_runtime_files_and_customer_readme_are_complete() -> None:
     }
 
     assert "mcr.microsoft.com/dts/dts-emulator:latest" in readme
-    assert "DTS_USE_DYNAMIC_TASK_HUBS=true" in readme
+    assert "DTS_TASK_HUB_NAMES=prstatusreports" in readme
+    assert "DTS_USE_DYNAMIC_TASK_HUBS" not in readme
+    assert "docker rm -f workflow-subagents-dts" in readme
     assert "-p 8080:8080 -p 8082:8082" in readme
     assert "http://localhost:8082" in readme
     assert "Azurite must still be running" in readme
+    assert "Restart the Functions host" in readme
 
 
 def test_fake_pr_tools_are_deterministic() -> None:
