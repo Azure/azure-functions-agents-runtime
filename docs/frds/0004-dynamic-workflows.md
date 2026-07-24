@@ -6,7 +6,7 @@ author: TsuyoshiUshio
 created: 2026-07-06
 updated: 2026-07-23
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117]
 ---
 
 # FRD 0004 — Dynamic workflows
@@ -270,6 +270,116 @@ execution.
   arguments fail fast at startup so authors do not think unsupported policy knobs
   are active.
 
+### Draft extension: Workflow Sub Agents
+
+> [!IMPORTANT]
+> This section is an external-specification proposal for review. It is not part
+> of the implemented Dynamic Workflows v1 surface. The conceptual sample under
+> `samples/workflow-subagents-preview/` is intentionally non-runnable.
+
+After Markdown-trigger support (#108 / PR #112), per-agent Workflow isolation
+(#109) is the remaining prerequisite. The proposed extension lets a
+workflow-enabled agent authorize existing Markdown agents as durable DAG nodes:
+
+```yaml
+---
+name: Support Coordinator
+workflows:
+  enabled: true
+  subagents:
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an actionable portfolio report
+---
+```
+
+`workflows.subagents` and the top-level chat-time `subagents:` list are
+independent capability grants. Both are deny-by-default when omitted.
+`workflows.subagents` may reference a specialist used only by Workflows.
+Unknown, duplicate, and self references fail during app composition. As with a
+top-level `subagents:` reference, an authorized Workflow-only specialist does
+not need its own trigger or built-in endpoint. `when` is the routing hint shown
+to the coordinator's plan-authoring model; when omitted, the specialist's
+`description` is used.
+
+The Workflow plan uses a `sub_agent` task:
+
+```json
+{
+  "id": "analyze_pr_42",
+  "type": "sub_agent",
+  "agent": "pr_status_analyst",
+  "task": "Review pull request https://github.com/owner/repo/pull/42 and summarize its current status."
+}
+```
+
+The reduce node uses the same task type and depends on every map result:
+
+```json
+{
+  "id": "write_report",
+  "type": "sub_agent",
+  "agent": "actionable_report_writer",
+  "task": "Create an actionable report from PR 42: ${analyze_pr_42.result.text}; PR 43: ${analyze_pr_43.result.text}.",
+  "depends_on": ["analyze_pr_42", "analyze_pr_43"]
+}
+```
+
+`task` must be a self-contained string and may template upstream results. A
+successful v1 node returns
+`{"agent": "pr_status_analyst", "text": "...", "child_workflow_id": "..."}`;
+downstream tasks can reference `${analyze_pr_42.result.text}`. Independent Sub
+Agent tasks can fan out without dependencies, and another authorized Sub Agent
+can depend on all of them to reduce their summaries. The child id provides
+durable status and lineage for the leaf execution; leaf-only means that child
+cannot start another Workflow or delegate again.
+
+The specialist runs as itself with a fresh context and its own instructions,
+model, timeout, normal tools, MCP servers, skills, and `web_request` setting. It
+does not inherit the parent's tools or conversation history. In v1 it also
+receives no request-scoped sandbox, Workflow management tools, or `delegate_*`
+tools.
+
+| Concern | Proposed v1 | Deferred to v2 |
+| --- | --- | --- |
+| Execution | Leaf-only child Sub Agent | Bounded multi-level execution |
+| Result | Fixed `{agent, text, child_workflow_id}` envelope | `response_schema`-validated output |
+| Failure | Child failure or timeout fails the parent Workflow | Retry and continue-on-error policy |
+| Retry | No automatic retry; use the specialist's timeout | Idempotent retry with attempts/backoff |
+| Cancellation | Best-effort for an already-dispatched model call | Stronger child interruption where supported |
+| Context | Self-contained `task` only | Explicit context-sharing policy, if justified |
+
+The v1 runtime does not configure automatic Durable retries. The task and result
+authoring contract should remain unchanged if a runtime-managed Durable retry
+policy is added later. Before enabling it, the implementation must define
+idempotency, retryable failure kinds, maximum attempts/backoff, and how repeated
+model or tool side effects are surfaced.
+
+#### Reviewer note: positive capability allowlists
+
+Today specialist `tools`, `skills`, and `mcp` capabilities inherit the
+project-wide inventory and can only be narrowed with `exclude` (or disabled
+entirely). The proposal preserves that existing behavior, but durable background
+execution makes the lack of a positive allowlist a least-privilege concern:
+adding a new project capability can make it available to existing specialists
+without editing their definitions.
+
+A future capability proposal could add an explicit form such as:
+
+```yaml
+tools:
+  allow: [lookup_invoice]
+skills:
+  allow: [billing-policy]
+mcp:
+  allow: [billing-api]
+```
+
+This syntax is illustrative only and is not accepted as part of the Workflow Sub
+Agent contract in this draft. Review should decide whether positive allowlists
+are a prerequisite, a parallel feature, or a later hardening step.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -288,6 +398,11 @@ execution.
 | 12 | Record trigger support | Create a second Dynamic Workflows FRD / evolve this FRD | Update FRD 0004 because Markdown-declared trigger support extends the existing feature without redesigning it | Human | 2026-07-23 |
 | 13 | Declared-trigger scope | Add named trigger types individually / use generic trigger registration | Add the Durable client binding generically to every supported Markdown-declared trigger for the workflow-enabled main agent | Human + Agent | 2026-07-17 |
 | 14 | Trigger lifetime | Wait for terminal status / start asynchronously | End the initial trigger Function after the agent starts the workflow; Durable execution continues independently | Human + Agent | 2026-07-17 |
+| 15 | Draft proposal: Workflow Sub Agent authorization | Reuse the top-level list / add a mode flag / use a Workflow-owned grant | Add independent, deny-by-default `workflows.subagents` | Human | 2026-07-23 |
+| 16 | Draft proposal: first execution boundary | Recursive delegation / bounded nesting / leaf-only | v1 is leaf-only; bounded multi-level execution is v2 | Human | 2026-07-23 |
+| 17 | Draft proposal: specialist context | Copy parent state / share history / self-contained task | Run with the specialist's own static capabilities and a self-contained task only | Human | 2026-07-23 |
+| 18 | Draft proposal: failure and retry | Recoverable result / automatic retry / fail parent without retry | Sub Agent failure fails the parent Workflow; v1 has no automatic retry | Human | 2026-07-23 |
+| 19 | Draft proposal: successful result | Plain text / schema-dependent result / fixed envelope | Return `{agent, text, child_workflow_id}`; defer `response_schema` to v2 | Human | 2026-07-23 |
 
 ## 6. Test plan
 
