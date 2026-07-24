@@ -28,6 +28,7 @@ export interface LiveAgent {
   provider: string
   trigger: string
   builtinEndpoints: boolean
+  routes: string[]
   defaultHostName: string
 }
 
@@ -37,7 +38,7 @@ export interface LiveAgentApp {
   location: string
   provider: string
   defaultHostName: string
-  agents: { name: string; trigger: string; builtinEndpoints: boolean }[]
+  agents: { name: string; trigger: string; builtinEndpoints: boolean; routes: string[] }[]
 }
 
 export interface LiveDiscovery {

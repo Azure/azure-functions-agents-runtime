@@ -1,5 +1,5 @@
 import { useEffect, useMemo } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
@@ -173,7 +173,13 @@ export default function AgentsPage() {
             {agents.map((a) => (
               <tr key={`${a.app}/${a.name}`}>
                 <td>
-                  <div className="cell-title">{a.name}</div>
+                  <div className="cell-title">
+                    <Link
+                      to={`/agents/${encodeURIComponent(selected)}/${encodeURIComponent(a.app)}/${encodeURIComponent(a.name)}`}
+                    >
+                      {a.name}
+                    </Link>
+                  </div>
                   {a.defaultHostName && (
                     <div className="cell-sub">
                       <a
@@ -201,6 +207,10 @@ export default function AgentsPage() {
                 <td>
                   {a.builtinEndpoints ? (
                     <span className="badge gray">built-in</span>
+                  ) : a.routes && a.routes.length > 0 ? (
+                    <span className="badge gray">
+                      {a.routes.length} route{a.routes.length === 1 ? '' : 's'}
+                    </span>
                   ) : (
                     <span className="muted">—</span>
                   )}
