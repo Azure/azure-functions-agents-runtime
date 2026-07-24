@@ -438,3 +438,12 @@ __azurite_*
 __blobstorage__/
 **/local.settings.json
 .tmp-validation/
+serverless-portal/mocks/workflows/builder.html
+serverless-portal/mocks/workflows/index.html
+serverless-portal/mocks/workflows/README.md
+serverless-portal/mocks/workflows/requirements.md
+serverless-portal/mocks/workflows/run.html
+serverless-portal/mocks/workflows/workflow.css
+serverless-portal/mocks/workflows/store/schema.json
+serverless-portal/mocks/workflows/store/wf-daily-cost-digest.json
+serverless-portal/mocks/workflows/store/wf-support-triage.json
