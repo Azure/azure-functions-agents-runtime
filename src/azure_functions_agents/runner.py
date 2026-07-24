@@ -819,16 +819,26 @@ async def _build_harness_agent_session(
         effective_instructions = (effective_instructions or "") + system_addendum
 
     # create_harness_agent takes skills_paths natively; no SkillsProvider in context_providers.
+    # history_provider is passed directly (not via context_providers) so that the harness can
+    # call before_run/after_run on it for both context injection and per-service-call persistence.
+    # NOTE: ContextWindowCompactionStrategy (enabled by max_context_window_tokens) does not yet
+    # support stateless per-request agents — each new agent instance starts with an empty
+    # InMemoryHistoryProvider, causing the CompactionProvider to overwrite externally-injected
+    # blob history. Until MAF supports persistent compaction state across requests, compaction
+    # must be disabled (max_context_window_tokens=None) for serverless deployments.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         agent = create_harness_agent(
             chat_client,
+            harness_instructions=resolved_config.harness_instructions,
             agent_instructions=effective_instructions,
             tools=resolved_tools or None,
             history_provider=history_provider,
             skills_paths=skill_paths or None,
             disable_tool_auto_approval=True,
             disable_web_search=True,
+            disable_todo=resolved_config.disable_todo,
+            disable_mode=resolved_config.disable_mode,
             max_context_window_tokens=resolved_config.max_context_window_tokens,
             max_output_tokens=resolved_config.max_output_tokens,
             disable_file_memory=resolved_config.disable_file_memory,

@@ -137,7 +137,10 @@ def test_harness_agent_config_defaults() -> None:
     config = HarnessAgentConfig()
     assert config.max_context_window_tokens is None
     assert config.max_output_tokens is None
-    assert config.disable_file_memory is False
+    assert config.disable_file_memory is True
+    assert config.harness_instructions == ""
+    assert config.disable_todo is True
+    assert config.disable_mode is True
 
 
 def test_harness_agent_config_with_fields() -> None:
