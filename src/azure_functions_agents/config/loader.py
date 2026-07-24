@@ -51,6 +51,8 @@ def _find_agent_files_with_suffix(directory: Path) -> list[Path]:
     for md_file in directory.iterdir():
         if not md_file.is_file():
             continue
+        if md_file.name.startswith("."):
+            continue  # skip hidden/dotfiles (iterdir() unlike glob doesn't exclude them)
         lower_name = md_file.name.lower()
         if not lower_name.endswith(".md"):
             continue
@@ -257,17 +259,18 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
     # Collect agent files from both top-level and agents/ folder (case-insensitive)
     agent_files: list[Path] = _find_agent_files_with_suffix(root)
     
-    # Also check for single-agent files: agent.md and CLAUDE.md (case-insensitive)
+    # Also check for single-agent files: agent.md and CLAUDE.md (case-insensitive).
+    # Collect *all* matching variants (no break) so that case-sensitive filesystems
+    # where both agent.md and Agent.md exist will surface both; the downstream
+    # _fail_on_duplicate_slugs() check then rejects the collision at app build time.
     for candidate in sorted(root.iterdir()):
         if candidate.is_file() and _is_bare_agent_md(candidate.name):
             agent_files.append(candidate)
-            break  # Only add one agent.md variant
 
     for candidate in sorted(root.iterdir()):
         if candidate.is_file() and _is_claude_md(candidate.name):
             agent_files.append(candidate)
-            break  # Only add one CLAUDE.md variant
-    
+
     agents_dir = _resolve_agents_dir(root)
     if agents_dir is not None:
         # Find prefixed agent files with case-insensitive suffix matching
@@ -276,12 +279,10 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
         for candidate in sorted(agents_dir.iterdir()):
             if candidate.is_file() and _is_bare_agent_md(candidate.name):
                 agent_files.append(candidate)
-                break  # Only add one agent.md variant
 
         for candidate in sorted(agents_dir.iterdir()):
             if candidate.is_file() and _is_claude_md(candidate.name):
                 agent_files.append(candidate)
-                break  # Only add one CLAUDE.md variant
 
     for source_file in sorted(agent_files):
         try:

@@ -88,7 +88,7 @@ def test_workflow_app_uses_durable_function_app(tmp_path: Path):
     assert isinstance(function_app, df.DFApp)
 
 
-def test_multiple_main_agents_can_each_enable_workflows(tmp_path: Path):
+def test_bare_agent_md_with_workflows_creates_durable_app(tmp_path: Path):
     _write_agent(tmp_path, "main.agent.md", name="Main", workflows=False)
     _write_agent(tmp_path, "agent.md", name="Default", workflows=True)
 
