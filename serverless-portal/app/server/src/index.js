@@ -139,6 +139,7 @@ app.get(
         provider: a.provider,
         trigger: ag.trigger,
         builtinEndpoints: ag.builtinEndpoints,
+        routes: ag.routes ?? [],
         defaultHostName: a.defaultHostName,
       })),
     )

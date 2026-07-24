@@ -131,3 +131,20 @@ textarea.editor:focus { outline: 2px solid var(--brand); }
 .toast { background: var(--text); color: #fff; padding: 10px 14px; border-radius: 8px; box-shadow: var(--shadow); font-size: 13px; }
 .toast.err { background: var(--red); }
 .toast.ok { background: var(--green); }
+
+/* Agent detail page */
+.meta-grid { display: grid; grid-template-columns: 130px 1fr; gap: 8px 14px; margin: 0; }
+.meta-grid dt { color: var(--text-muted); font-size: 12.5px; }
+.meta-grid dd { margin: 0; font-size: 13.5px; overflow-wrap: anywhere; }
+.tabs { display: flex; gap: 4px; }
+.tab { border: none; background: transparent; color: var(--text-muted); font-size: 13px; font-weight: 600;
+  padding: 6px 12px; border-radius: 6px; cursor: pointer; font-family: inherit; }
+.tab:hover { background: var(--surface-2); }
+.tab.active { background: var(--brand-soft); color: var(--brand-dark); }
+.tab:disabled { opacity: .5; cursor: not-allowed; }
+pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
+.endpoint-list { display: flex; flex-direction: column; gap: 8px; }
+.endpoint-row { display: grid; grid-template-columns: 52px 150px 1fr auto; align-items: center; gap: 10px;
+  padding: 8px 10px; border: 1px solid var(--border); border-radius: 6px; background: var(--surface-2); }
+.endpoint-url { font-family: "Cascadia Code", "SF Mono", Consolas, monospace; font-size: 12px;
+  color: var(--text); overflow-wrap: anywhere; }

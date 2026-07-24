@@ -17,6 +17,12 @@
 //      and an MCP tool trigger `agent_<name>_builtin_mcp`. If no agents can be
 //      parsed, the app itself is surfaced as a single agent.
 //
+// Function enumeration prefers the ARM control plane (`listFunctions`). That
+// endpoint returns nothing on Linux Consumption / Flex Consumption plans, so we
+// fall back to the app's read-only admin metadata API (`/admin/functions`,
+// authorised with the master host key fetched via the caller's ARM token). Only
+// function *definitions* are read there — the agent code is never invoked.
+//
 // Auth uses the caller's ARM access token, acquired in the browser via MSAL
 // (the same first-party app as Polaris) and forwarded as a Bearer token. Every
 // ARM call below runs as the signed-in user — no `az login` required.
@@ -153,19 +159,14 @@ function settingsToMap(properties) {
   return map
 }
 
-// Recover the agent name from a runtime function definition.
-// Prefers the built-in route `agents/<name>/…`; falls back to the
-// `agent_<name>_builtin_*` function-name convention.
-function agentNameFromFunction(fn) {
-  const bindings = fn?.config?.bindings ?? []
-  for (const b of bindings) {
-    const route = typeof b?.route === 'string' ? b.route : ''
-    const m = /^agents\/([^/]+)\//.exec(route)
-    if (m) return m[1]
-  }
-  // Function names arrive as `<app>/<function>`; keep the last segment.
-  const shortName = String(fn?.name ?? '').split('/').pop() ?? ''
-  if (shortName.startsWith('agent_')) {
+// Recover the built-in agent slug from a function that belongs to the built-in
+// endpoint set — either from its `agents/<slug>/…` route or the
+// `agent_<slug>_builtin_*` function name. Returns null for non-built-in
+// functions (i.e. an agent's own custom trigger).
+function builtinSlugFromFunction(shortName, route) {
+  const routeMatch = /^agents\/([^/]+)\//.exec(route)
+  if (routeMatch) return routeMatch[1]
+  if (shortName.startsWith('agent_') && shortName.includes('_builtin_')) {
     let base = shortName.slice('agent_'.length)
     for (const suffix of BUILTIN_SUFFIXES) {
       if (base.endsWith(suffix)) {
@@ -178,36 +179,136 @@ function agentNameFromFunction(fn) {
   return null
 }
 
-// List the agents hosted in a single Function App by inspecting its functions.
-async function agentsInApp(client, resourceGroup, appName) {
-  const agents = new Map() // name → { name, triggers:Set, builtinEndpoints:bool }
-  let functions
+// Map a raw Functions trigger binding type to a short, display-friendly label.
+function normalizeTrigger(type) {
+  const t = String(type ?? '')
+  const known = {
+    httpTrigger: 'http',
+    timerTrigger: 'timer',
+    queueTrigger: 'queue',
+    blobTrigger: 'blob',
+    serviceBusTrigger: 'servicebus',
+    eventHubTrigger: 'eventhub',
+    eventGridTrigger: 'eventgrid',
+    cosmosDBTrigger: 'cosmos',
+    connectorTrigger: 'connector',
+    orchestrationTrigger: 'orchestration',
+    activityTrigger: 'activity',
+  }
+  if (known[t]) return known[t]
+  return t.toLowerCase().endsWith('trigger') ? t.slice(0, -'trigger'.length).toLowerCase() : t.toLowerCase()
+}
+
+// Fold a collection of function definitions (from ARM or the admin API) into the
+// distinct agents they represent. Shared so both discovery sources parse
+// identically.
+//
+// Two agent shapes are recognised:
+//   • Built-in-endpoint agents — one or more `agent_<slug>_builtin_*` functions
+//     (chat UI/API/SSE/MCP) sharing a slug, grouped into a single agent.
+//   • Custom-trigger agents — every other registered function is its own agent
+//     (the runtime names the trigger function after the `<agent>.agent.md`
+//     source file). Its trigger type and any HTTP route are captured so the UI
+//     can surface the real invocation endpoint.
+function parseAgentsFromFunctions(functions) {
+  const agents = new Map() // name → { name, triggers:Set, builtinEndpoints, routes:Set }
+  const getEntry = (name) => {
+    let entry = agents.get(name)
+    if (!entry) {
+      entry = { name, triggers: new Set(), builtinEndpoints: false, routes: new Set() }
+      agents.set(name, entry)
+    }
+    return entry
+  }
+
+  for (const fn of functions) {
+    // Function names arrive as `<app>/<function>`; keep the last segment.
+    const shortName = String(fn?.name ?? '').split('/').pop() ?? ''
+    const bindings = fn?.config?.bindings ?? []
+    const triggerBinding = bindings.find(
+      (b) => typeof b?.type === 'string' && b.type.toLowerCase().endsWith('trigger'),
+    )
+    const routeBinding = bindings.find((b) => typeof b?.route === 'string' && b.route)
+    const route = routeBinding?.route ?? ''
+
+    const builtinSlug = builtinSlugFromFunction(shortName, route)
+    if (builtinSlug) {
+      const entry = getEntry(builtinSlug)
+      entry.builtinEndpoints = true
+      entry.triggers.add('httpTrigger')
+      continue
+    }
+
+    if (!shortName) continue
+    const entry = getEntry(shortName)
+    if (triggerBinding?.type) entry.triggers.add(String(triggerBinding.type))
+    if (route) entry.routes.add(route)
+  }
+
+  return [...agents.values()].map((a) => ({
+    name: a.name,
+    trigger: a.triggers.has('httpTrigger') ? 'http' : normalizeTrigger([...a.triggers][0] ?? 'httpTrigger'),
+    builtinEndpoints: a.builtinEndpoints,
+    routes: [...a.routes],
+  }))
+}
+
+// Enumerate an app's functions via the ARM control plane. Reliable on Windows /
+// Elastic Premium / dedicated plans, but returns an empty list on Linux
+// Consumption and (often) Flex Consumption plans — see `functionsFromAdminApi`.
+async function functionsFromArm(client, resourceGroup, appName) {
+  const out = []
   try {
-    functions = client.webApps.listFunctions(resourceGroup, appName)
+    for await (const fn of client.webApps.listFunctions(resourceGroup, appName)) {
+      out.push(fn)
+    }
+  } catch {
+    /* control-plane listing unavailable — caller falls back to the admin API */
+  }
+  return out
+}
+
+// Fallback enumeration for plans where ARM `listFunctions` returns nothing
+// (Linux Consumption / Flex Consumption). Reads the app's own read-only admin
+// metadata endpoint (`/admin/functions`) — function definitions only, the agent
+// code is never invoked — authorised with the master host key, which we fetch
+// using the caller's forwarded ARM token (no key handling by the browser).
+async function functionsFromAdminApi(client, resourceGroup, appName, defaultHostName) {
+  if (!defaultHostName) return []
+  let masterKey
+  try {
+    const keys = await client.webApps.listHostKeys(resourceGroup, appName)
+    masterKey = keys?.masterKey
+  } catch {
+    return [] // caller lacks listHostKeys permission — keep the app-level fallback
+  }
+  if (!masterKey) return []
+  try {
+    const res = await fetch(`https://${defaultHostName}/admin/functions`, {
+      headers: { 'x-functions-key': masterKey },
+    })
+    if (!res.ok) return []
+    const data = await res.json()
+    return Array.isArray(data) ? data : []
   } catch {
     return []
   }
-  for await (const fn of functions) {
-    const name = agentNameFromFunction(fn)
-    if (!name) continue
-    const entry = agents.get(name) ?? {
-      name,
-      triggers: new Set(),
-      builtinEndpoints: false,
-    }
-    const bindings = fn?.config?.bindings ?? []
-    for (const b of bindings) {
-      if (b?.type) entry.triggers.add(String(b.type))
-    }
-    const shortName = String(fn?.name ?? '').split('/').pop() ?? ''
-    if (shortName.includes('_builtin_')) entry.builtinEndpoints = true
-    agents.set(name, entry)
+}
+
+// List the agents hosted in a single Function App. Prefers the ARM control
+// plane; on plans where that yields nothing (Linux/Flex Consumption) it falls
+// back to the app's admin metadata API so multi-agent apps and their built-in
+// endpoints are still discovered.
+async function agentsInApp(client, resourceGroup, appName, defaultHostName) {
+  let agents = parseAgentsFromFunctions(
+    await functionsFromArm(client, resourceGroup, appName),
+  )
+  if (agents.length === 0) {
+    agents = parseAgentsFromFunctions(
+      await functionsFromAdminApi(client, resourceGroup, appName, defaultHostName),
+    )
   }
-  return [...agents.values()].map((a) => ({
-    name: a.name,
-    trigger: a.triggers.has('httpTrigger') ? 'http' : [...a.triggers][0] ?? 'http',
-    builtinEndpoints: a.builtinEndpoints,
-  }))
+  return agents
 }
 
 /**
@@ -223,7 +324,7 @@ async function agentsInApp(client, resourceGroup, appName) {
  *     location: string,
  *     provider: string,
  *     defaultHostName: string,
- *     agents: Array<{name: string, trigger: string, builtinEndpoints: boolean}>,
+ *     agents: Array<{name: string, trigger: string, builtinEndpoints: boolean, routes: string[]}>,
  *   }>,
  * }>}
  */
@@ -252,9 +353,9 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
     // The app qualifies. Enumerate individual agents from the runtime's function
     // naming convention; if none can be parsed (e.g. trigger-only agents), fall
     // back to representing the app itself as a single agent so it still appears.
-    let agents = await agentsInApp(client, resourceGroup, appName)
+    let agents = await agentsInApp(client, resourceGroup, appName, site.defaultHostName)
     if (agents.length === 0) {
-      agents = [{ name: appName, trigger: 'http', builtinEndpoints: false }]
+      agents = [{ name: appName, trigger: 'http', builtinEndpoints: false, routes: [] }]
     }
     apps.push({
       name: appName,
