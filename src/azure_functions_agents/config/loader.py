@@ -153,13 +153,15 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     else:
         instructions = post.content
 
+    # Resolve once to avoid redundant filesystem calls
+    resolved_source = source_file.resolve()
     # Normalize bare agent.md → default.agent.md for internal processing
-    normalized_file = _normalize_agent_filename(source_file.resolve())
+    normalized_file = _normalize_agent_filename(resolved_source)
 
     normalized["substitute_variables"] = substitute_variables
     normalized["instructions"] = instructions
     # Keep the real on-disk path so diagnostics reference the file the user can actually edit
-    normalized["source_file"] = str(source_file.resolve())
+    normalized["source_file"] = str(resolved_source)
     # agent.md and CLAUDE.md (and their case variants) map to default.agent.md internally;
     # check the normalized name to determine main-agent status
     normalized["is_main"] = normalized_file.name.lower() in ("main.agent.md", "default.agent.md")
