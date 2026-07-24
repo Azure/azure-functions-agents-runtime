@@ -104,6 +104,7 @@ class ResolvedObservability:
 
 _MAF_SENSITIVE_ENV = "ENABLE_SENSITIVE_DATA"
 _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+_AAD_AUTH_STRING_ENV = "APPLICATIONINSIGHTS_AUTHENTICATION_STRING"
 
 _CONTENT_ATTR_MAX_CHARS = 2048
 
@@ -242,8 +243,25 @@ def _configure_azure_monitor(connection_string: str) -> None:
         # host.json telemetryMode exports only *host* telemetry, not the runtime's worker spans. The
         # caller detects that no provider became active and emits an actionable warning.
         return
+    kwargs: dict[str, Any] = {"connection_string": connection_string}
+    if runtime_env_value(_AAD_AUTH_STRING_ENV):
+        # Entra ID (AAD) auth for App Insights is configured (APPLICATIONINSIGHTS_AUTHENTICATION_STRING,
+        # the standard App Service/Functions "Authentication type" setting). Regular exporters
+        # (traces/logs/metrics) resolve that env var into a credential themselves, but the
+        # Live Metrics (QuickPulse) exporter does not — it only honors an explicitly-passed
+        # `credential=` kwarg, which configure_azure_monitor() never supplies. On any Application
+        # Insights resource that requires AAD (DisableLocalAuth=true), this makes Live Metrics'
+        # background polling fail every ~1s with a 401 ClientAuthenticationError ("The Agent/SDK
+        # does not have permissions to send telemetry to this resource"), flooding exception
+        # telemetry even though normal export works fine. Disable Live Metrics in this case to
+        # avoid the noise; it only removes the real-time Portal dashboard, not telemetry export.
+        # Remove this workaround once azure-monitor-opentelemetry-exporter resolves credentials
+        # for QuickPulse the same way it does for the other exporters (upstream gap; filed against
+        # Azure/azure-sdk-for-python, distinct from #37209 which fixed the no-AAD-support-at-all
+        # case in exporter 1.0.0b29).
+        kwargs["enable_live_metrics"] = False
     try:
-        configure_azure_monitor(connection_string=connection_string)
+        configure_azure_monitor(**kwargs)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Could not configure the Azure Monitor exporter: %s", exc)
 
