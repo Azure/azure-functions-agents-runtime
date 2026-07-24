@@ -229,6 +229,9 @@ def make_agent_handler(
     trigger_type: str,
     capabilities: AgentCapabilities,
     catalog: AgentCatalog | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
 
@@ -237,7 +240,7 @@ def make_agent_handler(
     # expected type (e.g. ``func.TimerRequest``) and rejects ``Any``. Leaving
     # the parameter unannotated tells the worker to skip that type check, so
     # this single handler can be reused across all non-HTTP trigger types.
-    async def _handler(trigger_data) -> None:  # type: ignore[no-untyped-def]
+    async def _handle(trigger_data, durable_client: Any | None) -> None:  # type: ignore[no-untyped-def]
         logger.info(
             "Agent triggered: trigger_type=%s source_file=%s",
             trigger_type,
@@ -278,6 +281,9 @@ def make_agent_handler(
                     skill_paths=capabilities.enabled_skill_paths,
                     subagents=resolved.subagents,
                     catalog=catalog,
+                    system_addendum=workflow_system_addendum,
+                    workflow_enabled=workflows_enabled,
+                    workflow_durable_client=durable_client,
                     agent_name=resolved.slug,
                 )
 
@@ -309,8 +315,15 @@ def make_agent_handler(
                 )
                 raise
 
-    _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
-    return _handler
+    async def _handler_with_client(trigger_data, client: str) -> None:  # type: ignore[no-untyped-def]
+        await _handle(trigger_data, client)
+
+    async def _handler_without_client(trigger_data) -> None:  # type: ignore[no-untyped-def]
+        await _handle(trigger_data, None)
+
+    handler = _handler_with_client if workflows_enabled else _handler_without_client
+    handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    return handler
 
 
 def make_http_agent_handler(
@@ -318,7 +331,10 @@ def make_http_agent_handler(
     capabilities: AgentCapabilities,
     catalog: AgentCatalog | None = None,
     auth: EndpointAuthConfig | None = None,
-) -> Callable[[Request], Any]:
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
+) -> Callable[..., Any]:
     """Create an async handler for an HTTP-triggered agent.
 
     ``auth`` is the resolved inbound authentication policy. In ``entra`` mode the
@@ -328,7 +344,7 @@ def make_http_agent_handler(
     """
     auth_policy = auth or EndpointAuthConfig()
 
-    async def _handler(req: Request) -> Response:
+    async def _handle(req: Request, durable_client: Any | None) -> Response:
         auth_error = authorize_entra_request(req.headers.get, auth_policy)
         if auth_error is not None:
             return Response(
@@ -404,6 +420,9 @@ def make_http_agent_handler(
                     skill_paths=capabilities.enabled_skill_paths,
                     subagents=resolved.subagents,
                     catalog=catalog,
+                    system_addendum=workflow_system_addendum,
+                    workflow_enabled=workflows_enabled,
+                    workflow_durable_client=durable_client,
                     agent_name=resolved.slug,
                 )
 
@@ -504,5 +523,12 @@ def make_http_agent_handler(
                     headers={_SESSION_ID_HEADER: session_id},
                 )
 
-    _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
-    return _handler
+    async def _handler_with_client(req: Request, client: str) -> Response:
+        return await _handle(req, client)
+
+    async def _handler_without_client(req: Request) -> Response:
+        return await _handle(req, None)
+
+    handler = _handler_with_client if workflows_enabled else _handler_without_client
+    handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    return handler

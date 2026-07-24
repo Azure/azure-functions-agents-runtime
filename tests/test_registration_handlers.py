@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import re
 from contextlib import contextmanager
@@ -744,3 +745,177 @@ def test_http_handler_default_auth_does_not_gate_requests(monkeypatch: Any) -> N
     response = asyncio.run(handler(DummyRequest({"hello": "world"})))
 
     assert response.status_code == 200
+
+
+def test_workflow_non_http_handler_passes_durable_context(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    durable_client = SimpleNamespace(name="durable-client")
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            content="started",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None),
+        "timer_trigger",
+        AgentCapabilities(),
+        workflows_enabled=True,
+        workflow_system_addendum="\ntrigger workflow guidance",
+    )
+
+    assert list(inspect.signature(handler).parameters) == ["trigger_data", "client"]
+    asyncio.run(handler({"past_due": False}, durable_client))
+
+    assert captured["workflow_enabled"] is True
+    assert captured["workflow_durable_client"] is durable_client
+    assert captured["system_addendum"] == "\ntrigger workflow guidance"
+    assert captured["agent_name"] == "resolved-agent-slug"
+
+
+def test_workflow_http_handler_passes_durable_context(monkeypatch: Any) -> None:
+    captured: dict[str, Any] = {}
+    durable_client = SimpleNamespace(name="durable-client")
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            content="started",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        workflows_enabled=True,
+        workflow_system_addendum="\ntrigger workflow guidance",
+    )
+
+    assert list(inspect.signature(handler).parameters) == ["req", "client"]
+    response = asyncio.run(handler(DummyRequest({"prompt": "start"}), durable_client))
+
+    assert response.status_code == 200
+    assert captured["workflow_enabled"] is True
+    assert captured["workflow_durable_client"] is durable_client
+    assert captured["system_addendum"] == "\ntrigger workflow guidance"
+    assert captured["agent_name"] == "resolved-agent-slug"
+
+
+def test_disabled_non_http_handler_keeps_single_binding_signature(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            content="ok",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_agent_handler(
+        _resolved_agent(response_schema=None),
+        "queue_trigger",
+        AgentCapabilities(),
+    )
+
+    assert list(inspect.signature(handler).parameters) == ["trigger_data"]
+    asyncio.run(handler({"message": "hello"}))
+    assert captured["workflow_enabled"] is False
+    assert captured["workflow_durable_client"] is None
+    assert captured["system_addendum"] is None
+
+
+def test_workflow_http_handler_preserves_response_schema(monkeypatch: Any) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content='{"workflow_id":"workflow-123"}',
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema={
+                "type": "object",
+                "properties": {"workflow_id": {"type": "string"}},
+                "required": ["workflow_id"],
+            }
+        ),
+        AgentCapabilities(),
+        workflows_enabled=True,
+        workflow_system_addendum="\ntrigger workflow guidance",
+    )
+
+    response = asyncio.run(
+        handler(DummyRequest({"prompt": "start"}), SimpleNamespace(name="client"))
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"workflow_id": "workflow-123"}
+
+
+def test_disabled_http_handler_keeps_single_binding_signature() -> None:
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+    )
+
+    assert list(inspect.signature(handler).parameters) == ["req"]
+
+
+def test_workflow_http_handler_rejects_invalid_schema_response(
+    monkeypatch: Any,
+) -> None:
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        return SimpleNamespace(
+            content='{"message":"missing workflow id"}',
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(
+            response_schema={
+                "type": "object",
+                "properties": {"workflow_id": {"type": "string"}},
+                "required": ["workflow_id"],
+            }
+        ),
+        AgentCapabilities(),
+        workflows_enabled=True,
+        workflow_system_addendum="\ntrigger workflow guidance",
+    )
+
+    response = asyncio.run(
+        handler(DummyRequest({"prompt": "start"}), SimpleNamespace(name="client"))
+    )
+    assert response.status_code == 500
+    assert json.loads(response.body)["error"] == "Agent response validation failed"

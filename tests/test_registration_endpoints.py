@@ -10,6 +10,7 @@ from typing import Any, get_type_hints
 
 import azure.functions as func
 
+from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     EndpointAuthConfig,
@@ -18,10 +19,13 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
+    _SAFE_SESSION_ID_PATTERN,
+    _extract_mcp_session_id,
     _run_builtin_agent,
     _run_builtin_agent_stream,
     register_builtin_endpoints,
 )
+from azure_functions_agents.runner import _SESSION_ID_PATTERN
 
 
 class FakeFunctionApp:
@@ -657,6 +661,53 @@ def test_handle_mcp_agent_chat_refreshes_span_session_id_when_caller_omits_it(
     assert json.loads(result)["session_id"] == "runner-generated-session-id"
     [span] = spans
     assert span.attributes["af.agent.session_id"] == "runner-generated-session-id"
+
+
+def test_extract_mcp_session_id_passes_through_safe_ids() -> None:
+    """A caller-supplied id that already matches the safe pattern is kept as-is."""
+    assert _extract_mcp_session_id({"sessionId": "session-456"}) == "session-456"
+    assert _extract_mcp_session_id({"sessionId": "  trimmed.me_1  "}) == "trimmed.me_1"
+
+
+def test_extract_mcp_session_id_returns_none_when_absent_or_blank() -> None:
+    assert _extract_mcp_session_id({}) is None
+    assert _extract_mcp_session_id({"sessionId": "   "}) is None
+    assert _extract_mcp_session_id({"sessionId": 123}) is None
+
+
+def test_safe_session_id_pattern_matches_runner_pattern() -> None:
+    """The endpoint layer and the runner both validate session ids against the
+    same rule. They now share a single source of truth
+    (``_session_id.SESSION_ID_PATTERN``) rather than duplicating the regex, so
+    pass-through session ids validated here remain valid in the runner. Assert
+    both reference that shared object to catch any future re-duplication.
+    """
+    assert _SAFE_SESSION_ID_PATTERN is SESSION_ID_PATTERN
+    assert _SESSION_ID_PATTERN is SESSION_ID_PATTERN
+
+
+
+def test_extract_mcp_session_id_sanitizes_transport_ids() -> None:
+    """The MCP extension mints transport ids the runner would reject (invalid
+    characters or over the 128-char cap). They must be mapped deterministically
+    into the runner's safe session-id space so the run doesn't fail validation.
+    """
+    # Streamable-HTTP style value with characters outside [A-Za-z0-9._-].
+    raw = "urn:mcp:session:9f8b/6a2c+d4==@conn"
+    sanitized = _extract_mcp_session_id({"sessionId": raw})
+    assert sanitized is not None
+    assert _SESSION_ID_PATTERN.match(sanitized), sanitized
+    # Deterministic: same transport id -> same agent session (continuity).
+    assert sanitized == _extract_mcp_session_id({"sessionId": raw})
+    # Different transport id -> different agent session.
+    assert sanitized != _extract_mcp_session_id({"sessionId": raw + "-other"})
+
+    # Over the 128-char length cap is also brought back into range.
+    long_id = "a" * 200
+    long_sanitized = _extract_mcp_session_id({"sessionId": long_id})
+    assert long_sanitized is not None
+    assert _SESSION_ID_PATTERN.match(long_sanitized), long_sanitized
+
 
 
 def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(
