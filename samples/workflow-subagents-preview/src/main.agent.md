@@ -7,7 +7,7 @@ tools: false
 
 workflows:
   enabled: true
-  allowed_sub_agents:
+  subagents:
     - agent: pr_status_analyst
       when: Review one pull request and summarize its current status
     - agent: actionable_report_writer
