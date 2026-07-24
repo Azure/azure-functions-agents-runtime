@@ -102,7 +102,27 @@ def test_sample_runtime_files_and_customer_readme_are_complete() -> None:
         (SAMPLE_SRC / "local.settings.template.json").read_text(encoding="utf-8")
     )
     assert settings["Values"]["AzureWebJobsStorage"] == "UseDevelopmentStorage=true"
+    assert settings["Values"]["DURABLE_TASK_SCHEDULER_CONNECTION_STRING"] == (
+        "Endpoint=http://localhost:8080;Authentication=None"
+    )
+    assert settings["Values"]["TASKHUB_NAME"] == "prstatusreports"
     assert settings["Values"]["PR_STATUS_REPORT_CONTAINER"] == "workflow-reports"
+
+    host = json.loads((SAMPLE_SRC / "host.json").read_text(encoding="utf-8"))
+    durable_task = host["extensions"]["durableTask"]
+    assert durable_task == {
+        "hubName": "%TASKHUB_NAME%",
+        "storageProvider": {
+            "type": "azureManaged",
+            "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+        },
+    }
+
+    assert "mcr.microsoft.com/dts/dts-emulator:latest" in readme
+    assert "DTS_USE_DYNAMIC_TASK_HUBS=true" in readme
+    assert "-p 8080:8080 -p 8082:8082" in readme
+    assert "http://localhost:8082" in readme
+    assert "Azurite must still be running" in readme
 
 
 def test_fake_pr_tools_are_deterministic() -> None:
