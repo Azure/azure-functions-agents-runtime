@@ -10,10 +10,13 @@ from azure_functions_agents.config.schema import (
     SubagentRef,
     ToolsFilter,
     TriggerSpec,
+    WorkflowConfig,
+    WorkflowSubagentRef,
 )
 from azure_functions_agents.config.validation import (
     validate_resolved_agent,
     validate_subagent_references,
+    validate_workflow_subagent_references,
 )
 
 
@@ -422,3 +425,69 @@ def test_validate_subagent_references_rejects_duplicate_reference() -> None:
     assert "field `subagents`" in message
     assert "Duplicate reference" in message
     assert "billing-specialist" in message
+
+
+def test_validate_workflow_subagent_references_accepts_known_reference() -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        workflows=WorkflowConfig(
+            enabled=True,
+            subagents=(WorkflowSubagentRef(agent="pr_status_analyst"),),
+        ),
+    )
+
+    validate_workflow_subagent_references(
+        resolved,
+        known_slugs={"coordinator", "pr_status_analyst"},
+    )
+
+
+@pytest.mark.parametrize(
+    ("refs", "expected"),
+    [
+        (
+            (WorkflowSubagentRef(agent="coordinator"),),
+            "cannot invoke itself",
+        ),
+        (
+            (WorkflowSubagentRef(agent="missing"),),
+            "Unknown agent reference",
+        ),
+        (
+            (
+                WorkflowSubagentRef(agent="pr_status_analyst"),
+                WorkflowSubagentRef(agent="pr_status_analyst"),
+            ),
+            "Duplicate reference",
+        ),
+    ],
+)
+def test_validate_workflow_subagent_references_rejects_invalid_grants(
+    refs: tuple[WorkflowSubagentRef, ...],
+    expected: str,
+) -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        workflows=WorkflowConfig(enabled=True, subagents=refs),
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        validate_workflow_subagent_references(
+            resolved,
+            known_slugs={"coordinator", "pr_status_analyst"},
+        )
+
+
+def test_chat_and_workflow_grants_can_reference_same_specialist() -> None:
+    resolved = _make_resolved(
+        slug="coordinator",
+        subagents=[SubagentRef(agent="pr_status_analyst")],
+        workflows=WorkflowConfig(
+            enabled=True,
+            subagents=(WorkflowSubagentRef(agent="pr_status_analyst"),),
+        ),
+    )
+    known = {"coordinator", "pr_status_analyst"}
+
+    validate_subagent_references(resolved, known_slugs=known)
+    validate_workflow_subagent_references(resolved, known_slugs=known)

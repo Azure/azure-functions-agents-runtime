@@ -15,6 +15,8 @@ from azure_functions_agents.config.schema import (
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
+    WorkflowConfig,
+    WorkflowSubagentRef,
 )
 
 
@@ -215,3 +217,79 @@ def test_agent_spec_subagents_rejects_string_shorthand() -> None:
 def test_agent_spec_subagents_defaults_to_none() -> None:
     spec = AgentSpec(name="X", description="Y")
     assert spec.subagents is None
+
+
+def test_workflow_subagent_ref_parses_optional_routing_hint() -> None:
+    ref = WorkflowSubagentRef.model_validate(
+        {"agent": "pr_status_analyst", "when": "Analyze one pull request."}
+    )
+
+    assert ref.agent == "pr_status_analyst"
+    assert ref.when == "Analyze one pull request."
+
+
+def test_workflow_subagent_ref_rejects_empty_agent() -> None:
+    with pytest.raises(ValidationError, match="agent must be non-empty"):
+        WorkflowSubagentRef(agent=" ")
+
+
+def test_workflow_subagent_ref_forbids_chat_grant_fields() -> None:
+    with pytest.raises(ValidationError):
+        WorkflowSubagentRef.model_validate(
+            {"agent": "pr_status_analyst", "tool_name": "delegate_pr_status"}
+        )
+
+
+def test_agent_spec_workflows_parses_typed_subagent_grant() -> None:
+    spec = AgentSpec.model_validate(
+        {
+            "name": "Coordinator",
+            "description": "Coordinates PR reporting.",
+            "workflows": {
+                "enabled": True,
+                "exclude": ["private_tool"],
+                "subagents": [
+                    {
+                        "agent": "pr_status_analyst",
+                        "when": "Analyze one pull request.",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert spec.workflows == WorkflowConfig(
+        enabled=True,
+        exclude=("private_tool",),
+        subagents=(
+            WorkflowSubagentRef(
+                agent="pr_status_analyst",
+                when="Analyze one pull request.",
+            ),
+        ),
+    )
+
+
+def test_agent_spec_workflows_omission_is_deny_by_default() -> None:
+    spec = AgentSpec(name="Coordinator", description="Coordinates work.")
+
+    assert spec.workflows is None
+
+
+@pytest.mark.parametrize(
+    "workflows",
+    [
+        {"enabled": True, "unknown": True},
+        {"enabled": True, "subagents": ["pr_status_analyst"]},
+        {"enabled": True, "subagents": [{"agent": ""}]},
+    ],
+)
+def test_agent_spec_workflows_rejects_invalid_shape(workflows: object) -> None:
+    with pytest.raises(ValidationError):
+        AgentSpec.model_validate(
+            {
+                "name": "Coordinator",
+                "description": "Coordinates work.",
+                "workflows": workflows,
+            }
+        )

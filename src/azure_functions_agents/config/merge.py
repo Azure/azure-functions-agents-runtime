@@ -178,7 +178,7 @@ def compose(
     if spec.logger is not None:
         metadata["logger"] = spec.logger
     if spec.workflows is not None:
-        metadata["workflows"] = spec.workflows
+        metadata["workflows"] = spec.workflows.model_dump(mode="json")
 
     resolved = ResolvedAgent(
         name=spec.name,
