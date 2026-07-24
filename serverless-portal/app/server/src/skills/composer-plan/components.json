@@ -1,0 +1,49 @@
+{
+  "triggers": [
+    { "kind": "httpTrigger", "label": "HTTP request", "when": "invoked on-demand via a URL / webhook", "config": { "route": "string", "methods": ["POST"] } },
+    { "kind": "timerTrigger", "label": "Schedule", "when": "runs on a cron schedule (daily, hourly, weekdays)", "config": { "schedule": "NCRONTAB e.g. 0 0 8 * * 1-5" } },
+    { "kind": "connectorTrigger", "label": "Connector event", "when": "reacts to an external SaaS event (Outlook mail, GitHub issue, Teams)", "config": { "connector": "outlook|github|teams|servicenow", "event": "string" } },
+    { "kind": "queueTrigger", "label": "Storage queue", "when": "processes messages from a storage queue", "config": { "queue": "string" } },
+    { "kind": "serviceBusTrigger", "label": "Service Bus", "when": "processes Service Bus queue/topic messages", "config": { "queue": "string" } },
+    { "kind": "blobTrigger", "label": "Blob created", "when": "reacts to a file/blob being uploaded", "config": { "path": "container/{name}" } },
+    { "kind": "eventHubTrigger", "label": "Event Hub", "when": "consumes an event stream", "config": { "eventHub": "string" } },
+    { "kind": "cosmosDBTrigger", "label": "Cosmos DB change feed", "when": "reacts to document changes", "config": { "container": "string" } }
+  ],
+  "agent": {
+    "type": "agent",
+    "kind": "agent",
+    "describes": "a markdown-authored AI agent (*.agent.md) — one reasoning step",
+    "config": { "sourceFile": "name.agent.md", "instructions": "system prompt / task", "skills": ["skill names"], "tools": ["tool names"], "builtinEndpoints": "bool — expose a chat UI/API", "workflows": "bool — allow LLM-authored durable sub-workflows" }
+  },
+  "tool": {
+    "type": "tool",
+    "kind": "tool",
+    "describes": "a Python @tool function the agents can call",
+    "config": { "signature": "def name(args) -> ret", "code": "python source" }
+  },
+  "skill": {
+    "type": "skill",
+    "kind": "skill",
+    "describes": "packaged domain knowledge (SKILL.md) agents ground their output in; shared across agents",
+    "config": { "path": "skills/<name>/SKILL.md", "summary": "what it contains" }
+  },
+  "mcp": {
+    "type": "mcp",
+    "kind": "mcp",
+    "describes": "an MCP server exposing external tools (mcp.json)",
+    "config": { "server": "name", "url": "https://…", "tools": ["allowed tool names"] }
+  },
+  "router": {
+    "type": "router",
+    "kind": "switch|filter",
+    "describes": "conditional branching between nodes (composer-level glue)",
+    "config": { "on": "field", "cases": ["value -> nodeId"] }
+  },
+  "outputs": [
+    { "kind": "connector", "label": "Connector action", "when": "open a ticket, post to Teams/Slack, update a SaaS record", "config": { "connector": "servicenow|teams|slack|jira", "action": "string" } },
+    { "kind": "email", "label": "Send email", "when": "reply to or notify someone by email", "config": { "via": "outlook" } },
+    { "kind": "queue", "label": "Enqueue message", "when": "hand off to another queue-triggered process", "config": { "queue": "string" } },
+    { "kind": "blob", "label": "Store result", "when": "persist the result to storage", "config": { "container": "string" } },
+    { "kind": "http_response", "label": "Return response", "when": "return the result to the HTTP caller", "config": {} }
+  ]
+}

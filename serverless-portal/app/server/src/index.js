@@ -14,6 +14,7 @@ import express from 'express'
 import cors from 'cors'
 
 import * as azure from './azure.js'
+import { createWorkflowsRouter } from './workflows/routes.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DIST_DIR = path.resolve(__dirname, '..', '..', 'frontend', 'dist')
@@ -29,8 +30,8 @@ app.use(
       'http://localhost:5173',
       'http://127.0.0.1:5173',
     ],
-    methods: ['GET'],
-    allowedHeaders: ['Authorization', 'Content-Type'],
+    methods: ['GET', 'POST', 'PUT', 'DELETE'],
+    allowedHeaders: ['Authorization', 'Content-Type', 'If-Match'],
   }),
 )
 
@@ -146,6 +147,13 @@ app.get(
     res.json({ subscriptionId, apps: result.apps, agents })
   }),
 )
+
+// ---------------------------------------------------------------------------
+// Workflow Composer (portal-owned store; deploys on the customer's behalf).
+// Token-free — the portal owns these documents. Mounted under /api.
+// ---------------------------------------------------------------------------
+
+app.use('/api', createWorkflowsRouter())
 
 // Any unmatched /api/* path is a 404 JSON (never the SPA shell).
 app.use('/api', (_req, res) => res.status(404).json({ detail: 'Not found' }))

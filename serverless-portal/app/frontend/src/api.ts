@@ -80,6 +80,30 @@ async function req<T>(method: string, url: string): Promise<T> {
   return data as T
 }
 
+// Composer requests are backed by the portal-owned store and need no ARM token.
+async function reqJson<T>(method: string, url: string, body?: unknown): Promise<T> {
+  const res = await fetch(url, {
+    method,
+    headers: body !== undefined ? { 'Content-Type': 'application/json' } : undefined,
+    body: body !== undefined ? JSON.stringify(body) : undefined,
+  })
+  const text = await res.text()
+  let data: unknown = null
+  try {
+    data = text ? JSON.parse(text) : null
+  } catch {
+    data = text
+  }
+  if (!res.ok) {
+    const detail =
+      data && typeof data === 'object' && 'detail' in data
+        ? (data as { detail: unknown }).detail
+        : `HTTP ${res.status}`
+    throw new ApiError(typeof detail === 'string' ? detail : JSON.stringify(detail), res.status)
+  }
+  return data as T
+}
+
 const enc = encodeURIComponent
 
 export const api = {
@@ -93,4 +117,46 @@ export const api = {
       'GET',
       subscription ? `/api/live/agents?subscription=${enc(subscription)}` : '/api/live/agents',
     ),
+}
+
+// ---------------------------------------------------------------------------
+// Workflow Composer API (portal-owned store; no ARM token required).
+// ---------------------------------------------------------------------------
+
+import type {
+  Workflow,
+  WorkflowSummary,
+  WorkflowVersion,
+  ModelInfo,
+  SkillInfo,
+  RunResult,
+} from './workflow/types'
+
+export type ComponentCatalog = Record<string, unknown>
+
+export const composerApi = {
+  model: () => reqJson<ModelInfo>('GET', '/api/composer/model'),
+  skills: () => reqJson<SkillInfo[]>('GET', '/api/composer/skills'),
+  catalog: () => reqJson<ComponentCatalog>('GET', '/api/composer/catalog'),
+
+  list: () => reqJson<WorkflowSummary[]>('GET', '/api/workflows'),
+  get: (id: string) => reqJson<Workflow>('GET', `/api/workflows/${enc(id)}`),
+  create: (partial: Partial<Workflow>) => reqJson<Workflow>('POST', '/api/workflows', partial),
+  generate: (prompt: string, target?: Workflow['target']) =>
+    reqJson<Workflow>('POST', '/api/workflows/generate', { prompt, target }),
+  regenerate: (id: string, prompt: string) =>
+    reqJson<Workflow>('POST', `/api/workflows/${enc(id)}/regenerate`, { prompt }),
+  // Stage-2 codegen for a single (possibly unsaved) node.
+  generateCode: (node: unknown, workflow: unknown) =>
+    reqJson<{ code?: string; instructions?: string }>('POST', '/api/composer/generate-code', { node, workflow }),
+  save: (id: string, doc: Partial<Workflow>) => reqJson<Workflow>('PUT', `/api/workflows/${enc(id)}`, doc),
+  remove: (id: string) => reqJson<void>('DELETE', `/api/workflows/${enc(id)}`),
+  compile: (id: string) => reqJson<{ files: Record<string, string> }>('GET', `/api/workflows/${enc(id)}/compile`),
+  deploy: (id: string) => reqJson<Workflow>('POST', `/api/workflows/${enc(id)}/deploy`, {}),
+  run: (id: string, inputs: Record<string, unknown>) =>
+    reqJson<RunResult>('POST', `/api/workflows/${enc(id)}/run`, { inputs }),
+  // Version history + restore (working-copy model).
+  versions: (id: string) => reqJson<WorkflowVersion[]>('GET', `/api/workflows/${enc(id)}/versions`),
+  restore: (id: string, version: number) =>
+    reqJson<Workflow>('POST', `/api/workflows/${enc(id)}/restore/${version}`, {}),
 }
