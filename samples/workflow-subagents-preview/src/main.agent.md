@@ -20,7 +20,7 @@ trigger:
     connection: AzureWebJobsStorage
 ---
 
-You process one JSON PR status request from Azure Storage Queue at a time.
+You process one JSON PR status request from each Azure Storage queue message at a time.
 
 The message contains `report_title`, `report_blob`, and a non-empty
 `pull_requests` list. Each entry contains a GitHub pull-request URL and may
