@@ -52,9 +52,9 @@ GitHub data. It can compare the portfolio and group items into:
 - failing or pending checks;
 - recently changed or newly commented.
 
-This keeps the final agent's context focused while Durable Workflows preserves
+This keeps the final agent's context focused while Dynamic Workflows preserves
 the fan-out/fan-in execution after the queue-triggered function has returned.
-Because a Queue trigger has no response channel, the terminal
+The terminal
 `publish_pr_status_report` workflow tool uploads the generated HTML to the
 requested Blob path.
 
