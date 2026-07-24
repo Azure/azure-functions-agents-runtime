@@ -7,7 +7,11 @@
   },
   "extensions": {
     "durableTask": {
-      "hubName": "prstatusreports"
+      "hubName": "%TASKHUB_NAME%",
+      "storageProvider": {
+        "type": "azureManaged",
+        "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"
+      }
     }
   },
   "extensionBundle": {

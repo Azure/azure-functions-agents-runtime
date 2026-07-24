@@ -55,7 +55,9 @@ Copy-Item local.settings.template.json local.settings.json
 ```
 
 Set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` in
-`local.settings.json`, authenticate with `az login`, and start Azurite:
+`local.settings.json`, then authenticate with `az login`.
+
+Start Azurite for the input queue, output Blob, and Functions host storage:
 
 ```powershell
 docker run --rm --name workflow-subagents-azurite `
@@ -65,7 +67,26 @@ docker run --rm --name workflow-subagents-azurite `
   --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
 ```
 
-Start the Functions host from the activated environment:
+Azurite must still be running when this sample uses the Durable Task Scheduler
+(DTS), because the queue, report Blob, and Functions host storage remain in
+Azurite.
+
+In another terminal, start the DTS emulator. Dynamic Task Hubs let it create
+the configured `prstatusreports` hub automatically:
+
+```powershell
+docker run --rm --name workflow-subagents-dts `
+  -e DTS_USE_DYNAMIC_TASK_HUBS=true `
+  -p 8080:8080 -p 8082:8082 `
+  mcr.microsoft.com/dts/dts-emulator:latest
+```
+
+Port `8080` is the scheduler endpoint used by the Functions host. Open the DTS
+dashboard at <http://localhost:8082> to inspect workflow instances and their
+progress.
+
+With both emulators running, start the Functions host from the activated
+environment:
 
 ```powershell
 func start
