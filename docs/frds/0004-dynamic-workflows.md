@@ -286,7 +286,7 @@ workflow-enabled agent authorize existing Markdown agents as durable DAG nodes:
 name: Support Coordinator
 workflows:
   enabled: true
-  allowed_sub_agents:
+  subagents:
     - agent: pr_status_analyst
       when: Review one pull request and summarize its current status
     - agent: actionable_report_writer
@@ -294,12 +294,13 @@ workflows:
 ---
 ```
 
-`workflows.allowed_sub_agents` is independent from chat-time `subagents:`. It is
-deny-by-default when omitted and may reference a specialist used only by
-Workflows. Unknown, duplicate, and self references fail during app composition.
-As with a `subagents:` reference, an authorized Workflow-only specialist does not
-need its own trigger or built-in endpoint. `when` is the routing hint shown to
-the coordinator's plan-authoring model; when omitted, the specialist's
+`workflows.subagents` and the top-level chat-time `subagents:` list are
+independent capability grants. Both are deny-by-default when omitted.
+`workflows.subagents` may reference a specialist used only by Workflows.
+Unknown, duplicate, and self references fail during app composition. As with a
+top-level `subagents:` reference, an authorized Workflow-only specialist does
+not need its own trigger or built-in endpoint. `when` is the routing hint shown
+to the coordinator's plan-authoring model; when omitted, the specialist's
 `description` is used.
 
 The Workflow plan uses a `sub_agent` task:
@@ -349,6 +350,12 @@ tools.
 | Cancellation | Best-effort for an already-dispatched model call | Stronger child interruption where supported |
 | Context | Self-contained `task` only | Explicit context-sharing policy, if justified |
 
+The v1 runtime does not configure automatic Durable retries. The task and result
+authoring contract should remain unchanged if a runtime-managed Durable retry
+policy is added later. Before enabling it, the implementation must define
+idempotency, retryable failure kinds, maximum attempts/backoff, and how repeated
+model or tool side effects are surfaced.
+
 #### Reviewer note: positive capability allowlists
 
 Today specialist `tools`, `skills`, and `mcp` capabilities inherit the
@@ -391,7 +398,7 @@ are a prerequisite, a parallel feature, or a later hardening step.
 | 12 | Record trigger support | Create a second Dynamic Workflows FRD / evolve this FRD | Update FRD 0004 because Markdown-declared trigger support extends the existing feature without redesigning it | Human | 2026-07-23 |
 | 13 | Declared-trigger scope | Add named trigger types individually / use generic trigger registration | Add the Durable client binding generically to every supported Markdown-declared trigger for the workflow-enabled main agent | Human + Agent | 2026-07-17 |
 | 14 | Trigger lifetime | Wait for terminal status / start asynchronously | End the initial trigger Function after the agent starts the workflow; Durable execution continues independently | Human + Agent | 2026-07-17 |
-| 15 | Draft proposal: Workflow Sub Agent authorization | Reuse `subagents:` / add a mode flag / use a Workflow-owned grant | Add independent, deny-by-default `workflows.allowed_sub_agents` | Human | 2026-07-23 |
+| 15 | Draft proposal: Workflow Sub Agent authorization | Reuse the top-level list / add a mode flag / use a Workflow-owned grant | Add independent, deny-by-default `workflows.subagents` | Human | 2026-07-23 |
 | 16 | Draft proposal: first execution boundary | Recursive delegation / bounded nesting / leaf-only | v1 is leaf-only; bounded multi-level execution is v2 | Human | 2026-07-23 |
 | 17 | Draft proposal: specialist context | Copy parent state / share history / self-contained task | Run with the specialist's own static capabilities and a self-contained task only | Human | 2026-07-23 |
 | 18 | Draft proposal: failure and retry | Recoverable result / automatic retry / fail parent without retry | Sub Agent failure fails the parent Workflow; v1 has no automatic retry | Human | 2026-07-23 |
