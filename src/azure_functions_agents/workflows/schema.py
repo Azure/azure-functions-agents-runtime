@@ -23,10 +23,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Collection
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 
 class PlanValidationError(ValueError):
@@ -43,10 +45,26 @@ class TemplateResolutionError(ValueError):
 
 TOOL_TASK_TYPE: str = "tool"
 WAIT_TASK_TYPE: str = "wait"
-SUPPORTED_TASK_TYPES: frozenset[str] = frozenset({TOOL_TASK_TYPE, WAIT_TASK_TYPE})
+SUB_AGENT_TASK_TYPE: str = "sub_agent"
+SUPPORTED_TASK_TYPES: frozenset[str] = frozenset({
+    TOOL_TASK_TYPE,
+    WAIT_TASK_TYPE,
+    SUB_AGENT_TASK_TYPE,
+})
+
+
+@dataclass(frozen=True)
+class WorkflowPlanPolicy:
+    """Immutable owner-specific authorization boundary for workflow plans."""
+
+    allowed_tools: frozenset[str]
+    allowed_subagents: frozenset[str]
+    subagent_guidance: tuple[tuple[str, str], ...] = ()
 
 
 class WorkflowTask(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(..., min_length=1, max_length=64)
     type: str = Field(default=TOOL_TASK_TYPE)
     # ``tool`` is required for type=tool, must be omitted for type=wait.
@@ -58,6 +76,8 @@ class WorkflowTask(BaseModel):
     # ``type == "wait"``; both must be omitted otherwise.
     duration: str | None = Field(default=None)
     until: str | None = Field(default=None)
+    agent: str | None = Field(default=None)
+    task: str | None = Field(default=None)
 
 
 class WorkflowPlan(BaseModel):
@@ -93,20 +113,27 @@ _TEMPLATE_UNCLOSED_RE = re.compile(r"\$\{[^}]*\Z")
 def validate_plan(
     raw: dict[str, Any],
     *,
-    allowed_tools: set[str],
+    policy: WorkflowPlanPolicy | None = None,
+    allowed_tools: Collection[str] | None = None,
 ) -> WorkflowPlan:
     """Validate and normalize a plan dict.
 
-    ``allowed_tools`` is the set of tool names admitted as ``type=tool``
-    node targets. In production this is computed by
-    :func:`build_workflow_integration` from the agent's frontmatter and
-    the registry. There is no fallback — the validator never invents
-    its own allowlist.
+    ``policy`` is the immutable owner-specific authorization boundary used
+    by both prompt guidance and runtime validation. ``allowed_tools`` remains
+    as a compatibility-only input for callers predating sub-agent nodes.
 
     Raises :class:`PlanValidationError` with a caller-friendly message on
     any structural or semantic problem.
     """
-    effective_allowed = frozenset(allowed_tools)
+    if policy is not None and allowed_tools is not None:
+        raise TypeError("pass either policy or allowed_tools, not both")
+    if policy is None:
+        if allowed_tools is None:
+            raise TypeError("validate_plan requires an explicit WorkflowPlanPolicy")
+        policy = WorkflowPlanPolicy(
+            allowed_tools=frozenset(allowed_tools),
+            allowed_subagents=frozenset(),
+        )
     try:
         plan = WorkflowPlan.model_validate(raw)
     except ValidationError as exc:
@@ -137,15 +164,20 @@ def validate_plan(
                     f"task {task.id!r}: 'tool' field is required for "
                     "type=tool tasks"
                 )
-            if task.tool not in effective_allowed:
+            if task.tool not in policy.allowed_tools:
                 raise PlanValidationError(
                     f"task {task.id!r}: tool {task.tool!r} is not workflow-safe. "
-                    f"Allowed tools: {sorted(effective_allowed)}"
+                    f"Allowed tools: {sorted(policy.allowed_tools)}"
                 )
             if task.duration is not None or task.until is not None:
                 raise PlanValidationError(
                     f"task {task.id!r}: 'duration' and 'until' are only "
                     "valid on type=wait tasks"
+                )
+            if "agent" in task.model_fields_set or "task" in task.model_fields_set:
+                raise PlanValidationError(
+                    f"task {task.id!r}: 'agent' and 'task' are only valid on "
+                    "type=sub_agent tasks"
                 )
         elif task.type == WAIT_TASK_TYPE:
             if task.tool is not None:
@@ -156,6 +188,11 @@ def validate_plan(
                 raise PlanValidationError(
                     f"task {task.id!r}: 'args' is not valid on type=wait tasks "
                     "(use 'duration' or 'until' instead)"
+                )
+            if "agent" in task.model_fields_set or "task" in task.model_fields_set:
+                raise PlanValidationError(
+                    f"task {task.id!r}: 'agent' and 'task' are only valid on "
+                    "type=sub_agent tasks"
                 )
             has_duration = task.duration is not None
             has_until = task.until is not None
@@ -202,6 +239,33 @@ def validate_plan(
                         f"task {task.id!r}: until {task.until!r} is more than "
                         f"{MAX_WAIT_DURATION} in the future"
                     )
+        elif task.type == SUB_AGENT_TASK_TYPE:
+            if not task.agent or not task.agent.strip():
+                raise PlanValidationError(
+                    f"task {task.id!r}: 'agent' field is required and must be "
+                    "non-empty for type=sub_agent tasks"
+                )
+            if not task.task or not task.task.strip():
+                raise PlanValidationError(
+                    f"task {task.id!r}: 'task' field is required and must be "
+                    "non-empty for type=sub_agent tasks"
+                )
+            forbidden = [
+                field
+                for field in ("tool", "args", "duration", "until")
+                if field in task.model_fields_set
+            ]
+            if forbidden:
+                listed = ", ".join(repr(field) for field in forbidden)
+                raise PlanValidationError(
+                    f"task {task.id!r}: {listed} is not valid on type=sub_agent tasks"
+                )
+            if task.agent not in policy.allowed_subagents:
+                raise PlanValidationError(
+                    f"task {task.id!r}: Sub Agent {task.agent!r} is not authorized "
+                    f"for this workflow owner. Allowed Sub Agents: "
+                    f"{sorted(policy.allowed_subagents)}"
+                )
 
     # Validate ``depends_on`` edges reference known task ids (no self-loops,
     # no duplicates) and detect cycles.
@@ -330,13 +394,16 @@ def _validate_task_templates(
     """Ensure every ``${...}`` reference in the task's args is well-formed
     and points to an upstream task.
     """
-    for path, value in _walk_strings(task.args, ()):
+    template_root = "task" if task.type == SUB_AGENT_TASK_TYPE else "args"
+    template_value: Any = task.task if task.type == SUB_AGENT_TASK_TYPE else task.args
+    for path, value in _walk_strings(template_value, ()):
         # Catch unterminated ``${`` (no closing brace before end of string)
         # before the inner finditer loop, which only sees balanced ``${...}``.
         if _TEMPLATE_UNCLOSED_RE.search(value):
             raise PlanValidationError(
                 f"task {task.id!r}: unterminated template reference at "
-                f"args path {_format_arg_path(path)} — missing closing '}}'"
+                f"{template_root} path {_format_value_path(template_root, path)} "
+                "— missing closing '}'"
             )
         # Catch ``${...}`` literals that don't match the strict template
         # regex — silently leaving these in args would defeat the point of
@@ -346,8 +413,8 @@ def _validate_task_templates(
             if not _TEMPLATE_RE.fullmatch(literal):
                 raise PlanValidationError(
                     f"task {task.id!r}: malformed template "
-                    f"reference {literal!r} at args path "
-                    f"{_format_arg_path(path)} — expected "
+                    f"reference {literal!r} at {template_root} path "
+                    f"{_format_value_path(template_root, path)} — expected "
                     "${{node_id.result}} or ${{node_id.result.path}}"
                 )
         for ref_match in _TEMPLATE_RE.finditer(value):
@@ -355,7 +422,8 @@ def _validate_task_templates(
             if ref_id not in by_id:
                 raise PlanValidationError(
                     f"task {task.id!r}: template references unknown task "
-                    f"{ref_id!r} at args path {_format_arg_path(path)}"
+                    f"{ref_id!r} at {template_root} path "
+                    f"{_format_value_path(template_root, path)}"
                 )
             if ref_id not in upstream_ids:
                 raise PlanValidationError(
@@ -381,13 +449,13 @@ def _walk_strings(
     return out
 
 
-def _format_arg_path(path: tuple[Any, ...]) -> str:
+def _format_value_path(root: str, path: tuple[Any, ...]) -> str:
     if not path:
         return "<root>"
     parts: list[str] = []
     for p in path:
         parts.append(f"[{p}]" if isinstance(p, int) else f".{p}")
-    return "args" + "".join(parts)
+    return root + "".join(parts)
 
 
 def resolve_template_value(value: Any, results: dict[str, Any]) -> Any:
@@ -494,11 +562,14 @@ def plan_to_activity_inputs(plan: WorkflowPlan) -> list[dict[str, Any]]:
         if t.type == TOOL_TASK_TYPE:
             entry["tool"] = t.tool
             entry["args"] = dict(t.args)
-        else:  # WAIT_TASK_TYPE
+        elif t.type == WAIT_TASK_TYPE:
             if t.duration is not None:
                 entry["duration"] = t.duration
             if t.until is not None:
                 entry["until"] = t.until
+        else:
+            entry["agent"] = t.agent
+            entry["task"] = t.task
         out.append(entry)
     return out
 
@@ -590,12 +661,14 @@ __all__ = [
     "MAX_NODES",
     "MAX_PARALLELISM",
     "MAX_WAIT_DURATION",
+    "SUB_AGENT_TASK_TYPE",
     "SUPPORTED_TASK_TYPES",
     "TOOL_TASK_TYPE",
     "WAIT_TASK_TYPE",
     "PlanValidationError",
     "TemplateResolutionError",
     "WorkflowPlan",
+    "WorkflowPlanPolicy",
     "WorkflowTask",
     "parse_iso8601_datetime",
     "parse_iso8601_duration",

@@ -103,6 +103,8 @@ if TYPE_CHECKING:
     # symbols), so this adds no import-time cost.
     from agent_framework import Agent, AgentResponse, ContextProvider, SupportsChatGetResponse
 
+    from .workflows.schema import WorkflowPlanPolicy
+
 # ---------------------------------------------------------------------------
 # Constants
 # ---------------------------------------------------------------------------
@@ -325,6 +327,7 @@ def _build_role_agent(
     resolved_id: str | None,
     history_provider: ContextProvider | None,
     delegate_tools: list[FunctionTool] | None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Agent[Any]:
     """Assemble the final tool list + context providers and build the MAF ``Agent``.
 
@@ -358,6 +361,7 @@ def _build_role_agent(
                 session_id=resolved_id or "",
                 agent_name=agent_name or "main",
                 durable_client=workflow_durable_client,
+                policy=workflow_policy,
             )
         )
 
@@ -423,6 +427,19 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
         history_provider=None,
         delegate_tools=None,
     )
+
+
+async def run_leaf_agent_task(
+    resolved: ResolvedAgent,
+    capabilities: AgentCapabilities,
+    task: str,
+    *,
+    timeout: float,
+) -> str:
+    """Run one fresh stateless specialist and return its response text."""
+    specialist_agent = _build_delegated_agent(resolved, capabilities)
+    response = await asyncio.wait_for(specialist_agent.run(task), timeout=timeout)
+    return response.text
 
 
 def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
@@ -570,8 +587,12 @@ def _build_delegate_tool(
             # construction failure (e.g. a misconfigured specialist model)
             # is just as recoverable as a run failure, instead of
             # propagating unhandled and aborting the coordinator turn.
-            specialist_agent = _build_delegated_agent(resolved, capabilities)
-            response = await asyncio.wait_for(specialist_agent.run(task_text), timeout=effective_timeout)
+            result = await run_leaf_agent_task(
+                resolved,
+                capabilities,
+                task_text,
+                timeout=effective_timeout,
+            )
         except asyncio.CancelledError:
             # Parent/request cancellation — never a recoverable delegate
             # error (Decision #12), but still a dispatched call, so it's
@@ -588,7 +609,6 @@ def _build_delegate_tool(
         except Exception as exc:
             return _record_generic_delegate_failure(span, tracker, slug, exc)
 
-        result = response.text
         record_delegate_call(error=False)
         span.set_attribute("af.delegate.outcome", "success")
         span.set_attribute("af.delegate.response_bytes", len(result))
@@ -658,6 +678,7 @@ async def _build_agent_session_history(
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
@@ -714,6 +735,7 @@ async def _build_agent_session_history(
         resolved_id=resolved_id,
         history_provider=history_provider,
         delegate_tools=delegate_tools,
+        workflow_policy=workflow_policy,
     )
 
     return agent, session, resolved_id, delegate_error_tracker
@@ -799,6 +821,7 @@ async def run_agent(
     web_request_tools: list[Any] | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AgentResult:
     """Execute a single prompt against the configured agent backend.
 
@@ -882,6 +905,7 @@ async def run_agent(
         subagents=subagents,
         catalog=catalog,
         coordinator_deadline=coordinator_deadline,
+        workflow_policy=workflow_policy,
     )
 
     try:
@@ -972,6 +996,7 @@ async def run_agent_stream(
     web_request_tools: list[Any] | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> AsyncIterator[str]:
     """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
 
@@ -1037,6 +1062,7 @@ async def run_agent_stream(
             subagents=subagents,
             catalog=catalog,
             coordinator_deadline=deadline,
+            workflow_policy=workflow_policy,
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)

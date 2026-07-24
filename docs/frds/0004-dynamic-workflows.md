@@ -80,8 +80,8 @@ explicitly opt a function into the Durable Activity execution path.
   LLM-authored through `start_workflow`.
 - Per-task retry/timeout/concurrency settings in v1, beyond reserving
   `@workflow_tool(...)` as the future metadata surface.
-- Sub-orchestrations, sub-agent tasks, MCP Tasks integration, or cross-app
-  workflow coordination.
+- Sub-orchestrations, nested/stateful Sub Agent tasks, MCP Tasks integration,
+  or cross-app workflow coordination. Stateless leaf Sub Agent tasks are in v1.
 - Changing normal MAF tool execution semantics.
 - Automatically promoting every compatible plain function into a workflow tool.
 
@@ -90,9 +90,9 @@ explicitly opt a function into the Durable Activity execution path.
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `_function_tool.py` | Load `tools/*.py` once, preserving normal `FunctionTool` discovery while also discovering explicit workflow tool declarations. Add a public `workflow_tool` decorator that records workflow metadata without making the function a normal MAF tool by itself. |
-| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled` plus optional `exclude`) and compute the concrete per-agent workflow tool set for the main agent. Unknown workflow excludes warn, mirroring `tools.exclude`. |
-| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | When the main agent enables workflows, consume the already-filtered workflow tool set, register compatible handlers into the workflow registry, register the Durable blueprint, store the effective workflow tool names, and add Durable client bindings to built-in endpoints and Markdown-declared triggers. |
-| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Durable Activity invokes registered workflow handlers with `dict` args and JSON-serializable results. Trigger handlers pass the bound Durable client and trigger-specific workflow guidance to the runner. UI polls workflow status and injects terminal notifications. |
+| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled`, optional `exclude`, and independent `subagents`) and compute concrete capabilities without hard-coding the v1 owner. Unknown workflow excludes warn, mirroring `tools.exclude`. |
+| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | The app composition root selects `main.agent.md` as the v1 owner. Integration consumes its filtered workflow tools and Sub Agent grants, builds one immutable owner policy, registers the Durable blueprint and catalog-backed Sub Agent Activity, and threads the policy plus Durable client through endpoints and declared triggers. |
+| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Runtime validation uses the same policy that generated prompt guidance. Durable Activities invoke registered workflow tools or fresh stateless leaf specialists. Trigger handlers pass the bound Durable client and trigger-specific workflow guidance to the runner. UI polls workflow status and injects terminal notifications. |
 
 ### Authoring / API surface
 
@@ -478,7 +478,7 @@ are a prerequisite, a parallel feature, or a later hardening step.
 - [x] Evolution #112: timer and queue samples index their trigger, Durable
   client, orchestrator, and Activity bindings and complete model-backed local
   runs.
-- [ ] Evolution #117: Workflow Sub Agents
+- [x] Evolution #117: Workflow Sub Agents
   - validate the independent, deny-by-default `workflows.subagents` grant;
   - reject a runtime `sub_agent` node whose slug is not authorized by that
     grant, and fail closed on an impossible catalog miss;
@@ -506,7 +506,7 @@ are a prerequisite, a parallel feature, or a later hardening step.
 - [ ] `docs/frds/README.md` — add FRD 0004 to the index.
 - [x] Evolution #112: update `docs/triggers.md`, `docs/workflows.md`, and
   `docs/architecture.md` for trigger-started workflows.
-- [ ] Evolution #117: document `workflows.subagents` and the `sub_agent` task in
+- [x] Evolution #117: document `workflows.subagents` and the `sub_agent` task in
   `docs/front-matter-spec.md`, `docs/workflows.md`, and `docs/architecture.md`;
   keep the sample customer-facing and free of FRD/Durable implementation
   details.

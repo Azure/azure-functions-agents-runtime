@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 type EndpointAuthMode = Literal["function", "admin", "anonymous", "entra"]
 
@@ -142,6 +149,51 @@ class SubagentRef(BaseModel):
         return trimmed
 
 
+class WorkflowSubagentRef(BaseModel):
+    """A workflow owner's authorization grant for one leaf specialist."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    agent: str
+    when: str | None = None
+
+    @field_validator("agent")
+    @classmethod
+    def validate_agent(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("agent must be non-empty")
+        return trimmed
+
+    @field_validator("when")
+    @classmethod
+    def validate_when(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("when must be non-empty when provided")
+        return trimmed
+
+
+class WorkflowConfig(BaseModel):
+    """Dynamic Workflow enablement and owner-specific capability grants."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: StrictBool = False
+    exclude: tuple[str, ...] = ()
+    subagents: tuple[WorkflowSubagentRef, ...] = ()
+
+    @field_validator("exclude")
+    @classmethod
+    def validate_exclude(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip() for item in value)
+        if any(not item for item in normalized):
+            raise ValueError("exclude entries must be non-empty")
+        return normalized
+
+
 class DynamicSessionsCodeInterpreterConfig(BaseModel):
     """Configuration for the ACA Dynamic Sessions-backed code interpreter."""
 
@@ -223,7 +275,7 @@ class AgentSpec(BaseModel):
     mcp: bool | McpFilter | None = None
     skills: bool | SkillsFilter | None = None
     tools: bool | ToolsFilter | None = None
-    workflows: dict[str, Any] | None = None
+    workflows: WorkflowConfig | None = None
     subagents: list[SubagentRef] | None = None
     input_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
@@ -258,7 +310,7 @@ class ResolvedAgent(BaseModel):
     skills_exclude_names: list[str] = Field(default_factory=list)
     tool_exclude_names: list[str] = Field(default_factory=list)
     tool_filter: ToolsFilter
-    workflows: dict[str, Any] | None = None
+    workflows: WorkflowConfig | None = None
     subagents: list[SubagentRef] = Field(default_factory=list)
     tools_disabled: bool = False
     skills_disabled: bool = False

@@ -26,9 +26,12 @@ import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents._logger import logger
+from azure_functions_agents.config.schema import WorkflowSubagentRef
+from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
 from .engine import register_workflows
+from .schema import WorkflowPlanPolicy
 from .tools import build_workflow_tools
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
@@ -43,7 +46,7 @@ from .tools import build_workflow_tools
 # here because a frontmatter declaration would just be a parallel
 # assertion that can drift from the truth.
 _ALLOWED_WORKFLOWS_KEYS: frozenset[str] = frozenset({
-    "enabled", "exclude",
+    "enabled", "exclude", "subagents",
 })
 
 
@@ -139,6 +142,7 @@ class WorkflowIntegrationResult:
     workflow_tools: list[Any]
     chat_system_addendum: str | None
     trigger_system_addendum: str | None
+    plan_policy: WorkflowPlanPolicy | None
 
     def __iter__(self) -> Iterator[Any]:
         """Yield the legacy ``(workflow_tools, system_addendum)`` pair."""
@@ -229,6 +233,18 @@ def _validate_workflows_block(metadata: dict[str, Any]) -> None:
                 "workflows.exclude must be a list of non-empty strings; "
                 f"got {raw!r}"
             )
+    if "subagents" in block:
+        raw_subagents = block["subagents"]
+        if not isinstance(raw_subagents, list) or not all(
+            isinstance(item, dict)
+            and isinstance(item.get("agent"), str)
+            and bool(item["agent"].strip())
+            for item in raw_subagents
+        ):
+            raise RuntimeError(
+                "workflows.subagents must be a list of objects with a non-empty "
+                f"`agent` field; got {raw_subagents!r}"
+            )
 
 
 def _workflows_enabled(metadata: dict[str, Any]) -> bool:
@@ -309,15 +325,64 @@ def _build_tool_section(allowed_tools: frozenset[str]) -> str:
     return tool_section
 
 
-def _build_addendum(allowed_tools: frozenset[str], *, trigger_invocation: bool) -> str:
+def _build_subagent_section(policy: WorkflowPlanPolicy) -> str:
+    if not policy.subagent_guidance:
+        return (
+            "\n\n### Available workflow Sub Agents\n\n"
+            "_No Sub Agent tasks are allowed for this agent._"
+        )
+    lines = ["\n\n### Available workflow Sub Agents\n"]
+    for slug, description in policy.subagent_guidance:
+        lines.append(f"- `{slug}` — {description}")
+    lines.extend(
+        [
+            "",
+            "Use `type: \"sub_agent\"` with `agent` and a self-contained `task`. "
+            "A successful node returns `{agent, text}`; downstream tasks can "
+            "reference `${node_id.result.text}`.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+def _build_addendum(policy: WorkflowPlanPolicy, *, trigger_invocation: bool) -> str:
     channel_addendum = _TRIGGER_ADDENDUM if trigger_invocation else _CHAT_ADDENDUM
-    return _SHARED_ADDENDUM + channel_addendum + _build_tool_section(allowed_tools)
+    return (
+        _SHARED_ADDENDUM
+        + channel_addendum
+        + _build_tool_section(policy.allowed_tools)
+        + _build_subagent_section(policy)
+    )
+
+
+def _build_plan_policy(
+    allowed_tools: frozenset[str],
+    workflow_subagents: Sequence[WorkflowSubagentRef],
+    catalog: AgentCatalog | None,
+) -> WorkflowPlanPolicy:
+    guidance: list[tuple[str, str]] = []
+    for ref in workflow_subagents:
+        entry = catalog.get(ref.agent) if catalog is not None else None
+        if entry is None:
+            raise RuntimeError(
+                f"Workflow Sub Agent {ref.agent!r} was authorized but is not "
+                "available in the AgentCatalog"
+            )
+        guidance.append((ref.agent, ref.when or entry.resolved.description))
+    return WorkflowPlanPolicy(
+        allowed_tools=allowed_tools,
+        allowed_subagents=frozenset(ref.agent for ref in workflow_subagents),
+        subagent_guidance=tuple(guidance),
+    )
 
 
 def build_workflow_integration(
     app: func.FunctionApp,
     metadata: dict[str, Any],
     workflow_tools: Sequence[WorkflowTool] | None = None,
+    *,
+    workflow_subagents: Sequence[WorkflowSubagentRef] = (),
+    catalog: AgentCatalog | None = None,
 ) -> WorkflowIntegrationResult:
     """Enable workflows for the app if the main agent opted in.
 
@@ -337,20 +402,23 @@ def build_workflow_integration(
         # configured allowlist (if any) is intentionally left untouched
         # so this function is safe to call multiple times in test
         # scenarios that toggle metadata.
-        return WorkflowIntegrationResult([], None, None)
-    register_workflows(app)
+        return WorkflowIntegrationResult([], None, None, None)
+    register_workflows(app, catalog=catalog)
     filtered_workflow_tools = _apply_workflow_exclude(tuple(workflow_tools or ()), metadata)
     effective = _register_workflow_tools(filtered_workflow_tools)
+    policy = _build_plan_policy(effective, workflow_subagents, catalog)
     registry.set_app_config(effective)
     logger.info(
-        "workflows enabled for main agent: %d tool(s) allowed (%s)",
+        "workflows enabled: %d tool(s) and %d Sub Agent(s) allowed (%s)",
         len(effective),
+        len(policy.allowed_subagents),
         ", ".join(sorted(effective)) or "<none>",
     )
     return WorkflowIntegrationResult(
-        workflow_tools=build_workflow_tools(),
-        chat_system_addendum=_build_addendum(effective, trigger_invocation=False),
-        trigger_system_addendum=_build_addendum(effective, trigger_invocation=True),
+        workflow_tools=build_workflow_tools(policy=policy),
+        chat_system_addendum=_build_addendum(policy, trigger_invocation=False),
+        trigger_system_addendum=_build_addendum(policy, trigger_invocation=True),
+        plan_policy=policy,
     )
 
 

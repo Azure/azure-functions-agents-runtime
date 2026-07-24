@@ -1,16 +1,29 @@
-# PR status portfolio report
+# Parallel PR status portfolio report
 
-> [!IMPORTANT]
-> This is a design preview, not a runnable sample. The proposed
-> `workflows.subagents` field and `sub_agent` task type are not
-> implemented. This directory intentionally omits `host.json`,
-> `function_app.py`, and deployment files.
+This sample receives pull requests from Azure Storage Queue, reviews every pull
+request in parallel with an isolated specialist, combines the summaries into an
+HTML portfolio report, and publishes the report to Azure Blob Storage.
 
-An Azure Storage Queue message supplies a list of pull requests and a Blob
-destination. The coordinator creates one independent PR review for every list
-entry, runs those reviews in parallel, asks a final specialist to turn the
-summaries into a polished HTML report, and publishes the document to Blob
-Storage.
+The pull-request tools use deterministic synthetic data, so no GitHub token is
+required. A model provider is required to run the PR analysts and report writer.
+
+## Workflow shape
+
+```text
+Queue message
+  +-- PR analyst: pull request A --+
+  +-- PR analyst: pull request B --+-- HTML report writer -- publish Blob
+  +-- PR analyst: pull request C --+
+```
+
+Each PR analyst uses the fake `get_pull_request_status` and
+`get_pull_request_activity` tools plus the `pr-status-analysis` skill. The
+report writer receives only the compact analyst summaries and returns one
+responsive HTML document. The publisher writes to the exact `report_blob`
+provided by the queue message with overwrite enabled, so submitting the same
+destination again updates one stable Blob instead of creating duplicates.
+
+Example queue message:
 
 ```json
 {
@@ -29,55 +42,49 @@ Storage.
 }
 ```
 
-## Workflow shape
+## Run locally
 
-```text
-Queue message
-  ├─ PR status analyst: PR 123 ─┐
-  └─ PR status analyst: PR 456 ─┴─ HTML report writer ─ publish to Blob
+Create the environment and local settings:
+
+```powershell
+Set-Location samples\workflow-subagents-preview\src
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install -r requirements.txt
+Copy-Item local.settings.template.json local.settings.json
 ```
 
-The map phase is useful because each PR can have noisy, unrelated checks,
-reviews, comments, and merge requirements. Every analyst gets a clean context
-and investigates one PR with the deterministic `get_pull_request_status` and
-`get_pull_request_activity` sample tools plus the `pr-status-analysis` skill.
-These independent model calls can run in parallel without GitHub credentials.
+Set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` in
+`local.settings.json`, authenticate with `az login`, and start Azurite:
 
-The reduce phase receives the compact analyst summaries instead of all raw
-GitHub data. It can compare the portfolio and group items into:
+```powershell
+docker run --rm --name workflow-subagents-azurite `
+  -p 10000:10000 -p 10001:10001 -p 10002:10002 `
+  mcr.microsoft.com/azure-storage/azurite:latest `
+  azurite --silent --skipApiVersionCheck `
+  --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+```
 
-- ready to merge;
-- author action required;
-- reviewer action required;
-- failing or pending checks;
-- recently changed or newly commented.
+Start the Functions host from the activated environment:
 
-This keeps the final agent's context focused while Dynamic Workflows preserves
-the fan-out/fan-in execution after the queue-triggered function has returned.
-The final `publish_pr_status_report` workflow tool uploads the generated HTML to
-the requested Blob path.
+```powershell
+func start
+```
 
-## Agent capabilities
+Create the queue and submit the JSON message with Azure Storage Explorer, Azure
+CLI, or the Azure Storage SDK. Use:
 
-The PR analyst inherits the two fake GitHub tools and uses the
-`pr-status-analysis` skill. The report writer disables normal tools and uses
-only the summarized inputs plus the `actionable-pr-report` skill. The Blob
-publisher is workflow-only, so it is not exposed as a normal tool to either Sub
-Agent.
+- queue: `pr-status-requests`
+- storage connection: `UseDevelopmentStorage=true`
+- output container: `workflow-reports`
 
-The current exclude-based capability model makes this distinction possible, but
-does not positively allow only selected normal tools or skills.
+After processing completes, download
+`workflow-reports/reports/functions-pr-status.html`. Submit the same message a
+second time and confirm that the same Blob is replaced.
 
-## Sample tools
+## Adapt for production
 
-- [`pr_status_tool.py`](src/tools/pr_status_tool.py) and
-  [`pr_activity_tool.py`](src/tools/pr_activity_tool.py) each define one normal
-  agent tool that returns stable synthetic data. The one-tool-per-file layout
-  matches current tool discovery, makes the sample repeatable, and avoids a
-  deployed GitHub authentication dependency.
-- [`report_publisher.py`](src/tools/report_publisher.py) defines the
-  workflow-only Blob publishing step. It writes HTML with the `text/html`
-  content type using `AzureWebJobsStorage`. The container defaults to
-  `workflow-reports` and can be changed with `PR_STATUS_REPORT_CONTAINER`. Keep
-  this stored-HTML container private and grant readers access through the
-  application's normal Azure authorization.
+Replace the two fake PR tools with GitHub API implementations and use managed
+identity for Azure Storage. Keep the same shape: one isolated analyst per pull
+request, a final report writer that receives the analyst summaries, and one
+stable output destination.

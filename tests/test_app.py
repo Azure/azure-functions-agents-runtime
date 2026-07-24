@@ -396,6 +396,90 @@ def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffec
     ]
 
 
+def test_create_function_app_accepts_workflow_only_endpoint_less_specialist(
+    tmp_path: Path,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        """
+        name: Coordinator
+        description: Coordinates PR reporting.
+        builtin_endpoints:
+          chat_api: true
+        workflows:
+          enabled: false
+          subagents:
+            - agent: pr_status_analyst
+              when: Analyze one pull request.
+        """,
+    )
+    _write_agent(
+        tmp_path,
+        "pr_status_analyst.agent.md",
+        """
+        name: PR Status Analyst
+        description: Analyzes one pull request.
+        """,
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert not any(
+        "pr_status_analyst" in name for name in _function_names(app.get_functions())
+    )
+
+
+@pytest.mark.parametrize(
+    ("workflow_slugs", "expected"),
+    [
+        (["missing"], "Unknown agent reference"),
+        (
+            ["pr_status_analyst", "pr_status_analyst"],
+            "Duplicate reference",
+        ),
+        (["main"], "cannot invoke itself"),
+    ],
+)
+def test_create_function_app_rejects_invalid_workflow_subagent_grants(
+    tmp_path: Path,
+    workflow_slugs: list[str],
+    expected: str,
+) -> None:
+    frontmatter = "\n".join(
+        [
+            "name: Coordinator",
+            "description: Coordinates PR reporting.",
+            "builtin_endpoints:",
+            "  chat_api: true",
+            "workflows:",
+            "  enabled: false",
+            "  subagents:",
+            *(f"    - agent: {slug}" for slug in workflow_slugs),
+        ]
+    )
+    _write_agent(
+        tmp_path,
+        "main.agent.md",
+        frontmatter,
+    )
+    _write_agent(
+        tmp_path,
+        "pr_status_analyst.agent.md",
+        """
+        name: PR Status Analyst
+        description: Analyzes one pull request.
+        trigger:
+          type: timer_trigger
+          args:
+            schedule: "0 0 * * * *"
+        """,
+    )
+
+    with pytest.raises(ValueError, match=expected):
+        create_function_app(tmp_path)
+
+
 class TestStructuredIndexingLog:
     """Tests for the structured JSON indexing log emitted by create_function_app."""
 
@@ -670,4 +754,3 @@ class TestStructuredIndexingLog:
         assert any(
             "agent_capabilities_registered" in record.getMessage() for record in caplog.records
         )
-
