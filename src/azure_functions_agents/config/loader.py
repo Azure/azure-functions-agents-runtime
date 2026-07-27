@@ -10,6 +10,7 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
+from azure_functions_agents._slug import _is_single_agent_file
 from azure_functions_agents.config.env import (
     _to_bool,
     resolve_env_vars_in_data,
@@ -27,25 +28,15 @@ _FRONTMATTER_ACTION_ITEMS = (
 )
 
 
-def _is_bare_agent_md(filename: str) -> bool:
-    """Check if filename is bare agent.md (case-insensitive)."""
-    return filename.lower() == "agent.md"
+def _collect_agent_files(directory: Path) -> list[Path]:
+    """Collect all agent markdown files from a directory in a single pass.
 
+    Returns bare agent.md / CLAUDE.md single-agent aliases and prefixed
+    *.agent.md / *.claude.md files.  Skips dotfiles.
 
-def _is_claude_md(filename: str) -> bool:
-    """Check if filename is CLAUDE.md (case-insensitive)."""
-    return filename.lower() == "claude.md"
-
-
-def _is_single_agent_file(filename: str) -> bool:
-    """Check if filename is a recognized single-agent file (agent.md or CLAUDE.md)."""
-    return _is_bare_agent_md(filename) or _is_claude_md(filename)
-
-
-def _find_agent_files_with_suffix(directory: Path) -> list[Path]:
-    """Find all *.agent.md and *.claude.md files (case-insensitive) in directory.
-    
-    Excludes bare agent.md and CLAUDE.md variants as those are handled separately.
+    Collecting all shapes in one pass ensures case-sensitive filesystems can
+    surface duplicate bare aliases (e.g. agent.md + Agent.md) for the
+    downstream _fail_on_duplicate_slugs() check.
     """
     agent_files: list[Path] = []
     for md_file in directory.iterdir():
@@ -54,11 +45,7 @@ def _find_agent_files_with_suffix(directory: Path) -> list[Path]:
         if md_file.name.startswith("."):
             continue  # skip hidden/dotfiles (iterdir() unlike glob doesn't exclude them)
         lower_name = md_file.name.lower()
-        if not lower_name.endswith(".md"):
-            continue
-        # Check if it ends with .agent.md or .claude.md (case-insensitive)
-        # and exclude bare single-agent files (handled separately)
-        if lower_name.endswith((".agent.md", ".claude.md")) and not _is_single_agent_file(md_file.name):
+        if lower_name in ("agent.md", "claude.md") or lower_name.endswith((".agent.md", ".claude.md")):
             agent_files.append(md_file)
     return agent_files
 
@@ -74,9 +61,9 @@ def _normalize_agent_filename(source_file: Path) -> Path:
     filename = source_file.name
     lower_filename = filename.lower()
     
-    # Handle single-agent files (bare agent.md or CLAUDE.md)
+    # Handle single-agent files (bare agent.md or CLAUDE.md) — alias for main.agent.md
     if _is_single_agent_file(filename):
-        return source_file.with_name("default.agent.md")
+        return source_file.with_name("main.agent.md")
     
     # Handle *.claude.md pattern (e.g., report.claude.md → report.agent.md)
     if lower_filename.endswith(".claude.md"):
@@ -162,9 +149,9 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     normalized["instructions"] = instructions
     # Keep the real on-disk path so diagnostics reference the file the user can actually edit
     normalized["source_file"] = str(resolved_source)
-    # agent.md and CLAUDE.md (and their case variants) map to default.agent.md internally;
+    # agent.md and CLAUDE.md (and their case variants) are aliases for main.agent.md;
     # check the normalized name to determine main-agent status
-    normalized["is_main"] = normalized_file.name.lower() in ("main.agent.md", "default.agent.md")
+    normalized["is_main"] = normalized_file.name.lower() == "main.agent.md"
 
     try:
         return AgentSpec.model_validate(normalized)
@@ -258,33 +245,12 @@ def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
     root = Path(app_root).resolve()
     specs: list[AgentSpec] = []
 
-    # Collect agent files from both top-level and agents/ folder (case-insensitive)
-    agent_files: list[Path] = _find_agent_files_with_suffix(root)
-    
-    # Also check for single-agent files: agent.md and CLAUDE.md (case-insensitive).
-    # Collect *all* matching variants (no break) so that case-sensitive filesystems
-    # where both agent.md and Agent.md exist will surface both; the downstream
-    # _fail_on_duplicate_slugs() check then rejects the collision at app build time.
-    for candidate in sorted(root.iterdir()):
-        if candidate.is_file() and _is_bare_agent_md(candidate.name):
-            agent_files.append(candidate)
-
-    for candidate in sorted(root.iterdir()):
-        if candidate.is_file() and _is_claude_md(candidate.name):
-            agent_files.append(candidate)
+    # Collect agent files from both top-level and agents/ folder in a single pass each
+    agent_files: list[Path] = _collect_agent_files(root)
 
     agents_dir = _resolve_agents_dir(root)
     if agents_dir is not None:
-        # Find prefixed agent files with case-insensitive suffix matching
-        agent_files.extend(_find_agent_files_with_suffix(agents_dir))
-        # Also check for single-agent files in agents folder (case-insensitive)
-        for candidate in sorted(agents_dir.iterdir()):
-            if candidate.is_file() and _is_bare_agent_md(candidate.name):
-                agent_files.append(candidate)
-
-        for candidate in sorted(agents_dir.iterdir()):
-            if candidate.is_file() and _is_claude_md(candidate.name):
-                agent_files.append(candidate)
+        agent_files.extend(_collect_agent_files(agents_dir))
 
     for source_file in sorted(agent_files):
         try:

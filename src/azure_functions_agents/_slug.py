@@ -22,6 +22,21 @@ def _safe_function_name(raw_name: str) -> str:
     return name
 
 
+def _is_bare_agent_md(filename: str) -> bool:
+    """Return True if filename is the bare agent.md single-agent alias (case-insensitive)."""
+    return filename.lower() == "agent.md"
+
+
+def _is_claude_md(filename: str) -> bool:
+    """Return True if filename is the CLAUDE.md single-agent alias (case-insensitive)."""
+    return filename.lower() == "claude.md"
+
+
+def _is_single_agent_file(filename: str) -> bool:
+    """Return True if filename is a bare single-agent file (agent.md or CLAUDE.md, case-insensitive)."""
+    return _is_bare_agent_md(filename) or _is_claude_md(filename)
+
+
 def _function_name_from_source(
     source_file: str | Path | None, fallback_name: str, *, warn_on_missing: bool = True
 ) -> str:
@@ -46,9 +61,9 @@ def _function_name_from_source(
     source_name = Path(source_value).name
     lower_name = source_name.lower()
 
-    # Single-agent files (bare agent.md or CLAUDE.md, any casing) → "default"
+    # Single-agent files (bare agent.md or CLAUDE.md, any casing) → alias for main.agent.md
     if lower_name in ("agent.md", "claude.md"):
-        return "default"
+        return "main"
 
     # *.claude.md → strip the suffix to get the prefix
     if lower_name.endswith(".claude.md"):

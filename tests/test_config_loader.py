@@ -651,14 +651,14 @@ def _write_valid_agent_markdown(path: Path, *, name: str, description: str) -> N
 @pytest.mark.parametrize(
     ("filename", "location", "expected_source_name", "expected_is_main", "expected_slug"),
     [
-        pytest.param("agent.md", "top-level", "agent.md", True, "default", id="bare-agent"),
-        pytest.param("Agent.md", "top-level", "Agent.md", True, "default", id="bare-agent-mixed-case"),
-        pytest.param("AGENT.MD", "top-level", "AGENT.MD", True, "default", id="bare-agent-uppercase"),
-        pytest.param("CLAUDE.md", "top-level", "CLAUDE.md", True, "default", id="bare-claude-uppercase"),
-        pytest.param("Claude.md", "top-level", "Claude.md", True, "default", id="bare-claude-mixed-case"),
-        pytest.param("claude.md", "top-level", "claude.md", True, "default", id="bare-claude-lowercase"),
-        pytest.param("agent.md", "agents", "agent.md", True, "default", id="bare-agent-in-agents-folder"),
-        pytest.param("CLAUDE.md", "agents", "CLAUDE.md", True, "default", id="bare-claude-in-agents-folder"),
+        pytest.param("agent.md", "top-level", "agent.md", True, "main", id="bare-agent"),
+        pytest.param("Agent.md", "top-level", "Agent.md", True, "main", id="bare-agent-mixed-case"),
+        pytest.param("AGENT.MD", "top-level", "AGENT.MD", True, "main", id="bare-agent-uppercase"),
+        pytest.param("CLAUDE.md", "top-level", "CLAUDE.md", True, "main", id="bare-claude-uppercase"),
+        pytest.param("Claude.md", "top-level", "Claude.md", True, "main", id="bare-claude-mixed-case"),
+        pytest.param("claude.md", "top-level", "claude.md", True, "main", id="bare-claude-lowercase"),
+        pytest.param("agent.md", "agents", "agent.md", True, "main", id="bare-agent-in-agents-folder"),
+        pytest.param("CLAUDE.md", "agents", "CLAUDE.md", True, "main", id="bare-claude-in-agents-folder"),
         pytest.param("report.claude.md", "top-level", "report.claude.md", False, "report", id="prefixed-claude"),
         pytest.param("Report.Claude.md", "top-level", "Report.Claude.md", False, "Report", id="prefixed-claude-mixed-case"),
         pytest.param("summarizer.CLAUDE.md", "agents", "summarizer.CLAUDE.md", False, "summarizer", id="prefixed-claude-uppercase-in-agents-folder"),
@@ -729,13 +729,14 @@ def test_load_agent_specs_flexible_naming_variants_coexist(tmp_path: Path) -> No
     assert Path(specs_by_name["Data Agent"].source_file).name == "data.Agent.MD"
 
 
-def test_load_agent_specs_bare_agent_and_main_agent_md_can_coexist(tmp_path: Path) -> None:
-    """agent.md and main.agent.md can coexist and both be marked is_main.
+def test_load_agent_specs_bare_agent_md_is_alias_for_main(tmp_path: Path) -> None:
+    """agent.md and main.agent.md are aliases: both normalise to main.agent.md (slug 'main').
 
-    These produce distinct slugs ("default" and "main" respectively), so they
-    are valid at the loader level. Note: agent.md and CLAUDE.md must NOT coexist
-    in the same directory because both derive the same slug ("default") and
-    app construction fails fast on duplicate slugs.
+    load_agent_specs loads both files successfully. They produce the same slug
+    so the app-level _fail_on_duplicate_slugs() check would reject the combination
+    at startup — but that is tested at the app layer, not here.
+    Note: agent.md and CLAUDE.md are both aliases for main.agent.md and must
+    not coexist in the same app for the same reason.
     """
     _write_valid_agent_markdown(
         tmp_path / "agent.md",

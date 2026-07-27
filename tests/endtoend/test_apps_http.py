@@ -241,14 +241,14 @@ def test_chat_happy_path(builtin_endpoints_host: Served) -> None:
 def test_flexible_naming_bare_agent_md_registers_as_default(
     flexible_naming_host: Served,
 ) -> None:
-    """bare agent.md is discovered and registers builtin endpoints under 'default'."""
+    """bare agent.md is discovered and registers builtin endpoints under 'main' (alias for main.agent.md)."""
     _, endpoints = flexible_naming_host
 
-    # builtin_endpoints: true on agent.md → chat page + chat API under agents/default/
-    chat_page = find_endpoint(endpoints, route_exact="agents/default/", method="GET")
+    # builtin_endpoints: true on agent.md → chat page + chat API under agents/main/
+    chat_page = find_endpoint(endpoints, route_exact="agents/main/", method="GET")
     assert chat_page.auth_level == "anonymous"
 
-    chat = find_endpoint(endpoints, route_exact="agents/default/chat", method="POST")
+    chat = find_endpoint(endpoints, route_exact="agents/main/chat", method="POST")
     assert "POST" in chat.methods
 
 
@@ -268,7 +268,7 @@ def test_flexible_naming_bare_agent_md_chat_missing_prompt_returns_400(
 ) -> None:
     """POSTing an empty body to the agent.md-derived chat route is rejected before any model call."""
     client, endpoints = flexible_naming_host
-    chat = find_endpoint(endpoints, route_exact="agents/default/chat", method="POST")
+    chat = find_endpoint(endpoints, route_exact="agents/main/chat", method="POST")
 
     resp = client.post(chat.route, json={})
 
@@ -280,7 +280,7 @@ def test_flexible_naming_bare_agent_md_chat_missing_prompt_returns_400(
 def test_flexible_naming_debug_chat_ui_returns_html(flexible_naming_host: Served) -> None:
     """GET on the agent.md-derived debug chat page returns the static HTML UI."""
     client, endpoints = flexible_naming_host
-    page = find_endpoint(endpoints, route_exact="agents/default/", method="GET")
+    page = find_endpoint(endpoints, route_exact="agents/main/", method="GET")
 
     resp = client.get(page.route)
 

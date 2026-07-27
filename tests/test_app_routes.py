@@ -89,12 +89,10 @@ def test_workflow_app_uses_durable_function_app(tmp_path: Path):
 
 
 def test_bare_agent_md_with_workflows_creates_durable_app(tmp_path: Path):
-    _write_agent(tmp_path, "main.agent.md", name="Main", workflows=False)
-    _write_agent(tmp_path, "agent.md", name="Default", workflows=True)
+    _write_agent(tmp_path, "agent.md", name="Main", workflows=True)
 
-    # Multiple main agents can coexist; the app is a DFApp because at least one
-    # main agent requested workflows. Only one agent enables workflows here to
-    # avoid double-registration until workflow registration is explicitly idempotent.
+    # bare agent.md is an alias for main.agent.md; enabling workflows on it
+    # should produce a DFApp just like main.agent.md would.
     function_app = app_module.create_function_app(app_root=tmp_path)
 
     assert isinstance(function_app, df.DFApp)
