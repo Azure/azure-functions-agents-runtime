@@ -415,9 +415,14 @@ def test_web_request_opted_out_agent_responds_without_tool(
     ep = find_endpoint(endpoints, route_exact="no-fetch", method="POST")
     resp = client.post(
         ep.url(client.base_url),
-        json={"prompt": "What is the capital of France?"},
+        json={
+            "prompt": (
+                "Try to use web_request to fetch https://example.com. If the tool is unavailable, "
+                "reply with exactly 'WEB_REQUEST_DISABLED'."
+            )
+        },
     )
 
     expect_status(resp, 200)
     expect_header(resp, "x-ms-session-id")
-    assert resp.text.strip(), "expected a non-empty response body"
+    expect_body_contains(resp, "WEB_REQUEST_DISABLED")
