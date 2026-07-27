@@ -1,0 +1,195 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.5 — Controller ↔ sandbox transport &amp; protocol · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.5 · Sub-FRD · for team feedback</div>
+    <h1>Controller ↔ sandbox transport &amp; protocol</h1>
+    <p class="tagline">The single authenticated file/exec plane that lets the controller deliver content, start runs, stream journal events, fetch results, and cancel — without opening sandbox ingress.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 7, 23, 26, 29</span>
+      <span class="badge">Six verbs</span>
+      <span class="badge warn">v1 · pull/cursor based</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">Once a session has an ACA sandbox, Azure Functions still stays the authenticated controller. This sub-FRD defines the only way the controller talks to that sandbox: one authenticated <b>six-verb file/exec transport</b> over the ACA data plane, with the sandbox exposing no anonymous port and no second inbound control path.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> the controller writes files, starts one detached entry point, and reads the files the sandbox journals back. That same channel carries <b>run-control</b>, the <b>exec / journal data plane</b>, and <b>content delivery</b> for the captured app. The sandbox is identity-less and never fetches its own code; it only runs what the controller delivers.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Only inbound path</h3><p>No sandbox HTTP listener is part of v1. Every controller action is initiated through authenticated file operations plus detached exec.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Connectionless by design</h3><p>A run is not tied to the Functions instance that submitted it. Another instance can reattach by resolving state, running readiness, and reading the journal.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Same plane, three payloads</h3><p>Run envelopes, status/events/results, and the delivered app content all ride the same plane. Content is a larger payload class, not a seventh run verb.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>The six-verb contract</h2>
+  <p class="lead">The controller depends on a small transport abstraction. The v1 implementation is the ACA file+exec journal; any future transport must preserve the same semantics before controller code can ignore the swap.</p>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Verb</th><th>What it means</th><th>Important return / rule</th></tr></thead>
+      <tbody>
+        <tr><td class="v1"><span class="mono">submit(run_id, envelope)</span></td><td>Write the run request and launch the detached entry point.</td><td>Idempotent: duplicate <span class="mono">run_id</span> returns the existing run, never a second process.</td></tr>
+        <tr><td class="v1"><span class="mono">get_status(run_id)</span></td><td>Read current or terminal state.</td><td>In v1, terminal status can still be answered from the controller-owned Tables record after the sandbox is reaped.</td></tr>
+        <tr><td class="v1"><span class="mono">read_events(run_id, since)</span></td><td>Read journal events after the caller's cursor.</td><td>Returns events or <span class="mono">snapshot-restart</span> when <span class="mono">Last-Event-ID</span> is older than retention.</td></tr>
+        <tr><td class="v1"><span class="mono">get_result(run_id)</span></td><td>Read the per-run result payload.</td><td>Returns result while retained, or <span class="mono">result-evicted</span> after post-terminal grace and reap.</td></tr>
+        <tr><td class="v1"><span class="mono">cancel(run_id)</span></td><td>Signal the recorded process group through the entry point.</td><td>Escalates to verified kill before forcing terminal <span class="mono">canceled</span>; never frees a slot while work may still run.</td></tr>
+        <tr><td class="v1"><span class="mono">ensure_ready(sandbox)</span></td><td>Resume if needed and verify the session manifest before work.</td><td>Checks content digest and <span class="mono">protocol_version</span> compatibility for this session.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">All six verbs are controller-initiated. The sandbox executes and journals; it does not call back into Functions. Streaming details are consumed by <a href="https://gistpreview.github.io/?3c5024c951d6fbaa8b6026cc51359f7b">0008.11</a>.</p>
+
+  <h2><span class="n">3</span>How a run moves through the journal</h2>
+  <p class="lead">Sync and async use the same detached execution pattern so the SDK's fixed exec-read timeout never becomes the runtime limit.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Submit</b> <span>— the controller writes <span class="mono">inbox/{run_id}.json</span> and starts the sandbox entry point in a detached process.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Accept atomically</b> <span>— the sandbox creates <span class="mono">runs/{run_id}/</span>, records process metadata, and journals <span class="mono">accepted</span>. Duplicate submissions reuse that directory.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Journal progress</b> <span>— status, append-only <span class="mono">events.jsonl</span>, and the eventual <span class="mono">result.json</span> are all per-run files under <span class="mono">runs/{run_id}/</span>.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Poll by cursor</b> <span>— clients reconnect with <span class="mono">Last-Event-ID</span>; the controller reads events after that cursor instead of holding a live socket.</span></div></div>
+      <div class="step"><div class="num">5</div><div class="txt"><b>Finish or cancel</b> <span>— terminal state frees the one-active-run slot only after the run is actually terminal or death is verified.</span></div></div>
+    </div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Rejected: anonymous ingress or mandatory tunnel</h4>
+  <p class="why">An anonymous sandbox port is not an allowed fallback. A required private tunnel adds heavy networking prerequisites. File/exec won because the live spike proved the core mechanism while keeping the sandbox sealed from inbound traffic.</p></div>
+
+  <h2><span class="n">4</span>Streaming, reconnect, and retention</h2>
+  <p class="lead">Events are pull/cursor-based. That is the intentional trade: less immediacy than token-level push, but no connection-bound run and no sandbox ingress.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Run journal</h3><p><span class="mono">events.jsonl</span> rotates in bounded 1 MiB segments and acts as a transient replay buffer. <span class="mono">status.json</span> and <span class="mono">result.json</span> do not rotate and hold the authoritative terminal record while the sandbox exists.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Reconnect cursor</h3><p><span class="mono">read_events</span> uses the caller's <span class="mono">Last-Event-ID</span>. If the cursor is too old, the controller returns <span class="mono">snapshot-restart</span> with the earliest retained event so the client re-reads status/result, then resumes without a silent gap.</p></div>
+  </div>
+  <div class="plain">
+    <strong>Why this survives controller recycle:</strong> a Functions instance owns no in-memory stream. A later instance resolves the current binding, runs <span class="mono">ensure_ready</span>, and continues reading the same on-disk journal from the caller's cursor. A live stream would fail that scenario; the journal is deliberately connectionless.
+  </div>
+
+  <h2><span class="n">5</span>Content delivery rides the same plane</h2>
+  <p class="lead">The transport is not just for runs. Under Model-1 packaging, the controller-captured script root is delivered into the identity-less sandbox over this same authenticated file plane.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Capture</b> <span>— the controller captures its own script root: app code plus the vendored <span class="mono">.python_packages</span> tree described by <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Fingerprint</b> <span>— it zips that content and computes the SHA-256 digest that identifies this session's content epoch.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Deliver</b> <span>— the controller writes the large content payload into <span class="mono">session/content/</span>. This path is separate from the 4 MiB run-journal cap.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Verify before submit</b> <span>— the sandbox unpacks and verifies the digest before any run is accepted; delivery is a bring-up gate, not interleaved with turns.</span></div></div>
+    </div>
+  </div>
+  <p class="note">The sandbox never downloads the app, resolves dependencies, or reads storage. Content capture/format belongs to 0008.6; this sub-FRD owns the delivery channel, digest gate, and size/throughput envelope.</p>
+
+  <h2><span class="n">6</span>Protocol version belongs to the captured runtime</h2>
+  <p class="lead"><span class="mono">protocol_version</span> is a session-scoped compatibility guard, not a base-image constant and not a fleet-wide "latest" comparison.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Travels with <span class="mono">.python_packages</span></h3><p>The runtime and MAF version are captured per session from the app's vendored dependency tree. The sandbox reports the protocol for that captured runtime epoch; <a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a> owns the protocol / ABI policy.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Checked during readiness</h3><p><span class="mono">ensure_ready</span> refuses to submit if the sandbox manifest does not match the session's captured epoch. If app content changes, v1 drains the session and the client starts fresh on the new epoch.</p></div>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.5 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns the transport/protocol contract (Decisions 7, 23, 26, 29): one authenticated six-verb file/exec plane, pull/cursor events, content delivery, readiness checks, idempotent run submission, and verified cancellation. Cross-cutting boundaries confirmed with 0008.6 (content), 0008.11 (streaming/SSE), and 0008.7 (protocol / ABI).</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

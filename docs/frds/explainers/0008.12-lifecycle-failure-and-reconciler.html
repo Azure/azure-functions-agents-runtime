@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.12 — Lifecycle, failure &amp; reconciler · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.12 · Sub-FRD · for team feedback</div>
+    <h1>Lifecycle, failure &amp; reconciler</h1>
+    <p class="tagline">How sessions/runs move through state, how failures become terminal records, and why v1 needs a small timer reaper — not Durable Functions.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 4, 21, 22, 24</span>
+      <span class="badge">State machines</span>
+      <span class="badge warn">v1 timer ≈ 1 h backstop</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">A session is one ephemeral ACA sandbox running the whole MAF agent loop. Azure Functions is the authenticated controller and sole ledger writer: it admits one active run, records terminal status, and the reconciler handles cases no request is guaranteed to observe.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> the sandbox does the long-running work; the controller keeps the official scoreboard. If the sandbox finishes, crashes, disappears, idles too long, or becomes stale after a deploy, the controller writes one monotonic outcome and either keeps the session reusable or returns <span class="mono">410 Gone</span> so the client starts fresh.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Two state machines</h3><p>Sessions move through create, ready, running, suspend/resume, delete, and terminals. Runs persist only <span class="mono">accepted</span>/<span class="mono">running</span> plus finals.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Verified liveness</h3><p>A stale heartbeat is only suspicion. Before freeing a slot, the controller confirms the process is dead or destroys the sandbox to make death definitive.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>One reconciler</h3><p>A plain Functions timer plus fast-paths scans the source-of-truth table directly. No Durable orchestrator; no separate due-work index.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>State machines and terminal states</h2>
+  <p class="lead">The design is small: one session row gates the active run; run rows record durable terminal status. Every terminal clears <span class="mono">active_run_id</span>.</p>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Machine</th><th>Flow</th><th>Terminal states the FRD names</th></tr></thead>
+      <tbody>
+        <tr><td>Session</td><td class="v1"><span class="mono">Creating → Ready → Running → Ready</span>; <span class="mono">Ready → Suspending → Suspended → Resuming → Ready</span>; delete path <span class="mono">Ready/Suspended/Failed → Deleting → Deleted</span></td><td class="v2"><span class="mono">Failed</span> and <span class="mono">Deleted</span>; reclaimed/lost/drained sessions are tombstoned and later answer <span class="mono">410</span>.</td></tr>
+        <tr><td>Run</td><td class="v1"><span class="mono">accepted → running → terminal</span>; <span class="mono">canceling</span> is transient internal control, not stored or surfaced.</td><td class="v2"><span class="mono">succeeded</span>, <span class="mono">failed</span>, <span class="mono">timed_out</span>, <span class="mono">canceled</span>, <span class="mono">abandoned</span>.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span><span class="mono">abandoned</span> is no-fault</h3><p>No terminal was reported: the sandbox was lost, or the harness died before journaling. Written only after death is confirmed.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Status and content split</h3><p>Terminal status survives in Azure Tables. In v1, result content stays in the sandbox until fetched or idle-retention expires.</p></div>
+  </div>
+
+  <h2><span class="n">3</span>Drain-on-deploy: digest epochs</h2>
+  <p class="lead">Epochs are keyed by the SHA-256 digest of the <b>captured script-root zip</b> — controller code plus vendored <span class="mono">.python_packages</span>, defined by <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a> and stamped by <a href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4">0008.3</a>.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Next request detects stale epoch</b> <span>— the session's captured-script-root digest differs from the controller's current digest. A worker restart with the same digest does nothing.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Grace</b> <span>— any in-flight run gets a short chance to finish and report a real terminal.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Abandon in-flight</b> <span>— if it does not finish, the run is written terminal <span class="mono">abandoned</span>, clearing the one-active-run slot.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Tombstone</b> <span>— the session row is tombstoned; old-epoch sandboxes are idle-reaped within the retention window.</span></div></div>
+      <div class="step"><div class="num">5</div><div class="txt"><b><span class="mono">410 Gone</span></b> <span>— the same <span class="mono">session_id</span> is dead. The client creates a new session on the new epoch.</span></div></div>
+    </div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Rejected for v1: carry the live session across a redeploy</h4><p class="why">Durable continuity across an epoch change needs the external checkpoint mirror deferred by <a href="https://gistpreview.github.io/?6946f4a98ea7bb4f7106337fdbaf625e">0008.8</a>. v1 drains and tombstones instead.</p></div>
+
+  <h2><span class="n">4</span>Crash-liveness and verified kill</h2>
+  <p class="lead">The reconciler must never create split-brain by freeing a slot while the old process may still hold the OS lock.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Crash with disk intact</h3><p>Reachable sandbox, no terminal, stale heartbeat → probe. Only a released OS lock/process group or verified kill authorizes <span class="mono">abandoned</span>. The sandbox is retained.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Unverifiable death</h3><p>If death cannot be proven, reclaim the sandbox to produce definitive death; only then abandon the run and free the slot.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Lost sandbox</h3><p>Gone or disk unrecoverable: write <span class="mono">abandoned</span>, tombstone the session, return <span class="mono">410</span>. No v1 rebuild.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Adopt before abandon</h3><p>If a reachable sandbox has terminal <span class="mono">status.json</span>/<span class="mono">result.json</span>, adopt <span class="mono">succeeded</span>/<span class="mono">failed</span>/<span class="mono">timed_out</span>/<span class="mono">canceled</span> before considering abandonment.</p></div>
+  </div>
+
+  <h2><span class="n">5</span>The due-time model and bounded scan</h2>
+  <p class="lead">The timer reads the single source-of-truth session/run table from <a href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4">0008.3</a> directly. There is no separate due-work index in v1.</p>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Due case</th><th>Rows scanned</th><th>Action</th></tr></thead>
+      <tbody>
+        <tr><td>Run timeout backstop</td><td class="v1">RUN rows in <span class="mono">accepted</span> or <span class="mono">running</span> with <span class="mono">expires_at ≤ now</span></td><td class="v2">Verify liveness, then time out/abandon safely.</td></tr>
+        <tr><td>Idle reclaim</td><td class="v1">SESSION rows with terminal-idle <span class="mono">expires_at ≤ now</span></td><td class="v2">ETag-CAS confirms <span class="mono">active_run_id = null</span>, then delete sandbox/snapshot and tombstone.</td></tr>
+        <tr><td>Idle-policy repair</td><td class="v1">SESSION rows terminal with <span class="mono">idle_policy_armed = false</span></td><td class="v2">Re-arm the ACA idle policy that was disabled during the run.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="plain">
+    <strong>The whole due-time contract:</strong> one state-dependent <span class="mono">expires_at</span> is the next due timestamp (run timeout on RUN rows, reclaim deadline on SESSION rows). <span class="mono">idle_policy_armed</span> marks terminal sandboxes needing policy repair, and <span class="mono">last_activity_at</span> feeds idle <span class="mono">expires_at</span>. There is no separate <span class="mono">reclaim_at</span>.
+  </div>
+  <p class="note">The scan stays bounded because terminal and tombstoned rows are pruned/archived after retention; at v1 scale it covers only the live plus recently-terminal working set. Writes still rely on ETag-CAS and generation guards.</p>
+
+  <h2><span class="n">6</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2</th></tr></thead>
+      <tbody>
+        <tr><td>Orchestration</td><td class="v1">Plain Table state machine + controller fast-paths</td><td class="v2">Reconsider Durable only for queues, retries, fan-out, or sagas</td></tr>
+        <tr><td>Reconciler cadence</td><td class="v1">Configurable relaxed backstop, default ≈ 1 h</td><td class="v2">Tightens to ≈ 1 min for mirror SLO</td></tr>
+        <tr><td>Checkpoint mirror</td><td class="v1"><span class="pill v1">not in v1</span></td><td class="v2">External owner-scoped mirror and rebuild/rebind</td></tr>
+        <tr><td>Quotas</td><td class="v1">No runtime quota counter; ACA capacity is the aggregate limit</td><td class="v2">Optional per-owner fairness quota</td></tr>
+        <tr><td>Retention</td><td class="v1">~5 min auto-suspend, ~24 h idle reclaim; app-level override</td><td class="v2">Possible per-agent or operator override layer</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.12 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns lifecycle, failure behavior, drain/reclaim, and the minimal reconciler/reaper; it depends on 0008.3 for the table contract, 0008.6 for captured-digest epochs, and 0008.8 for suspend/commit boundaries.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

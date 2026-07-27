@@ -1,0 +1,203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.11 — HTTP API: sync / async / streaming · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.11 · Sub-FRD · for team feedback</div>
+    <h1>HTTP API — sync, async &amp; streaming</h1>
+    <p class="tagline">The caller-facing contract: simple chat waits for an answer, long work opts into a small LRO model, and streaming is replayable SSE.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 3, 19, 25</span>
+      <span class="badge">Sync default</span>
+      <span class="badge warn">180 s cap</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">This is the part callers see: HTTP routes, waits, status codes, and reconnect rules while Azure Functions acts as the authenticated controller for one ephemeral ACA sandbox per session.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> <span class="mono">POST /agents/{slug}/chat</span> is still request→answer by default. Add <span class="mono">Prefer: respond-async</span> when the turn may run long. Use SSE for stream updates, and reconnect with <span class="mono">Last-Event-ID</span>; losing the connection does not stop the run.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Default sync</h3><p><span class="mono">/chat</span> and <span class="mono">/chatstream</span> preserve today's default shapes, including <span class="mono">x-ms-session-id</span>.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Explicit async</h3><p><span class="mono">Prefer: respond-async</span> returns <b>202 Accepted</b>, <span class="mono">run_id</span>, and URLs to status, result, events, and cancel.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Replayable stream</h3><p>SSE frames carry monotonic <span class="mono">id:</span> values. The client re-attaches by sending the last seen id.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>Synchronous vs asynchronous / streaming</h2>
+  <p class="lead">v1 allows <b>one active run per session</b>. A distinct second submission gets <span class="mono">409 active_run_exists</span> unless the caller cancels first (<a href="https://gistpreview.github.io/?cb1c20c3927659a4026ece50fb9186c7">0008.2</a>).</p>
+  <div class="grid g2">
+    <div class="card">
+      <h3><span class="ic">◆</span>Synchronous default</h3>
+      <div class="flow">
+        <div class="step"><div class="num">1</div><div class="txt"><b>Call chat</b> <span>— <span class="mono">POST /agents/{slug}/chat</span>, no async preference.</span></div></div>
+        <div class="step"><div class="num">2</div><div class="txt"><b>Wait under 180 s</b> <span>— sandbox lookup/create/resume, verification, and execution all fit inside the controller's cap.</span></div></div>
+        <div class="step"><div class="num">3</div><div class="txt"><b>Answer or fail</b> <span>— success is <span class="mono">200</span>; typed request/app failures use the normal HTTP model; a sync window breach returns <span class="mono">504</span>.</span></div></div>
+        <div class="step"><div class="num">4</div><div class="txt"><b>Cap breach cancels</b> <span>— if the run would still be going, the controller cancels it and the terminal state is <span class="mono">canceled</span>.</span></div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h3><span class="ic">◆</span>Asynchronous / streaming</h3>
+      <div class="flow">
+        <div class="step"><div class="num">1</div><div class="txt"><b>Ask explicitly</b> <span>— <span class="mono">POST /agents/{slug}/chat</span> with <span class="mono">Prefer: respond-async</span>.</span></div></div>
+        <div class="step"><div class="num">2</div><div class="txt"><b>Get the LRO shell</b> <span>— <span class="mono">202</span>, <span class="mono">Location</span>, <span class="mono">Retry-After: 2</span>, plus <span class="mono">status_url</span>, <span class="mono">result_url</span>, <span class="mono">events_url</span>, and <span class="mono">cancel_url</span>.</span></div></div>
+        <div class="step"><div class="num">3</div><div class="txt"><b>Poll or stream</b> <span>— read status, fetch the result, or consume replayable SSE from the events route.</span></div></div>
+        <div class="step"><div class="num">4</div><div class="txt"><b>Re-attach</b> <span>— reconnect SSE with <span class="mono">Last-Event-ID</span>; a normal lease close is not cancellation.</span></div></div>
+      </div>
+    </div>
+  </div>
+
+  <h2><span class="n">3</span>The exact public routes</h2>
+  <p class="lead">The status route is the run URL itself — there is no separate <span class="mono">/status</span> suffix. Every route re-checks auth and session ownership.</p>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Route</th><th>Use</th><th>Important behavior</th></tr></thead>
+      <tbody>
+        <tr><td><span class="mono">POST /agents/{slug}/chat</span></td><td class="v1">sync answer, or async when preferred</td><td><span class="mono">Prefer: respond-async</span> returns <span class="mono">202</span> and a <span class="mono">result_url</span>.</td></tr>
+        <tr><td><span class="mono">POST /agents/{slug}/chatstream</span></td><td class="v1">SSE chat stream</td><td>After SSE headers are sent, failures are in-band terminal events, not changed HTTP codes.</td></tr>
+        <tr><td><span class="mono">GET /agents/{slug}/sessions/{session_id}/runs/{run_id}</span></td><td class="v1">LRO status</td><td>Returns readable run state: <span class="mono">accepted</span>, <span class="mono">running</span>, <span class="mono">succeeded</span>, <span class="mono">failed</span>, <span class="mono">canceled</span>, <span class="mono">timed_out</span>, or <span class="mono">abandoned</span>.</td></tr>
+        <tr><td><span class="mono">GET /agents/{slug}/sessions/{session_id}/runs/{run_id}/result</span></td><td class="v1">terminal result</td><td>Returns the outcome while retained, or <span class="mono">410 Gone</span> after result eviction or session tombstone (<a href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae">0008.12</a>).</td></tr>
+        <tr><td><span class="mono">GET /agents/{slug}/sessions/{session_id}/runs/{run_id}/events</span></td><td class="v1">replayable SSE</td><td>Accepts <span class="mono">Last-Event-ID</span>; emits <span class="mono">snapshot-restart</span> if the cursor rotated out (<a href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d">0008.5</a>).</td></tr>
+        <tr><td><span class="mono">POST /agents/{slug}/sessions/{session_id}/runs/{run_id}/cancel</span></td><td class="v1">explicit stop</td><td>The intentional way to stop an active run.</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2><span class="n">4</span>Status, result, and failure semantics</h2>
+  <p class="lead">Async uses a small long-running-operation model: HTTP says whether the read/submission worked; <span class="mono">state</span> and <span class="mono">error</span> describe the run.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Status is readable state</h3><p><span class="mono">GET .../runs/{run_id}</span> returns <span class="mono">200</span> when the run row is readable, even for terminal <span class="mono">failed</span> runs.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Result can expire</h3><p><span class="mono">GET .../result</span> returns the answer while retained. Once reaped or tombstoned, it returns <span class="mono">410 Gone</span>; status can still report the terminal state.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Streaming failures are in-band</h3><p><span class="mono">/chatstream</span> can use HTTP status only before the stream starts. Later run failures surface as named terminal SSE events, then close.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Sync never auto-asyncs</h3><p>A sync <span class="mono">504</span> carries <span class="mono">retry_with: respond-async</span> and <span class="mono">x-ms-retry-with: respond-async</span>; SDK retry helpers are opt-in.</p></div>
+  </div>
+
+  <h2><span class="n">5</span>Reconnect, cancellation, and v1 boundaries</h2>
+  <p class="lead">Connection liveness and run liveness are separate. The sandbox keeps journaling until the run reaches a terminal state or the controller explicitly cancels it.</p>
+  <div class="decision"><h4>Disconnect ≠ cancel</h4>
+  <p class="why">A dropped SSE connection, graceful lease close, or closed client socket does <b>not</b> kill the run. Clients reconnect with <span class="mono">Last-Event-ID</span> or poll status/result.</p></div>
+  <div class="decision"><h4>Only cancel or the sync cap stops it</h4>
+  <p class="why"><span class="mono">POST .../cancel</span> is the normal stop path. The other v1 stop case is controller cancellation when the 180-second synchronous cap is hit.</p></div>
+  <div class="decision"><h4>Replay and conflict stay unambiguous</h4>
+  <p class="why">Same <span class="mono">Idempotency-Key</span> + same payload replays the same attempt. A distinct submission while a run is active returns <span class="mono">409 active_run_exists</span>; same key with a different payload returns <span class="mono">422 idempotency_key_conflict</span>.</p></div>
+
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2</th></tr></thead>
+      <tbody>
+        <tr><td>Streaming latency</td><td class="v1">replayable chunks with ≤ 2 s p95 visibility</td><td class="v2">token-level transport upgrade</td></tr>
+        <tr><td>Connection loss</td><td class="v1">reattach; run continues</td><td class="v2">—</td></tr>
+        <tr><td>Concurrency</td><td class="v1">one active run per session</td><td class="v2">supersede / interrupt only if later designed</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.11 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns the caller-facing HTTP contract (Decisions 3, 19, 25) and cross-cuts 0008.2 one-active-run/cancel semantics, 0008.5 SSE journal replay, and 0008.12 lifecycle/result eviction.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

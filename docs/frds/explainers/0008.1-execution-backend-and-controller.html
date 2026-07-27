@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.1 &mdash; Execution backend &amp; the controller model &middot; ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.1 · Sub-FRD · for team feedback</div>
+    <h1>Execution backend &amp; the controller model</h1>
+    <p class="tagline">Where the agent actually runs — and what Azure Functions <em>becomes</em> once it is no longer the compute.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 1, 2, 12, 13</span>
+      <span class="badge">opt-in · <span class="mono">provider: aca_sandbox</span></span>
+      <span class="badge warn">default unchanged</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">Today the runtime runs an agent's whole "thinking loop" — calling the model, using tools, keeping history — inside the Azure Functions Python worker. This sub-FRD adds a second, opt-in <em>place</em> to run that loop, and redefines what the Functions app is.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> introduce one clean <strong>seam</strong> — an <span class="mono">AgentExecutionBackend</span> interface — between "the Functions app" and "wherever the agent runs." Then move the agent into <strong>one ACA sandbox per session</strong> and let Azure Functions step back into the role of an authenticated <strong>controller</strong>: neither the agent runtime anymore, nor a dumb byte-shuffling proxy.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>One sandbox / session</h3><p>The <b>complete</b> harness (the MAF loop + its tools) runs inside a single ACA sandbox per session — not in the worker, and not split across the two.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Controller, not proxy</h3><p>Functions authenticates the caller, checks who owns the session, creates or resumes the sandbox, and routes the run. A trusted control plane — not a runtime, not a pass-through.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Default stays put</h3><p><span class="mono">provider: in_process</span> (today's in-worker execution) remains the default; <span class="mono">provider: aca_sandbox</span> is experimental and must be explicitly turned on.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>The seam — one small interface</h2>
+  <p class="lead">The controller talks to <em>any</em> execution location through a tiny async interface. Only typed, serializable data crosses it — never a live agent or Python tool object.</p>
+  <div class="diagram" style="padding:18px 22px">
+    <pre class="mono" style="margin:0; white-space:pre-wrap; color:var(--cp-text)">class AgentExecutionBackend(Protocol):
+    async def start_run(self, request: StartRunRequest) -> RunHandle: ...
+    async def get_run(self, context: RunContext) -> RunStatus: ...
+    async def read_events(self, context: RunContext, after_sequence: int) -> AsyncIterator[RunEvent]: ...
+    async def cancel_run(self, context: RunContext) -> RunStatus: ...</pre>
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Two implementations</h3><p><span class="mono">LocalExecutionBackend</span> wraps today's <span class="mono">runner.py</span>; <span class="mono">AcaSandboxExecutionBackend</span> drives a sandbox. Handlers depend on the interface, never on the ACA SDK.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Sync is not a special case</h3><p><span class="mono">start_run</span> <b>always</b> creates a run resource — so a synchronous chat is just "start a run and wait." Run IDs, telemetry, cancellation, and idempotency stay identical for sync and async.</p></div>
+  </div>
+  <p class="note">In the runtime's pipeline (discover → translate → register → execute) the seam lives in <b>execute</b>; <b>registration</b> stays the only Azure-aware stage that picks and wires the backend. "Who the agent is" is bound once at registration — a closure over <span class="mono">resolved + capabilities</span> for in-process, or the controller-captured script-root content for the sandbox (<a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>).</p>
+
+  <h2><span class="n">3</span>What the controller actually does</h2>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Authenticate the caller</b> <span>— standard Functions endpoint auth (function keys or Easy Auth). No second, ACA-specific identity layer; no blanket Entra requirement.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Authorize the owner</b> <span>— ownership is an <span class="mono">OwnerContext</span> (app-scoped or a specific end user). Checked <em>before</em> the backend is called, so owner identity never crosses the seam (owned by <a href="https://gistpreview.github.io/?cb1c20c3927659a4026ece50fb9186c7">0008.2</a>).</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Create or resume the sandbox</b> <span>— the only owner-derived value that leaves the controller is a <b>hashed owner label</b> stamped on the resource at provisioning time — never raw claims.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Route the run</b> <span>— drive the turn over the transport (<a href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d">0008.5</a>) and remain the <b>sole writer</b> of session state.</span></div></div>
+    </div>
+  </div>
+
+  <h2><span class="n">4</span>Key decisions</h2>
+  <div class="decision"><h4>Decision 1 — where the agent executes</h4>
+  <p class="why">The complete harness runs inside <b>one ACA sandbox per session</b> — not inside the Functions worker, and not split across the two.</p></div>
+  <div class="decision"><h4>Decision 2 — what the Functions app is</h4>
+  <p class="why">An <b>authenticated session controller</b>: authenticate, check ownership, create/resume the sandbox, route the run. Neither the agent runtime nor a byte-shuffling proxy.</p></div>
+  <div class="decision"><h4>Decision 12 — default behavior unchanged</h4>
+  <p class="why">In-worker execution (<span class="mono">in_process</span>) stays the default; the sandbox backend (<span class="mono">aca_sandbox</span>) is experimental and opt-in — this feature adds a path, it doesn't replace one.</p></div>
+  <div class="decision"><h4>Decision 13 — direct Functions Host integration deferred</h4>
+  <p class="why">A Python-level controller is enough to prove the product; wiring this deeper into the Functions Host is postponed (a longer-term, cross-team effort).</p></div>
+
+  <footer>
+    <p><strong>FRD 0008.1 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Frames the execution model the rest of FRD 0008 builds on; owns Decisions 1, 2, 12, 13. Auth/ownership detail defers to <a href="https://gistpreview.github.io/?cb1c20c3927659a4026ece50fb9186c7">0008.2</a>; the transport seam is detailed in <a href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d">0008.5</a>.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

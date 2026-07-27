@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.8 — Snapshot, auto-suspend &amp; state durability · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.8 · Sub-FRD · for team feedback</div>
+    <h1>Snapshot, auto-suspend &amp; durability</h1>
+    <p class="tagline">How a sandbox session survives idle time and ordinary crashes in v1 — and where the line is drawn before v2 durability.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 9, 18, 27, 28</span>
+      <span class="badge">Platform-only v1 durability</span>
+      <span class="badge warn">Mirror deferred to v2</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">FRD 0008.8 decides what durability means for a persistent ACA sandbox session. v1 deliberately uses the platform boundary: ACA snapshot plus auto-suspend/resume keeps the same sandbox warm enough to continue between turns, then scale to zero while idle.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> v1 does <em>not</em> copy every completed turn to an outside checkpoint store. The sandbox writes its conversation state to its own on-disk session directory. ACA then suspends that idle sandbox and later resumes the <strong>same backing</strong> — same instance, same disk, same generation — before the controller sends the next turn.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Common case</h3><p>Idle between turns becomes cheap: the sandbox is suspended, its disk remains the session record, and resume brings it back warm before work continues.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Hard boundary</h3><p>If the sandbox and its suspended state are truly lost in v1, the conversation content is gone. The session tombstones with <span class="mono">410 Gone</span>; the client starts a new session.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>v2 target</h3><p>The owner-scoped external checkpoint mirror — losing a sandbox without losing the conversation — is retained as the v2 durability add, not part of v1.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>The all-or-nothing turn commit</h2>
+  <p class="lead">Platform suspend is only safe if the disk is never left halfway through a turn. The harness therefore commits a whole turn with one atomic pointer move.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Stage the whole turn</b> <span>— conversation history, tool working files, and run result data for turn N are written into a private staging tree, never over the live committed turn.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Flush the staged files</b> <span>— files and directories are fsynced so the full staged set is durable before it can become current.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Pointer-commit once</b> <span>— one atomic rename advances a <span class="mono">current</span> pointer or manifest to turn N. That pointer and its parent directory are fsynced before the turn is acknowledged.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Resume cleanly</b> <span>— after crash or warm resume, the harness reads <span class="mono">current</span> and discards incomplete staging. Either turn N committed completely, or turn N-1 remains the last truth.</span></div></div>
+    </div>
+  </div>
+  <div class="decision" style="margin-top:18px"><h4>Why a single pointer matters</h4>
+  <p class="why">A turn is a multi-file state change. Per-file temp-write and rename is not enough, because a crash can land between independent renames. The single pointer-commit makes the turn an all-or-nothing unit.</p></div>
+
+  <h2><span class="n">3</span>Active runs do not nap</h2>
+  <p class="lead">ACA idle reclamation is based on quiet request traffic, not on whether an agent is thinking. So v1 explicitly controls suspend around every run.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Before accepting work</h3><p>The controller disables auto-suspend and keeps the session non-idle before the run starts. A sandbox watchdog bounds the authored timeout; the platform cooldown is not the run limiter.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>After terminal</h3><p>When a sync or attached run reaches terminal state, the controller re-arms the idle policy. For detached async, the periodic reconciler in <a href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae">0008.12</a> repairs any terminal-or-crashed sandbox still left in the run-disabled state.</p></div>
+  </div>
+  <div class="plain">
+    <strong>Crash vs loss:</strong> a harness crash with disk intact abandons the in-flight run but keeps the session. The next resume returns to the same sandbox backing and last committed turn. A truly lost sandbox is different: v1 has no outside copy to rebuild from, so it tombstones.
+  </div>
+
+  <h2><span class="n">4</span>Resume, generation, and redeploy</h2>
+  <p class="lead">Resume is verified before new work, but it is not a state migration. In v1 it always means the same backing and the same generation.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Same-generation resume</h3><p>After suspend/resume or crash-with-disk-intact, live clients, token providers, MCP connections, and leases are recreated. The controller verifies the manifest, protocol, content digest, owner/app/session identity, sandbox ID, generation, and last-run journal before submitting work. See <a href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4">0008.3</a> for the generation model.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Generation advance is v2-only</h3><p>A generation advance means state-preserving rebind to a different sandbox backing. That requires the external mirror to reconstruct state, so v1 never advances generation: same backing resumes; lost backing tombstones.</p></div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Not silent redeploy recovery</h4>
+  <p class="why">A content-digest change is a deliberate lifecycle boundary. Row 70 drains the session by design — grace, abandon in-flight work, tombstone, then <span class="mono">410</span> — and the client starts fresh on the new epoch. That is the packaging/epoch rule from <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>, not a warm-snapshot compatibility bug and not silent loss.</p></div>
+
+  <h2><span class="n">5</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2</th></tr></thead>
+      <tbody>
+        <tr><td>Durability boundary</td><td class="v1">ACA auto-suspend/resume preserving sandbox disk within the session epoch</td><td class="v2">external owner-scoped checkpoint mirror</td></tr>
+        <tr><td>Turn safety</td><td class="v1">whole-turn atomic pointer-commit</td><td class="v2">mirror watermark + bounded checkpoint semantics</td></tr>
+        <tr><td>Sandbox crash with disk intact</td><td class="v1">abandon run, resume same session from last committed turn</td><td class="v2">same, plus mirror-backed recovery options</td></tr>
+        <tr><td>Sandbox backing lost</td><td class="v1"><span class="pill no">tombstone → 410</span></td><td class="v2">state-preserving rebuild may advance generation</td></tr>
+        <tr><td>Redeploy / digest change</td><td class="v1">drain by design, then new epoch</td><td class="v2">state-preserving generation advance is a future design question</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <h2><span class="n">6</span>The honest residual</h2>
+  <p class="lead">The remaining v1 question is intentionally narrow.</p>
+  <div class="decision"><h4>Tracked preview-durability item</h4>
+  <p class="why">v1 assumes ACA auto-suspend reliably preserves the on-disk session directory <em>within a single epoch</em>. If the platform drops that disk state, v1 has no mirror fallback and must tombstone. Redeploy is not part of this risk; digest changes already drain by design.</p></div>
+  <div class="decision"><h4>Why the v1 cut still wins</h4>
+  <p class="why">It keeps the always-needed correctness rules — atomic turns, no suspend during active runs, verified resume, explicit tombstone on true loss — while deferring only the larger external-mirror machinery to v2.</p></div>
+
+  <footer>
+    <p><strong>FRD 0008.8 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns snapshot, suspend, resume, and durability boundaries: v1 is platform-only; v2 adds the owner-scoped mirror and state-preserving generation advance. Cross-cutting boundaries align with 0008.3 generation/state, 0008.6 epoch drain, and 0008.12 lifecycle/reconciler behavior.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

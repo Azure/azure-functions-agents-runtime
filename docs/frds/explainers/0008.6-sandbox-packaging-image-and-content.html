@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.6 — Sandbox packaging (image + content) · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.6 · Sub-FRD · for team feedback</div>
+    <h1>Sandbox packaging — image &amp; content</h1>
+    <p class="tagline">How the agent's code and its dependencies get <em>into</em> the sandbox — safely, with no internet at startup and nothing to install.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 8, 17, 17-R/48</span>
+      <span class="badge">Model-1 packaging</span>
+      <span class="badge warn">v1 · Path 1 only</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">Before an agent can run inside its sandbox, two things must meet there: a generic <b>bootstrap image</b> and the <b>captured app environment</b> (the author's code + its resolved dependencies). This sub-FRD decides how they come together.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> we do <em>not</em> let the sandbox <span class="mono">pip install</span> or <span class="mono">git clone</span> anything at startup. Instead, the Azure Functions <strong>controller captures the app it already has on its own disk</strong> — the code plus the dependencies Functions already vendored — zips it, fingerprints it, and hands it to the sandbox over the secure transport. The sandbox just <strong>runs</strong> what it's given.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Generic image</h3><p>A tiny <b>stdlib-only bootstrap</b>, built <em>from</em> the Azure Functions Python base. It bakes <b>no MAF</b> and no app code — so it never needs rebuilding when an author changes their agent.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Captured content</h3><p>The app's <span class="mono">.agent.md</span> files, tools, skills, MCP config, and <b>one pip-resolved dependency tree</b> — which already contains our runtime <em>and</em> the MAF it pulls in.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>One coherent env</h3><p>Because the runtime is a normal pip dependency, the customer's build already resolves runtime + MAF + tools <b>together</b>. There is only ever one MAF — so dependency-isolation isn't a problem to solve.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>Model-1: run from the captured environment</h2>
+  <p class="lead">The single most shaping decision — and it <em>removes</em> a subsystem rather than adding one.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Author builds normally</b> <span>— <span class="mono">azurefunctions-agents-runtime</span> is a requirements.txt dependency; it transitively pulls in MAF. Functions vendors everything into <span class="mono">.python_packages</span>.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Controller captures its own script root</b> <span>— <span class="mono">/home/site/wwwroot</span> (or the Flex equivalent) where the Functions worker already runs the app — on every SKU. It zips the code + vendored <span class="mono">.python_packages</span>.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Fingerprint</b> <span>— computes a <b>SHA-256</b> over that captured zip. This digest is the session's content identity (its "epoch").</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Deliver over the transport</b> <span>— ships the bytes into an <b>identity-less</b> sandbox over the six-verb file plane (<a href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d">0008.5</a>). The sandbox needs no identity and no storage access.</span></div></div>
+      <div class="step"><div class="num">5</div><div class="txt"><b>Verify, then run</b> <span>— the sandbox exposes a manifest; the controller verifies the digest matches before driving any turn. The <b>stdlib bootstrap</b> then runs the single captured environment.</span></div></div>
+    </div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Rejected: install-at-startup</h4>
+  <p class="why"><span class="mono">pip install</span> / <span class="mono">curl | bash</span> / <span class="mono">git clone</span> at session start are rejected outright — they force a startup window with permissive network access <em>before</em> lockdown, and re-fetch from the internet for every session. The prebuilt image + delivered content avoids both.</p></div>
+
+  <h2><span class="n">3</span>Key decisions</h2>
+
+  <div class="decision"><h4>Reuse the deployment content — no bespoke format (Decision 17-R / 48)</h4>
+  <p class="why">The per-app layer is <b>not</b> a new signed content-package format. It's exactly the content the Azure Functions deployment already produced. We capture it from disk rather than inventing a delivery scheme.</p></div>
+
+  <div class="decision"><h4>Digest source: the captured script-root zip — not the deploy artifact</h4>
+  <p class="why">The epoch digest is a SHA-256 over the <b>controller-captured script-root content</b> (code + vendored <span class="mono">.python_packages</span>), <em>not</em> an IaC-pinned Run-From-Package deploy artifact. It fingerprints what actually runs.</p></div>
+
+  <div class="decision"><h4>Build FROM the Functions Python base (ABI)</h4>
+  <p class="why">The bootstrap image is built <em>from</em> the Azure Functions Python base (Linux, Python 3.13–3.14), so the vendored <span class="mono">.python_packages</span> — including compiled wheels — are ABI-compatible with the interpreter that runs them. <span class="mono">protocol_version</span> travels with the captured runtime, not the base image.</p></div>
+
+  <div class="decision"><h4>Content change ⇒ drain the session (not a generation bump)</h4>
+  <p class="why">A redeploy changes the captured content digest. Rather than keep old sessions compatible, v1 <b>drains</b> the session (grace → tombstone → <span class="mono">410</span>); the client starts fresh on the new epoch (<a href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4">0008.3</a> row 70). Generation tracks the sandbox <em>backing</em> only.</p></div>
+
+  <div class="decision"><h4>MAF-only for v1</h4>
+  <p class="why">A custom sandbox disk image is permitted, but in v1 it must be <b>MAF-conformant</b> (golden-trace gate, <a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a>). A non-MAF / bring-your-own harness image is deferred to a separate FRD.</p></div>
+
+  <h2><span class="n">4</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1 (Path 1)</th><th>Deferred / v2</th></tr></thead>
+      <tbody>
+        <tr><td>Delivery</td><td class="v1">controller-captured content over the transport</td><td class="v2">—</td></tr>
+        <tr><td>Image</td><td class="v1">generic stdlib bootstrap (no baked MAF)</td><td class="v2">ACA committed disk image (Path 2)</td></tr>
+        <tr><td>Why defer Path 2</td><td class="v1"><span class="pill v1">not needed for v1</span></td><td class="v2">low-latency start / network-install native deps</td></tr>
+        <tr><td>Harness</td><td class="v1">MAF-only (conformance-gated)</td><td class="v2">non-MAF / bring-your-own image</td></tr>
+        <tr><td>Redeploy of a live app</td><td class="v1">drain &amp; tombstone → new epoch</td><td class="v2">cross-deploy continuity</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Path 2 (a pre-baked ACA committed image) is fully <em>documented</em> in the FRD as a future optimization — it is simply not built in v1. That keeps the surface we own small and the generic image version-agnostic.</p>
+
+  <footer>
+    <p><strong>FRD 0008.6 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns the packaging decision area (Decisions 8, 17, 17-R/48) and pairs with master-log rows 66/68/69/70. Cross-cutting boundaries confirmed with 0008.3 (digest/trust), 0008.5 (transport), 0008.7 (ABI + conformance), 0008.4 (residency/identity).</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

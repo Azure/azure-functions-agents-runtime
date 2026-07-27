@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>FRD 0008 — ACA Sandbox Session Runtime (explainer)</title>
+<title>ACA Sandbox Session Runtime — Simple Guide (FRD 0008)</title>
 <script>
   (() => {
     const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
@@ -84,10 +84,14 @@ td.v2 { color: var(--cp-text-muted); }
 .decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
 .decision h4 { margin: 0 0 3px; font-size: 1rem; }
 .decision .why { color: var(--cp-text-muted); font-size: .93rem; }
-.subfrd { display: grid; grid-template-columns: 52px 1fr; gap: 10px; padding: 9px 0; border-bottom: 1px solid var(--cp-border); font-size: .92rem; }
+.subfrd { display: grid; grid-template-columns: 52px 1fr auto; gap: 10px; padding: 11px 10px; border-bottom: 1px solid var(--cp-border); font-size: .92rem; align-items: center; }
 .subfrd .id { font-weight: 700; color: var(--cp-accent); font-variant-numeric: tabular-nums; }
 .subfrd .d { color: var(--cp-text-muted); }
 .subfrd .d b { color: var(--cp-text); font-weight: 600; }
+a.subfrd { text-decoration: none; color: inherit; border-radius: 8px; transition: background .12s ease; }
+a.subfrd:hover { background: var(--cp-accent-soft); }
+a.subfrd:hover .d b { color: var(--cp-accent); }
+.subfrd .open { color: var(--cp-link); font-size: .8rem; font-weight: 700; white-space: nowrap; opacity: .8; }
 footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
 .note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
 a { color: var(--cp-link); }
@@ -99,13 +103,13 @@ a { color: var(--cp-link); }
 <body>
 <header class="hero">
   <div class="hero-inner">
-    <div class="eyebrow">FRD 0008 · Preview / for team feedback</div>
+    <div class="eyebrow">FRD 0008 · Simple Guide · for team feedback</div>
     <h1>ACA Sandbox Session Runtime</h1>
     <p class="tagline">Run the <strong>entire</strong> AI-agent loop inside one ephemeral Azure Container Apps sandbox per session — with Azure Functions as a thin, secure controller.</p>
     <div class="badges">
       <span class="badge accent">Validated · 5 rubber-duck rounds</span>
       <span class="badge">70 recorded decisions</span>
-      <span class="badge">1 parent + 14 sub-FRDs</span>
+      <a class="badge accent" href="#deepdives">14 visual deep-dives ↓</a>
       <span class="badge warn">v1 scope · MAF-only</span>
     </div>
   </div>
@@ -265,29 +269,29 @@ a { color: var(--cp-link); }
     </table>
   </div>
 
-  <h2><span class="n">8</span>How the FRD is organized</h2>
-  <p class="lead">A parent overview + 14 focused sub-FRDs. Handy for navigating the doc set in review.</p>
+  <h2 id="deepdives"><span class="n">8</span>Explore the deep-dives</h2>
+  <p class="lead">Each sub-FRD has its own visual explainer — <strong>click any row to open it</strong>. This guide is the parent overview's visual companion; the 14 focused pages below go one level deeper.</p>
   <div class="card">
-    <div class="subfrd"><div class="id">0008</div><div class="d"><b>Parent overview</b> — problem, goals, component map, and the 70-row master decisions log.</div></div>
-    <div class="subfrd"><div class="id">.1</div><div class="d"><b>Execution backend &amp; controller</b> — the controller-as-proxy model and provisioning orchestration.</div></div>
-    <div class="subfrd"><div class="id">.2</div><div class="d"><b>Session identity, ownership &amp; concurrency</b> — session_id, one-active-run, compare-and-set, verified-kill.</div></div>
-    <div class="subfrd"><div class="id">.3</div><div class="d"><b>State store &amp; tamper-evident trust</b> — the Azure Table schema, digest/generation, sole-writer model.</div></div>
-    <div class="subfrd"><div class="id">.4</div><div class="d"><b>Resource residency &amp; provisioning</b> — the customer-owned Sandbox Group + IaC boundary.</div></div>
-    <div class="subfrd"><div class="id">.5</div><div class="d"><b>Controller ↔ sandbox transport</b> — the six-verb file/exec plane, run journal, event cursor.</div></div>
-    <div class="subfrd"><div class="id">.6</div><div class="d"><b>Packaging, image &amp; content</b> — stdlib bootstrap image, capture-from-disk, content digest.</div></div>
-    <div class="subfrd"><div class="id">.7</div><div class="d"><b>Harness compatibility &amp; conformance</b> — MAF harness, ABI, golden-trace, output validation.</div></div>
-    <div class="subfrd"><div class="id">.8</div><div class="d"><b>Snapshot, suspend &amp; durability</b> — atomic per-turn commit, auto-suspend/resume.</div></div>
-    <div class="subfrd"><div class="id">.9</div><div class="d"><b>Network egress &amp; OBO</b> — deny-by-default egress, credential injection, identity-less.</div></div>
-    <div class="subfrd"><div class="id">.10</div><div class="d"><b>Authoring surface &amp; config</b> — the <span class="mono">aca_sandbox</span> block and startup validation matrix.</div></div>
-    <div class="subfrd"><div class="id">.11</div><div class="d"><b>HTTP API</b> — sync / async / streaming routes, the LRO status model, SSE.</div></div>
-    <div class="subfrd"><div class="id">.12</div><div class="d"><b>Lifecycle, failure &amp; reconciler</b> — state machines, drain-on-deploy, the reaper, crash-liveness.</div></div>
-    <div class="subfrd"><div class="id">.13</div><div class="d"><b>Subagent delegation compatibility</b> — how multi-agent delegation co-locates in the sandbox.</div></div>
-    <div class="subfrd"><div class="id">.14</div><div class="d"><b>Dynamic workflows compatibility</b> — analysis only; the combination stays fail-closed in v1.</div></div>
+    <div class="subfrd"><div class="id">0008</div><div class="d"><b>Parent overview</b> — problem, goals, component map, and the 70-row master decisions log. <em>(You're reading its visual companion.)</em></div><span class="open"></span></div>
+    <a class="subfrd" href="https://gistpreview.github.io/?373f6153175e5f8e8b2cb08f508cd92f"><div class="id">.1</div><div class="d"><b>Execution backend &amp; controller</b> — the controller-as-proxy model and the execution-backend seam.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?cb1c20c3927659a4026ece50fb9186c7"><div class="id">.2</div><div class="d"><b>Session identity, ownership &amp; concurrency</b> — session_id, one-active-run, compare-and-set, verified-kill.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4"><div class="id">.3</div><div class="d"><b>State store &amp; tamper-evident trust</b> — the Azure Table schema, digest/generation, sole-writer model.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?2a47ed8d57959b47c9022721b7d522ae"><div class="id">.4</div><div class="d"><b>Resource residency &amp; provisioning</b> — the customer-owned Sandbox Group + IaC boundary.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d"><div class="id">.5</div><div class="d"><b>Controller ↔ sandbox transport</b> — the six-verb file/exec plane, run journal, event cursor.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e"><div class="id">.6</div><div class="d"><b>Packaging, image &amp; content</b> — stdlib bootstrap image, capture-from-disk, content digest.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222"><div class="id">.7</div><div class="d"><b>Harness compatibility &amp; conformance</b> — MAF harness, ABI, golden-trace, output validation.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?6946f4a98ea7bb4f7106337fdbaf625e"><div class="id">.8</div><div class="d"><b>Snapshot, suspend &amp; durability</b> — atomic per-turn commit, auto-suspend/resume.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?7ff281c651e0c0dcfa24487de5dd9bb3"><div class="id">.9</div><div class="d"><b>Network egress &amp; OBO</b> — deny-by-default egress, credential injection, identity-less.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?993488caa6648524400224af6baf8255"><div class="id">.10</div><div class="d"><b>Authoring surface &amp; config</b> — the <span class="mono">aca_sandbox</span> block and startup validation matrix.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?3c5024c951d6fbaa8b6026cc51359f7b"><div class="id">.11</div><div class="d"><b>HTTP API</b> — sync / async / streaming routes, the LRO status model, SSE.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae"><div class="id">.12</div><div class="d"><b>Lifecycle, failure &amp; reconciler</b> — state machines, drain-on-deploy, the reaper, crash-liveness.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?f7a28d45f9d50b246514aa98fae2bdce"><div class="id">.13</div><div class="d"><b>Subagent delegation compatibility</b> — how multi-agent delegation co-locates in the sandbox.</div><span class="open">open ↗</span></a>
+    <a class="subfrd" href="https://gistpreview.github.io/?e19b1afbe34fc256d4a3db7c66242399"><div class="id">.14</div><div class="d"><b>Dynamic workflows compatibility</b> — analysis only; the combination stays fail-closed in v1.</div><span class="open">open ↗</span></a>
   </div>
 
   <footer>
     <p><strong>Status:</strong> FRD 0008 validated and human-signed-off (2026-07-27). Hardened over five independent max-reasoning rubber-duck rounds — from 8 cross-layer seam gaps down to a clean set — across a parent overview and 14 sub-FRDs (70 recorded decisions).</p>
-    <p class="note">This explainer is a companion to the FRD for team feedback — the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+    <p class="note">This Simple Guide is the hub for a set of <strong>14 visual deep-dive explainers</strong> (one per sub-FRD, linked in section 8) — companions to the FRD for team feedback. The FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
   </footer>
 </div>
 </body>

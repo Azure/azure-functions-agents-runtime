@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.9 — Network egress &amp; OBO · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.9 · Sub-FRD · for team feedback</div>
+    <h1>Network egress &amp; OBO</h1>
+    <p class="tagline">How the sandbox can call approved services without ever holding credentials, and why that is the safe foundation for enterprise delegated auth.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 10, 11, 16, 56</span>
+      <span class="badge">deny-by-default egress</span>
+      <span class="badge warn">v1 · group-wide policy</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">A session sandbox runs partly untrusted agent work, so it starts with <b>no open internet</b>. Every outbound call must cross an egress proxy that both decides whether the destination is allowed and, when needed, injects the credential after the request has left the sandbox.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> the sandbox is <b>identity-less</b>. It has no managed identity, no AAD token, no API key, and no secret on disk or in memory. If a model, MCP endpoint, telemetry sink, artifact service, or future broker is allowed, the proxy adds the right credential at the boundary. If it is not on the allow-list, the call never leaves.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>No general internet</h3><p>Default action is <b>Deny</b>, active before the harness runs. There is no startup window where code can fetch arbitrary packages or exfiltrate data.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Proxy owns auth</h3><p>Managed-identity tokens or static-secret fallbacks are injected by proxy transforms. The workload never handles reusable credentials.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Enterprise seam</h3><p>Because tokens stay outside the sandbox, a future OBO broker can call downstream APIs as the user without baking credentials into agent code.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>What happens on an outbound call</h2>
+  <p class="lead">The proxy is both the reachability gate and the credential-injection point.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Sandbox code asks to call out</b> <span>— for example a model endpoint, MCP server, artifact service, telemetry endpoint, or future credential broker.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Traffic is forced through the proxy</b> <span>— no broad non-HTTP egress and no alternate identity path are available from inside the sandbox.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Allow-list is evaluated</b> <span>— ordered rules put exact host/path/method denies or transforms before broader host allows. A missing or narrowed rule produces a deny.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Credential is injected, if required</b> <span>— the preferred transform mints a scoped managed-identity token on the proxy side; static secrets are a fallback from the Sandbox Group secrets store.</span></div></div>
+      <div class="step"><div class="num">5</div><div class="txt"><b>Result returns to the sandbox</b> <span>— the credential itself never enters sandbox memory or disk, so compromise of the workload leaves nothing reusable to steal.</span></div></div>
+    </div>
+  </div>
+  <p class="note">This depends on the packaging decision in <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>: the controller delivers the already-captured app environment, so sandbox startup does not need internet access.</p>
+
+  <h2><span class="n">3</span>Key decisions</h2>
+
+  <div class="decision"><h4>Decision 10 — deny from create</h4>
+  <p class="why">Production sandboxes start with full inspection and default egress <b>Deny</b>. The policy is active before the harness executes, so there is no permissive bootstrap phase to exploit.</p></div>
+
+  <div class="decision"><h4>Decision 56 — v1 sandbox is identity-less</h4>
+  <p class="why">The v1 sandbox gets no managed identity and no AAD token. The controller remains the sole writer of session state (<a href="https://gistpreview.github.io/?56accce5f0fbdd849669f1709a64d3b4">0008.3</a>), while outbound auth happens at the proxy boundary. That is why secrets and tokens never live in partly untrusted compute.</p></div>
+
+  <div class="decision"><h4>Decisions 11 and 16 — be precise about OBO</h4>
+  <p class="why">A workload managed identity is <em>not</em> user On-Behalf-Of. True OAuth OBO means calling a downstream API as the signed-in user, and v1 does not put user tokens in the sandbox. The FRD reserves the safe broker seam and defers the broker implementation.</p></div>
+
+  <div class="decision"><h4>Group-wide allow-list for v1</h4>
+  <p class="why">Destination intent comes from authored capability config, MCP server URLs, model endpoints, telemetry, artifacts, and the future broker. The controller compiles the union into one Sandbox Group policy, aligned with group provisioning in <a href="https://gistpreview.github.io/?2a47ed8d57959b47c9022721b7d522ae">0008.4</a>.</p></div>
+
+  <div class="decision reject"><h4>✗ Rejected: credentials in agent code or sandbox memory</h4>
+  <p class="why">Passing user tokens, API keys, or workload tokens into the sandbox would turn a sandbox escape or malicious tool call into credential theft. The chosen pattern keeps those credentials outside the workload and scopes them at the proxy.</p></div>
+
+  <h2><span class="n">4</span>Why enterprise customers care</h2>
+  <p class="lead">Enterprise auth is less about making outbound calls possible and more about proving who can act, where, and with what blast radius.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Least privilege by construction</h3><p>Allowed destinations are explicit. Credentials are scoped to host, path, method, and resource where the proxy transform supports it. The sandbox itself cannot reuse the credential elsewhere.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>No credentials to leak</h3><p>Auditors can reason about a strong invariant: agent code and model-driven tool calls do not receive tokens. The sensitive boundary is the proxy policy and its privileged operators.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Clean OBO path</h3><p>A future broker can receive a proxy-injected workload token, perform delegated-user OBO outside the sandbox, call allow-listed downstream APIs, and return only the result.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>No auth baked into agents</h3><p>Authors do not hardcode secrets or special credential flows in agent code. Local authoring describes destination intent; deployment maps it to proxy-side transforms.</p></div>
+  </div>
+  <p class="note">Important boundary: v1 reserves the OBO seam; it does not yet deliver true user-delegated downstream access. Sessions without an Entra user have no user to act for.</p>
+
+  <h2><span class="n">5</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2</th></tr></thead>
+      <tbody>
+        <tr><td>Egress posture</td><td class="v1">default deny with full inspection from create</td><td class="v2">—</td></tr>
+        <tr><td>Sandbox identity</td><td class="v1">identity-less; no token inside</td><td class="v2">possible workload-identity paths after trust review</td></tr>
+        <tr><td>Outbound auth</td><td class="v1">proxy-injected managed-identity token; static secret fallback</td><td class="v2">richer broker / platform integrations</td></tr>
+        <tr><td>Policy scope</td><td class="v1">one group-wide mutable allow-list</td><td class="v2">per-session, per-epoch, or per-tool scoping hardening</td></tr>
+        <tr><td>User OBO</td><td class="v1"><span class="pill v1">seam reserved</span></td><td class="v2">external broker or equivalent Microsoft-native service</td></tr>
+        <tr><td>Non-HTTP egress</td><td class="v1">blocked</td><td class="v2">scoped escape hatch in a separate fast-follow</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Because the v1 egress policy is group-wide and mutable, an operator egress-only narrowing can affect live sessions immediately. A real content redeploy is different: it drains live sessions rather than spanning a content boundary.</p>
+
+  <footer>
+    <p><strong>FRD 0008.9 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns the network, egress, credential-injection, and OBO-seam decisions; cross-cutting boundaries confirmed with 0008.3 (sole writer / identity), 0008.4 (Sandbox Group policy scope), and 0008.6 (no internet needed at startup).</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

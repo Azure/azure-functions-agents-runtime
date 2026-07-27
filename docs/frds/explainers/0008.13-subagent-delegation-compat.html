@@ -1,0 +1,186 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.13 — Subagent delegation compatibility · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.13 · Sub-FRD · for team feedback</div>
+    <h1>Subagent delegation compatibility</h1>
+    <p class="tagline">How FRD 0007's coordinator-plus-specialists model runs inside the ACA session sandbox without creating extra sandboxes or a new run surface.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 42–46</span>
+      <span class="badge">FRD 0007 compatible</span>
+      <span class="badge warn">v1 · single sandbox</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">FRD 0007 shipped <b>multi-agent delegation</b>: a coordinator sees each specialist as an in-process <span class="mono">delegate_&lt;slug&gt;</span> tool and calls it inside the coordinator's own Microsoft Agent Framework run. FRD 0008 keeps that shape under ACA.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> think of the session sandbox as the <b>brain + hands for a whole team of agents</b>. The coordinator and every reachable specialist live together in one room, share the same delivered app content, and use the same controlled outbound doorway. Delegation is still one top-level run asking an in-room specialist for help — not a new session, not a new sandbox, and not a second API call.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Coordinator</h3><p>The entry agent owns the user-facing run and receives <span class="mono">delegate_&lt;slug&gt;</span> tools for its declared <span class="mono">subagents:</span>.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Specialists</h3><p>Each specialist is built fresh per delegated call and runs in-process through MAF <span class="mono">Agent.run()</span>, using only the task string passed by the coordinator.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>One sandbox</h3><p>All reachable agents co-locate inside the one ephemeral ACA sandbox for the session. Specialists get no separate session, binding, identity, or sandbox.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>What happens on a delegated turn</h2>
+  <p class="lead">Delegation stays inside the harness. The controller still drives one session, one sandbox, and one active top-level run.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Session starts</b> <span>— the Azure Functions controller creates or resumes the single ACA sandbox and delivers the controller-captured app content described in <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>.</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Catalog is rebuilt in the sandbox</b> <span>— discovery sees the coordinator and every statically reachable specialist, so every declared <span class="mono">delegate_&lt;slug&gt;</span> target can resolve locally.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Coordinator runs</b> <span>— the user's turn enters the MAF loop as a single top-level run. The one-active-run invariant still belongs to the session, not to each agent.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Coordinator calls a specialist tool</b> <span>— <span class="mono">delegate_&lt;slug&gt;</span> invokes the specialist in-process through MAF. There is no network hop and no new request-scoped compute.</span></div></div>
+      <div class="step"><div class="num">5</div><div class="txt"><b>Answer folds back in</b> <span>— the specialist's result is integrated into the coordinator output, while delegation spans and errors remain nested under the same run telemetry.</span></div></div>
+    </div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Rejected: one sandbox per specialist</h4>
+  <p class="why">A per-specialist sandbox would multiply latency and cost, split the session's ownership/binding model, and contradict FRD 0007's rule that delegation starts no new request or top-level compute. v1 deliberately co-locates the team.</p></div>
+
+  <h2><span class="n">3</span>The shared things span the whole team</h2>
+  <p class="lead">Because specialists live in the same sandbox, the package, catalog, and network policy must be computed for the whole reachable delegation graph.</p>
+  <div class="grid g3">
+    <div class="card"><h3><span class="ic">◆</span>Captured content package</h3><p>The controller-captured content includes the coordinator plus every referenced specialist: each <span class="mono">.agent.md</span>, tools, skills, MCP config, and the single captured pip-resolved <span class="mono">.python_packages</span>.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Agent catalog</h3><p>The in-sandbox <span class="mono">AgentCatalog</span> is the immutable catalog for the reachable set. Packaging only the entry agent would make <span class="mono">delegate_&lt;slug&gt;</span> fail at runtime.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Egress policy</h3><p>The deny-by-default allow-list is the union of destinations required by the coordinator and all reachable specialists, enforced as one group-wide policy per <a href="https://gistpreview.github.io/?7ff281c651e0c0dcfa24487de5dd9bb3">0008.9</a>.</p></div>
+  </div>
+  <div class="plain">
+    <strong>Security intuition:</strong> v1 treats one app's reachable agent team as one trust domain. The union policy is still tighter than today's normal in-process worker network, but it is <em>not</em> per-specialist isolation. Any code in the sandbox can reach any allowed destination in the union; future hardening may add identity-scoped per-delegate proxy rules.
+  </div>
+  <div class="decision"><h4>Identity stays outside the sandbox</h4>
+  <p class="why">The sandbox remains identity-less. Outbound auth is applied by the shared egress proxy through credential injection, and no specialist receives an in-sandbox credential or its own session identity.</p></div>
+
+  <h2><span class="n">4</span>Delegation is a negotiated harness capability</h2>
+  <p class="lead">The API surface does not grow. Instead, the harness advertises whether it can preserve FRD 0007's in-process delegation semantics.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Capability gate</h3><p><span class="mono">subagent delegation</span> is an enumerated capability under the single <span class="mono">protocol_version</span>. If an app declares <span class="mono">subagents:</span> and the harness cannot run them in-process, startup fails closed.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Conformance trace</h3><p><a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a> requires a golden trace that exercises a coordinator calling a specialist and integrating its answer before the capability can be advertised as supported.</p></div>
+  </div>
+  <div class="decision"><h4>One top-level run is preserved</h4>
+  <p class="why">Delegation is just an in-harness tool call. It does not create a second top-level run, session row, binding, or client-visible API. The synchronous budget is whole-run: coordinator plus any nested delegated work share the same wall clock.</p></div>
+
+  <h2><span class="n">5</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2+</th></tr></thead>
+      <tbody>
+        <tr><td>Execution locus</td><td class="v1">coordinator + reachable specialists in one session sandbox</td><td class="v2">per-specialist isolation only if a future design requires it</td></tr>
+        <tr><td>Delegation shape</td><td class="v1">single-level, static <span class="mono">subagents:</span>, task-string-only calls</td><td class="v2">multi-level or dynamic delegation</td></tr>
+        <tr><td>Egress</td><td class="v1">one group-wide union allow-list</td><td class="v2">identity-scoped per-<span class="mono">delegate_&lt;slug&gt;</span> hardening</td></tr>
+        <tr><td>Run surface</td><td class="v1">single top-level run; negotiated harness capability</td><td class="v2">no new v1 API surface reserved here</td></tr>
+        <tr><td>Handoff state</td><td class="v1"><span class="pill v1">schema room reserved</span></td><td class="v2">active participant + shared context durability</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Future cross-sandbox handoff state is intentionally only a checkpoint/manifest schema reservation in v1. Concrete handoff durability waits for the future external checkpoint mirror design; ACA v1 ships platform durability only.</p>
+
+  <footer>
+    <p><strong>FRD 0008.13 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns subagent delegation compatibility (Decisions 42–46): co-location, whole-team content/catalog scope, union egress, negotiated harness capability, and reserved future handoff state.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>
