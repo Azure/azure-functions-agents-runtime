@@ -32,7 +32,7 @@ provides:
 | Any other external resource (databases, connectors, etc.) | **No** |
 
 **Supported trigger types:** `http_trigger`, `blob_trigger`, `queue_trigger`,
-`timer_trigger` (start-only; timers do not fire in CI), and MCP tool triggers
+`timer_trigger` (scheduled timers do not fire in CI; tests should invoke timers deterministically via the Functions admin API), and MCP tool triggers
 via the `builtin_endpoints.mcp` flag.
 
 **Decision rule:**
