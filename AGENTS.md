@@ -94,10 +94,16 @@ python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=x
 
 # Fast local test loop
 python -m pytest tests -q
+
+# End-to-end tests (require func + Azurite + Foundry resource; excluded from default run)
+python -m pytest -m e2e tests/endtoend -v
 ```
 
 > `samples/` is intentionally excluded from `ruff` and `mypy`. `tests/` is
 > linted but excluded from strict `mypy`.
+>
+> E2E tests are excluded from the default run by `addopts = "-m 'not e2e'"` in
+> `pyproject.toml`. The E2E CI pipeline runs them explicitly with `-m e2e`.
 
 ---
 
@@ -161,6 +167,24 @@ Grounded in `pyproject.toml` and current code:
   are interpreted.
 - For bug fixes, add a **failing regression test first**, then fix.
 
+### End-to-end tests
+
+When a feature can be exercised through a real Function App host, an E2E test is
+required. The E2E environment provides `func`, Azurite (blob/queue/table), and a
+Foundry resource. Features that require any other external resource may waive the
+E2E requirement — record the waiver in the FRD Decisions log (medium+ features)
+or PR description (small features).
+
+- Each app must contain `function_app.py`, `host.json`, `local.settings.json` (no secrets),
+  `requirements.txt` (editable install), and one or more `*.agent.md` files.
+  Add assertions in the appropriate `tests/endtoend/test_apps_*.py` file based on trigger type.
+- `tests/endtoend/test_apps_start.py` auto-discovers all apps and runs a `func
+  start` smoke test — adding a new app dir is enough to opt into it.
+- Use the **`add-e2e-test` skill**
+  ([`.github/skills/add-e2e-test/SKILL.md`](.github/skills/add-e2e-test/SKILL.md))
+  for the full playbook: eligibility check, app structure, test design, dependency
+  wiring, and pipeline variables.
+
 ---
 
 ## 7. Documentation conventions
@@ -198,6 +222,8 @@ When modifying `src/azure_functions_agents/config/schema.py`:
 - [ ] (medium+) FRD finalized with a completed Decisions log.
 - [ ] `ruff`, `mypy`, and `pytest` all green locally (§3).
 - [ ] New behavior is tested (regression test for bugs).
+- [ ] E2E test added under `tests/endtoend/apps/`, **or** eligibility waiver recorded in
+      FRD Decisions log / PR description (see §6 and the `add-e2e-test` skill).
 - [ ] `docs/architecture.md` + relevant `docs/*` / `README.md` updated.
 - [ ] (schema changes) `front-matter-reference.md` regenerated + `update-schema-docs` skill run.
 - [ ] Diff is surgical — no unrelated changes.

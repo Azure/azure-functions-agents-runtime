@@ -16,6 +16,8 @@ must be started with ``--skipApiVersionCheck`` for storage-trigger apps.
 from __future__ import annotations
 
 import contextlib
+import json
+import os
 import shutil
 import uuid
 from collections.abc import Iterator
@@ -38,6 +40,25 @@ from tests.endtoend._storage_probe import (
 
 APPS_DIR = Path(__file__).resolve().parent / "apps"
 
+
+def _provider_configured() -> bool:
+    """Whether an LLM provider appears configured (env vars or app settings)."""
+    from tests.endtoend._func_host import configured_provider
+
+    return bool(
+        os.environ.get("OPENAI_API_KEY")
+        or os.environ.get("AZURE_OPENAI_ENDPOINT")
+        or os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+        or configured_provider(APPS_DIR / "storage-triggers") is not None
+        or configured_provider(APPS_DIR / "queue-trigger-payload") is not None
+        or configured_provider(APPS_DIR / "blob-trigger-payload") is not None
+    )
+
+
+requires_llm = pytest.mark.skipif(
+    not _provider_configured(), reason="no LLM provider configured (set FOUNDRY_PROJECT_ENDPOINT etc.)"
+)
+
 pytestmark = [
     pytest.mark.e2e,
     pytest.mark.skipif(shutil.which("func") is None, reason="Azure Functions Core Tools not found"),
@@ -46,6 +67,9 @@ pytestmark = [
 # The container / queue the storage-triggers app binds to (see its *.agent.md).
 BLOB_CONTAINER = "uploads"
 QUEUE_NAME = "work-items"
+
+# The queue the queue-trigger-payload app binds to (see queue_processor.agent.md).
+QUEUE_PAYLOAD_NAME = "queue-payload-input"
 
 # Served storage hosts are (handle, client): the handle exposes host output so we
 # can assert the function executed after data lands in storage.
@@ -141,4 +165,251 @@ def test_queue_trigger_fires_on_message(storage_host: Served) -> None:
     assert executed, (
         f"host never logged execution of queue trigger '{fn.name}' after enqueuing a "
         f"message on '{QUEUE_NAME}'. Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Queue trigger — payload serialization (queue-trigger-payload app)
+#
+# These tests verify the trigger-data serialization path introduced in
+# PR #105: when a queue message carries a JSON body, the runtime serializes it
+# into a structured dict (body, body_encoding, id, dequeue_count, body_json)
+# rather than forwarding the raw Python QueueMessage repr to the agent.
+# --------------------------------------------------------------------------- #
+
+FUNCTION_NAME = "queue_processor"
+
+
+@contextlib.contextmanager
+def _serve_payload_app() -> Iterator[Served]:
+    with running_host(APPS_DIR / "queue-trigger-payload") as handle:
+        client = HttpClient(handle.base_url)
+        try:
+            client.wait_until_responsive()
+            yield handle, client
+        finally:
+            client.close()
+
+
+@pytest.fixture(scope="module")
+def queue_trigger_payload_host() -> Iterator[Served]:
+    """Start the queue-trigger-payload app after clearing any residue messages."""
+    clear_queue_messages(QUEUE_PAYLOAD_NAME)
+    with _serve_payload_app() as served:
+        yield served
+
+
+# --------------------------------------------------------------------------- #
+# Discovery
+# --------------------------------------------------------------------------- #
+
+
+def test_queue_trigger_payload_is_indexed(queue_trigger_payload_host: Served) -> None:
+    """The queue-trigger-payload app registers exactly one queueTrigger function."""
+    _, client = queue_trigger_payload_host
+    functions = discover_functions(client)
+    queues = find_functions(functions, trigger_type="queueTrigger")
+    assert len(queues) == 1, f"expected exactly one queueTrigger function to be indexed, got {len(queues)}"
+    fn = queues[0]
+    assert fn.name == FUNCTION_NAME
+    assert fn.route is None, "queue trigger must not expose an HTTP route"
+    assert fn.methods == (), "queue trigger must not list HTTP methods"
+
+
+# --------------------------------------------------------------------------- #
+# JSON body message — provider-independent
+# --------------------------------------------------------------------------- #
+
+
+def test_queue_trigger_payload_fires_on_json_message(
+    queue_trigger_payload_host: Served,
+) -> None:
+    """Enqueuing a JSON message exercises the body_json serialization path.
+
+    The agent receives a structured payload (body + body_json) rather than a raw
+    Python QueueMessage repr. Provider-independent assertions:
+
+    1. The handler log ``"Agent triggered: trigger_type=queue_trigger"`` appears,
+       confirming the queue-trigger handler started executing.
+    2. ``Executed 'Functions.queue_processor'`` appears, confirming the Functions
+       host invoked the function (whether the agent run itself succeeds or fails).
+    handle, _ = queue_trigger_payload_host
+
+    body = json.dumps({"order": f"e2e-{uuid.uuid4().hex[:8]}", "quantity": 3})
+    send_queue_message(QUEUE_PAYLOAD_NAME, body)
+
+    # The handler logs "Agent triggered" immediately before calling
+    # serialize_trigger_data — its presence confirms the full handler chain was
+    # entered for a queue trigger.
+    triggered = handle.wait_for_log("Agent triggered: trigger_type=queue_trigger", timeout=120.0)
+    assert triggered, (
+        "handler never logged 'Agent triggered: trigger_type=queue_trigger' after "
+        f"enqueuing a JSON message. Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+    executed = handle.wait_for_log(f"Executed 'Functions.{FUNCTION_NAME}'", timeout=30.0)
+    assert executed, (
+        f"host never logged execution of '{FUNCTION_NAME}' after enqueuing a "
+        f"JSON message. Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Full-run assertion (requires LLM)
+# --------------------------------------------------------------------------- #
+
+
+@requires_llm
+def test_queue_trigger_payload_full_run_succeeds(
+    queue_trigger_payload_host: Served,
+) -> None:
+    """With an LLM provider, the agent completes and logs a response.
+
+    Confirms the full path: queue message → serialize_trigger_data (body_json
+    populated) → agent runner → LLM call → response logged. The assertion
+    targets the ``"Agent response: source_file="`` log entry that the handler
+    emits on a successful run, not the content of the LLM response itself.
+    """
+    handle, _ = queue_trigger_payload_host
+
+    order_id = f"e2e-llm-{uuid.uuid4().hex[:8]}"
+    body = json.dumps({"order": order_id, "quantity": 1})
+    send_queue_message(QUEUE_PAYLOAD_NAME, body)
+
+    responded = handle.wait_for_log("Agent response: source_file=", timeout=120.0)
+    assert responded, (
+        "agent never logged a successful response after enqueuing a JSON message. "
+        f"Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+    output = handle.read_output()
+    assert order_id in output, (
+        "agent response did not include the expected order id (likely missing trigger payload content). "
+        f"order_id={order_id}. Recent output:\n{output[-2000:]}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Blob trigger — payload serialization (blob-trigger-payload app)
+#
+# These tests verify the blob-trigger serialization path introduced in
+# PR #105: when a blob is uploaded, the runtime serializes the InputStream
+# binding into a structured dict (name, uri, length, blob_properties, metadata)
+# rather than forwarding the raw Python InputStream repr to the agent.
+# --------------------------------------------------------------------------- #
+
+BLOB_PAYLOAD_CONTAINER = "blob-payload-input"
+BLOB_FUNCTION_NAME = "blob_processor"
+
+
+@contextlib.contextmanager
+def _serve_blob_payload_app() -> Iterator[Served]:
+    with running_host(APPS_DIR / "blob-trigger-payload") as handle:
+        client = HttpClient(handle.base_url)
+        try:
+            client.wait_until_responsive()
+            yield handle, client
+        finally:
+            client.close()
+
+
+@pytest.fixture(scope="module")
+def blob_trigger_payload_host() -> Iterator[Served]:
+    """Start the blob-trigger-payload app after clearing the bound container.
+
+    Classic blob triggers scan the container at startup. Clearing any residue
+    blobs before starting prevents stale blobs from tripping the harness's
+    startup failure detection.
+    """
+    clear_container(BLOB_PAYLOAD_CONTAINER)
+    with _serve_blob_payload_app() as served:
+        yield served
+
+
+# --------------------------------------------------------------------------- #
+# Discovery
+# --------------------------------------------------------------------------- #
+
+
+def test_blob_trigger_payload_is_indexed(blob_trigger_payload_host: Served) -> None:
+    """The blob-trigger-payload app registers exactly one blobTrigger function."""
+    _, client = blob_trigger_payload_host
+    functions = discover_functions(client)
+    blobs = find_functions(functions, trigger_type="blobTrigger")
+    assert len(blobs) == 1, f"expected exactly one blobTrigger function to be indexed, got {len(blobs)}"
+    fn = blobs[0]
+    assert fn.name == BLOB_FUNCTION_NAME
+    assert fn.route is None, "blob trigger must not expose an HTTP route"
+    assert fn.methods == (), "blob trigger must not list HTTP methods"
+
+
+# --------------------------------------------------------------------------- #
+# Blob upload — provider-independent
+# --------------------------------------------------------------------------- #
+
+
+def test_blob_trigger_payload_fires_on_upload(
+    blob_trigger_payload_host: Served,
+) -> None:
+    """Uploading a blob exercises the InputStream serialization path.
+
+    The agent receives structured blob metadata (name, uri, length,
+    blob_properties) rather than a raw Python InputStream repr. Provider-
+    independent assertions:
+
+    1. The handler log ``"Agent triggered: trigger_type=blob_trigger"`` appears,
+       confirming serialize_trigger_data was called inside the handler.
+    2. ``Executed 'Functions.blob_processor'`` appears, confirming the function
+       ran to completion (serialization did not throw before invocation logged).
+    """
+    handle, _ = blob_trigger_payload_host
+
+    blob_name = f"probe-{uuid.uuid4().hex[:8]}.txt"
+    upload_text_blob(BLOB_PAYLOAD_CONTAINER, blob_name, "blob trigger serialization e2e probe")
+
+    # Classic blob triggers poll storage, so allow a generous wait.
+    triggered = handle.wait_for_log("Agent triggered: trigger_type=blob_trigger", timeout=240.0)
+    assert triggered, (
+        "handler never logged 'Agent triggered: trigger_type=blob_trigger' after "
+        f"uploading '{blob_name}'. Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+    executed = handle.wait_for_log(f"Executed 'Functions.{BLOB_FUNCTION_NAME}'", timeout=30.0)
+    assert executed, (
+        f"host never logged execution of '{BLOB_FUNCTION_NAME}' after uploading "
+        f"'{blob_name}'. Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+
+# --------------------------------------------------------------------------- #
+# Full-run assertion (requires LLM)
+# --------------------------------------------------------------------------- #
+
+
+@requires_llm
+def test_blob_trigger_payload_full_run_succeeds(
+    blob_trigger_payload_host: Served,
+) -> None:
+    """With an LLM provider, the blob agent completes and logs a response.
+
+    Confirms the full path: blob upload → serialize_trigger_data (name/uri/
+    length populated) → agent runner → LLM call → response logged. The
+    assertion targets the ``"Agent response: source_file="`` log entry that the
+    handler emits on a successful run, not the content of the LLM response.
+    """
+    handle, _ = blob_trigger_payload_host
+
+    blob_name = f"probe-llm-{uuid.uuid4().hex[:8]}.txt"
+    upload_text_blob(BLOB_PAYLOAD_CONTAINER, blob_name, "blob trigger llm e2e probe")
+
+    responded = handle.wait_for_log("Agent response: source_file=", timeout=240.0)
+    assert responded, (
+        "agent never logged a successful response after uploading a blob. "
+        f"Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+    output = handle.read_output()
+    assert blob_name in output, (
+        "agent response did not include the uploaded blob name (likely missing trigger payload content). "
+        f"blob_name={blob_name}. Recent output:\n{output[-2000:]}"
     )
