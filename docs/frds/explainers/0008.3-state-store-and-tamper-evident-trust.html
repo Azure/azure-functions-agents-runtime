@@ -95,6 +95,30 @@ a { color: var(--cp-link); }
 .legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
 .legend span { display:inline-flex; align-items:center; gap:6px; }
 .sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+@media (prefers-reduced-motion:reduce){ .flow-row .beam,.breather,.gate-node,.gate-tok{ animation:none!important; } .gate-tok{ opacity:1; left:42%; } }
 </style>
 </head>
 <body>
@@ -145,12 +169,19 @@ a { color: var(--cp-link); }
   <h2><span class="n">3</span>The fail-closed routing check</h2>
   <p class="lead">A Table row is authoritative, but routing still verifies the row against the live sandbox before any turn is submitted.</p>
   <div class="card">
-    <div class="flow">
-      <div class="step"><div class="num">1</div><div class="txt"><b>Resolve owner context</b> <span>— use the platform-authenticated owner; do not trust request-supplied hashes.</span></div></div>
-      <div class="step"><div class="num">2</div><div class="txt"><b>Read the owner/app partition</b> <span>— find the session or run row in the Azure Table, with status and due-time fields coming from this single source of truth.</span></div></div>
-      <div class="step"><div class="num">3</div><div class="txt"><b>Check generation</b> <span>— the monotonic row generation bars rollback; lower or divergent values are treated as stale or tampered, not as recovery hints.</span></div></div>
-      <div class="step"><div class="num">4</div><div class="txt"><b>Resolve the sandbox</b> <span>— only inside the configured Sandbox Group, after a short ETag lease keeps one active controller path.</span></div></div>
-      <div class="step"><div class="num">5</div><div class="txt"><b>Fetch the live manifest</b> <span>— require owner, app, session, group, protocol, generation, and <span class="mono">(digest_kind, digest)</span> to match before routing.</span></div></div>
+    <div class="viz" role="img" aria-label="Controller-only writes flow into Azure Table while the identity-less sandbox cannot write or tamper with state">
+      <div class="flow-row">
+        <span class="beam"></span>
+        <div class="fnode">Controller <span class="fsub">the only writer</span></div>
+        <div class="fnode">Azure Table <span class="fsub">source of truth</span></div>
+        <div class="fnode term">Sandbox — no creds, can't write</div>
+      </div>
+      <div class="chip-row">
+        <span class="chip k">controller = sole writer</span>
+        <span class="chip">digest-stamped routing</span>
+        <span class="chip">generation = backing only</span>
+        <span class="chip no">sandbox can't tamper</span>
+      </div>
     </div>
   </div>
   <div class="plain">

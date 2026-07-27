@@ -95,6 +95,30 @@ a { color: var(--cp-link); }
 .legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
 .legend span { display:inline-flex; align-items:center; gap:6px; }
 .sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+@media (prefers-reduced-motion:reduce){ .flow-row .beam,.breather,.gate-node,.gate-tok{ animation:none!important; } .gate-tok{ opacity:1; left:42%; } }
 </style>
 </head>
 <body>
@@ -116,6 +140,24 @@ a { color: var(--cp-link); }
 
   <div class="decision reject" style="margin-top:8px"><h4>⚠ This combination is not enabled in v1</h4>
   <p class="why">An app with <span class="mono">workflows.enabled: true</span> plus the ACA sandbox backend <b>fails closed at startup</b> (Decision 36, owned by <a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a>). "Finalized" here means this <em>analysis</em> is reviewed and accepted as part of FRD 0008 — <b>not</b> that the feature is turned on. The actual compatibility fix is deferred to a future implementation FRD.</p></div>
+
+  <div class="viz" role="img" aria-label="A fail-closed startup gate blocks workflows enabled with the ACA sandbox; default in-worker workflows remain unaffected.">
+    <div class="gate-row">
+      <div class="gate-end">workflows.enabled<br>+ ACA sandbox</div>
+      <div class="gate-track">
+        <span class="gate-tok"></span>
+        <div class="gate-node">⊗</div>
+      </div>
+      <div class="gate-end">startup</div>
+    </div>
+    <div class="cap">Fail-closed at startup (Decision 36) — analysis only; fix deferred to a future FRD</div>
+    <div class="chip-row">
+      <span class="chip no">fail-closed at startup</span>
+      <span class="chip">Decision 36 (owned by 0008.7)</span>
+      <span class="chip k">analysis only — no binding decision</span>
+      <span class="chip k">fix deferred to a future FRD</span>
+    </div>
+  </div>
 
   <h2><span class="n">1</span>What "dynamic workflows" are</h2>
   <p class="lead">Dynamic Workflows is a feature of <em>this runtime</em> — not of the Microsoft Agent Framework (MAF).</p>
