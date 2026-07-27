@@ -98,6 +98,43 @@ a { color: var(--cp-link); }
 .legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
 .legend span { display:inline-flex; align-items:center; gap:6px; }
 .sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== animated diagrams (sections 4 & 5) — pure CSS, respects reduced-motion ===== */
+.viz-hint{ color:var(--cp-text-soft); font-weight:500; }
+.reqcard h3 .mode{ font-size:.74rem; font-weight:600; color:var(--cp-text-soft); }
+.reqviz{ position:relative; margin-top:18px; }
+.reqrow{ display:grid; grid-template-columns:repeat(3,1fr); gap:8px; }
+.rnode{ text-align:center; }
+.rnode .box{ min-height:54px; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:6px 4px; border-radius:12px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.8rem; font-weight:700; color:var(--cp-text); }
+.rnode .box .sub{ font-size:.64rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.rnode.run .box{ animation:runglow 1.8s ease-in-out infinite; }
+@keyframes runglow{ 0%,100%{ box-shadow:0 0 0 0 var(--cp-accent-soft); border-color:var(--cp-border);} 50%{ box-shadow:0 0 0 6px var(--cp-accent-soft); border-color:var(--cp-accent);} }
+.lane{ position:relative; height:22px; margin-top:10px; }
+.reqrail{ position:absolute; left:16.6%; right:16.6%; top:50%; height:3px; margin-top:-1.5px; background:var(--cp-border); border-radius:3px; }
+.packet{ position:absolute; top:50%; margin-top:-7px; left:16.6%; width:14px; height:14px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); }
+.reqviz.sync .packet{ animation:pktSync 4.2s cubic-bezier(.55,0,.45,1) infinite; }
+@keyframes pktSync{ 0%{left:16.6%;opacity:0;background:var(--cp-accent);} 7%{opacity:1;} 44%{left:83.4%;background:var(--cp-accent);} 55%{left:83.4%;background:var(--cp-success);} 93%{left:16.6%;opacity:1;background:var(--cp-success);} 100%{left:16.6%;opacity:0;} }
+.reqviz.async .packet{ animation:pkt202 5s ease-in-out infinite; }
+@keyframes pkt202{ 0%{left:16.6%;opacity:0;background:var(--cp-accent);} 7%{opacity:1;} 22%{left:50%;background:var(--cp-accent);} 26%{background:var(--cp-success);} 42%{left:16.6%;background:var(--cp-success);opacity:1;} 48%{opacity:0;} 100%{left:16.6%;opacity:0;} }
+.sdot{ position:absolute; top:50%; margin-top:-4px; left:83.4%; width:8px; height:8px; border-radius:50%; background:var(--cp-link); opacity:0; }
+.reqviz.async .sdot{ animation:stream 1.7s linear infinite; }
+.reqviz.async .sdot:nth-of-type(2){ animation-delay:.57s; }
+.reqviz.async .sdot:nth-of-type(3){ animation-delay:1.14s; }
+@keyframes stream{ 0%{left:83.4%;opacity:0;} 12%{opacity:1;} 82%{opacity:1;} 100%{left:16.6%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.life{ padding:8px 2px 2px; }
+.breather{ width:120px; height:52px; margin:4px auto 20px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;box-shadow:0 0 0 0 var(--cp-accent-soft);} }
+.lchips{ display:grid; grid-template-columns:repeat(7,1fr); gap:6px; }
+.lchip{ text-align:center; font-size:.66rem; font-weight:600; line-height:1.25; padding:8px 3px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); opacity:.55; animation:lchip 8s ease-in-out infinite; }
+.lchip .ico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.lchip:nth-child(1){animation-delay:0s;} .lchip:nth-child(2){animation-delay:1.14s;} .lchip:nth-child(3){animation-delay:2.29s;} .lchip:nth-child(4){animation-delay:3.43s;} .lchip:nth-child(5){animation-delay:4.57s;} .lchip:nth-child(6){animation-delay:5.71s;} .lchip:nth-child(7){animation-delay:6.86s;}
+@keyframes lchip{ 0%,100%{opacity:.5;transform:translateY(0);} 5%{opacity:1;transform:translateY(-3px);border-color:var(--cp-accent);} 15%{opacity:.5;transform:translateY(0);} }
+.lchip.term{ animation-name:lchipTerm; }
+.lchip.term .ico{ color:var(--cp-danger); }
+@keyframes lchipTerm{ 0%,100%{opacity:.5;transform:translateY(0);} 5%{opacity:1;transform:translateY(-3px);border-color:var(--cp-danger);color:var(--cp-danger);} 15%{opacity:.5;transform:translateY(0);} }
+@media (prefers-reduced-motion:reduce){ .rnode.run .box,.packet,.sdot,.breather,.lchip{ animation:none!important; } .packet,.sdot,.lchip,.breather{ opacity:1; } }
 </style>
 </head>
 <body>
@@ -196,37 +233,55 @@ a { color: var(--cp-link); }
   <p class="note">The controller reaches the sandbox over a single authenticated file/exec plane (six verbs) that carries run-control traffic, the exec/journal data plane, and the session content package — no other inbound path exists.</p>
 
   <h2><span class="n">4</span>What a request looks like</h2>
+  <p class="lead">One authenticated call in; the agent runs inside the sandbox; the answer comes back. <span class="viz-hint">Sync waits for it — async hands you a ticket and streams. (Animated — watch the request travel.)</span></p>
   <div class="grid g2">
-    <div class="card">
-      <h3><span class="ic">⚡</span>Synchronous (default chat)</h3>
-      <div class="flow" style="margin-top:12px">
-        <div class="step"><div class="num">1</div><div class="txt"><b>Call arrives</b> <span>— Functions authenticates &amp; finds/creates the session's sandbox.</span></div></div>
-        <div class="step"><div class="num">2</div><div class="txt"><b>Content delivered</b> <span>— controller captures its own <span class="mono">/app</span> and ships it into the sandbox (first turn only).</span></div></div>
-        <div class="step"><div class="num">3</div><div class="txt"><b>Agent runs</b> <span>— the MAF harness executes the turn; tools call out via the egress proxy.</span></div></div>
-        <div class="step"><div class="num">4</div><div class="txt"><b>Result returns</b> <span>— within the 180-second cap; the answer is the HTTP response.</span></div></div>
+    <div class="card reqcard">
+      <h3><span class="ic">⚡</span>Synchronous <span class="mode">· default chat</span></h3>
+      <div class="reqviz sync" role="img" aria-label="A request travels Client to Functions to Sandbox and the answer returns within 180 seconds">
+        <div class="reqrow">
+          <div class="rnode"><div class="box">Client<span class="sub">HTTP</span></div></div>
+          <div class="rnode"><div class="box">Functions<span class="sub">controller</span></div></div>
+          <div class="rnode run"><div class="box">Sandbox<span class="sub">MAF runs</span></div></div>
+        </div>
+        <div class="lane"><span class="reqrail"></span><span class="packet"></span></div>
       </div>
+      <div class="chip-row"><span class="chip k">one call</span><span class="chip">answer ≤ 180s</span><span class="chip">response = the HTTP body</span></div>
     </div>
-    <div class="card">
-      <h3><span class="ic">⏳</span>Asynchronous / streaming (long work)</h3>
-      <div class="flow" style="margin-top:12px">
-        <div class="step"><div class="num">1</div><div class="txt"><b>Submit</b> <span>— returns <span class="mono">202</span> + a <span class="mono">result_url</span> immediately.</span></div></div>
-        <div class="step"><div class="num">2</div><div class="txt"><b>Poll or stream</b> <span>— <span class="mono">/status</span>, or <span class="mono">/events</span> (SSE) with reconnect via <span class="mono">Last-Event-ID</span>.</span></div></div>
-        <div class="step"><div class="num">3</div><div class="txt"><b>Disconnect ≠ cancel</b> <span>— the run keeps going; you re-attach. Only an explicit cancel stops it.</span></div></div>
-        <div class="step"><div class="num">4</div><div class="txt"><b>Fetch result</b> <span>— <span class="mono">/result</span> returns the outcome (or <span class="mono">410</span> once evicted).</span></div></div>
+    <div class="card reqcard">
+      <h3><span class="ic">⏳</span>Async / streaming <span class="mode">· long work</span></h3>
+      <div class="reqviz async" role="img" aria-label="Submit returns 202 and a result_url immediately, then the sandbox streams events while it keeps running">
+        <div class="reqrow">
+          <div class="rnode"><div class="box">Client<span class="sub">gets 202</span></div></div>
+          <div class="rnode"><div class="box">Functions<span class="sub">controller</span></div></div>
+          <div class="rnode run"><div class="box">Sandbox<span class="sub">keeps running</span></div></div>
+        </div>
+        <div class="lane"><span class="reqrail"></span><span class="packet"></span><span class="sdot"></span><span class="sdot"></span><span class="sdot"></span></div>
       </div>
+      <div class="chip-row"><span class="chip k">202 + result_url</span><span class="chip">SSE stream</span><span class="chip">/result</span><span class="chip">disconnect ≠ cancel</span></div>
     </div>
   </div>
 
   <h2><span class="n">5</span>The session's life</h2>
-  <p class="lead">A session is one sandbox, one content epoch, from birth to reap.</p>
+  <p class="lead">One sandbox, one content epoch, from birth to reap — it breathes (active → suspended → resumed) and always ends on a clear terminal state. <span class="viz-hint">(Animated — the sandbox pulses; the stage highlight sweeps left to right.)</span></p>
   <div class="card">
-    <div class="flow">
-      <div class="step"><div class="num">▶</div><div class="txt"><b>Create</b> <span>— controller provisions a sandbox, stamps it with the content digest (its "epoch"), delivers the app.</span></div></div>
-      <div class="step"><div class="num">↻</div><div class="txt"><b>Run &amp; commit</b> <span>— each turn is written to disk with an <b>all-or-nothing per-turn commit</b>, so a crash never resumes half-written state.</span></div></div>
-      <div class="step"><div class="num">💤</div><div class="txt"><b>Idle → suspend / resume</b> <span>— ACA suspends the idle sandbox and resumes it (same instance, same generation) on the next turn.</span></div></div>
-      <div class="step"><div class="num">✱</div><div class="txt"><b>Harness crash, disk intact</b> <span>— the run is abandoned but the <b>session continues</b> on the same sandbox from the last committed turn.</span></div></div>
-      <div class="step"><div class="num">⤳</div><div class="txt"><b>Redeploy</b> <span>— a content change drains in-flight work and tombstones the session (<span class="mono">410</span>); the client starts a fresh session on the new epoch. <span style="color:var(--cp-text-soft)">(Cross-deploy continuity is a v2 feature.)</span></span></div></div>
-      <div class="step"><div class="num">✝</div><div class="txt"><b>Loss or idle-expiry</b> <span>— a truly lost sandbox tombstones (<span class="mono">410</span>); idle sessions are reaped after the retention window. Control-plane status stays durable in the Table.</span></div></div>
+    <div class="life" role="img" aria-label="The sandbox breathes between active and suspended, and the lifecycle sweeps from Create through Run and commit, Suspend, Resume, Crash-resume, Redeploy-drain, to a 410 tombstone">
+      <div class="breather">SANDBOX</div>
+      <div class="lchips">
+        <div class="lchip"><span class="ico">▶</span>Create</div>
+        <div class="lchip"><span class="ico">✎</span>Run + commit</div>
+        <div class="lchip"><span class="ico">💤</span>Suspend</div>
+        <div class="lchip"><span class="ico">⤴</span>Resume</div>
+        <div class="lchip"><span class="ico">✱</span>Crash → resume</div>
+        <div class="lchip"><span class="ico">⤳</span>Redeploy → drain</div>
+        <div class="lchip term"><span class="ico">✝</span>410 tombstone</div>
+      </div>
+    </div>
+    <div class="chip-row" style="justify-content:center; margin-top:18px">
+      <span class="chip k">all-or-nothing per-turn commit</span>
+      <span class="chip">suspend / resume = same generation</span>
+      <span class="chip">crash + disk intact → resume</span>
+      <span class="chip">loss / redeploy → 410, start fresh</span>
+      <span class="chip">cross-deploy continuity = v2</span>
     </div>
   </div>
 
