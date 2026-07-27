@@ -306,23 +306,27 @@ def test_delegation_coordinator_rejects_wrong_method(
 def test_delegation_coordinator_responds(
     multi_agent_delegation_host: Served,
 ) -> None:
-    """The coordinator handles a prompt end-to-end and returns a valid response.
+    """The coordinator delegates to the specialist, which emits a deterministic marker.
 
-    Confirms the full delegation path: coordinator receives prompt → decides
-    whether to delegate to delegate_specialist → returns a non-empty reply.
-    Plain HTTP trigger agents return plain text (not the JSON envelope from
-    builtin chat endpoints), so this asserts on status and session header only.
+    The specialist is instructed to always start its response with ``DELEGATION_OK:``.
+    The coordinator is instructed to always delegate and pass through the specialist's
+    response verbatim. Asserting on the marker confirms that delegation actually
+    happened — a coordinator that answered directly would never produce the prefix.
     """
     client, endpoints = multi_agent_delegation_host
 
     ep = find_endpoint(endpoints, route_exact="delegate", method="POST")
     resp = client.post(
         ep.url(client.base_url),
-        json={"prompt": "Delegate to the specialist: explain the difference between threading and async in Python."},
+        json={"prompt": "What is the difference between a process and a thread?"},
     )
     expect_status(resp, 200)
     expect_header(resp, "x-ms-session-id")
-    assert resp.text.strip(), "expected a non-empty response body"
+    assert "DELEGATION_OK:" in resp.text, (
+        "expected the delegation marker 'DELEGATION_OK:' in the response — "
+        "if absent the coordinator answered directly without delegating to the specialist. "
+        f"Got: {resp.text!r}"
+    )
 
 
 # --------------------------------------------------------------------------- #
