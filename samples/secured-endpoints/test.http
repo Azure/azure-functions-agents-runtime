@@ -1,0 +1,63 @@
+### Secured Endpoints — request samples
+### Set these variables, then run the requests below.
+
+@baseUrl = https://<your-app-name>.azurewebsites.net
+@contentType = application/json
+
+# API key for the "apikey" agent (function key). Get it with:
+#   az functionapp keys list -g rg-<env> -n <app-name> --query functionKeys.default -o tsv
+@functionKey = <function-key>
+
+# Bearer token for the "entra" agent. Get it with:
+#   az account get-access-token --resource <your-audience> --query accessToken -o tsv
+@bearerToken = <entra-access-token>
+
+# ---------------------------------------------------------------------------
+# API KEY AGENT  (builtin_endpoints.http_auth: function)
+# ---------------------------------------------------------------------------
+
+### Chat WITHOUT key -> 401 Unauthorized
+POST {{baseUrl}}/agents/apikey/chat
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Say hello in one sentence"
+}
+
+### Chat WITH key (header) -> 200 OK
+POST {{baseUrl}}/agents/apikey/chat
+Content-Type: {{contentType}}
+x-functions-key: {{functionKey}}
+
+{
+  "prompt": "Say hello in one sentence"
+}
+
+### Chat WITH key (query string) -> 200 OK
+POST {{baseUrl}}/agents/apikey/chat?code={{functionKey}}
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Say hello in one sentence"
+}
+
+# ---------------------------------------------------------------------------
+# ENTRA AGENT  (builtin_endpoints.http_auth.mode: entra)
+# ---------------------------------------------------------------------------
+
+### Chat WITHOUT token -> 401 Unauthorized
+POST {{baseUrl}}/agents/entra/chat
+Content-Type: {{contentType}}
+
+{
+  "prompt": "Say hello in one sentence"
+}
+
+### Chat WITH bearer token -> 200 OK
+POST {{baseUrl}}/agents/entra/chat
+Content-Type: {{contentType}}
+Authorization: Bearer {{bearerToken}}
+
+{
+  "prompt": "Say hello in one sentence"
+}

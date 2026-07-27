@@ -21,9 +21,11 @@ from azure_functions_agents.config.schema import (
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
+    EndpointAuthConfig,
     GlobalConfig,
     McpFilter,
     SkillsFilter,
+    SubagentRef,
     SystemToolsAgentOverride,
     SystemToolsConfig,
     ToolsFilter,
@@ -57,22 +59,76 @@ def test_resolve_timeout_precedence(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_builtin_endpoints() -> None:
+    empty = GlobalConfig()
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", is_main=True)
+        AgentSpec(name="A", description="B", is_main=True), empty
     ) == BuiltinEndpointsConfig()
-    assert _resolve_builtin_endpoints(AgentSpec(name="A", description="B", is_main=False)) == BuiltinEndpointsConfig()
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", builtin_endpoints=True)
+        AgentSpec(name="A", description="B", is_main=False), empty
+    ) == BuiltinEndpointsConfig()
+    assert _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), empty
     ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True))
+        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True)),
+        empty,
     ) == BuiltinEndpointsConfig(chat_api=True)
 
 
 def test_resolve_builtin_endpoints_shorthand_is_not_main_special_cased() -> None:
     assert _resolve_builtin_endpoints(
-        AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True)
+        AgentSpec(name="A", description="B", builtin_endpoints=True, is_main=True), GlobalConfig()
     ) == BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+
+
+def test_app_wide_auth_is_inherited_by_agents() -> None:
+    """A top-level agents.config.yaml `http_auth` becomes each agent's default."""
+    global_config = GlobalConfig(http_auth=EndpointAuthConfig(mode="entra"))
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=BuiltinEndpointsConfig(chat_api=True)),
+        global_config,
+    )
+    assert resolved.http_auth.mode == "entra"
+
+
+def test_app_wide_auth_inherited_for_shorthand_builtin_endpoints() -> None:
+    """`builtin_endpoints: true` still inherits the app-wide auth default."""
+    global_config = GlobalConfig(http_auth=EndpointAuthConfig(mode="anonymous"))
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), global_config
+    )
+    assert resolved.http_auth.mode == "anonymous"
+
+
+def test_app_wide_auth_shorthand_string_is_coerced() -> None:
+    """A bare-string `http_auth: entra` at the global level is coerced and inherited."""
+    global_config = GlobalConfig.model_validate({"http_auth": "admin"})
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), global_config
+    )
+    assert resolved.http_auth.mode == "admin"
+
+
+def test_per_agent_auth_overrides_app_wide_default() -> None:
+    """An explicit per-agent auth wins over the app-wide default, even if weaker."""
+    global_config = GlobalConfig(http_auth=EndpointAuthConfig(mode="entra"))
+    spec = AgentSpec.model_validate(
+        {
+            "name": "A",
+            "description": "B",
+            "builtin_endpoints": {"chat_api": True, "http_auth": "function"},
+        }
+    )
+    resolved = _resolve_builtin_endpoints(spec, global_config)
+    assert resolved.http_auth.mode == "function"
+
+
+def test_no_app_wide_auth_keeps_default_function() -> None:
+    """Without a global auth, agents keep the built-in `function` default."""
+    resolved = _resolve_builtin_endpoints(
+        AgentSpec(name="A", description="B", builtin_endpoints=True), GlobalConfig()
+    )
+    assert resolved.http_auth.mode == "function"
 
 
 def test_resolve_sandbox() -> None:
@@ -225,7 +281,7 @@ def test_resolve_builtin_endpoints_explicit_false() -> None:
     """Defensive: explicit builtin_endpoints: false returns an all-disabled BuiltinEndpointsConfig
     (keeps built-in endpoints disabled even for main.agent.md)."""
     spec = AgentSpec(name="Main", description="d", builtin_endpoints=False, is_main=True)
-    debug = _resolve_builtin_endpoints(spec)
+    debug = _resolve_builtin_endpoints(spec, GlobalConfig())
     assert debug.debug_chat_ui is False
     assert debug.chat_api is False
     assert debug.mcp is False
@@ -296,6 +352,75 @@ def test_resolve_web_request_per_agent_true_or_absent_inherits_global() -> None:
         require_https=False
     )
     assert _resolve_web_request(spec_true, global_config) == WebRequestConfig(require_https=False)
+
+
+def test_compose_derives_slug_from_source_file_stem() -> None:
+    """Identity slug = sanitized file stem, same derivation as function/endpoint names (FRD 0007 §4.2)."""
+    spec = AgentSpec(
+        name="Billing Specialist",
+        description="d",
+        source_file=str(Path("agents") / "billing-specialist.agent.md"),
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == "billing_specialist"
+
+
+def test_compose_slug_matches_function_name_derivation() -> None:
+    """The slug must equal exactly what `_naming.py`'s function-name allocator would compute
+    for the same source file — this equivalence is load-bearing for FRD 0007 Decision #17."""
+    from azure_functions_agents._slug import _function_name_from_source
+
+    spec = AgentSpec(
+        name="Weird Name!!",
+        description="d",
+        source_file=str(Path(r"C:\agents\my-cool.agent.md")),
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == _function_name_from_source(resolved.source_file, resolved.name)
+
+
+def test_compose_slug_missing_source_file_does_not_warn(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Directly-constructed AgentSpecs (common in tests) may omit source_file; compose() must
+    silently fall back rather than warn (validation-time concerns belong elsewhere)."""
+    spec = AgentSpec(name="No Source File", description="d")
+    with caplog.at_level(logging.WARNING):
+        resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.slug == "No_Source_File"
+    assert caplog.records == []
+
+
+def test_compose_normalizes_subagents() -> None:
+    spec = AgentSpec(
+        name="Coordinator",
+        description="d",
+        subagents=[
+            SubagentRef(agent="billing-specialist", when="Billing questions."),
+            SubagentRef(agent="shipping-specialist"),
+        ],
+    )
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents == [
+        SubagentRef(agent="billing-specialist", when="Billing questions."),
+        SubagentRef(agent="shipping-specialist"),
+    ]
+
+
+def test_compose_subagents_defaults_to_empty_list() -> None:
+    spec = AgentSpec(name="Coordinator", description="d")
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents == []
+
+
+def test_compose_normalized_subagents_are_independent_copies() -> None:
+    """`compose()` must copy SubagentRef entries, not alias the spec's own list/objects."""
+    ref = SubagentRef(agent="billing-specialist")
+    spec = AgentSpec(name="Coordinator", description="d", subagents=[ref])
+    resolved = compose(spec, GlobalConfig(), discovered_mcp_names=[], discovered_skill_names=[])
+    assert resolved.subagents[0] == ref
+    assert resolved.subagents[0] is not ref
+    assert resolved.subagents is not spec.subagents
 
 
 def test_resolve_web_request_global_object_is_used_verbatim() -> None:

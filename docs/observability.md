@@ -74,13 +74,14 @@ The prefix:
 - keeps our attributes from colliding with MAF's `gen_ai.*` or OpenTelemetry semantic conventions,
 - makes them trivial to query — *everything we add starts with `af.`*.
 
-Two sub-namespaces group the detail, plus two cross-cutting attributes:
+Four sub-namespaces group the detail, plus two cross-cutting attributes:
 
 | Namespace | Used for |
 | --- | --- |
 | `af.agent.*` | attributes on the per-run `agent.run {name}` span |
 | `af.dynamic_session.*` | attributes on the `dynamic_session.execute` (code sandbox) span |
 | `af.web_request.*` | attributes on the `web_request` (outbound HTTP tool) span |
+| `af.delegate.*` | attributes on the `execute_tool delegate_<slug>` span (chat-time sub-agent delegation) |
 | `af.fault_domain`, `af.lifecycle_stage` | cross-cutting; may appear on any runtime span |
 
 Where a standard OpenTelemetry attribute already exists we reuse it instead of inventing an `af.`
@@ -93,7 +94,7 @@ name — for example `server.address` for the session-pool host. MAF keeps emitt
 
 | Attribute | Meaning |
 | --- | --- |
-| `af.fault_domain` | Whose fault a failure is: `app`, `runtime`, `platform`, `model`, `connector`, `sandbox`, `web_request`, `unknown`. Set **only on failing spans**. |
+| `af.fault_domain` | Whose fault a failure is: `app`, `runtime`, `platform`, `model`, `connector`, `sandbox`, `web_request`, `delegate`, `unknown`. Set **only on failing spans**. |
 | `af.lifecycle_stage` | Which run stage the span represents, e.g. `agent_run`, `tool_execution`. |
 
 ### Span `agent.run {name}`
@@ -109,7 +110,7 @@ spans and the sandbox/`web_request` tool spans together.
 | `af.agent.session_id` | Conversation/session id. |
 | `af.agent.outcome` | `success` or `error`. |
 | `af.agent.tool_call_count` | Number of tool calls in the run. |
-| `af.agent.tool_error_count` | Tool calls that failed — includes a "successful" call whose result carried an error or non-empty stderr. |
+| `af.agent.tool_error_count` | Tool calls that failed — includes a "successful" call whose result carried an error or non-empty stderr, **plus** any `delegate_<slug>` call the coordinator recovered from (a specialist failure or timeout — see [Span `execute_tool delegate_<slug>`](#span-execute_tool-delegate_slug-chat-time-sub-agent-delegation)). |
 | `af.agent.input_bytes` | Size of the trigger payload / HTTP body. |
 | `af.agent.response_bytes` | Size of the model's final response. |
 | `af.agent.input` | The trigger payload / HTTP body. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
@@ -173,6 +174,63 @@ and secrets are never logged, regardless of `ENABLE_SENSITIVE_DATA`.
 Plus `af.lifecycle_stage=tool_execution`. SSRF rejections, timeouts, and transport errors all mark
 the span ERROR with `af.fault_domain=web_request`.
 
+### Span `execute_tool delegate_<slug>` (chat-time sub-agent delegation)
+
+Chat-time delegation ([FRD 0007](./frds/0007-multi-agent-delegation.md)) needs **no new span** —
+the `delegate_<slug>` tool's handler calls the specialist's plain, non-streaming `Agent.run(task)`
+directly, and MAF already traces every `Agent.run()` and
+every `FunctionTool.invoke()`. A coordinator that declares `subagents:` gets this nested span tree
+for free the moment a `delegate_<slug>` tool is called:
+
+```
+agent.run {coordinator}              runtime span (af.*)
+└─ invoke_agent {coordinator}        MAF
+   ├─ chat {model}                   the routing decision
+   └─ execute_tool delegate_<slug>   the delegation (an ordinary tool span)
+      └─ invoke_agent {specialist}   auto-nested
+         └─ chat {model}             the specialist's own model call
+```
+
+All of these spans share one trace, so Application Insights ties the whole fan-out together under a
+single `OperationId` — including **concurrent** specialists (`asyncio.gather`), because OpenTelemetry
+context propagates through `contextvars` into each gathered task.
+
+The runtime does not open a *new* span for delegation — it annotates the existing
+`execute_tool delegate_<slug>` span (already opened by MAF's `FunctionTool.invoke()`) with
+`af.delegate.*` attributes, the same way `agent.run` is annotated, for parity with the
+sandbox/`web_request` tools:
+
+| Attribute | Meaning |
+| --- | --- |
+| `af.delegate.specialist` | The specialist's slug (the same identity used for its `delegate_<slug>` tool name). |
+| `af.delegate.outcome` | `success`, `error`, `timeout`, or `cancelled`. |
+| `af.delegate.task_bytes` | Size of the `task` argument passed to the specialist. |
+| `af.delegate.response_bytes` | Size of the specialist's response text (only set on success). |
+| `af.delegate.task` / `.result` | **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
+
+Plus `af.fault_domain=delegate` on a failing span: the specialist raised (including a failure
+*constructing* the specialist itself), or the *effective*
+delegation timeout — `min(specialist timeout, coordinator's remaining time)` — was exceeded. A
+**parent/request cancellation** (`asyncio.CancelledError`) is different: the handler tags the span
+`outcome=cancelled` and still counts it in the delegate *call* metric (it was genuinely dispatched),
+but never converts it into a recoverable error — it re-raises immediately and aborts the whole run,
+rather than being recorded as a delegate error (FRD 0007 Decision #12).
+
+**Error accounting.** `_looks_like_tool_error` (the sandbox/`web_request` JSON `{"error": …}` /
+non-empty-`stderr` heuristic) does not understand a specialist's sanitized free-text failure message,
+so relying on it alone would silently under-count. The delegated adapter tracks its own recoverable
+failures explicitly and folds them into `af.agent.tool_error_count` on top of the heuristic's count.
+
+**Accepted limitations (v1):**
+- **SSE is a black box at the boundary.** The coordinator's stream emits `tool_start`/`tool_end` for
+  `delegate_<slug>` (task in, final text out) exactly like the sandbox/`web_request` tools — a
+  specialist's own internal deltas and nested tool calls do not surface on the wire unless a MAF
+  `stream_callback` is wired into `run_agent_stream` (out of scope for v1).
+- **Token usage does not roll up across the boundary.** MAF records usage per-run on each
+  `invoke_agent`/`chat` span; the `execute_tool` span carries no usage, and a specialist's tokens are
+  not merged into the coordinator's totals. Sum the child spans by trace (`OperationId`) in the
+  backend for a combined per-request total.
+
 ### Metrics
 
 Namespace `azure_functions_agents.*`:
@@ -183,6 +241,8 @@ Namespace `azure_functions_agents.*`:
 | `azure_functions_agents.dynamic_session.errors` | Count that failed or produced stderr. |
 | `azure_functions_agents.web_request.requests` | Count of `web_request` tool calls. |
 | `azure_functions_agents.web_request.errors` | Count that were blocked by the SSRF validator, timed out, or otherwise failed. |
+| `azure_functions_agents.delegate.calls` | Count of `delegate_<slug>` tool invocations (chat-time sub-agent delegation). |
+| `azure_functions_agents.delegate.errors` | Count that failed, raised, or timed out (specialist-side; sanitized before reaching the model). |
 
 ## Sensitive data
 
@@ -192,8 +252,8 @@ Microsoft Agent Framework, **default off**.
 - **Off (default):** only metadata is recorded — sizes, counts, outcome, fault domain. The
   `*_bytes` attributes above are emitted; the content attributes are not.
 - **On:** content attributes are attached (bounded in length): `af.agent.input`, `af.agent.response`,
-  `af.dynamic_session.code` / `.stdout` / `.stderr`, plus MAF prompt/response/tool-arg content
-  (via `enable_instrumentation(enable_sensitive_data=True)`).
+  `af.dynamic_session.code` / `.stdout` / `.stderr`, `af.delegate.task` / `.result`, plus MAF
+  prompt/response/tool-arg content (via `enable_instrumentation(enable_sensitive_data=True)`).
 - **Never captured, regardless of the flag:** secrets — MCP `Authorization` headers/tokens,
   connection strings, and the ACA system key. Endpoints are reduced to host only. The `web_request`
   span never carries the full request URL (query string or userinfo stripped), request/response
@@ -238,6 +298,15 @@ telemetry. The runtime now detects an existing OpenTelemetry provider and skips 
 Monitor setup, so enabling the worker exporter path will not double-export — it is simply
 unnecessary when the runtime is already handling exporter configuration.
 
+**Delegation-heavy apps:** a single coordinator turn with several `subagents:` can fan out into many
+child spans (coordinator + N specialists + MAF's own `chat`/`invoke_agent` children — see
+[Span `execute_tool delegate_<slug>`](#span-execute_tool-delegate_slug-chat-time-sub-agent-delegation)).
+Azure Monitor's default rate-limited sampler counts spans, so a large fan-out can exhaust its budget
+and drop whole traces under load — prefer the explicit `OTEL_TRACES_SAMPLER=parentbased_traceidratio`
++ `OTEL_TRACES_SAMPLER_ARG` setting above instead of relying on the default. Because that sampler is
+trace-id-deterministic, a sampling decision applies consistently to the whole nested trace (no
+half-traces), but logs on a dropped trace are dropped with it.
+
 ## Quick KQL
 
 ```kql
@@ -255,6 +324,15 @@ AppDependencies
 | extend stderr_present = tostring(Properties["af.dynamic_session.stderr_present"])
 | where Success == false or stderr_present == "true"
 | project TimeGenerated, OperationId, DurationMs, Properties
+```
+
+```kql
+// Delegate calls that failed or timed out (recovered — the coordinator kept running)
+AppDependencies
+| where Name startswith "execute_tool delegate_"
+| extend outcome = tostring(Properties["af.delegate.outcome"]), specialist = tostring(Properties["af.delegate.specialist"])
+| where outcome in ("error", "timeout")
+| project TimeGenerated, OperationId, specialist, outcome, DurationMs, Properties
 ```
 
 ### Measuring telemetry volume (billed bytes per run)
@@ -324,7 +402,8 @@ wants richer dashboards. They build on the spans/metrics above.
 
 **Implemented (must-have):** runtime-owned OTel bootstrap + Azure Monitor auto-configuration via
 the optional `[monitor]` extra; fault-domain / lifecycle-stage conventions; sandbox truth-telling +
-ACA correlation; the `agent.run` summary span; sensitive-data gating (default off).
+ACA correlation; the `agent.run` summary span; sensitive-data gating (default off); chat-time
+sub-agent delegation span enrichment + error accounting (FRD 0007).
 
 **Follow-ups (good-to-have):**
 
@@ -333,6 +412,8 @@ ACA correlation; the `agent.run` summary span; sensitive-data gating (default of
   response-validation failures (today's remaining silent gaps).
 - Automatic per-tool span enrichment via the tool wrapper.
 - The Tier-1/2 dashboards and alerts above, shipped as reusable infra.
+- Delegation SSE passthrough (surface a specialist's internal stream deltas through the
+  coordinator's stream) and cross-boundary token roll-up (FRD 0007 §4.12 accepted limitations).
 
 ## Implementation map
 
@@ -344,4 +425,5 @@ ACA correlation; the `agent.run` summary span; sensitive-data gating (default of
 | Sandbox span + stderr surfacing + ACA correlation | `src/azure_functions_agents/system_tools/sandbox.py` |
 | `web_request` span, SSRF blocking, and truncation reporting | `src/azure_functions_agents/system_tools/web_request.py` |
 | `agent.run` span + sensitive-log gating | `src/azure_functions_agents/registration/_handlers.py` |
-| Tests | `tests/test_observability.py`, `tests/test_system_tools_sandbox.py`, `tests/test_web_request.py` |
+| `delegate_<slug>` tool build, failure/cancellation adapter, span annotation (FRD 0007) | `src/azure_functions_agents/runner.py` |
+| Tests | `tests/test_observability.py`, `tests/test_system_tools_sandbox.py`, `tests/test_web_request.py`, `tests/test_runner_delegation.py` |

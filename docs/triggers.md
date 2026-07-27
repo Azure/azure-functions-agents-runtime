@@ -4,7 +4,7 @@ This document describes the trigger types that can be used in `.agent.md` front 
 
 ## How Triggers Work
 
-Each `*.agent.md` file requires either a `trigger` section or at least one enabled `builtin_endpoints` value. The `type` field selects the trigger, and `trigger.args` is passed to the underlying Azure Functions decorator.
+Each `*.agent.md` file requires either a `trigger` section or at least one enabled `builtin_endpoints` value — **unless** it is an internal specialist agent (see [Endpoint-less internal specialists](#endpoint-less-internal-specialists) below). The `type` field selects the trigger, and `trigger.args` is passed to the underlying Azure Functions decorator.
 
 ```yaml
 ---
@@ -23,6 +23,37 @@ Runtime rules:
 - Other supported trigger types map directly to `FunctionApp.<trigger_type>(arg_name="trigger_data", **trigger.args)`.
 - `timer_trigger` accepts 5-part cron expressions; the runtime prepends seconds before registration.
 - String values under `trigger.*`, including `type`, follow [environment variable substitution](./front-matter-spec.md#environment-variable-substitution).
+
+### Endpoint-less internal specialists
+
+An agent may omit **both** `trigger` and `builtin_endpoints` if — and only if — it is referenced by
+another agent's `subagents:` list ([chat-time delegation](./front-matter-spec.md#subagents), FRD
+0007). Such an agent registers no Azure Function trigger and no `/agents/{slug}/*` routes of its own;
+it is reachable only as a `delegate_<slug>` tool on whichever coordinator(s) declare it as a
+specialist. This is checked globally across the whole app — the specialist file can live anywhere
+(root or `agents/`) and can appear before or after the coordinator that references it in discovery
+order.
+
+An agent with neither `trigger` nor an enabled `builtin_endpoints` value, and that is **not**
+referenced by any other agent's `subagents:`, is invalid and fails validation — it would otherwise be
+completely unreachable. See [`samples/multi-agent-delegation/`](../samples/multi-agent-delegation/)
+for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
+
+### Starting Dynamic Workflows
+
+When `main.agent.md` sets `workflows.enabled: true`, every supported declared
+trigger can initiate a Dynamic Workflow. The runtime schedules the workflow
+asynchronously, and the trigger Function does not wait for it to finish.
+
+This behavior is generic across HTTP, timer, queue, blob, Event Grid, Service
+Bus, connector, and the other supported trigger decorators. It is still limited
+to `main.agent.md`; workflow settings on other agent files are ignored with a
+startup warning.
+
+See [Trigger-started workflows](./workflows.md#trigger-started-workflows) for
+HTTP and non-HTTP completion behavior, and the
+[queue workflow sample](../samples/workflow-queue-p0-report/README.md) for a
+runnable example.
 
 ## Supported Trigger Types
 
@@ -65,6 +96,10 @@ These Azure Functions Python decorators are intentionally not supported as `.age
 | `mcp_prompt_trigger` | Runtime MCP prompts are not authored as `.agent.md` triggers. | Built-in MCP surfaces. |
 | Dotted connector trigger types such as `teams.new_channel_message_trigger` or `connectors.generic_trigger` | Dotted connector trigger resolution is not supported. | `connector_trigger` |
 
+### Built-in endpoint authentication
+
+The HTTP chat API registered by `builtin_endpoints` is protected via `builtin_endpoints.http_auth`. Modes: `function` (API key, default), `admin` (master key), `anonymous`, and `entra` (Entra ID / Azure AD). For `entra`, the chat routes rely on platform-level App Service Authentication (Easy Auth): the platform validates the Entra token and the runtime enforces the injected `x-ms-client-principal`. `http_auth` applies only to HTTP endpoints and does not affect the MCP endpoint (`/runtime/webhooks/mcp`), which is owned by the Functions MCP extension and always requires the MCP extension system key (`x-functions-key`). See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentication) for the full schema and examples.
+
 ## HTTP Trigger
 
 `http_trigger` exposes the agent as a REST API endpoint. It maps to Azure Functions `app.route(...)`, but the agent runtime owns the handler, prompt construction, session id, and response validation.
@@ -75,18 +110,49 @@ trigger:
   args:
     route: my-endpoint
     methods: ["POST"]
-    auth_level: function
+    http_auth: function
 ```
 
 | Parameter | Required | Default | Description |
 |---|---|---|---|
 | `route` | Yes | - | URL path for the endpoint. |
 | `methods` | No | `["POST"]` | HTTP methods to accept. |
-| `auth_level` | No | `function` | `anonymous`, `function`, or `admin`. |
+| `http_auth` | No | `function` | Inbound auth policy, the same model as `builtin_endpoints.http_auth`. Accepts a string (`function`, `admin`, `anonymous`, `entra`) or an object with `mode` + optional `entra` allow-lists. |
+| `auth_level` | No | `function` | **Deprecated** — use `http_auth` instead. Still accepted (`anonymous`, `function`, or `admin`); if both are set, `http_auth` wins and `auth_level` is ignored with a warning. |
+
+### HTTP trigger authentication
+
+`http_auth` reuses the same `EndpointAuthConfig` model as the built-in chat endpoints, so HTTP-triggered agents get identical enforcement:
+
+- `function` (default) — Azure Functions host key check (a function or host key, `AuthLevel.FUNCTION`).
+- `admin` — Azure Functions master key check (`AuthLevel.ADMIN` maps to the `_master` key, distinct from an extension system key).
+- `anonymous` — no auth.
+- `entra` — the route is registered anonymous at the key layer and identity is enforced in-app against the App Service Authentication (Easy Auth) `x-ms-client-principal` header, with optional tenant/audience/client-id allow-lists. Requests without a validated principal (or without verifiable Easy Auth enforcement) are rejected before the agent runs.
+
+```yaml
+trigger:
+  type: http_trigger
+  args:
+    route: secured
+    http_auth:
+      mode: entra
+      entra:
+        tenant_id: <tenant-guid>
+        allowed_audiences: ["api://my-app"]
+```
+
+See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentication) for the full auth schema and semantics.
 
 By default, the handler returns the agent response as `text/plain`. When `response_example` or `response_schema` is configured at the top level, the runtime instructs the model to return JSON, validates the result, and returns `application/json`.
 
 HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header.
+
+An HTTP request receives the agent's immediate response, not the eventual
+workflow result. The configured response schema/example continues to govern the
+immediate response. Runtime workflow monitoring routes are available only when
+the same main agent also enables the built-in chat API. For non-HTTP result
+delivery, see
+[Trigger-started workflows](./workflows.md#trigger-started-workflows).
 
 Use `response_example` or `response_schema` at the top level, not under `trigger`.
 
@@ -488,9 +554,144 @@ Triggered by: timer_trigger
 
 Trigger data:
 ```json
-{"past_due": false, "schedule": {...}}
+{
+  "past_due": false,
+  "schedule_status": {
+    "last": "2025-01-02T09:00:00+00:00",
+    "next": "2025-01-03T09:00:00+00:00"
+  },
+  "schedule": {"adjust_for_dst": true}
+}
 ```
 ````
+
+The runtime serializes public Azure Functions binding objects with per-binding adapters rather
+than using their Python `repr`. Text message bodies use `"body_encoding": "utf-8"`; binary
+bodies are base64-encoded with `"body_encoding": "base64"`. Metadata values are JSON-safe, with
+datetimes represented as ISO-8601 strings.
+
+### Binding-specific payloads
+
+**Blob (`InputStream`)** provides metadata only. The runtime does not call `read()` or put blob
+content in the prompt. The runtime also does **not** add a blob-reading tool automatically — if
+the agent needs the content, author one yourself (for example a function tool in your project's
+`tools/`, or an MCP server) that fetches the blob using the `name`/`uri`. Because `uri` is a
+plain blob URL with no SAS token, that tool must provide its own storage credentials — a
+connection string, or a managed identity granted the **Storage Blob Data Reader** role on the
+account/container.
+
+> Richer content access — a built-in in-memory blob-reading tool (no extra storage call or
+> credentials) and native multimodal ingestion (images/PDF/audio) — is tracked separately in
+> [Azure/azure-functions-bucees-planning#1200](https://github.com/Azure/azure-functions-bucees-planning/issues/1200).
+> The metadata-only payload here is the deliberate first step.
+
+```json
+{
+  "name": "uploads/x.png",
+  "uri": "https://storage.example.net/uploads/x.png",
+  "length": 18432,
+  "blob_properties": {"content_type": "image/png"},
+  "metadata": {"source": "upload"}
+}
+```
+
+**Queue (`QueueMessage`)** includes the decoded body and queue delivery metadata. If the body is
+valid JSON, `body_json` is included as a parsed value.
+
+```json
+{
+  "id": "queue-message-id",
+  "body": "{\"order_id\": 42}",
+  "body_encoding": "utf-8",
+  "body_json": {"order_id": 42},
+  "dequeue_count": 1,
+  "pop_receipt": "receipt"
+}
+```
+
+**Service Bus (`ServiceBusMessage`)** includes the decoded body plus canonical message and
+application properties.
+
+```json
+{
+  "body": "process order 42",
+  "body_encoding": "utf-8",
+  "message_id": "message-42",
+  "subject": "order.created",
+  "delivery_count": 1,
+  "application_properties": {"tenant": "contoso"},
+  "user_properties": {"priority": "high"}
+}
+```
+
+**Event Grid (`EventGridEvent`)** preserves the event envelope and parsed event data.
+
+```json
+{
+  "id": "event-42",
+  "topic": "/subscriptions/example",
+  "subject": "uploads/x.png",
+  "event_type": "Microsoft.Storage.BlobCreated",
+  "event_time": "2025-01-02T09:00:00+00:00",
+  "data_version": "1.0",
+  "data": {"url": "https://storage.example.net/uploads/x.png"}
+}
+```
+
+**Event Hubs (`EventHubEvent`)** and **Kafka (`KafkaEvent`)** include their decoded bodies and
+broker metadata.
+
+```json
+{
+  "body": "telemetry payload",
+  "body_encoding": "utf-8",
+  "partition_key": "device-7",
+  "sequence_number": 123,
+  "offset": "456",
+  "enqueued_time": "2025-01-02T09:00:00+00:00",
+  "iothub_metadata": {"device": "device-7"}
+}
+```
+
+```json
+{
+  "body": "order payload",
+  "body_encoding": "utf-8",
+  "key": "order-42",
+  "topic": "orders",
+  "partition": 2,
+  "offset": 456,
+  "timestamp": "2025-01-02T09:00:00Z",
+  "headers": [{"correlation-id": "abc"}]
+}
+```
+
+**Timer (`TimerRequest`)** is serialized from its public properties. `TimerRequest` does not
+provide `to_dict()`.
+
+```json
+{
+  "past_due": false,
+  "schedule_status": {
+    "last": "2025-01-02T09:00:00+00:00",
+    "next": "2025-01-03T09:00:00+00:00"
+  },
+  "schedule": {"adjust_for_dst": true}
+}
+```
+
+**Cosmos DB (`DocumentList`)**, **Azure SQL (`SqlRowList`)**, and **MySQL (`MySqlRowList`)**
+serialize as JSON arrays of document or row mappings, preserving null entries.
+
+```json
+[
+  {"id": "document-42", "status": "new"},
+  null
+]
+```
+
+When Event Hubs, Kafka, or Service Bus delivers a plain batch list, each message is serialized
+with the same per-message shape and the prompt contains a JSON array.
 
 HTTP-triggered agents use the same split: markdown body as instructions, request body data in the prompt.
 

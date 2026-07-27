@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 from azure_functions_agents._logger import logger as _logger
+
+from .schema import ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -36,19 +37,30 @@ def _format_error(
 
 
 def validate_resolved_agent(
-    resolved: Any,
+    resolved: ResolvedAgent,
     *,
     discovered_mcp_names: list[str],
     discovered_skills: list[str],
+    is_referenced_as_subagent: bool = False,
 ) -> None:
-    """Run post-merge sanity checks for a resolved agent."""
+    """Run post-merge sanity checks for a resolved agent.
+
+    ``is_referenced_as_subagent`` relaxes the trigger/``builtin_endpoints``
+    requirement below: an agent reachable only as another agent's
+    delegation target (via that agent's ``subagents:``) doesn't need its
+    own external entry point (Decision #18).
+    """
     source_file = resolved.source_file or "<unknown>"
 
     builtin_endpoints = resolved.builtin_endpoints
     has_builtin_endpoints = bool(
         builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
     )
-    if resolved.trigger is None and not has_builtin_endpoints:
+    if (
+        resolved.trigger is None
+        and not has_builtin_endpoints
+        and not is_referenced_as_subagent
+    ):
         raise ValueError(
             _format_error(
                 source_file,
@@ -81,7 +93,7 @@ def validate_resolved_agent(
             )
 
     known_mcp = set(discovered_mcp_names)
-    for name in getattr(resolved, "mcp_exclude_names", []) or []:
+    for name in resolved.mcp_exclude_names:
         if name not in known_mcp:
             raise ValueError(
                 _format_error(
@@ -93,7 +105,7 @@ def validate_resolved_agent(
             )
 
     known_skills = set(discovered_skills)
-    for name in getattr(resolved, "skills_exclude_names", []):
+    for name in resolved.skills_exclude_names:
         if name not in known_skills:
             _logger.warning(
                 "%s: field `skills.exclude`: Unknown skill reference `%s`. See docs/front-matter-spec.md#skills",
@@ -101,9 +113,55 @@ def validate_resolved_agent(
                 name,
             )
 
-    for name in getattr(resolved, "tool_exclude_names", []):
+    for name in resolved.tool_exclude_names:
         _logger.warning(
             "%s: field `tools.exclude`: Could not verify tool reference `%s` during config validation. See docs/front-matter-spec.md#tools",
             source_file,
             name,
         )
+
+
+def validate_subagent_references(
+    resolved: ResolvedAgent,
+    *,
+    known_slugs: set[str],
+) -> None:
+    """Reject self, unknown, and duplicate ``subagents:`` references.
+
+    Must run only after the app-wide identity-slug index (``known_slugs``)
+    is built and de-duplicated (see ``app.py``'s two-pass composition
+    root) — these are fail-fast configuration errors, never silently
+    dropped.
+    """
+    source_file = resolved.source_file or "<unknown>"
+    seen: set[str] = set()
+    for ref in resolved.subagents:
+        if ref.agent == resolved.slug:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "subagents",
+                    f"An agent cannot delegate to itself (`agent: {ref.agent}`).",
+                    "#subagents",
+                )
+            )
+        if ref.agent not in known_slugs:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "subagents",
+                    f"Unknown agent reference `{ref.agent}`. No agent with that "
+                    "identity slug (file stem) was discovered in this app.",
+                    "#subagents",
+                )
+            )
+        if ref.agent in seen:
+            raise ValueError(
+                _format_error(
+                    source_file,
+                    "subagents",
+                    f"Duplicate reference to agent `{ref.agent}` in `subagents`.",
+                    "#subagents",
+                )
+            )
+        seen.add(ref.agent)

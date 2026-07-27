@@ -1,0 +1,203 @@
+"""Inbound authentication enforcement for built-in endpoints.
+
+This module is the only place that reasons about *who* may call an agent's
+built-in HTTP endpoints. It maps the authoring-level ``builtin_endpoints.http_auth``
+policy onto an Azure Functions ``AuthLevel`` (for native function/system-key
+"API key" auth) and, for Entra ID, checks the caller's identity before the
+runner is ever invoked.
+
+Entra ID enforcement is delegated entirely to **App Service Authentication
+(Easy Auth)**. The platform validates the Entra-issued token (bearer or cookie),
+and injects a validated ``X-MS-CLIENT-PRINCIPAL`` header. The runtime trusts that
+header and applies the configured tenant/audience/client-id allow-lists as
+defense-in-depth. The runtime never parses or validates a JWT itself; a request
+in ``entra`` mode without a validated principal is rejected (fail closed).
+
+Because ``entra`` routes are registered anonymous at the Functions key layer, the
+injected principal header is only trustworthy when Easy Auth is guaranteed to sit
+in front of the app (Easy Auth strips any client-supplied ``X-MS-CLIENT-PRINCIPAL``
+header before injecting its own). If Easy Auth is disabled, that header is just
+caller-controlled input, which would be an authentication bypass. The runtime
+therefore refuses to trust the header unless it has positive, non-spoofable
+evidence that Easy Auth is enforced -- the platform-injected
+``WEBSITE_AUTH_ENABLED`` environment variable, or an explicit operator assertion
+via ``AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`` -- and fails closed otherwise.
+"""
+
+from __future__ import annotations
+
+import base64
+import binascii
+import json
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any
+
+import azure.functions as func
+
+from ..config import EndpointAuthConfig, EntraAuthConfig
+from ..config.env import runtime_env_value
+
+_EASY_AUTH_PRINCIPAL_HEADER = "x-ms-client-principal"
+
+# Non-spoofable signals that App Service Authentication (Easy Auth) is enforced in
+# front of the app. Both are process environment variables (not request headers),
+# so a caller cannot forge them. ``WEBSITE_AUTH_ENABLED`` is injected by the App
+# Service platform when Easy Auth is enabled; the ``..._ENTRA_EASY_AUTH`` app
+# setting lets operators assert enforcement where the platform signal is absent.
+_PLATFORM_EASY_AUTH_ENV = "WEBSITE_AUTH_ENABLED"
+_EASY_AUTH_ASSERTION_ENV = "AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH"
+
+_TRUTHY_VALUES = frozenset({"true", "1", "yes", "y"})
+
+_AUTH_LEVEL_BY_MODE: dict[str, func.AuthLevel] = {
+    "function": func.AuthLevel.FUNCTION,
+    "admin": func.AuthLevel.ADMIN,
+    "anonymous": func.AuthLevel.ANONYMOUS,
+    # entra replaces the function-key gate with an Easy Auth identity check, so
+    # the Functions level is anonymous and the platform-injected principal is
+    # validated in-app against the configured allow-lists.
+    "entra": func.AuthLevel.ANONYMOUS,
+}
+
+# Map common long-form (Easy Auth / WS-Fed) claim types to their short JWT names.
+_CLAIM_ALIASES: dict[str, str] = {
+    "http://schemas.microsoft.com/identity/claims/tenantid": "tid",
+    "http://schemas.microsoft.com/identity/claims/objectidentifier": "oid",
+}
+
+type HeaderGetter = Callable[[str], str | None]
+
+
+@dataclass(frozen=True)
+class AuthError:
+    """A failed authorization outcome to surface to the caller."""
+
+    status_code: int
+    message: str
+
+
+def resolve_endpoint_auth_level(auth: EndpointAuthConfig) -> func.AuthLevel:
+    """Map an endpoint auth policy to the Azure Functions route ``AuthLevel``."""
+    return _AUTH_LEVEL_BY_MODE.get(auth.mode, func.AuthLevel.FUNCTION)
+
+
+def _easy_auth_enforced() -> bool:
+    """Return True only with positive evidence that Easy Auth is enforced.
+
+    Either the platform-injected ``WEBSITE_AUTH_ENABLED`` variable or the explicit
+    ``AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH`` operator assertion is sufficient.
+    Both are environment variables, so they cannot be spoofed by a caller. When
+    neither is truthy the injected principal header must not be trusted.
+    """
+    return (
+        runtime_env_value(_PLATFORM_EASY_AUTH_ENV).lower() in _TRUTHY_VALUES
+        or runtime_env_value(_EASY_AUTH_ASSERTION_ENV).lower() in _TRUTHY_VALUES
+    )
+
+
+def _short_claim_name(claim_type: str) -> str:
+    if claim_type in _CLAIM_ALIASES:
+        return _CLAIM_ALIASES[claim_type]
+    # Fall back to the last path segment of a URI-style claim type.
+    return claim_type.rsplit("/", 1)[-1]
+
+
+def _flatten_claims(principal: dict[str, Any]) -> dict[str, list[str]]:
+    """Normalize an Easy Auth principal or decoded JWT into short-name -> values."""
+    flat: dict[str, list[str]] = {}
+    claims = principal.get("claims")
+    if isinstance(claims, list):
+        # Easy Auth shape: a list of {"typ": ..., "val": ...} entries.
+        for entry in claims:
+            if not isinstance(entry, dict):
+                continue
+            typ = entry.get("typ")
+            val = entry.get("val")
+            if isinstance(typ, str) and isinstance(val, str):
+                flat.setdefault(_short_claim_name(typ), []).append(val)
+        return flat
+    # Decoded JWT / flat dict of claims.
+    for key, value in principal.items():
+        short = _short_claim_name(key)
+        if isinstance(value, str):
+            flat.setdefault(short, []).append(value)
+        elif isinstance(value, list):
+            flat.setdefault(short, []).extend(str(item) for item in value)
+    return flat
+
+
+def _check_allowlists(
+    flat: dict[str, list[str]], entra: EntraAuthConfig | None
+) -> AuthError | None:
+    if entra is None:
+        return None
+
+    if entra.tenant_id and entra.tenant_id not in flat.get("tid", []):
+        return AuthError(403, "Token tenant is not allowed.")
+
+    if entra.allowed_audiences and not (
+        set(entra.allowed_audiences) & set(flat.get("aud", []))
+    ):
+        return AuthError(403, "Token audience is not allowed.")
+
+    if entra.allowed_client_ids:
+        caller = set(flat.get("appid", [])) | set(flat.get("azp", []))
+        if not (set(entra.allowed_client_ids) & caller):
+            return AuthError(403, "Caller application is not allowed.")
+    return None
+
+
+def _decode_easy_auth_principal(header_value: str) -> dict[str, Any] | None:
+    try:
+        raw = base64.b64decode(header_value, validate=True)
+        data = json.loads(raw)
+    except (binascii.Error, ValueError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+def authorize_entra_request(
+    get_header: HeaderGetter, auth: EndpointAuthConfig
+) -> AuthError | None:
+    """Authorize an inbound request against an endpoint auth policy.
+
+    Returns ``None`` when the request is authorized (including for the
+    non-``entra`` modes, whose enforcement is handled by the Functions host key
+    check), or an :class:`AuthError` describing why it was rejected.
+
+    In ``entra`` mode the request must carry a validated App Service
+    Authentication (Easy Auth) ``X-MS-CLIENT-PRINCIPAL`` header. The runtime does
+    not validate tokens itself; a request without a validated Entra principal is
+    rejected (fail closed). The header is only trusted when Easy Auth is
+    verifiably enforced (see :func:`_easy_auth_enforced`); otherwise the request
+    is rejected rather than trusting a potentially caller-supplied header.
+    """
+    if auth.mode != "entra":
+        return None
+    entra = auth.entra
+
+    # The route is anonymous at the Functions key layer, so the injected principal
+    # header is only trustworthy when Easy Auth is guaranteed to have stripped any
+    # client-supplied copy. Without that guarantee, fail closed rather than trust
+    # spoofable input.
+    if not _easy_auth_enforced():
+        return AuthError(
+            401,
+            "Entra authentication requires App Service Authentication (Easy Auth) "
+            "to be enabled in front of this app.",
+        )
+
+    principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
+    if not principal_header:
+        return AuthError(401, "Entra authentication required (App Service Authentication).")
+
+    principal = _decode_easy_auth_principal(principal_header)
+    if principal is None:
+        return AuthError(401, "Invalid client principal header.")
+
+    auth_typ = principal.get("auth_typ")
+    if not isinstance(auth_typ, str) or auth_typ.lower() not in {"aad", "azureactivedirectory"}:
+        return AuthError(401, "Entra authentication required.")
+
+    return _check_allowlists(_flatten_claims(principal), entra)

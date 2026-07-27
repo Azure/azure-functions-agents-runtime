@@ -22,8 +22,11 @@ from .._observability import (
     start_span,
 )
 from .._source_marker import source_marker
-from ..config import ResolvedAgent, _to_bool
+from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ._auth import authorize_entra_request
+from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
+from .catalog import AgentCatalog
 
 AUTH_LEVEL_MAP = {
     "anonymous": func.AuthLevel.ANONYMOUS,
@@ -31,26 +34,6 @@ AUTH_LEVEL_MAP = {
     "admin": func.AuthLevel.ADMIN,
 }
 _SESSION_ID_HEADER = "x-ms-session-id"
-
-
-def serialize_trigger_data(trigger_data: Any) -> str:
-    """Serialize trigger binding data to a JSON string."""
-    if trigger_data is None:
-        return "{}"
-    if hasattr(trigger_data, "to_dict"):
-        payload = trigger_data.to_dict()
-    elif hasattr(trigger_data, "model_dump"):
-        payload = trigger_data.model_dump()
-    elif isinstance(trigger_data, dict):
-        payload = trigger_data
-    elif isinstance(trigger_data, str):
-        return trigger_data
-    else:
-        payload = str(trigger_data)
-
-    if isinstance(payload, dict):
-        return json.dumps(payload, ensure_ascii=False, default=str)
-    return str(payload)
 
 
 def extract_json_from_response(text: str) -> str:
@@ -153,12 +136,29 @@ def _tool_error_count(tool_calls: list[dict[str, Any]] | None) -> int:
     return sum(1 for call in tool_calls if _looks_like_tool_error(call.get("result")))
 
 
+def _total_tool_error_count(result: Any) -> int:
+    """Combine tool-call error heuristics with explicit delegate-error accounting.
+
+    ``_tool_error_count`` only recognizes the sandbox error envelope /
+    non-empty ``stderr`` heuristic (:func:`_looks_like_tool_error`), which
+    cannot classify a specialist's sanitized free-text delegation failure
+    (FRD 0007 §4.12: "do NOT rely on `_looks_like_tool_error`'s JSON
+    `{error}`/stderr heuristic for a specialist's sanitized free-text
+    failure"). ``AgentResult.delegate_error_count`` is incremented
+    explicitly by the ``delegate_<slug>`` adapter instead, and is added
+    here so both the run span and the response log see one combined count.
+    """
+    tool_calls = list(getattr(result, "tool_calls", None) or [])
+    delegate_error_count = int(getattr(result, "delegate_error_count", 0) or 0)
+    return _tool_error_count(tool_calls) + delegate_error_count
+
+
 def _set_run_result_attributes(span: Any, result: Any) -> None:
     """Attach non-sensitive run-summary attributes; content only when opted in."""
     tool_calls = list(getattr(result, "tool_calls", None) or [])
     content = str(getattr(result, "content", "") or "")
     span.set_attribute("af.agent.tool_call_count", len(tool_calls))
-    span.set_attribute("af.agent.tool_error_count", _tool_error_count(tool_calls))
+    span.set_attribute("af.agent.tool_error_count", _total_tool_error_count(result))
     span.set_attribute("af.agent.response_bytes", len(content))
     span.set_content("af.agent.response", content)
 
@@ -171,7 +171,7 @@ def _run_log_payload(resolved: ResolvedAgent, result: Any) -> dict[str, Any]:
         "session_id": getattr(result, "session_id", None),
         "response_bytes": len(content),
         "tool_call_count": len(tool_calls),
-        "tool_error_count": _tool_error_count(tool_calls),
+        "tool_error_count": _total_tool_error_count(result),
     }
     if capture_sensitive_data():
         payload["response"] = content
@@ -228,6 +228,10 @@ def make_agent_handler(
     resolved: ResolvedAgent,
     trigger_type: str,
     capabilities: AgentCapabilities,
+    catalog: AgentCatalog | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
 
@@ -236,7 +240,7 @@ def make_agent_handler(
     # expected type (e.g. ``func.TimerRequest``) and rejects ``Any``. Leaving
     # the parameter unannotated tells the worker to skip that type check, so
     # this single handler can be reused across all non-HTTP trigger types.
-    async def _handler(trigger_data) -> None:  # type: ignore[no-untyped-def]
+    async def _handle(trigger_data, durable_client: Any | None) -> None:  # type: ignore[no-untyped-def]
         logger.info(
             "Agent triggered: trigger_type=%s source_file=%s",
             trigger_type,
@@ -245,10 +249,11 @@ def make_agent_handler(
 
         session_id = _new_session_id()
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": trigger_type,
                 "af.agent.session_id": session_id,
                 "af.agent.model": resolved.model,
@@ -274,6 +279,12 @@ def make_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    subagents=resolved.subagents,
+                    catalog=catalog,
+                    system_addendum=workflow_system_addendum,
+                    workflow_enabled=workflows_enabled,
+                    workflow_durable_client=durable_client,
+                    agent_name=resolved.slug,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -304,27 +315,55 @@ def make_agent_handler(
                 )
                 raise
 
-    _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
-    return _handler
+    async def _handler_with_client(trigger_data, client: str) -> None:  # type: ignore[no-untyped-def]
+        await _handle(trigger_data, client)
+
+    async def _handler_without_client(trigger_data) -> None:  # type: ignore[no-untyped-def]
+        await _handle(trigger_data, None)
+
+    handler = _handler_with_client if workflows_enabled else _handler_without_client
+    handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    return handler
 
 
 def make_http_agent_handler(
     resolved: ResolvedAgent,
     capabilities: AgentCapabilities,
-) -> Callable[[Request], Any]:
-    """Create an async handler for an HTTP-triggered agent."""
+    catalog: AgentCatalog | None = None,
+    auth: EndpointAuthConfig | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
+) -> Callable[..., Any]:
+    """Create an async handler for an HTTP-triggered agent.
 
-    async def _handler(req: Request) -> Response:
+    ``auth`` is the resolved inbound authentication policy. In ``entra`` mode the
+    request is authorized (App Service Authentication principal + allow-lists)
+    before the runner is ever invoked; the other modes are enforced by the
+    Functions host key check via the route's ``AuthLevel``.
+    """
+    auth_policy = auth or EndpointAuthConfig()
+
+    async def _handle(req: Request, durable_client: Any | None) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth_policy)
+        if auth_error is not None:
+            return Response(
+                content=json.dumps({"error": auth_error.message}),
+                status_code=auth_error.status_code,
+                media_type="application/json",
+            )
+
         logger.info(
             "HTTP agent triggered: source_file=%s",
             source_marker(resolved.source_file),
         )
 
         with start_span(
-            f"agent.run {resolved.name}",
+            f"agent.run {resolved.slug}",
             lifecycle_stage=LifecycleStage.AGENT_RUN,
             attributes={
-                "af.agent.name": resolved.name,
+                "af.agent.name": resolved.slug,
+                "af.agent.display_name": resolved.name,
                 "af.agent.trigger_type": "http",
                 "af.agent.model": resolved.model,
             },
@@ -379,6 +418,12 @@ def make_http_agent_handler(
                     tools=capabilities.filtered_user_tools,
                     mcp_tools=capabilities.filtered_mcp_tools,
                     skill_paths=capabilities.enabled_skill_paths,
+                    subagents=resolved.subagents,
+                    catalog=catalog,
+                    system_addendum=workflow_system_addendum,
+                    workflow_enabled=workflows_enabled,
+                    workflow_durable_client=durable_client,
+                    agent_name=resolved.slug,
                 )
 
                 _set_run_result_attributes(span, result)
@@ -478,5 +523,12 @@ def make_http_agent_handler(
                     headers={_SESSION_ID_HEADER: session_id},
                 )
 
-    _handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
-    return _handler
+    async def _handler_with_client(req: Request, client: str) -> Response:
+        return await _handle(req, client)
+
+    async def _handler_without_client(req: Request) -> Response:
+        return await _handle(req, None)
+
+    handler = _handler_with_client if workflows_enabled else _handler_without_client
+    handler.__name__ = f"handler_{re.sub(r'[^a-zA-Z0-9_]', '_', resolved.name)}"
+    return handler

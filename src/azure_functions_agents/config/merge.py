@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from azure_functions_agents._slug import _function_name_from_source
 from azure_functions_agents.config.env import runtime_env_value
 from azure_functions_agents.config.schema import (
     AgentSpec,
@@ -11,6 +12,7 @@ from azure_functions_agents.config.schema import (
     McpFilter,
     ResolvedAgent,
     SkillsFilter,
+    SubagentRef,
     ToolsFilter,
     WebRequestConfig,
 )
@@ -18,13 +20,26 @@ from azure_functions_agents.config.schema import (
 DEFAULT_TIMEOUT = 900.0
 
 
-def _resolve_builtin_endpoints(spec: AgentSpec) -> BuiltinEndpointsConfig:
+def _resolve_builtin_endpoints(
+    spec: AgentSpec, global_config: GlobalConfig
+) -> BuiltinEndpointsConfig:
     builtin_endpoints = spec.builtin_endpoints
     if isinstance(builtin_endpoints, BuiltinEndpointsConfig):
-        return builtin_endpoints
-    if builtin_endpoints is True:
-        return BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
-    return BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
+        resolved = builtin_endpoints
+    elif builtin_endpoints is True:
+        resolved = BuiltinEndpointsConfig(debug_chat_ui=True, chat_api=True, mcp=True)
+    else:
+        resolved = BuiltinEndpointsConfig(debug_chat_ui=False, chat_api=False, mcp=False)
+
+    # Inherit the app-wide auth default (agents.config.yaml `http_auth`) unless the
+    # agent authored its own builtin_endpoints.http_auth, which always overrides.
+    authored_http_auth = (
+        isinstance(builtin_endpoints, BuiltinEndpointsConfig)
+        and "http_auth" in builtin_endpoints.model_fields_set
+    )
+    if not authored_http_auth and global_config.http_auth is not None:
+        resolved = resolved.model_copy(update={"http_auth": global_config.http_auth})
+    return resolved
 
 
 def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
@@ -116,6 +131,33 @@ def apply_tools_filter(
     return ToolsFilter(exclude=sorted(merged_excludes)), False
 
 
+def _resolve_slug(spec: AgentSpec) -> str:
+    """Compute the agent's stable identity slug from its source file stem.
+
+    This is the same sanitization used for function names and built-in
+    endpoint routes (see ``_slug.py``), so an agent's slug, function name,
+    and ``/agents/<slug>/`` route are always identical. It is also the
+    identifier ``subagents[].agent`` references point at and the suffix of
+    the ``delegate_<slug>`` tool name (FRD 0007 §4.8).
+
+    ``compose()`` must stay warning-free (validation-time concerns belong
+    to ``config.validation``), so a missing ``source_file`` — common for
+    directly-constructed ``AgentSpec``s in unit tests — silently falls
+    back to a sanitized version of ``spec.name`` rather than warning.
+    """
+    return _function_name_from_source(spec.source_file, spec.name, warn_on_missing=False)
+
+
+def _normalize_subagents(spec: AgentSpec) -> list[SubagentRef]:
+    """Copy the spec's ``subagents`` list, defaulting to empty.
+
+    Reference validation (unknown/duplicate/self, tool-name collisions) is
+    intentionally deferred to ``config.validation``, which runs once the
+    full slug index is available; ``compose()`` only normalizes shape.
+    """
+    return [ref.model_copy() for ref in (spec.subagents or [])]
+
+
 def compose(
     spec: AgentSpec,
     global_config: GlobalConfig,
@@ -140,11 +182,12 @@ def compose(
 
     resolved = ResolvedAgent(
         name=spec.name,
+        slug=_resolve_slug(spec),
         description=spec.description,
         trigger=spec.trigger,
         instructions=spec.instructions,
         is_main=spec.is_main,
-        builtin_endpoints=_resolve_builtin_endpoints(spec),
+        builtin_endpoints=_resolve_builtin_endpoints(spec, global_config),
         model=_resolve_model(spec, global_config),
         timeout=_resolve_timeout(spec, global_config),
         enabled_mcp_names=enabled_mcp,
@@ -156,6 +199,7 @@ def compose(
         tool_exclude_names=list(tool_filter.exclude),
         tool_filter=tool_filter,
         workflows=spec.workflows,
+        subagents=_normalize_subagents(spec),
         tools_disabled=tools_disabled,
         skills_disabled=skills_disabled,
         mcp_disabled=mcp_disabled,

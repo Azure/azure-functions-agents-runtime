@@ -9,6 +9,7 @@ from azure_functions_agents.config.env import (
     substitute_env_vars_in_text,
     substitute_env_vars_in_value,
 )
+from azure_functions_agents.config.schema import BuiltinEndpointsConfig
 
 
 def test_substitute_env_vars_in_value_dollar(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -211,6 +212,51 @@ def test_substitute_env_vars_in_text_preserves_code_fences(
     monkeypatch.setenv("FOO", "value")
     text = "before $FOO\n```bash\necho $FOO\n```\nafter %FOO%"
     assert substitute_env_vars_in_text(text) == "before value\n```bash\necho $FOO\n```\nafter value"
+
+
+def test_http_auth_entra_allowlists_resolve_env_placeholders(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Authors keep secrets out of source by referencing env vars inline; the
+    # loader resolves the placeholders before schema validation, so frontmatter
+    # stays the single source of truth for the entra allow-lists.
+    monkeypatch.setenv("ENTRA_TENANT_ID", "tenant-guid")
+    monkeypatch.setenv("ENTRA_AUDIENCE", "api://agents")
+    raw = {
+        "chat_api": True,
+        "http_auth": {
+            "mode": "entra",
+            "entra": {
+                "tenant_id": "$ENTRA_TENANT_ID",
+                "allowed_audiences": ["$ENTRA_AUDIENCE"],
+            },
+        },
+    }
+
+    resolved = resolve_env_vars_in_data(raw)
+    endpoints = BuiltinEndpointsConfig.model_validate(resolved)
+
+    assert endpoints.http_auth.entra is not None
+    assert endpoints.http_auth.entra.tenant_id == "tenant-guid"
+    assert endpoints.http_auth.entra.allowed_audiences == ["api://agents"]
+
+
+def test_http_auth_entra_allowlists_keep_unset_placeholders_literal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # An unset placeholder is left literal (consistent with the substitution
+    # engine's contract) rather than silently becoming an empty allow-list.
+    monkeypatch.delenv("ENTRA_TENANT_ID", raising=False)
+    raw = {
+        "chat_api": True,
+        "http_auth": {"mode": "entra", "entra": {"tenant_id": "$ENTRA_TENANT_ID"}},
+    }
+
+    resolved = resolve_env_vars_in_data(raw)
+    endpoints = BuiltinEndpointsConfig.model_validate(resolved)
+
+    assert endpoints.http_auth.entra is not None
+    assert endpoints.http_auth.entra.tenant_id == "$ENTRA_TENANT_ID"
 
 
 def test_substitute_env_vars_in_text_unescapes_literal_placeholders_outside_fences(
