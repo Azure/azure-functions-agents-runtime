@@ -54,9 +54,9 @@ samples — avoid bundling multiple capabilities.
 
 Create a new directory under `tests/endtoend/apps/<slug>/` where `<slug>` is
 short, lowercase, and hyphenated (e.g., `queue-error-handling`). Each directory
-**must** contain exactly these five files:
+**must** contain the following supporting files, plus one or more `*.agent.md` files:
 
-#### `<name>.agent.md`
+#### `<name>.agent.md` (one or more)
 
 One focused agent that exercises the feature. Follow standard front-matter
 conventions from `docs/front-matter-spec.md`. Keep the system prompt minimal.

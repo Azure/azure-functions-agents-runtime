@@ -224,10 +224,9 @@ def test_queue_trigger_payload_fires_on_json_message(
     Python QueueMessage repr. Provider-independent assertions:
 
     1. The handler log ``"Agent triggered: trigger_type=queue_trigger"`` appears,
-       confirming serialize_trigger_data was called inside the handler.
-    2. ``Executed 'Functions.queue_processor'`` appears, confirming the function
-       ran to completion (serialization did not throw before invocation logged).
-    """
+       confirming the queue-trigger handler started executing.
+    2. ``Executed 'Functions.queue_processor'`` appears, confirming the Functions
+       host invoked the function (whether the agent run itself succeeds or fails).
     handle, _ = queue_trigger_payload_host
 
     body = json.dumps({"order": f"e2e-{uuid.uuid4().hex[:8]}", "quantity": 3})
@@ -267,13 +266,20 @@ def test_queue_trigger_payload_full_run_succeeds(
     """
     handle, _ = queue_trigger_payload_host
 
-    body = json.dumps({"order": f"e2e-llm-{uuid.uuid4().hex[:8]}", "quantity": 1})
+    order_id = f"e2e-llm-{uuid.uuid4().hex[:8]}"
+    body = json.dumps({"order": order_id, "quantity": 1})
     send_queue_message(QUEUE_PAYLOAD_NAME, body)
 
     responded = handle.wait_for_log("Agent response: source_file=", timeout=120.0)
     assert responded, (
         "agent never logged a successful response after enqueuing a JSON message. "
         f"Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+    output = handle.read_output()
+    assert order_id in output, (
+        "agent response did not include the expected order id (likely missing trigger payload content). "
+        f"order_id={order_id}. Recent output:\n{output[-2000:]}"
     )
 
 
@@ -393,4 +399,10 @@ def test_blob_trigger_payload_full_run_succeeds(
     assert responded, (
         "agent never logged a successful response after uploading a blob. "
         f"Recent output:\n{handle.read_output()[-2000:]}"
+    )
+
+    output = handle.read_output()
+    assert blob_name in output, (
+        "agent response did not include the uploaded blob name (likely missing trigger payload content). "
+        f"blob_name={blob_name}. Recent output:\n{output[-2000:]}"
     )

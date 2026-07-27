@@ -175,11 +175,8 @@ Foundry resource. Features that require any other external resource may waive th
 E2E requirement — record the waiver in the FRD Decisions log (medium+ features)
 or PR description (small features).
 
-- E2E apps live under `tests/endtoend/apps/<slug>/` — one dedicated directory
-  per feature, never shared between features.
-- Each app must contain five files: `*.agent.md`, `function_app.py`, `host.json`,
-  `local.settings.json` (no secrets), and `requirements.txt` (editable install).
-- Tests go into `tests/endtoend/test_apps_http.py`, `test_apps_storage.py`, or
+- Each app must contain `function_app.py`, `host.json`, `local.settings.json` (no secrets),
+  `requirements.txt` (editable install), and one or more `*.agent.md` files.
   `test_apps_mcp.py` based on trigger type.
 - `tests/endtoend/test_apps_start.py` auto-discovers all apps and runs a `func
   start` smoke test — adding a new app dir is enough to opt into it.

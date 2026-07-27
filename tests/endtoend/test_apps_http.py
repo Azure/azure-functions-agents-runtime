@@ -316,8 +316,10 @@ def test_delegation_coordinator_responds(
     client, endpoints = multi_agent_delegation_host
 
     ep = find_endpoint(endpoints, route_exact="delegate", method="POST")
-    resp = client.post(ep.url(client.base_url), json={"prompt": "Hello, who are you?"})
-
+    resp = client.post(
+        ep.url(client.base_url),
+        json={"prompt": "Delegate to the specialist: explain the difference between threading and async in Python."},
+    )
     expect_status(resp, 200)
     expect_header(resp, "x-ms-session-id")
     assert resp.text.strip(), "expected a non-empty response body"
@@ -388,7 +390,7 @@ def test_web_request_fetcher_completes_outbound_request(
 
     expect_status(resp, 200)
     expect_header(resp, "x-ms-session-id")
-    assert resp.text.strip(), "expected a non-empty response body"
+    expect_body_contains(resp, "Example Domain")
 
 
 @requires_llm
