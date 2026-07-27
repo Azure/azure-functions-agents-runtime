@@ -134,7 +134,7 @@ a { color: var(--cp-link); }
 .lchip.term{ animation-name:lchipTerm; }
 .lchip.term .ico{ color:var(--cp-danger); }
 @keyframes lchipTerm{ 0%,100%{opacity:.5;transform:translateY(0);} 5%{opacity:1;transform:translateY(-3px);border-color:var(--cp-danger);color:var(--cp-danger);} 15%{opacity:.5;transform:translateY(0);} }
-@media (prefers-reduced-motion:reduce){ .rnode.run .box,.packet,.sdot,.breather,.lchip{ animation:none!important; } .packet,.sdot,.lchip,.breather{ opacity:1; } }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
 </style>
 </head>
 <body>

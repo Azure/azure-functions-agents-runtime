@@ -118,7 +118,7 @@ a { color: var(--cp-link); }
 .chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
 .chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
 .chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
-@media (prefers-reduced-motion:reduce){ .flow-row .beam,.breather,.gate-node,.gate-tok{ animation:none!important; } .gate-tok{ opacity:1; left:42%; } }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
 </style>
 </head>
 <body>
