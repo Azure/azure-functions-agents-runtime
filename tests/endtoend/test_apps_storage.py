@@ -336,8 +336,9 @@ def test_blob_trigger_payload_is_indexed(blob_trigger_payload_host: Served) -> N
     _, client = blob_trigger_payload_host
     functions = discover_functions(client)
     blobs = find_functions(functions, trigger_type="blobTrigger")
-    assert blobs, "expected one blobTrigger function to be indexed"
+    assert len(blobs) == 1, f"expected exactly one blobTrigger function to be indexed, got {len(blobs)}"
     fn = blobs[0]
+    assert fn.name == BLOB_FUNCTION_NAME
     assert fn.route is None, "blob trigger must not expose an HTTP route"
     assert fn.methods == (), "blob trigger must not list HTTP methods"
 

@@ -66,12 +66,13 @@ conventions from `docs/front-matter-spec.md`. Keep the system prompt minimal.
 name: My Feature Agent
 description: One-sentence description of what this agent tests.
 trigger:
-  type: http_trigger          # or blob_trigger / queue_trigger / mcp
+  type: http_trigger          # or blob_trigger / queue_trigger
   args:
     route: "my-feature"
     methods: ["POST"]
     auth_level: anonymous
----
+builtin_endpoints:
+  mcp: true                   # optional: also register this agent as an MCP tool
 
 You are a concise assistant. Reply in one short sentence.
 ```
