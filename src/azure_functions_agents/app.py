@@ -203,13 +203,18 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         workflows_enabled = False
         workflow_system_addendum: str | None = None
+        trigger_workflow_system_addendum: str | None = None
         if resolved.is_main:
-            _, workflow_system_addendum = build_workflow_integration(
+            workflow_integration = build_workflow_integration(
                 app,
                 resolved.metadata,
                 workflow_tools=capabilities.filtered_workflow_tools,
             )
-            workflows_enabled = workflow_system_addendum is not None
+            workflows_enabled = workflow_integration.enabled
+            workflow_system_addendum = workflow_integration.chat_system_addendum
+            trigger_workflow_system_addendum = (
+                workflow_integration.trigger_system_addendum
+            )
         elif _workflows_requested(resolved.workflows):
             logger.warning(
                 "workflows.enabled is only honored on main.agent.md; ignoring "
@@ -240,6 +245,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 capabilities,
                 function_name=resolved.slug,
                 catalog=catalog,
+                workflows_enabled=workflows_enabled,
+                workflow_system_addendum=trigger_workflow_system_addendum,
             )
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
             register_builtin_endpoints(

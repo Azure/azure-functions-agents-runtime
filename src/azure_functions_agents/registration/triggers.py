@@ -42,6 +42,9 @@ def _register_builtin_agent(
     trigger_params: dict[str, Any],
     trigger_type: str,
     catalog: AgentCatalog | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
     trigger_params = dict(trigger_params)
     decorator_fn = getattr(app, trigger_type, None)
@@ -60,9 +63,18 @@ def _register_builtin_agent(
     if trigger_type == "timer_trigger" and "schedule" in trigger_params:
         trigger_params["schedule"] = normalize_timer_schedule(str(trigger_params["schedule"]))
 
-    handler = make_agent_handler(resolved, trigger_type, capabilities, catalog)
+    handler = make_agent_handler(
+        resolved,
+        trigger_type,
+        capabilities,
+        catalog,
+        workflows_enabled=workflows_enabled,
+        workflow_system_addendum=workflow_system_addendum,
+    )
     trigger_params["arg_name"] = "trigger_data"
 
+    if workflows_enabled:
+        handler = app.durable_client_input(client_name="client")(handler)
     decorated = decorator_fn(**trigger_params)(handler)
     decorated = app.function_name(name=function_name)(decorated)
 
@@ -128,6 +140,9 @@ def _register_http_agent(
     function_name: str,
     trigger_params: dict[str, Any],
     catalog: AgentCatalog | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
     route = trigger_params.get("route")
     if not route:
@@ -139,8 +154,17 @@ def _register_http_agent(
 
     methods = trigger_params.get("methods", ["POST"])
     auth = _resolve_http_trigger_auth(resolved, trigger_params)
-    handler = make_http_agent_handler(resolved, capabilities, catalog, auth=auth)
+    handler = make_http_agent_handler(
+        resolved,
+        capabilities,
+        catalog,
+        auth=auth,
+        workflows_enabled=workflows_enabled,
+        workflow_system_addendum=workflow_system_addendum,
+    )
 
+    if workflows_enabled:
+        handler = app.durable_client_input(client_name="client")(handler)
     decorated = app.route(
         route=route,
         methods=methods,
@@ -156,6 +180,9 @@ def register_agent(
     registered_names: set[str] | None = None,
     function_name: str | None = None,
     catalog: AgentCatalog | None = None,
+    *,
+    workflows_enabled: bool = False,
+    workflow_system_addendum: str | None = None,
 ) -> None:
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
@@ -178,7 +205,16 @@ def register_agent(
         )
 
     if trigger_type == "http_trigger":
-        _register_http_agent(app, resolved, capabilities, function_name, trigger_params, catalog)
+        _register_http_agent(
+            app,
+            resolved,
+            capabilities,
+            function_name,
+            trigger_params,
+            catalog,
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
+        )
         logger.info(
             "Registered trigger: source_file=%s function=%s trigger_type=http_trigger route=%s methods=%s",
             source_marker(resolved.source_file),
@@ -198,6 +234,8 @@ def register_agent(
         trigger_params,
         trigger_type,
         catalog,
+        workflows_enabled=workflows_enabled,
+        workflow_system_addendum=workflow_system_addendum,
     )
     logger.info(
         "Registered trigger: source_file=%s function=%s trigger_type=%s",

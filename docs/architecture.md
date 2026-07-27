@@ -164,11 +164,17 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
     - **Implemented by:** `src/azure_functions_agents/app.py:create_function_app()`, `src/azure_functions_agents/registration/triggers.py:register_agent()`, `src/azure_functions_agents/registration/endpoints.py:register_builtin_endpoints()`, `src/azure_functions_agents/registration/_handlers.py`
     - **Input:** `FunctionApp`, `ResolvedAgent`, `AgentCapabilities`, and the frozen `AgentCatalog`
     - **Output:** the same `FunctionApp`, now decorated with trigger bindings, HTTP routes, SSE streaming routes, and/or MCP endpoints
-    - **Notes:** agents go through `register_agent()` when they have a `trigger`. Any agent with built-in endpoints enabled also goes through `register_builtin_endpoints()`, which can add debug chat UI, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and MCP tool surfaces. Each agent's identity slug (already guaranteed globally unique by stage 6) is used directly as its function name / built-in endpoint route — there is no allocator or de-duplication pass here anymore. Both registration calls also thread the frozen `AgentCatalog` through to the handler closures they build, so a coordinator's `delegate_<slug>` tools can be built later, at request time (see "Multi-agent delegation" below).
+    - **Notes:** agents go through `register_agent()` when they have a `trigger`. Any agent with built-in endpoints enabled also goes through `register_builtin_endpoints()`, which can add debug chat UI, `/agents/{slug}/chat`, `/agents/{slug}/chatstream`, and MCP tool surfaces. Each agent's identity slug (already guaranteed globally unique by stage 6) is used directly as its function name / built-in endpoint route — there is no allocator or de-duplication pass here anymore. Both registration calls also thread the frozen `AgentCatalog` through to the handler closures they build, so a coordinator's `delegate_<slug>` tools can be built later, at request time (see "Multi-agent delegation" below). When the main agent enables Dynamic Workflows, both built-in endpoints and every supported Markdown-declared trigger receive a Durable client input; workflow-disabled and non-main handlers retain their original binding signatures.
 
 ### Where the registration stage hands off to execution
 
 Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
+
+For a workflow-enabled main agent, `workflows/integration.py` produces shared workflow guidance plus channel-specific completion behavior. Built-in chat/MCP handlers receive the chat addendum; declared-trigger handlers receive the trigger addendum together with `workflow_enabled=True`, the Durable client, and the agent name. Registration consumes these resolved values and does not re-parse workflow metadata.
+
+### Dynamic Workflow execution lifetimes
+
+A declared trigger handler is a short-lived Durable **client/starter**. The agent authors a plan, calls `start_workflow`, receives the Durable instance ID, and ends its turn without polling. The starter remains subject to the normal model-call and Function timeout, but the orchestration does not: Durable checkpoints and resumes the DAG independently across Activities and timers.
 
 ### Registration paths in practice
 
@@ -193,6 +199,7 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_workflow_tools` becomes the workflow Activity target inventory used by `build_workflow_integration()` for the main agent when workflows are enabled.
+- `WorkflowIntegrationResult` supplies separate chat and declared-trigger system addenda; the declared-trigger handler also receives the bound Durable client.
 - `AgentCapabilities.filtered_mcp_tools` becomes the concrete MCP-tool list.
 - `AgentCapabilities.enabled_skill_paths` becomes the list of skill directories handed to MAF's `SkillsProvider`.
 - `AgentCapabilities.web_request_tools` becomes the concrete `web_request` tool list, passed to the runner via its own `web_request_tools` parameter.

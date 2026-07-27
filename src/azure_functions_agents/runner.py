@@ -59,7 +59,6 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import re
 import sys
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
@@ -79,6 +78,7 @@ from ._observability import (
     record_delegate_call,
     start_span,
 )
+from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
 from .client_manager import get_client_manager
 from .config import ResolvedAgent, SubagentRef
@@ -125,8 +125,9 @@ DEFAULT_TIMEOUT = _runtime_timeout_default()
 DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 
 # Validated session-id pattern. The id is used as a filename component, so
-# refuse anything that could escape the session directory.
-_SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,128}$")
+# refuse anything that could escape the session directory. Shared with the
+# endpoint layer via ``_session_id`` so the two never drift.
+_SESSION_ID_PATTERN = SESSION_ID_PATTERN
 
 
 # ---------------------------------------------------------------------------
