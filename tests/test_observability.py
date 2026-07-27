@@ -11,6 +11,7 @@ import azure_functions_agents._observability as obs
 def _clear_env(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     for name in (
         "APPLICATIONINSIGHTS_CONNECTION_STRING",
+        "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
         "ENABLE_SENSITIVE_DATA",
     ):
         monkeypatch.delenv(name, raising=False)
@@ -156,9 +157,10 @@ def test_configure_azure_monitor_skips_when_provider_already_configured(  # type
 
     from azure.monitor import opentelemetry as azure_monitor_opentelemetry
 
+    _clear_env(monkeypatch)
     called = {"count": 0}
 
-    def _fake_configure_azure_monitor(*, connection_string: str) -> None:
+    def _fake_configure_azure_monitor(*, connection_string: str, **_kwargs) -> None:
         called["count"] += 1
 
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: True)
@@ -179,10 +181,12 @@ def test_configure_azure_monitor_calls_when_provider_not_configured(monkeypatch)
     pytest.importorskip("azure.monitor.opentelemetry")
     from azure.monitor import opentelemetry as azure_monitor_opentelemetry
 
-    called = {"connection_string": None}
+    _clear_env(monkeypatch)
+    called: dict[str, object] = {}
 
-    def _fake_configure_azure_monitor(*, connection_string: str) -> None:
+    def _fake_configure_azure_monitor(*, connection_string: str, **kwargs) -> None:
         called["connection_string"] = connection_string
+        called["kwargs"] = kwargs
 
     monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
     monkeypatch.setattr(
@@ -194,6 +198,44 @@ def test_configure_azure_monitor_calls_when_provider_not_configured(monkeypatch)
     obs._configure_azure_monitor("InstrumentationKey=abc")
 
     assert called["connection_string"] == "InstrumentationKey=abc"
+    # No AAD auth string configured: Live Metrics is left at its default (enabled).
+    assert "enable_live_metrics" not in called["kwargs"]
+
+
+def test_configure_azure_monitor_disables_live_metrics_when_aad_auth_configured(  # type: ignore[no-untyped-def]
+    monkeypatch,
+) -> None:
+    """QuickPulse/Live Metrics doesn't honor APPLICATIONINSIGHTS_AUTHENTICATION_STRING (upstream
+    gap: the exporter only accepts an explicit ``credential=`` kwarg, never falling back to the
+    env var like the trace/log/metric exporters do). On an Application Insights resource that
+    requires AAD, this makes Live Metrics fail every ~1s with a 401. When AAD auth is configured
+    via the env var, the runtime disables Live Metrics rather than emitting non-stop 401 noise.
+    """
+    pytest.importorskip("azure.monitor.opentelemetry")
+    from azure.monitor import opentelemetry as azure_monitor_opentelemetry
+
+    _clear_env(monkeypatch)
+    monkeypatch.setenv(
+        "APPLICATIONINSIGHTS_AUTHENTICATION_STRING",
+        "Authorization=AAD;ClientId=00000000-0000-0000-0000-000000000000",
+    )
+    called: dict[str, object] = {}
+
+    def _fake_configure_azure_monitor(*, connection_string: str, **kwargs) -> None:
+        called["connection_string"] = connection_string
+        called["kwargs"] = kwargs
+
+    monkeypatch.setattr(obs, "_otel_provider_already_configured", lambda: False)
+    monkeypatch.setattr(
+        azure_monitor_opentelemetry,
+        "configure_azure_monitor",
+        _fake_configure_azure_monitor,
+    )
+
+    obs._configure_azure_monitor("InstrumentationKey=abc")
+
+    assert called["connection_string"] == "InstrumentationKey=abc"
+    assert called["kwargs"] == {"enable_live_metrics": False}
 
 
 def test_start_span_is_safe_and_records(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -240,7 +282,9 @@ def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # t
     calls: list[str] = []
     monkeypatch.setattr(obs, "_metrics_ready", True)
     monkeypatch.setattr(
-        obs, "_sandbox_execution_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("x"))
+        obs,
+        "_sandbox_execution_counter",
+        types.SimpleNamespace(add=lambda *a, **k: calls.append("x")),
     )
     monkeypatch.setattr(
         obs, "_sandbox_error_counter", types.SimpleNamespace(add=lambda *a, **k: calls.append("e"))
