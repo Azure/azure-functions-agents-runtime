@@ -71,7 +71,12 @@ bug fixes.
 2. Add tests under `tests/`, mirroring source modules. For config/authoring
    changes, add a scenario folder under `tests/fixtures/config_scenarios/`.
 3. For bug-adjacent work, add a failing regression test first.
-4. Run the full CI-equivalent gate:
+4. **E2E test assessment:** consult the **`add-e2e-test` skill**
+   ([`.github/skills/add-e2e-test/SKILL.md`](../add-e2e-test/SKILL.md)) and run
+   the eligibility check. Either add an E2E test under `tests/endtoend/apps/`
+   or record a one-line waiver in the FRD Decisions log explaining why E2E is
+   not feasible for this feature.
+5. Run the full CI-equivalent gate:
    ```bash
    python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
    ```
