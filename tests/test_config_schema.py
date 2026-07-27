@@ -33,7 +33,7 @@ def test_agent_spec_extra_forbidden() -> None:
     [True, False, None, BuiltinEndpointsConfig(chat_api=True)],
 )
 def test_agent_spec_builtin_endpoints_variants(
-    value: bool | None | BuiltinEndpointsConfig,
+    value: bool | BuiltinEndpointsConfig | None,
 ) -> None:
     spec = AgentSpec(name="X", description="Y", builtin_endpoints=value)
     assert spec.builtin_endpoints == value
@@ -92,7 +92,7 @@ def test_builtin_endpoints_auth_rejects_extra_keys() -> None:
     "value",
     [False, None, McpFilter(exclude=["x"])],
 )
-def test_agent_spec_mcp_variants(value: bool | None | McpFilter) -> None:
+def test_agent_spec_mcp_variants(value: bool | McpFilter | None) -> None:
     spec = AgentSpec(name="X", description="Y", mcp=value)
     assert spec.mcp == value
 
@@ -101,7 +101,7 @@ def test_agent_spec_mcp_variants(value: bool | None | McpFilter) -> None:
     "value",
     [False, None, ToolsFilter(exclude=["x"])],
 )
-def test_agent_spec_tools_variants(value: bool | None | ToolsFilter) -> None:
+def test_agent_spec_tools_variants(value: bool | ToolsFilter | None) -> None:
     spec = AgentSpec(name="X", description="Y", tools=value)
     assert spec.tools == value
 
