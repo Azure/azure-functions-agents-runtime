@@ -42,11 +42,16 @@ APPS_DIR = Path(__file__).resolve().parent / "apps"
 
 
 def _provider_configured() -> bool:
-    """Whether an LLM provider appears configured."""
+    """Whether an LLM provider appears configured (env vars or app settings)."""
+    from tests.endtoend._func_host import configured_provider
+
     return bool(
         os.environ.get("OPENAI_API_KEY")
         or os.environ.get("AZURE_OPENAI_ENDPOINT")
         or os.environ.get("FOUNDRY_PROJECT_ENDPOINT")
+        or configured_provider(APPS_DIR / "storage-triggers") is not None
+        or configured_provider(APPS_DIR / "queue-trigger-payload") is not None
+        or configured_provider(APPS_DIR / "blob-trigger-payload") is not None
     )
 
 
@@ -204,8 +209,9 @@ def test_queue_trigger_payload_is_indexed(queue_trigger_payload_host: Served) ->
     _, client = queue_trigger_payload_host
     functions = discover_functions(client)
     queues = find_functions(functions, trigger_type="queueTrigger")
-    assert queues, "expected one queueTrigger function to be indexed"
+    assert len(queues) == 1, f"expected exactly one queueTrigger function to be indexed, got {len(queues)}"
     fn = queues[0]
+    assert fn.name == FUNCTION_NAME
     assert fn.route is None, "queue trigger must not expose an HTTP route"
     assert fn.methods == (), "queue trigger must not list HTTP methods"
 

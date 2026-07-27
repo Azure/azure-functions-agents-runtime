@@ -273,10 +273,10 @@ def test_delegation_specialist_has_no_direct_endpoint(
     """
     _, endpoints = multi_agent_delegation_host
 
-    specialist_routes = [ep for ep in endpoints if "specialist" in ep.route.lower()]
-    assert not specialist_routes, (
-        f"endpoint-less specialist must not appear in the admin API; "
-        f"found: {[ep.route for ep in specialist_routes]}"
+    specialist_endpoints = [ep for ep in endpoints if ep.function_name.lower() == "specialist"]
+    assert not specialist_endpoints, (
+        "endpoint-less specialist must not appear in the admin API; "
+        f"found: {[(ep.function_name, ep.route) for ep in specialist_endpoints]}"
     )
 
 

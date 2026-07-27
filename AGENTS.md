@@ -177,7 +177,7 @@ or PR description (small features).
 
 - Each app must contain `function_app.py`, `host.json`, `local.settings.json` (no secrets),
   `requirements.txt` (editable install), and one or more `*.agent.md` files.
-  `test_apps_mcp.py` based on trigger type.
+  Add assertions in the appropriate `tests/endtoend/test_apps_*.py` file based on trigger type.
 - `tests/endtoend/test_apps_start.py` auto-discovers all apps and runs a `func
   start` smoke test — adding a new app dir is enough to opt into it.
 - Use the **`add-e2e-test` skill**
