@@ -10,6 +10,7 @@ import yaml  # type: ignore[import-untyped]
 from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
+from azure_functions_agents._slug import _is_single_agent_file
 from azure_functions_agents.config.env import (
     _to_bool,
     resolve_env_vars_in_data,
@@ -25,6 +26,61 @@ _FRONTMATTER_ACTION_ITEMS = (
     f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",
     "Re-run startup in strict mode to fail fast (load_agent_specs(..., strict=True)).",
 )
+
+
+def _collect_agent_files(directory: Path) -> list[Path]:
+    """Collect all agent markdown files from a directory in a single pass.
+
+    Returns bare agent.md / CLAUDE.md single-agent aliases and prefixed
+    *.agent.md / *.claude.md files.  Skips dotfiles.
+
+    Collecting all shapes in one pass ensures case-sensitive filesystems can
+    surface duplicate bare aliases (e.g. agent.md + Agent.md) for the
+    downstream _fail_on_duplicate_slugs() check.
+    """
+    agent_files: list[Path] = []
+    for md_file in directory.iterdir():
+        if not md_file.is_file():
+            continue
+        if md_file.name.startswith("."):
+            continue  # skip hidden/dotfiles (iterdir() unlike glob doesn't exclude them)
+        lower_name = md_file.name.lower()
+        # _is_single_agent_file covers bare "agent.md"/"claude.md".  These do NOT
+        # satisfy endswith(".agent.md"/".claude.md") because the dot-prefixed suffix
+        # (9/10 chars) is longer than the bare name (8/9 chars), so both branches
+        # are needed.
+        if _is_single_agent_file(md_file.name) or lower_name.endswith((".agent.md", ".claude.md")):
+            agent_files.append(md_file)
+    return agent_files
+
+
+def _normalize_agent_filename(source_file: Path) -> Path:
+    """Normalize single-agent and claude-prefixed files for internal processing.
+    
+    - Bare agent.md and CLAUDE.md (case-insensitive) become default.agent.md
+      internally, generating function name 'default'.
+    - Files matching *.claude.md (e.g., report.claude.md) become *.agent.md
+      (e.g., report.agent.md), preserving the prefix for function naming.
+    """
+    filename = source_file.name
+    lower_filename = filename.lower()
+    
+    # Handle single-agent files (bare agent.md or CLAUDE.md) — alias for main.agent.md
+    if _is_single_agent_file(filename):
+        return source_file.with_name("main.agent.md")
+    
+    # Handle *.claude.md pattern (e.g., report.claude.md → report.agent.md)
+    if lower_filename.endswith(".claude.md"):
+        # Preserve the prefix, just change .claude.md to .agent.md
+        prefix = filename[:-len(".claude.md")]
+        return source_file.with_name(f"{prefix}.agent.md")
+
+    # Normalize mixed-case *.agent.md suffix (e.g., report.AGENT.md → report.agent.md)
+    if lower_filename.endswith(".agent.md") and not filename.endswith(".agent.md"):
+        prefix = filename[:-len(".agent.md")]
+        return source_file.with_name(f"{prefix}.agent.md")
+
+    return source_file
 
 
 def _format_action_items(items: tuple[str, ...]) -> str:
@@ -88,10 +144,18 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     else:
         instructions = post.content
 
+    # Resolve once to avoid redundant filesystem calls
+    resolved_source = source_file.resolve()
+    # Normalize bare agent.md → default.agent.md for internal processing
+    normalized_file = _normalize_agent_filename(resolved_source)
+
     normalized["substitute_variables"] = substitute_variables
     normalized["instructions"] = instructions
-    normalized["source_file"] = str(source_file.resolve())
-    normalized["is_main"] = source_file.name == "main.agent.md"
+    # Keep the real on-disk path so diagnostics reference the file the user can actually edit
+    normalized["source_file"] = str(resolved_source)
+    # agent.md and CLAUDE.md (and their case variants) are aliases for main.agent.md;
+    # check the normalized name to determine main-agent status
+    normalized["is_main"] = normalized_file.name.lower() == "main.agent.md"
 
     try:
         return AgentSpec.model_validate(normalized)
@@ -160,24 +224,37 @@ def _resolve_agents_dir(app_root: Path) -> Path | None:
 
 
 def load_agent_specs(app_root: Path, strict: bool = False) -> list[AgentSpec]:
-    """Read every *.agent.md in app_root and agents/ folder, return AgentSpec values.
+    """Read every *.agent.md and *.claude.md in app_root and agents/ folder, return AgentSpec values.
 
-    Searches for agent markdown files in two locations:
-    1. Top-level: ``{app_root}/*.agent.md``
-    2. Agents folder: ``{app_root}/agents/*.agent.md`` (case-insensitive)
+    Searches for agent markdown files in these locations:
+    1. Top-level: ``{app_root}/*.agent.md`` and ``{app_root}/*.claude.md`` (case-insensitive)
+    2. Top-level single-agent: ``{app_root}/agent.md`` or ``{app_root}/CLAUDE.md`` (case-insensitive)
+    3. Agents folder: ``{app_root}/agents/*.agent.md`` and ``{app_root}/agents/*.claude.md`` (case-insensitive)
+    4. Agents folder single-agent: ``{app_root}/agents/agent.md`` or ``{app_root}/agents/CLAUDE.md``
 
-    Files from both locations are combined and sorted by path for deterministic
+    Single-agent files (agent.md and CLAUDE.md, case-insensitive) are internally
+    normalized to default.agent.md for function name generation, producing 'default'
+    as the function name.
+    
+    Files matching *.claude.md pattern are normalized to *.agent.md, preserving the
+    prefix for function naming (e.g., report.claude.md → report.agent.md → 'report').
+    
+    Suffix matching (.agent.md and .claude.md) is case-insensitive, supporting files
+    like report.AGENT.md or summary.CLAUDE.md.
+
+    Files from all locations are combined and sorted by path for deterministic
     ordering. This allows customers to organize agents in a dedicated folder
     while maintaining backward compatibility with top-level agents.
     """
     root = Path(app_root).resolve()
     specs: list[AgentSpec] = []
 
-    # Collect agent files from both top-level and agents/ folder
-    agent_files: list[Path] = list(root.glob("*.agent.md"))
+    # Collect agent files from both top-level and agents/ folder in a single pass each
+    agent_files: list[Path] = _collect_agent_files(root)
+
     agents_dir = _resolve_agents_dir(root)
     if agents_dir is not None:
-        agent_files.extend(agents_dir.glob("*.agent.md"))
+        agent_files.extend(_collect_agent_files(agents_dir))
 
     for source_file in sorted(agent_files):
         try:
