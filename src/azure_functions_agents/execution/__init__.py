@@ -16,6 +16,7 @@ from .binding import AgentBinding
 from .compat import (
     collect_terminal_run,
     render_sse_event,
+    run_to_agent_result,
     split_runner_call,
     status_to_agent_result,
 )
@@ -41,6 +42,7 @@ __all__ = [
     "collect_terminal_run",
     "create_execution_backend",
     "render_sse_event",
+    "run_to_agent_result",
     "split_runner_call",
     "status_to_agent_result",
 ]

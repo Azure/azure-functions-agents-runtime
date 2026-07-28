@@ -68,6 +68,19 @@ async def collect_terminal_run(
     return await backend.get_run(context), events
 
 
+async def run_to_agent_result(
+    backend: AgentExecutionBackend,
+    request: StartRunRequest,
+) -> AgentResult:
+    """Run a request through the lifecycle and adapt its terminal result."""
+    handle = await backend.start_run(request)
+    status, events = await collect_terminal_run(
+        backend,
+        RunContext(run_id=handle.run_id, session_id=handle.session_id),
+    )
+    return status_to_agent_result(status, events)
+
+
 def status_to_agent_result(status: RunStatus, events: list[RunEvent]) -> AgentResult:
     """Map a successful lifecycle result to the legacy direct-runner result."""
     if status.state != "succeeded" or status.result is None:

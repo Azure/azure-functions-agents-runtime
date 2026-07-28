@@ -23,8 +23,7 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
-from ..execution.backend import RunContext
-from ..execution.compat import collect_terminal_run, split_runner_call, status_to_agent_result
+from ..execution.compat import run_to_agent_result, split_runner_call
 from ..execution.factory import create_execution_backend
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
@@ -204,12 +203,7 @@ def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
     request, binding = split_runner_call(args, kwargs, stream=False)
     backend = create_execution_backend(binding=binding)
-    handle = await backend.start_run(request)
-    status, events = await collect_terminal_run(
-        backend,
-        RunContext(run_id=handle.run_id, session_id=handle.session_id),
-    )
-    return status_to_agent_result(status, events)
+    return await run_to_agent_result(backend, request)
 
 
 def _request_header_value(req: Request, header_name: str) -> str | None:

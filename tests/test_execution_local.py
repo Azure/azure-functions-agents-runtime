@@ -30,6 +30,7 @@ from azure_functions_agents.execution import (
     collect_terminal_run,
     create_execution_backend,
     render_sse_event,
+    run_to_agent_result,
     status_to_agent_result,
 )
 from azure_functions_agents.execution.local import LocalExecutionBackend
@@ -547,6 +548,39 @@ class _RecordingBackend:
 
     async def cancel_run(self, context: RunContext) -> RunStatus:
         return await self.get_run(context)
+
+
+def test_run_to_agent_result_adapts_terminal_lifecycle() -> None:
+    backend = _RecordingBackend(
+        RunResult(
+            content="answer",
+            content_intermediate=["partial"],
+            tool_calls=[{"tool_name": "lookup"}],
+            reasoning="because",
+            delegate_error_count=1,
+        ),
+        [RunEvent(1, "message", {"content": "answer"}, datetime.now(UTC))],
+    )
+
+    result = asyncio.run(
+        run_to_agent_result(
+            backend,
+            StartRunRequest(prompt="hello", session_id="session-1", timeout=60.0),
+        )
+    )
+
+    assert backend.requests == [
+        StartRunRequest(prompt="hello", session_id="session-1", timeout=60.0)
+    ]
+    assert result == AgentResult(
+        session_id="session-1",
+        content="answer",
+        content_intermediate=["partial"],
+        tool_calls=[{"tool_name": "lookup"}],
+        reasoning="because",
+        events=[{"type": "message", "content": "answer"}],
+        delegate_error_count=1,
+    )
 
 
 @pytest.mark.parametrize("module", [endpoints, _handlers])

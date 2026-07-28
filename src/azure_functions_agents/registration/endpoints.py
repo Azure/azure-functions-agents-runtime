@@ -19,10 +19,9 @@ from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..execution.backend import RunContext
 from ..execution.compat import (
-    collect_terminal_run,
     render_sse_event,
+    run_to_agent_result,
     split_runner_call,
-    status_to_agent_result,
 )
 from ..execution.factory import create_execution_backend
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
@@ -56,12 +55,7 @@ def _format_exception_message(exc: Exception) -> str:
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
     request, binding = split_runner_call(args, kwargs, stream=False)
     backend = create_execution_backend(binding=binding)
-    handle = await backend.start_run(request)
-    status, events = await collect_terminal_run(
-        backend,
-        RunContext(run_id=handle.run_id, session_id=handle.session_id),
-    )
-    return status_to_agent_result(status, events)
+    return await run_to_agent_result(backend, request)
 
 
 def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
