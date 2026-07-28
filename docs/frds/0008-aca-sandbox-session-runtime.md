@@ -808,7 +808,13 @@ Invariants: no anonymous ingress; no ingress ports; one active run; free slot on
 * **P6:** atomic commit, readiness, watchdog, reconciler, crash injection, result retention, Table/platform divergence, snapshot pruning, disk/OOM, clock skew, drain while stopped.
 * **P7:** image build/register/boot; stdlib bootstrap/ABI and golden conformance every CI; fail-closed capability/ABI/protocol/digest/workflow/execute-python/ingress cases.
 * **P8:** egress compiler and delegation; ordering, unsafe defaults, three credential sources, identity-less negatives, redirect/SSRF, union/depth/cycle/failure behavior.
-* **P9:** pre-provisioned-group full E2E, egress decisions, reserved OBO seam only, 100-concurrent/load and payload gates.
+* **P9:** pre-provisioned-group full E2E, egress decisions, reserved OBO seam only,
+  100-concurrent/load and payload gates. File transport is accepted only if p95
+  status/event visibility is <=2 seconds while polling is <=1/s per active stream,
+  cancellation/lifecycle repair work reliably, and cost/throttling is acceptable at
+  100 concurrent runs. A failed or regressed condition, or a default-quota shortfall,
+  is an acceptance finding requiring authenticated private-ingress and/or
+  load-shaping review; anonymous ingress is never a fallback.
 
 Every phase also runs ruff, strict mypy, pytest, observability/redaction and docs slice. Tests include contract and golden traces, scenario fixtures, Azurite races, stub transport eviction/lag, architecture guard, crash injection, security negatives, and real ACA e2e (thin P4a onward; full/load P9).
 
@@ -872,6 +878,8 @@ session_runtime:
 * Disk is a customer-IaC-pinned generic MAF-conformant harness image. Content is controller-captured from script root at session start and delivered over the transport; it is not a Run-From-Package or Blob artifact. A custom image is IaC-plane only and must remain MAF-conformant.
 * Egress is derived from existing MCP URLs, `web_request.allowed_hosts`, model endpoint, telemetry, and future broker—not a new field. The sandbox’s outbound auth is injected by the external egress proxy (managed-identity Transform preferred; group Secrets/Key Vault/static-secret fallback); it must not use `DefaultAzureCredential`/IMDS. Local in-process behavior remains unchanged.
 * Deployment supplies the dedicated `AzureFunctionsAgentsStateStorage` trust anchor in production: Table + container, Shared Key disabled and scoped RBAC. There is no Key Vault signing-key validation.
+* Compatibility: the legacy `runtime:` frontmatter key remains ignored and is not
+  reused for `aca_sandbox`.
 
 ##### Matrix: `aca_sandbox` startup/configuration behavior
 
@@ -975,6 +983,13 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 ##### SSE and connection behavior
 
 * `/chatstream` preserves semantic event vocabulary, but the polled journal emits replayable chunks at <=2-second p95 rather than token-level timing. Conformance asserts event type/order/key fields/terminal status, not exact wording or token timing.
+* The file transport is conditionally accepted only if it achieves <=2-second p95
+  status/event visibility while polling <=1/s per active stream, reliable
+  cancellation, failure-time lifecycle repair, and acceptable cost/throttling at
+  100 concurrent runs. Any failed/regressed condition makes authenticated private
+  ingress a v1 prerequisite; anonymous ingress is never a fallback. Default-preview
+  quota shortfall is an acceptance finding that triggers private-ingress and/or
+  load-shaping review rather than reopening the customer-residency decision.
 * Before `200`/SSE headers flush, input/auth failures use normal HTTP codes. After start, failures and timeout are named in-band terminal `error` SSE frames containing the unary-equivalent `error`/`state`, then close.
 * `/events` accepts `Last-Event-ID`; each frame has a monotonic `id`. Retention is last 16 × 1 MiB event segments per run. If the cursor predates that window, emit named `event: snapshot-restart` with reason `last-event-id-evicted`, `earliest_available_event_id`, and authoritative `status.json`/`result.json`. Client reconciles status/result, then reconnects with `Last-Event-ID: E-1` to avoid skipping E. This is the HTTP rendering of `EventCursorExpiredError` from `read_events`.
 * SSE is a bounded connection lease: send heartbeat comments, flush available data, and close gracefully before the ~230-second host ceiling. Client reattaches using `Last-Event-ID`. Normal close is not cancellation.
@@ -1049,6 +1064,22 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 * Analysis-only leading future candidate: keep Durable orchestration/controller registration unchanged and give sandbox tools a controller-mediated proxy for the five control operations. Controller performs Durable calls under its identity; sandbox holds no Durable client/credentials/extra egress. Candidate (b), controller callbacks for workflow steps in a live sandbox, is not recommended; it needs ingress/liveness coupling and replay idempotency. Candidate (c), local shim/MCP, weakens Durable parity/durability. Candidate (d) is v1 status quo.
 * If candidate (a) is implemented, it cannot be an unversioned journal convention. It requires a formally negotiated/versioned reverse-RPC capability through `protocol_version`/`ensure_ready`, e.g. `request_host_call(run_id, request_id, op, args)` and `deliver_host_call_result(run_id, request_id, payload)`, with idempotency, cancellation-while-pending, and reattach semantics. No seventh verb/bridge lands in v1.
 
+**Historical analysis-only trace (superseded as a v1 design):** the original
+compatibility analysis illustrated a proxy tool appending a typed
+`workflow_tool_call_requested` event with a `request_id`, tool name, and args to
+the run journal. The controller's existing event poll would recognize that type,
+invoke its own `durable_client`, then write the result to
+`runs/{run_id}/workflow_calls/{request_id}.json` through the established
+controller-to-sandbox file plane. The sandbox would wait by reading that local file,
+not by opening ingress or using egress. After a controller recycle, another
+controller could reattach through the existing event cursor, observe an unresolved
+request, and safely retry the Durable operation using `request_id` idempotency.
+The measured journal visibility plus a small file round-trip suggested roughly
+1–3 seconds of bridge overhead, excluding the Durable operation. This demonstrated
+why a future bridge need not be a persistent gRPC-style channel, but it does **not**
+approve an unversioned convention: the final rule above requires negotiated,
+versioned reverse RPC and keeps every bridge out of v1.
+
 #### 6. SDK-corrected contradictions / stale claims to remove
 
 1. **Lifecycle is not group-only.** Verified SDK exposes per-sandbox lifecycle at creation and `set_lifecycle_policy(LifecyclePolicy)`. Any older wording that says retention is group-scoped or that per-session override/re-arm needs an unproven API is obsolete. The per-sandbox create/re-arm design stands.
@@ -1071,4 +1102,4 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, all credential Transform sources, identity-less negative tests, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.
 * Harness: bootstrap ABI/protocol/digest failure, no anonymous ingress, workflows/code-interpreter fail-closed, semantic golden traces every CI, advertise capability only after exercised trace.
 * Delegation: static/single-level guard, cycle/depth guard, egress union, co-location/no second run, recoverable specialist failure, whole-chain sync timeout.
-* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, sandbox loss->410, egress deny/transform audit, 100-concurrent/load and large-payload gates. Every phase also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
+* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, sandbox loss->410, egress deny/transform audit, and 100-concurrent/load and large-payload gates. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every phase also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
