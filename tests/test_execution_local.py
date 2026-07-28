@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 
+import azure_functions_agents.execution.local as local_execution
+from azure_functions_agents import runner
 from azure_functions_agents.execution import (
     DEFAULT_EXECUTION_PROVIDER,
     AgentExecutionBackend,
@@ -24,20 +27,35 @@ async def _collect_stream(stream: AsyncIterator[str]) -> list[str]:
     return [event async for event in stream]
 
 
-def test_factory_returns_the_default_in_process_backend() -> None:
-    async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
-        return AgentResult(session_id="session-1", content="answer")
+def _install_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    run_agent: Any,
+    run_agent_stream: Any,
+) -> None:
+    runner_module = SimpleNamespace(run_agent=run_agent, run_agent_stream=run_agent_stream)
+    monkeypatch.setattr(local_execution, "import_module", lambda _: runner_module)
 
-    async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
-        yield "data: {\"type\": \"done\"}\n\n"
 
-    backend = create_execution_backend(fake_run_agent, fake_run_agent_stream)
+def test_factory_returns_the_default_in_process_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    import_calls: list[str] = []
+
+    def fail_if_runner_imported(name: str) -> Any:
+        import_calls.append(name)
+        raise AssertionError("runner should not be imported while resolving a backend")
+
+    monkeypatch.setattr(local_execution, "import_module", fail_if_runner_imported)
+    backend = create_execution_backend()
 
     assert DEFAULT_EXECUTION_PROVIDER == "in_process"
     assert isinstance(backend, LocalExecutionBackend)
+    assert import_calls == []
+    with pytest.raises(ValueError, match="Unsupported execution provider"):
+        create_execution_backend("unsupported")
 
 
-def test_local_backend_matches_runner_for_non_streaming_calls() -> None:
+def test_local_backend_matches_runner_for_non_streaming_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
@@ -55,9 +73,11 @@ def test_local_backend_matches_runner_for_non_streaming_calls() -> None:
     async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
         yield "data: {\"type\": \"done\"}\n\n"
 
+    _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+
     async def exercise() -> None:
         expected = await fake_run_agent("hello", model="test-model")
-        backend = LocalExecutionBackend(fake_run_agent, fake_run_agent_stream)
+        backend = LocalExecutionBackend()
         actual = await backend.run_agent("hello", model="test-model")
 
         assert actual == expected
@@ -69,7 +89,9 @@ def test_local_backend_matches_runner_for_non_streaming_calls() -> None:
     ]
 
 
-def test_local_backend_matches_runner_for_streaming_calls() -> None:
+def test_local_backend_matches_runner_for_streaming_calls(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
@@ -81,9 +103,11 @@ def test_local_backend_matches_runner_for_streaming_calls() -> None:
         yield "data: {\"type\": \"delta\", \"content\": \"answer\"}\n\n"
         yield "data: {\"type\": \"done\"}\n\n"
 
+    _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+
     async def exercise() -> None:
         expected = await _collect_stream(fake_run_agent_stream("hello", model="test-model"))
-        backend = LocalExecutionBackend(fake_run_agent, fake_run_agent_stream)
+        backend = LocalExecutionBackend()
         actual = await _collect_stream(backend.run_agent_stream("hello", model="test-model"))
 
         assert actual == expected
@@ -100,6 +124,7 @@ def test_local_backend_matches_runner_for_streaming_calls() -> None:
     [(3, (3, 4, 5), 3, 1)],
 )
 def test_local_backend_reuses_event_cursor_conformance_harness(
+    monkeypatch: pytest.MonkeyPatch,
     event_retention: int,
     retained_sequences: tuple[int, ...],
     earliest_available_sequence: int,
@@ -125,12 +150,10 @@ def test_local_backend_reuses_event_cursor_conformance_harness(
     async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
         yield "data: {\"type\": \"done\"}\n\n"
 
+    _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+
     async def exercise() -> None:
-        backend = LocalExecutionBackend(
-            fake_run_agent,
-            fake_run_agent_stream,
-            event_retention=event_retention,
-        )
+        backend = LocalExecutionBackend(event_retention=event_retention)
         assert isinstance(backend, AgentExecutionBackend)
         handle = await backend.start_run(
             StartRunRequest(
@@ -170,15 +193,26 @@ def test_local_backend_reuses_event_cursor_conformance_harness(
     asyncio.run(exercise())
 
 
-def test_local_backend_maps_runner_timeout_to_timed_out() -> None:
-    async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
-        raise RuntimeError("Agent run timed out after 60.0s")
+def test_local_backend_maps_runner_timeout_to_timed_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fake_build_agent_session_history(*args: Any, **kwargs: Any) -> tuple[Any, Any, str, None]:
+        return object(), object(), "session-1", None
 
-    async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
-        yield "data: {\"type\": \"done\"}\n\n"
+    monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
     async def exercise() -> None:
-        backend = LocalExecutionBackend(fake_run_agent, fake_run_agent_stream)
+        with pytest.raises(RuntimeError) as raised:
+            await runner.run_agent("hello", session_id="session-1", timeout=0.0)
+        timeout_error = raised.value
+        assert str(timeout_error).startswith(local_execution._RUNNER_TIMEOUT_PREFIX)
+
+        async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
+            raise timeout_error
+
+        async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+            yield "data: {\"type\": \"done\"}\n\n"
+
+        _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+        backend = LocalExecutionBackend()
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
 

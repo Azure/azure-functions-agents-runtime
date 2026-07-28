@@ -24,6 +24,7 @@ from .._observability import (
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..execution.factory import create_execution_backend
+from ..execution.local import LocalExecutionBackend
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
@@ -200,8 +201,7 @@ def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
-    runner_module = import_module("azure_functions_agents.runner")
-    backend = create_execution_backend(runner_module.run_agent, runner_module.run_agent_stream)
+    backend = cast(LocalExecutionBackend, create_execution_backend())
     return await backend.run_agent(*args, **kwargs)
 
 

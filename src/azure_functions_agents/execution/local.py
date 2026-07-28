@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator
 from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Any
+from importlib import import_module
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 from .backend import (
     EventCursorExpiredError,
@@ -25,11 +26,20 @@ from .backend import (
 if TYPE_CHECKING:
     from ..runner import AgentResult
 
-type _RunAgent = Callable[..., Awaitable[AgentResult]]
-type _RunAgentStream = Callable[..., AsyncIterator[str]]
+
+class _RunnerModule(Protocol):
+    async def run_agent(self, *args: Any, **kwargs: Any) -> AgentResult:
+        """Run a non-streaming agent call."""
+
+    def run_agent_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[str]:
+        """Create a streaming agent call."""
 
 _TERMINAL_STATES = frozenset({"succeeded", "failed", "canceled", "timed_out", "abandoned"})
 _RUNNER_TIMEOUT_PREFIX = "Agent run timed out after "
+
+
+def _load_runner_module() -> _RunnerModule:
+    return cast(_RunnerModule, import_module("azure_functions_agents.runner"))
 
 
 @dataclass
@@ -49,26 +59,22 @@ class LocalExecutionBackend:
 
     def __init__(
         self,
-        run_agent: _RunAgent,
-        run_agent_stream: _RunAgentStream,
         *,
         event_retention: int = 16,
     ) -> None:
         if event_retention < 1:
             raise ValueError("event_retention must be positive")
 
-        self._run_agent = run_agent
-        self._run_agent_stream = run_agent_stream
         self._event_retention = event_retention
         self._runs: dict[tuple[str, str], _LocalRun] = {}
 
     async def run_agent(self, *args: Any, **kwargs: Any) -> AgentResult:
         """Delegate a non-streaming call without changing its inputs or result."""
-        return await self._run_agent(*args, **kwargs)
+        return await _load_runner_module().run_agent(*args, **kwargs)
 
     def run_agent_stream(self, *args: Any, **kwargs: Any) -> AsyncIterator[str]:
         """Delegate a streaming call without changing its inputs or events."""
-        return self._run_agent_stream(*args, **kwargs)
+        return _load_runner_module().run_agent_stream(*args, **kwargs)
 
     async def start_run(self, request: StartRunRequest) -> RunHandle:
         """Create and begin an in-process run."""
