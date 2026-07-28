@@ -21,8 +21,8 @@ from azure_functions_agents.execution.backend import (
 )
 
 
-class _InMemoryBackend:
-    """Minimal conformance fake with a retained event window."""
+class InMemoryExecutionBackend:
+    """Reusable conformance fake with a retained event window."""
 
     def __init__(self, events: list[RunEvent], earliest_sequence: int) -> None:
         self._events = events
@@ -88,8 +88,8 @@ def _events() -> list[RunEvent]:
     ]
 
 
-def _started_backend() -> tuple[_InMemoryBackend, RunContext]:
-    backend = _InMemoryBackend(_events(), earliest_sequence=3)
+def _started_backend() -> tuple[InMemoryExecutionBackend, RunContext]:
+    backend = InMemoryExecutionBackend(_events(), earliest_sequence=3)
     handle = asyncio.run(
         backend.start_run(
             StartRunRequest(
@@ -103,12 +103,46 @@ def _started_backend() -> tuple[_InMemoryBackend, RunContext]:
     return backend, RunContext(run_id=handle.run_id, session_id=handle.session_id)
 
 
-async def _collect_events(
-    backend: _InMemoryBackend, context: RunContext, after_sequence: int
+async def collect_run_events(
+    backend: AgentExecutionBackend, context: RunContext, after_sequence: int
 ) -> list[RunEvent]:
     return [
         event async for event in backend.read_events(context=context, after_sequence=after_sequence)
     ]
+
+
+async def assert_event_cursor_conformance(
+    backend: AgentExecutionBackend,
+    context: RunContext,
+    *,
+    retained_sequences: tuple[int, ...],
+    earliest_available_sequence: int,
+    too_old_cursor: int,
+) -> None:
+    """Assert the shared exclusive-cursor guarantees for an event backend."""
+
+    assert retained_sequences
+    assert retained_sequences[0] == earliest_available_sequence
+    assert too_old_cursor < earliest_available_sequence - 1
+
+    assert [
+        event.sequence
+        for event in await collect_run_events(backend, context, after_sequence=0)
+    ] == list(retained_sequences)
+    assert [
+        event.sequence
+        for event in await collect_run_events(
+            backend, context, after_sequence=earliest_available_sequence - 1
+        )
+    ] == list(retained_sequences)
+    assert [
+        event.sequence
+        for event in await collect_run_events(
+            backend, context, after_sequence=earliest_available_sequence
+        )
+    ] == list(retained_sequences[1:])
+    with pytest.raises(EventCursorExpiredError):
+        await collect_run_events(backend, context, after_sequence=too_old_cursor)
 
 
 def test_contract_dataclasses_and_run_state_literals() -> None:
@@ -170,9 +204,13 @@ def test_in_memory_backend_satisfies_protocol_and_lifecycle() -> None:
 def test_in_memory_backend_cursor_conformance() -> None:
     backend, context = _started_backend()
 
-    assert [event.sequence for event in asyncio.run(_collect_events(backend, context, 0))] == [3, 4, 5]
-    assert [event.sequence for event in asyncio.run(_collect_events(backend, context, 2))] == [3, 4, 5]
-    assert [event.sequence for event in asyncio.run(_collect_events(backend, context, 3))] == [4, 5]
-    assert asyncio.run(_collect_events(backend, context, 5)) == []
-    with pytest.raises(EventCursorExpiredError):
-        asyncio.run(_collect_events(backend, context, 1))
+    asyncio.run(
+        assert_event_cursor_conformance(
+            backend,
+            context,
+            retained_sequences=(3, 4, 5),
+            earliest_available_sequence=3,
+            too_old_cursor=1,
+        )
+    )
+    assert asyncio.run(collect_run_events(backend, context, after_sequence=5)) == []
