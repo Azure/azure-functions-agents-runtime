@@ -337,6 +337,7 @@ and folds in the mirror job to hold the 2-min-p95 SLO. It is not a second timer.
 | 80 | Disk-image supply chain | External base-image/MCR publishing dependency / self-service OCI disk image | Build a bootable disk from any OCI image reference with `create_disk_image` / `begin_create_disk_image`; `SandboxClient.commit()` returns `DiskImage`. No base-image/MCR publishing dependency blocks the feature. | SDK verification pass | 2026-07-28 | SDK verification |
 | 81 | Stateless controller recovery | Retain live SDK client in Functions worker / reconstruct client from persisted identity | Persist `sandbox_id` and construct `SandboxClient` directly after a Functions recycle; a group client helper is only a convenience. | SDK verification pass | 2026-07-28 | SDK verification |
 | 82 | Preview SDK containment | Distribute SDK use / pinned adapter firewall | Pin preview/beta `azure-containerapps-sandbox==0.1.0b4`, confine every SDK symbol to `transport/aca_sdk.py`, keep production free of test doubles, and run real ACA smoke from the first adapter phase. | SDK verification pass | 2026-07-28 | SDK verification |
+| 83 | Execution event-stream Protocol signature | `async def read_events(...) -> AsyncIterator` / `def read_events(...) -> AsyncIterator` | Declare `read_events` as a non-async Protocol method returning `AsyncIterator[RunEvent]`; implementations may be async generators. An `async def` Protocol stub without `yield` instead describes a coroutine returning an iterator. A type-only structural conformance guard prevents regression. | P0 type-check verification | 2026-07-28 | P0 contract correction |
 
 ## 6. Test plan, docs impact & rollout (cross-cutting)
 
@@ -573,7 +574,7 @@ superseded by the controlling SDK contract and Decisions 71–82 above.
 class AgentExecutionBackend(Protocol):
     async def start_run(self, request: StartRunRequest) -> RunHandle: ...
     async def get_run(self, context: RunContext) -> RunStatus: ...
-    async def read_events(self, context: RunContext, after_sequence: int) -> AsyncIterator[RunEvent]: ...
+    def read_events(self, context: RunContext, after_sequence: int) -> AsyncIterator[RunEvent]: ...
     async def cancel_run(self, context: RunContext) -> RunStatus: ...
 ```
 
@@ -716,11 +717,24 @@ Cursor is an exclusive lower bound: zero begins history; after a restart at earl
 
 The controller-only six-verb transport is `submit`, `get_status`, `read_events`, `get_result`, `cancel`, `ensure_ready`. It is file/data-plane based, connectionless, has no sandbox ingress, and is replaceable only behind this port. All submissions use the same detached `setsid`/`nohup` entrypoint; acceptance returns only after the harness atomically journals `accepted`, avoiding the SDK exec read ceiling. Duplicate controller-generated `run_id` atomically returns existing status rather than launching a second process.
 
+```text
+submit(run_id, envelope)                 -> accepted     # idempotent on duplicate run_id
+get_status(run_id)                       -> state         # v1: sandbox while alive, else Tables
+read_events(run_id, since=Last-Event-ID) -> [events] | snapshot-restart
+get_result(run_id)                       -> result | result-evicted
+cancel(run_id)                           -> terminal     # forced-terminal on timeout
+ensure_ready(sandbox)                    -> ok           # resume + manifest handshake
+```
+
 ```
 /var/lib/azure-functions-agents/
   protocol.json
-  session/manifest.json
-  session/content/                 # captured package + digest; large-payload path
+  session/
+    manifest.json
+    content/                       # captured package + digest; large-payload path
+      app.zip
+      app.sha256
+    checkpoints/                   # committed turn state survives harness crash
   inbox/{run_id}.json              # <=4 MiB
   runs/{run_id}/
     status.json                    # non-rotating, authoritative while sandbox exists
@@ -883,21 +897,21 @@ session_runtime:
 
 ##### Matrix: `aca_sandbox` startup/configuration behavior
 
-| # | Condition | Required result |
-|---|---|---|
-| 1 | `harness` is set and not `maf` | Fail startup: only MAF is supported. |
-| 2 | `workflows.enabled: true` | Fail startup; Dynamic Workflows are incompatible in v1. |
-| 3 | Dynamic Sessions code-interpreter configured | Fail startup; unsupported with ACA in v1. |
-| 4 | Agent is bound to a non-HTTP trigger | Fail startup; ACA is HTTP-only in v1. |
-| 5 | Missing/empty `sandbox_group_resource_id` | Fail startup. |
-| 6 | State account permits Shared Key or RBAC is not scoped | Required two-plane trust preflight fails. |
-| 7 | Production uses `AzureWebJobsStorage` rather than dedicated `AzureFunctionsAgentsStateStorage` | Required two-plane preflight fails; WebJobs storage is dev/preview only. |
-| 8 | Neither function-key nor Easy Auth/Entra Functions authentication is configured | Fail startup; some valid Functions auth is mandatory, but Entra-only is not. |
-| 9 | `auto_suspend_idle` is not 60/120/300/600/1800/3600 seconds | Fail startup. |
-| 10 | `reclaim_idle` is non-positive or not strictly greater than `auto_suspend_idle` | Fail startup. |
-| 11 | `retention` is set for a provider other than `aca_sandbox` | Fail startup. |
-| 12 | Functions app is not Linux x86_64 Python 3.13/3.14 | Fail startup; no in-sandbox ABI rebuild/fallback. Flex Consumption, Premium Linux, or Dedicated Linux is required in practice; Linux Consumption tops out at 3.12. |
-| 13 | `reclaim_idle > auto_delete - cadence - grace` | **Always fail startup/configuration** because SDK `AutoDeletePolicy.delete_interval_seconds` is readable. Use seconds; comparison is inclusive, so fail only on strict `>`. `cadence` is configured v1 reaper cadence (~1 h default), and `grace` defaults to ~300 s. |
+| # | Condition | Required result | Owning rule |
+|---|---|---|---|
+| 1 | `harness` is set and not `maf` | Fail startup: only MAF is supported. | 0008.7 #34/#36 |
+| 2 | `workflows.enabled: true` | Fail startup; Dynamic Workflows are incompatible in v1. | 0008.7 #36 |
+| 3 | Dynamic Sessions code-interpreter configured | Fail startup; unsupported with ACA in v1. | 0008.7 #36 |
+| 4 | Agent is bound to a non-HTTP trigger | Fail startup; ACA is HTTP-only in v1. | Parent / FRD 0009 |
+| 5 | Missing/empty `sandbox_group_resource_id` | Fail startup. | 0008.10 |
+| 6 | State account permits Shared Key or RBAC is not scoped | Required two-plane trust preflight fails. | 0008.3 (runtime) + 0008.10 (config) |
+| 7 | Production uses `AzureWebJobsStorage` rather than dedicated `AzureFunctionsAgentsStateStorage` | Required two-plane trust preflight fails; WebJobs storage is dev/preview only. | 0008.3 #31 (runtime) + 0008.10 (config) |
+| 8 | Neither function-key nor Easy Auth/Entra Functions authentication is configured | Fail startup; some valid Functions auth is mandatory, but Entra-only is not. | 0008.2 (method-agnostic) |
+| 9 | `auto_suspend_idle` is not 60/120/300/600/1800/3600 seconds | Fail startup. | 0008.10 + 0008.12 |
+| 10 | `reclaim_idle` is non-positive or not strictly greater than `auto_suspend_idle` | Fail startup. | 0008.10 + 0008.12 |
+| 11 | `retention` is set for a provider other than `aca_sandbox` | Fail startup. | 0008.10 |
+| 12 | Functions app is not Linux x86_64 Python 3.13/3.14 | Fail startup; no in-sandbox ABI rebuild/fallback. Flex Consumption, Premium Linux, or Dedicated Linux is required in practice; Linux Consumption tops out at 3.12. | 0008.7 (ABI) + 0008.10 (config) |
+| 13 | `reclaim_idle > auto_delete - cadence - grace` | **Always fail startup/configuration** because SDK `AutoDeletePolicy.delete_interval_seconds` is readable. Use seconds; comparison is inclusive, so fail only on strict `>`. `cadence` is configured v1 reaper cadence (~1 h default), and `grace` defaults to ~300 s. | 0008.12 (inequality + terms) + 0008.10 (config) |
 
 Absence of `session_runtime` is valid and selects `in_process`; none of these ACA rows apply. Rows 1–12 are fail-closed. The old row-13 “cannot read backstop => warn and runtime clamp” fallback is invalidated by SDK verification and must not be implemented.
 
@@ -1079,6 +1093,12 @@ The measured journal visibility plus a small file round-trip suggested roughly
 why a future bridge need not be a persistent gRPC-style channel, but it does **not**
 approve an unversioned convention: the final rule above requires negotiated,
 versioned reverse RPC and keeps every bridge out of v1.
+
+The full Dynamic Workflows incompatibility analysis and candidate deep-dive remain
+in git history at
+`docs/frds/0008.14-dynamic-workflows-aca-compat.md` on branch
+`larohra/frd-0008-aca-sandbox-session-runtime`; it is a historical reference, not
+an enabled v1 surface.
 
 #### 6. SDK-corrected contradictions / stale claims to remove
 
