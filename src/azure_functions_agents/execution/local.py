@@ -12,6 +12,7 @@ from importlib import import_module
 from typing import Any, Protocol
 from uuid import uuid4
 
+from .._logger import logger
 from .backend import (
     EventCursorExpiredError,
     RunContext,
@@ -46,6 +47,7 @@ class _LocalRun:
     status: RunStatus
     events: list[RunEvent]
     task: asyncio.Task[None] | None = None
+    terminalizer_task: asyncio.Task[None] | None = None
     next_sequence: int = 1
 
 
@@ -81,7 +83,9 @@ class LocalExecutionBackend:
         run = _LocalRun(request=request, session_id=session_id, status=status, events=[])
         async with self._condition:
             self._runs[run_id] = run
-            run.task = asyncio.create_task(self._execute_run(run))
+            task = asyncio.create_task(self._execute_run(run))
+            task.add_done_callback(lambda completed: self._ensure_task_terminal(run, completed))
+            run.task = task
         return RunHandle(
             run_id=run_id,
             session_id=session_id,
@@ -158,6 +162,7 @@ class LocalExecutionBackend:
                     message=_exception_message(exc),
                 )
             else:
+                logger.exception("Agent run failed")
                 await self._record_failure(
                     run,
                     state="failed",
@@ -173,12 +178,15 @@ class LocalExecutionBackend:
                 fault_domain="app",
             )
         except Exception as exc:
+            logger.exception("Agent run failed")
             await self._record_failure(
                 run,
                 state="failed",
                 code="run_failed",
                 message=_exception_message(exc),
             )
+        finally:
+            await self._record_terminal_status(run, "abandoned")
 
     async def _execute_standard(self, run: _LocalRun) -> None:
         runner_module = self._load_runner_module()
@@ -243,7 +251,7 @@ class LocalExecutionBackend:
                 message=stream_error.message,
             )
             return
-        await self._record_success(run, _stream_result(run.events))
+        await self._record_success(run)
 
     async def _append_event(
         self,
@@ -252,27 +260,35 @@ class LocalExecutionBackend:
         data: dict[str, object],
     ) -> None:
         async with self._condition:
-            event = RunEvent(
-                sequence=run.next_sequence,
-                type=event_type,
-                data=data,
-                timestamp=datetime.now(UTC),
-            )
-            run.next_sequence += 1
-            run.events.append(event)
-            if self._event_retention is not None and len(run.events) > self._event_retention:
-                del run.events[: len(run.events) - self._event_retention]
-            run.status = replace(run.status, last_sequence=event.sequence)
+            self._append_event_locked(run, event_type, data)
             self._condition.notify_all()
 
-    async def _record_success(self, run: _LocalRun, result: RunResult) -> None:
+    def _append_event_locked(
+        self,
+        run: _LocalRun,
+        event_type: str,
+        data: dict[str, object],
+    ) -> None:
+        event = RunEvent(
+            sequence=run.next_sequence,
+            type=event_type,
+            data=data,
+            timestamp=datetime.now(UTC),
+        )
+        run.next_sequence += 1
+        run.events.append(event)
+        if self._event_retention is not None and len(run.events) > self._event_retention:
+            del run.events[: len(run.events) - self._event_retention]
+        run.status = replace(run.status, last_sequence=event.sequence)
+
+    async def _record_success(self, run: _LocalRun, result: RunResult | None = None) -> None:
         async with self._condition:
             run.status = RunStatus(
                 run_id=run.status.run_id,
                 session_id=run.session_id,
                 state="succeeded",
                 last_sequence=run.next_sequence - 1,
-                result_available=True,
+                result_available=result is not None,
                 result=result,
             )
             self._condition.notify_all()
@@ -289,6 +305,8 @@ class LocalExecutionBackend:
         async with self._condition:
             if run.status.state in _TERMINAL_STATES:
                 return
+            if self._stream_events and not _ends_with_terminal_event(run.events):
+                self._append_event_locked(run, "error", {"content": message})
             run.status = RunStatus(
                 run_id=run.status.run_id,
                 session_id=run.session_id,
@@ -299,10 +317,34 @@ class LocalExecutionBackend:
             )
             self._condition.notify_all()
 
+    def _ensure_task_terminal(self, run: _LocalRun, task: asyncio.Future[None]) -> None:
+        if task.cancelled():
+            state: RunState = "canceled"
+        else:
+            failure = task.exception()
+            if failure is None:
+                return
+            logger.error(
+                "Agent execution task exited unexpectedly",
+                exc_info=(type(failure), failure, failure.__traceback__),
+            )
+            state = "abandoned"
+        run.terminalizer_task = asyncio.create_task(self._record_terminal_status(run, state))
+
     async def _record_terminal_status(self, run: _LocalRun, state: RunState) -> None:
         async with self._condition:
             if run.status.state in _TERMINAL_STATES:
                 return
+            if (
+                self._stream_events
+                and state != "canceled"
+                and not _ends_with_terminal_event(run.events)
+            ):
+                self._append_event_locked(
+                    run,
+                    "error",
+                    {"content": f"agent run ended in state {state}"},
+                )
             run.status = RunStatus(
                 run_id=run.status.run_id,
                 session_id=run.session_id,
@@ -333,6 +375,10 @@ class LocalExecutionBackend:
         return import_module("azure_functions_agents.runner")
 
 
+def _ends_with_terminal_event(events: list[RunEvent]) -> bool:
+    return bool(events) and events[-1].type in {"done", "error"}
+
+
 def _parse_sse_chunk(chunk: str) -> tuple[str, dict[str, object]]:
     if not chunk.startswith("data: ") or not chunk.endswith("\n\n"):
         raise RuntimeError("runner stream emitted an invalid SSE chunk")
@@ -343,38 +389,6 @@ def _parse_sse_chunk(chunk: str) -> tuple[str, dict[str, object]]:
     if not isinstance(event_type, str):
         raise RuntimeError("runner stream emitted an SSE payload without a string type")
     return event_type, payload
-
-
-def _stream_result(events: list[RunEvent]) -> RunResult:
-    content_parts: list[str] = []
-    intermediate: list[str] = []
-    tool_calls: list[dict[str, object]] = []
-
-    for event in events:
-        if event.type in {"delta", "message"}:
-            content = event.data.get("content")
-            if isinstance(content, str):
-                content_parts.append(content)
-        elif event.type == "intermediate":
-            content = event.data.get("content")
-            if isinstance(content, str):
-                intermediate.append(content)
-        elif event.type == "tool_start":
-            tool_calls.append({"type": event.type, **event.data})
-        elif event.type == "tool_end":
-            call_id = event.data.get("tool_call_id")
-            for tool_call in reversed(tool_calls):
-                if tool_call.get("tool_call_id") == call_id:
-                    tool_call["result"] = event.data.get("result")
-                    break
-
-    return RunResult(
-        content="".join(content_parts),
-        content_intermediate=intermediate,
-        tool_calls=tool_calls,
-        reasoning=None,
-        delegate_error_count=0,
-    )
 
 
 def _exception_message(exc: Exception) -> str:

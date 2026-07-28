@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import inspect
+import logging
 import os
 import subprocess
 import sys
@@ -96,6 +98,17 @@ def test_factory_returns_the_default_in_process_backend(monkeypatch: pytest.Monk
     assert import_calls == []
     with pytest.raises(ValueError, match="Unsupported execution provider"):
         create_execution_backend(binding=_binding(), provider="unsupported")
+
+
+@pytest.mark.parametrize(
+    ("runner_function", "stream"),
+    [(runner.run_agent, False), (runner.run_agent_stream, True)],
+)
+def test_agent_binding_matches_runner_keyword_contract(runner_function: Any, stream: bool) -> None:
+    runner_keywords = set(inspect.signature(runner_function).parameters)
+    runner_keywords -= {"prompt", "session_id", "timeout"}
+
+    assert set(_binding().runner_kwargs(stream=stream)) == runner_keywords
 
 
 def test_registration_import_defers_runner_loading() -> None:
@@ -247,6 +260,8 @@ def test_local_backend_stream_round_trips_real_runner_sse_bytes(
         assert actual == expected
         status = await backend.get_run(context)
         assert status.state == "succeeded"
+        assert status.result_available is False
+        assert status.result is None
 
     asyncio.run(exercise())
 
@@ -406,6 +421,101 @@ def test_local_backend_preserves_runner_value_errors(monkeypatch: pytest.MonkeyP
     asyncio.run(exercise())
 
 
+def test_local_backend_terminalizes_unexpected_base_exceptions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedBaseFailure(BaseException):
+        pass
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
+        raise UnexpectedBaseFailure("unexpected base failure")
+
+    async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+
+    async def exercise() -> None:
+        backend = LocalExecutionBackend(_binding())
+        handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
+        context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
+
+        status = await asyncio.wait_for(_wait_for_terminal(backend, context), timeout=1.0)
+
+        assert status.state == "abandoned"
+
+    asyncio.run(exercise())
+
+
+def test_local_backend_streaming_base_exception_emits_terminal_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class UnexpectedBaseFailure(BaseException):
+        pass
+
+    allow_failure = asyncio.Event()
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
+        raise AssertionError("streaming backend must not invoke run_agent")
+
+    async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+        yield "data: {\"type\": \"delta\", \"content\": \"partial\"}\n\n"
+        await allow_failure.wait()
+        raise UnexpectedBaseFailure("unexpected base failure")
+
+    _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+
+    async def exercise() -> None:
+        backend = LocalExecutionBackend(_binding(), stream_events=True)
+        handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
+        context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
+        reader = backend.read_events(context, after_sequence=0)
+
+        first_event = await anext(reader)
+        allow_failure.set()
+        events = [first_event, *[event async for event in reader]]
+        status = await backend.get_run(context)
+
+        assert [event.type for event in events] == ["delta", "error"]
+        assert events[-1].data == {"content": "agent run ended in state abandoned"}
+        assert status.state == "abandoned"
+
+    asyncio.run(exercise())
+
+
+def test_local_backend_logs_original_runner_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    class RunnerError(Exception):
+        pass
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
+        raise RunnerError("runner root cause")
+
+    async def fake_run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+        yield "data: {\"type\": \"done\"}\n\n"
+
+    _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
+
+    async def exercise() -> RunStatus:
+        backend = LocalExecutionBackend(_binding())
+        handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
+        context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
+        return (await collect_terminal_run(backend, context))[0]
+
+    with caplog.at_level(logging.ERROR, logger="azure.functions.AgentRuntime"):
+        status = asyncio.run(exercise())
+
+    assert status.state == "failed"
+    assert any(
+        record.message == "Agent run failed"
+        and record.exc_info is not None
+        and isinstance(record.exc_info[1], RunnerError)
+        for record in caplog.records
+    )
+
+
 class _RecordingBackend:
     def __init__(self, result: RunResult, events: list[RunEvent]) -> None:
         self._result = result
@@ -547,6 +657,27 @@ def test_registration_stream_wrapper_uses_lifecycle_events(monkeypatch: pytest.M
         "data: {\"type\": \"delta\", \"content\": \"answer\"}\n\n",
         "data: {\"type\": \"done\"}\n\n",
     ]
+
+
+def test_registration_stream_emits_terminal_error_for_backend_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_runner_import(_name: str) -> Any:
+        raise RuntimeError("runner unavailable")
+
+    monkeypatch.setattr(local_execution, "import_module", fail_runner_import)
+
+    result = asyncio.run(
+        _collect_stream(
+            endpoints._run_agent_stream(
+                "hello",
+                session_id="session-1",
+                timeout=60.0,
+            )
+        )
+    )
+
+    assert result == ['data: {"type": "error", "content": "runner unavailable"}\n\n']
 
 
 def test_harness_guard_rejects_controller_process(monkeypatch: pytest.MonkeyPatch) -> None:
