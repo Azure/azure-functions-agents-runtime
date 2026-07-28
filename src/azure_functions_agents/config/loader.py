@@ -45,7 +45,11 @@ def _collect_agent_files(directory: Path) -> list[Path]:
         if md_file.name.startswith("."):
             continue  # skip hidden/dotfiles (iterdir() unlike glob doesn't exclude them)
         lower_name = md_file.name.lower()
-        if lower_name in ("agent.md", "claude.md") or lower_name.endswith((".agent.md", ".claude.md")):
+        # _is_single_agent_file covers bare "agent.md"/"claude.md".  These do NOT
+        # satisfy endswith(".agent.md"/".claude.md") because the dot-prefixed suffix
+        # (9/10 chars) is longer than the bare name (8/9 chars), so both branches
+        # are needed.
+        if _is_single_agent_file(md_file.name) or lower_name.endswith((".agent.md", ".claude.md")):
             agent_files.append(md_file)
     return agent_files
 
