@@ -23,6 +23,8 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..execution.compat import run_to_agent_result, split_runner_call
+from ..execution.factory import create_execution_backend
 from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
@@ -199,8 +201,9 @@ def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
-    runner_module = import_module("azure_functions_agents.runner")
-    return await runner_module.run_agent(*args, **kwargs)
+    request, binding = split_runner_call(args, kwargs, stream=False)
+    backend = create_execution_backend(binding=binding)
+    return await run_to_agent_result(backend, request)
 
 
 def _request_header_value(req: Request, header_name: str) -> str | None:

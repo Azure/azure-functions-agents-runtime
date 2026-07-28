@@ -1,8 +1,9 @@
 """Agent execution layer — runs prompts through the Microsoft Agent Framework.
 
 This module is the single entry point for "execute a prompt against an agent".
-Both the HTTP chat endpoints and triggered-agent handlers go through
-:func:`run_agent` (one-shot) or :func:`run_agent_stream` (SSE).
+The execution backend invokes :func:`run_agent` (one-shot) or
+:func:`run_agent_stream` (SSE) after registration has bound the agent's
+live configuration.
 
 Architecture
 ------------
@@ -61,7 +62,6 @@ import contextlib
 import json
 import sys
 from collections.abc import AsyncIterator
-from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -86,12 +86,12 @@ from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
+from .execution.result import AgentResult as AgentResult
 
 # `_handlers` is always fully imported as a side effect of the
 # `.registration.*` imports above, so importing this shared tool-error
 # heuristic here (rather than duplicating it) creates no new import cycle:
-# `_handlers.py` has no module-level dependency back on `runner.py` (its own
-# need for `run_agent`/`run_agent_stream` uses a lazy, call-time import).
+# `_handlers.py` reaches this module only through the execution lifecycle.
 from .registration._handlers import _looks_like_tool_error
 from .registration.capabilities import AgentCapabilities
 from .registration.catalog import AgentCatalog, CatalogEntry
@@ -167,29 +167,6 @@ async def _session_lock_bounded_by(session_id: str, deadline: float) -> AsyncIte
         yield
     finally:
         lock.release()
-
-
-# ---------------------------------------------------------------------------
-# Result type
-# ---------------------------------------------------------------------------
-
-
-@dataclass
-class AgentResult:
-    """Result of a non-streaming agent run."""
-
-    session_id: str
-    content: str
-    content_intermediate: list[str] = field(default_factory=list)
-    tool_calls: list[dict[str, Any]] = field(default_factory=list)
-    reasoning: str | None = None
-    events: list[dict[str, Any]] = field(default_factory=list)
-    # Delegate (``delegate_<slug>``) calls that failed or timed out this run.
-    # Tracked separately from ``tool_calls`` because a specialist failure is
-    # sanitized to free text (FRD 0007 Decision #12) and wouldn't be
-    # recognized by ``_looks_like_tool_error``'s JSON heuristic — see
-    # ``registration._handlers._total_tool_error_count``.
-    delegate_error_count: int = 0
 
 
 # ---------------------------------------------------------------------------
