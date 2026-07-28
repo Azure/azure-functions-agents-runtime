@@ -1,0 +1,129 @@
+"""Provider-neutral contracts for executing an agent run."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Literal, Protocol, runtime_checkable
+
+type RunState = Literal[
+    "accepted",
+    "running",
+    "succeeded",
+    "failed",
+    "canceled",
+    "timed_out",
+    "abandoned",
+]
+
+
+@dataclass
+class StartRunRequest:
+    """Serializable per-turn input for a run."""
+
+    prompt: str
+    session_id: str | None = None
+    idempotency_key: str | None = None
+    timeout: float | None = None
+
+
+@dataclass
+class RunHandle:
+    """Ticket returned when a backend creates a run."""
+
+    run_id: str
+    session_id: str
+    state: RunState
+    created_at: datetime
+
+
+@dataclass
+class RunContext:
+    """Address of an existing run."""
+
+    run_id: str
+    session_id: str
+
+
+@dataclass
+class RunResult:
+    """Successful run payload, independent of the execution provider."""
+
+    content: str
+    content_intermediate: list[str]
+    tool_calls: list[dict[str, object]]
+    reasoning: str | None
+    delegate_error_count: int
+
+
+@dataclass
+class RunError:
+    """Structured, already-sanitized terminal failure."""
+
+    code: str
+    message: str
+    fault_domain: str | None = None
+
+
+@dataclass
+class RunStatus:
+    """Current run state, including a terminal result or error when available."""
+
+    run_id: str
+    session_id: str
+    state: RunState
+    last_sequence: int
+    result_available: bool
+    result: RunResult | None = None
+    error: RunError | None = None
+
+
+@dataclass
+class RunEvent:
+    """One monotonically sequenced event in a run's journal."""
+
+    sequence: int
+    type: str
+    data: dict[str, object]
+    timestamp: datetime
+
+
+class EventCursorExpiredError(Exception):
+    """Raised when an event cursor is older than the backend's retained journal."""
+
+
+@runtime_checkable
+class AgentExecutionBackend(Protocol):
+    """Provider-neutral run lifecycle seam.
+
+    The backend watchdog owns the agent-run deadline from
+    ``StartRunRequest.timeout`` (the resolved agent's authored timeout) and
+    records watchdog expiry as ``timed_out``. The controller/HTTP layer owns its
+    separate synchronous wait boundary of ``min(timeout, 180 seconds)``; it is
+    not a seam field. ``in_process`` execution has no 180-second cap.
+
+    ``cancel_run`` is used only for explicit cancellation or the synchronous
+    wait cap. A client disconnect never cancels a run.
+    """
+
+    async def start_run(self, request: StartRunRequest) -> RunHandle:
+        """Create a run resource and return its handle."""
+
+    async def get_run(self, context: RunContext) -> RunStatus:
+        """Return the current run status and terminal result or error, if any."""
+
+    async def read_events(
+        self, context: RunContext, after_sequence: int
+    ) -> AsyncIterator[RunEvent]:
+        """Tail events strictly after an exclusive cursor.
+
+        ``after_sequence=0`` reads all retained events and never expires solely
+        because the oldest retained event is later than one. When the earliest
+        available event is ``E``, resume with ``after_sequence=E - 1``. A cursor
+        that has rotated out must raise :class:`EventCursorExpiredError` rather
+        than silently skipping the missing events.
+        """
+
+    async def cancel_run(self, context: RunContext) -> RunStatus:
+        """Explicitly cancel a run and return its resulting status."""
