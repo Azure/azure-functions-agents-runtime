@@ -118,15 +118,31 @@ from .client_manager import (  # noqa: E402
     shutdown_client_manager,
 )
 from .config.paths import resolve_config_dir, set_app_root  # noqa: E402
-from .runner import (  # noqa: E402
-    DEFAULT_MODEL,
-    DEFAULT_TIMEOUT,
-    AgentResult,
-    run_agent,
-    run_agent_stream,
-)
+from .execution.result import AgentResult  # noqa: E402
 from .system_tools.sandbox import create_sandbox_tools  # noqa: E402
 from .system_tools.web_request import create_web_request_tools  # noqa: E402
+
+_RUNNER_EXPORTS = frozenset(
+    {
+        "DEFAULT_MODEL",
+        "DEFAULT_TIMEOUT",
+        "run_agent",
+        "run_agent_stream",
+    }
+)
+
+
+def __getattr__(name: str) -> Any:
+    """Resolve direct-runner exports only when callers request them."""
+    if name not in _RUNNER_EXPORTS:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+    from . import runner
+
+    value = getattr(runner, name)
+    globals()[name] = value
+    return value
+
 
 __all__ = [
     "DEFAULT_MODEL",

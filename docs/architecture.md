@@ -168,7 +168,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 ### Where the registration stage hands off to execution
 
-Registration does not run the agent itself. Instead, `registration/_handlers.py` and `registration/endpoints.py` build closures that lazily import `runner`, create the default `LocalExecutionBackend`, and delegate to its runner-compatible `run_agent()` or `run_agent_stream()` methods. The local backend forwards the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` unchanged — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
+Registration does not run the agent itself. Instead, `registration/_handlers.py` and `registration/endpoints.py` bind the agent's live configuration into an `AgentBinding`, resolve the default `LocalExecutionBackend`, and use only the execution lifecycle: `start_run()`, `read_events()`, and `get_run()`. `AgentBinding` holds the non-serializable per-agent inputs (instructions, concrete tools, skills, model, workflow client, subagents, and catalog); `StartRunRequest` carries only the per-turn prompt, session ID, authored timeout, and optional idempotency key. The local backend resolves `runner` lazily only when it starts execution. Non-streaming registration maps the terminal `RunResult` back to the existing `AgentResult` boundary; streaming registration renders the journaled `RunEvent` sequence back into the unchanged SSE chunks. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
 For a workflow-enabled main agent, `workflows/integration.py` produces shared workflow guidance plus channel-specific completion behavior. Built-in chat/MCP handlers receive the chat addendum; declared-trigger handlers receive the trigger addendum together with `workflow_enabled=True`, the Durable client, and the agent name. Registration consumes these resolved values and does not re-parse workflow metadata.
 
@@ -191,9 +191,9 @@ A declared trigger handler is a short-lived Durable **client/starter**. The agen
 - Sandbox tools are intentionally later-bound: startup computes whether an agent may use them, but the actual tool objects are created as close as possible to runtime invocation.
 - `web_request` configuration is resolved by `config/merge.py:_resolve_web_request()` into `ResolvedAgent.web_request_config` — **default-on** (enabled unless explicitly disabled globally or per agent), unlike the opt-in sandbox. `registration/capabilities.py:build_capabilities()` builds the tool **once per agent** at registration time (it needs no Azure resource, so there is no reason to defer it to invocation time like the sandbox) and carries it on `AgentCapabilities.web_request_tools`. It flows to the runner through a dedicated `web_request_tools` parameter parallel to (not merged with) `sandbox_tools`.
 
-### What the runner receives from registration
+### What execution binds from registration
 
-By the time a handler calls the default local execution backend's runner-compatible `run_agent()` or `run_agent_stream()` methods, the registration layer has already done most of the policy work:
+By the time a handler constructs the default local execution backend, the registration layer has already done most of the policy work. Those values are held in `AgentBinding`; they never cross the `StartRunRequest` lifecycle boundary:
 
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
 - `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
@@ -206,7 +206,7 @@ By the time a handler calls the default local execution backend's runner-compati
 - `build_sandbox_tools_for_session()` optionally adds per-session ACA dynamic session tools just before the call.
 - `ResolvedAgent.subagents` (when non-empty) plus the frozen `AgentCatalog` are passed through so `runner.build_subagent_tools()` can build one `delegate_<slug>` tool per reference for this request; each tool's handler builds its own fresh specialist `Agent` per call (see "Multi-agent delegation" below).
 
-The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, delegated-specialist construction, and streaming/non-streaming response handling.
+The runner therefore focuses on execution concerns: session history, lock management, final tool assembly order, delegated-specialist construction, and streaming/non-streaming response handling. The only per-turn inputs it receives from the backend are the prompt, resolved session ID, and authored timeout.
 
 ## 5. Multi-agent delegation (subagents)
 

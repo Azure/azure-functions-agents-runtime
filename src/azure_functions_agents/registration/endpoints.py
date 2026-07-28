@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
@@ -17,8 +17,14 @@ from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..execution.backend import RunContext
+from ..execution.compat import (
+    collect_terminal_run,
+    render_sse_event,
+    split_runner_call,
+    status_to_agent_result,
+)
 from ..execution.factory import create_execution_backend
-from ..execution.local import LocalExecutionBackend
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name
@@ -48,13 +54,26 @@ def _format_exception_message(exc: Exception) -> str:
 
 
 async def _run_agent(*args: Any, **kwargs: Any) -> Any:
-    backend = cast(LocalExecutionBackend, create_execution_backend())
-    return await backend.run_agent(*args, **kwargs)
+    request, binding = split_runner_call(args, kwargs, stream=False)
+    backend = create_execution_backend(binding=binding)
+    handle = await backend.start_run(request)
+    status, events = await collect_terminal_run(
+        backend,
+        RunContext(run_id=handle.run_id, session_id=handle.session_id),
+    )
+    return status_to_agent_result(status, events)
 
 
-def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
-    backend = cast(LocalExecutionBackend, create_execution_backend())
-    return backend.run_agent_stream(*args, **kwargs)
+def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+    async def stream() -> AsyncIterator[str]:
+        request, binding = split_runner_call(args, kwargs, stream=True)
+        backend = create_execution_backend(binding=binding, stream_events=True)
+        handle = await backend.start_run(request)
+        context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
+        async for event in backend.read_events(context, after_sequence=0):
+            yield render_sse_event(event)
+
+    return stream()
 
 
 # The runner uses the session id as a filename component, so it rejects anything
