@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 type RunState = Literal[
     "accepted",
@@ -113,7 +113,7 @@ class AgentExecutionBackend(Protocol):
     async def get_run(self, context: RunContext) -> RunStatus:
         """Return the current run status and terminal result or error, if any."""
 
-    async def read_events(
+    def read_events(
         self, context: RunContext, after_sequence: int
     ) -> AsyncIterator[RunEvent]:
         """Tail events strictly after an exclusive cursor.
@@ -127,3 +127,31 @@ class AgentExecutionBackend(Protocol):
 
     async def cancel_run(self, context: RunContext) -> RunStatus:
         """Explicitly cancel a run and return its resulting status."""
+
+
+if TYPE_CHECKING:
+
+    class _AsyncGeneratorBackend:
+        """Illustrates the async-generator implementation required by the seam."""
+
+        async def start_run(self, request: StartRunRequest) -> RunHandle:
+            raise NotImplementedError
+
+        async def get_run(self, context: RunContext) -> RunStatus:
+            raise NotImplementedError
+
+        async def read_events(
+            self, context: RunContext, after_sequence: int
+        ) -> AsyncIterator[RunEvent]:
+            if after_sequence < 0:
+                yield RunEvent(
+                    sequence=0,
+                    type="",
+                    data={},
+                    timestamp=datetime.min,
+                )
+
+        async def cancel_run(self, context: RunContext) -> RunStatus:
+            raise NotImplementedError
+
+    _async_generator_backend: AgentExecutionBackend = _AsyncGeneratorBackend()

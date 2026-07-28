@@ -143,6 +143,9 @@ async def assert_event_cursor_conformance(
     ] == list(retained_sequences[1:])
     with pytest.raises(EventCursorExpiredError):
         await collect_run_events(backend, context, after_sequence=too_old_cursor)
+    assert await collect_run_events(
+        backend, context, after_sequence=retained_sequences[-1]
+    ) == []
 
 
 def test_contract_dataclasses_and_run_state_literals() -> None:
@@ -213,4 +216,3 @@ def test_in_memory_backend_cursor_conformance() -> None:
             too_old_cursor=1,
         )
     )
-    assert asyncio.run(collect_run_events(backend, context, after_sequence=5)) == []
