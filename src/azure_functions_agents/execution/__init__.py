@@ -12,10 +12,14 @@ from .backend import (
     RunStatus,
     StartRunRequest,
 )
+from .factory import DEFAULT_EXECUTION_PROVIDER, create_execution_backend
+from .local import LocalExecutionBackend
 
 __all__ = [
+    "DEFAULT_EXECUTION_PROVIDER",
     "AgentExecutionBackend",
     "EventCursorExpiredError",
+    "LocalExecutionBackend",
     "RunContext",
     "RunError",
     "RunEvent",
@@ -24,4 +28,5 @@ __all__ = [
     "RunState",
     "RunStatus",
     "StartRunRequest",
+    "create_execution_backend",
 ]

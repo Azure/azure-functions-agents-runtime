@@ -17,6 +17,7 @@ from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..execution.factory import create_execution_backend
 from ._auth import authorize_entra_request, resolve_endpoint_auth_level
 from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
 from ._naming import _function_name_from_source, _safe_function_name
@@ -49,14 +50,16 @@ async def _run_agent(*args: Any, **kwargs: Any) -> Any:
     from importlib import import_module
 
     runner_module = import_module("azure_functions_agents.runner")
-    return await runner_module.run_agent(*args, **kwargs)
+    backend = create_execution_backend(runner_module.run_agent, runner_module.run_agent_stream)
+    return await backend.run_agent(*args, **kwargs)
 
 
 def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
     from importlib import import_module
 
     runner_module = import_module("azure_functions_agents.runner")
-    return runner_module.run_agent_stream(*args, **kwargs)
+    backend = create_execution_backend(runner_module.run_agent, runner_module.run_agent_stream)
+    return backend.run_agent_stream(*args, **kwargs)
 
 
 # The runner uses the session id as a filename component, so it rejects anything
