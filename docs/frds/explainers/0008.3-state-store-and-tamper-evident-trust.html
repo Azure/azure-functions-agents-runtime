@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.3 — State store &amp; tamper-evident trust · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.3 · Sub-FRD · for team feedback</div>
+    <h1>State store &amp; tamper-evident trust</h1>
+    <p class="tagline">How the controller keeps the durable routing record authoritative when the sandbox is ephemeral, identity-less, and unable to write state.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 5, 20, 31, 32-R, 33, 39-R</span>
+      <span class="badge">Azure Table source of truth</span>
+      <span class="badge warn">v1 · generation fixed</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">Every session needs a durable control-plane record that says which owner, app, content epoch, run status, and sandbox backing belong together. In v1 that record lives in an <b>Azure Table</b>, and it is the source of truth for session and run status.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> the sandbox can run the agent loop, but it cannot update the routing ledger. The Azure Functions <strong>controller is the sole writer</strong>. The sandbox is <strong>identity-less</strong>, holds no storage credential, and therefore physically cannot write state. That makes the Table row tamper-evident: routing reads verify the row against a live sandbox manifest before submitting work.
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Durable pointer</h3><p>The session row stores owner/app partitioning, sandbox pointer, status, protocol, due-time fields, <b>content digest</b>, and <b>generation</b>. Run rows store run status and timeout deadlines.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Controller-only writes</h3><p>All Table writes go through the controller under ETag-guarded conditional updates. End users never receive storage credentials, and the sandbox has no identity capable of reaching storage.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Verify before routing</h3><p>Routing reads compare row fields to a live manifest from the ACA sandbox. A mismatch fails closed, emits a security signal, and quarantines rather than blindly following a stale pointer.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>What is stored where</h2>
+  <p class="lead">The design separates the hot, queryable control plane from optional archival data. For v1 routing, the Azure Table is the load-bearing system.</p>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Store</th><th>v1 role</th><th>Important boundary</th></tr></thead>
+      <tbody>
+        <tr><td>Azure Table <span class="mono">AzureFunctionsAgentsSessions</span></td><td class="v1">durable source of truth for session rows and run rows</td><td class="v1">written only by the controller</td></tr>
+        <tr><td>Session row</td><td class="v1">sandbox pointer, status, owner hash, protocol, <span class="mono">(digest_kind, digest)</span>, generation, idle fields</td><td class="v1">digest is fixed at creation</td></tr>
+        <tr><td>Run row</td><td class="v1">run status plus <span class="mono">expires_at</span> as the run-timeout deadline</td><td class="v1">keyed under the session</td></tr>
+        <tr><td>Blob container</td><td class="v2">history / checkpoint archive surface</td><td class="v2">provisioned but not populated in v1</td></tr>
+        <tr><td>Storage account</td><td class="v1">defaults to <span class="mono">AzureWebJobsStorage</span></td><td class="v2">dedicated customer-owned account remains an option</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">The storage is customer-owned: it lives with the app owner, not in a runtime-team service. The key invariant is not the account name; it is that Shared Key is disabled, roles are scoped narrowly, and only the controller can write the Table.</p>
+
+  <h2><span class="n">3</span>The fail-closed routing check</h2>
+  <p class="lead">A Table row is authoritative, but routing still verifies the row against the live sandbox before any turn is submitted.</p>
+  <div class="card">
+    <div class="viz" role="img" aria-label="Controller-only writes flow into Azure Table while the identity-less sandbox cannot write or tamper with state">
+      <div class="flow-row">
+        <span class="beam"></span>
+        <div class="fnode">Controller <span class="fsub">the only writer</span></div>
+        <div class="fnode">Azure Table <span class="fsub">source of truth</span></div>
+        <div class="fnode term">Sandbox — no creds, can't write</div>
+      </div>
+      <div class="chip-row">
+        <span class="chip k">controller = sole writer</span>
+        <span class="chip">digest-stamped routing</span>
+        <span class="chip">generation = backing only</span>
+        <span class="chip no">sandbox can't tamper</span>
+      </div>
+    </div>
+  </div>
+  <div class="plain">
+    <strong>Digest is routing evidence:</strong> the digest comes from the controller-captured content described in <a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>. Because every session row carries that digest, the controller always knows which content epoch the session belongs to and can refuse to talk to the wrong epoch.
+  </div>
+
+  <h2><span class="n">4</span>Digest, deploys, and generation are different things</h2>
+  <p class="lead">This sub-FRD is the canonical place where the difference is settled: the digest tracks content; generation tracks the sandbox backing.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Digest = content epoch</h3><p>The <span class="mono">digest</span> is stamped once when the session is created. It identifies the captured app content for that session. If the controller's current content digest changes after a deploy, the old session is drained rather than made compatible.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Generation = backing</h3><p>The <span class="mono">generation</span> identifies the concrete sandbox backing: instance plus disk. It never encodes a content change, and it does not advance just because a new deployment exists.</p></div>
+  </div>
+  <div class="decision" style="margin-top:18px"><h4>Drain-on-deploy: row 70</h4>
+  <p class="why">When the session's stamped digest differs from the controller's current captured-content digest, the lifecycle path drains the session: in-flight grace, abandon if needed, tombstone, then <span class="mono">410 Gone</span>. The next session stamps the new digest. The drain mechanics live in <a href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae">0008.12</a>; this state row supplies the digest comparison.</p></div>
+  <div class="decision"><h4>v1 generation is fixed at creation</h4>
+  <p class="why">A state-preserving generation advance requires rebuilding committed state on a different sandbox backing, which needs the external checkpoint mirror. That is v2-only. In v1, suspend/resume and crash-with-disk-intact stay on the same generation; true backing loss tombstones and returns <span class="mono">410</span>, never a bump.</p></div>
+
+  <h2><span class="n">5</span>Lifecycle reads the same table</h2>
+  <p class="lead">The reaper does not have a special index or side ledger. It scans the same authoritative Table records that routing and status reads use.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>Run timeout</h3><p>Run rows use <span class="mono">expires_at</span> as the run-timeout deadline. The reaper filters by status plus due time, then applies controller-owned conditional updates.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Idle reclaim</h3><p>Session rows use <span class="mono">expires_at</span> as the idle-reclaim deadline, with <span class="mono">last_activity_at</span> and <span class="mono">idle_policy_armed</span> on the session row.</p></div>
+  </div>
+  <div class="decision reject" style="margin-top:18px"><h4>✗ Rejected: separate due-work index</h4>
+  <p class="why">A reaper-friendly index would need a different partitioning scheme, so it could not be co-written atomically with the owner-partitioned session/run row. v1 keeps one source of truth and lets the reaper scan it directly at the expected scale; <a href="https://gistpreview.github.io/?7be1e2792abad0a18f9d6862ec1412ae">0008.12</a> owns the detailed lifecycle policy.</p></div>
+
+  <h2><span class="n">6</span>What makes it tamper-evident</h2>
+  <p class="lead">The design is intentionally platform-native: controller-only writes, identity-less sandboxing, ETags, generation, and live ACA manifests.</p>
+  <div class="grid g3">
+    <div class="card"><h3><span class="ic">◆</span>No sandbox state credential</h3><p>The sandbox cannot write the Table because it has no identity or token. Outbound auth is injected by the egress proxy, not stored inside the sandbox (<a href="https://gistpreview.github.io/?7ff281c651e0c0dcfa24487de5dd9bb3">0008.9</a>).</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Rollback is visible</h3><p>The generation is monotonic on the ETag-guarded row. A stale pointer cannot be silently accepted as the latest backing.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Wrong sandbox is visible</h3><p>The live manifest must agree with the row's owner, app, session, group, generation, digest, and protocol. If it does not, routing fails closed.</p></div>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.3 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns the state-store and trust model: Azure Table as source of truth, controller-only writes, digest-stamped routing, v1-fixed generation, and lifecycle scans over the same rows.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

@@ -1,0 +1,204 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.14 &mdash; Dynamic Workflows on ACA (compatibility analysis) &middot; ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.14 · Sub-FRD · analysis only</div>
+    <h1>Dynamic Workflows on ACA — compatibility analysis</h1>
+    <p class="tagline">Why "dynamic workflows" + the ACA sandbox stays <em>fail-closed</em> in v1 — and what a future fix would actually need.</p>
+    <div class="badges">
+      <span class="badge accent">Analysis only · no binding decision</span>
+      <span class="badge warn">v1 · fail-closed (Decision 36)</span>
+      <span class="badge">Finalized (analysis)</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <div class="decision reject" style="margin-top:8px"><h4>⚠ This combination is not enabled in v1</h4>
+  <p class="why">An app with <span class="mono">workflows.enabled: true</span> plus the ACA sandbox backend <b>fails closed at startup</b> (Decision 36, owned by <a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a>). "Finalized" here means this <em>analysis</em> is reviewed and accepted as part of FRD 0008 — <b>not</b> that the feature is turned on. The actual compatibility fix is deferred to a future implementation FRD.</p></div>
+
+  <div class="viz" role="img" aria-label="A fail-closed startup gate blocks workflows enabled with the ACA sandbox; default in-worker workflows remain unaffected.">
+    <div class="gate-row">
+      <div class="gate-end">workflows.enabled<br>+ ACA sandbox</div>
+      <div class="gate-track">
+        <span class="gate-tok"></span>
+        <div class="gate-node">⊗</div>
+      </div>
+      <div class="gate-end">startup</div>
+    </div>
+    <div class="cap">Fail-closed at startup (Decision 36) — analysis only; fix deferred to a future FRD</div>
+    <div class="chip-row">
+      <span class="chip no">fail-closed at startup</span>
+      <span class="chip">Decision 36 (owned by 0008.7)</span>
+      <span class="chip k">analysis only — no binding decision</span>
+      <span class="chip k">fix deferred to a future FRD</span>
+    </div>
+  </div>
+
+  <h2><span class="n">1</span>What "dynamic workflows" are</h2>
+  <p class="lead">Dynamic Workflows is a feature of <em>this runtime</em> — not of the Microsoft Agent Framework (MAF).</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> a tool can mark itself <span class="mono">@workflow_tool</span>-safe (deterministic, idempotent). At request time the LLM can hand a small DAG of those tools to a durable <strong>Azure Durable Functions</strong> orchestrator instead of running them as ordinary in-turn calls. The runtime wires that orchestrator at app-registration and exposes exactly <strong>five control tools</strong> — <span class="mono">start_workflow</span>, <span class="mono">get_workflow_status</span>, <span class="mono">list_workflows</span>, <span class="mono">cancel_workflow</span>, <span class="mono">terminate_workflow</span>. MAF never sees a "workflow" — just five ordinary async callables.
+  </div>
+
+  <h2><span class="n">2</span>The tension with ACA</h2>
+  <p class="lead">FRD 0008 moves the <em>whole</em> harness into one ACA sandbox and turns Functions into a thin controller (<a href="https://gistpreview.github.io/?373f6153175e5f8e8b2cb08f508cd92f">0008.1</a>). Crucially, <b>the sandbox is not a Functions Host.</b></p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>What the sandbox carries</h3><p>Under 0008.6's Model-1 packaging the image is a <b>stdlib-only bootstrap</b> that bakes in <b>no MAF</b>; the runtime + MAF arrive as the customer's captured <span class="mono">.python_packages</span>. The stack that executes is a fixed entry point over MAF — <b>never a Functions Host</b>.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>What workflows need</h3><p>Promoting a tool call into a Durable orchestrator run depends on exactly the <b>Functions Host machinery the sandbox deliberately does not carry</b>. That is the whole tension.</p></div>
+  </div>
+
+  <h2><span class="n">3</span>The precise finding (a useful reframe)</h2>
+  <p class="lead">The headline is sharper than "the orchestrator doesn't exist under ACA."</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">✓</div><div class="txt"><b>The orchestrator DOES exist</b> <span>— the controller is still an ordinary Functions app, and it registers a fully wired Durable orchestrator for any project with <span class="mono">workflows.enabled</span>, regardless of which backend runs the chat turn.</span></div></div>
+      <div class="step"><div class="num">✗</div><div class="txt"><b>Only the bridge is missing</b> <span>— what ACA lacks is the path from the sandboxed MAF agent's tool-call boundary <em>back to</em> that already-running controller-side orchestrator.</span></div></div>
+      <div class="step"><div class="num">➜</div><div class="txt"><b>So the problem shrinks</b> <span>— from "build a workflow engine inside a locked-down sandbox" (hard, likely wrong) to "give the sandbox a controller-mediated path to invoke five specific control tools" (bounded, and analyzed in the FRD).</span></div></div>
+    </div>
+  </div>
+
+  <h2><span class="n">4</span>v1 posture</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Future</th></tr></thead>
+      <tbody>
+        <tr><td>ACA sandbox + <span class="mono">workflows.enabled</span></td><td class="v1"><span class="pill no">fail-closed at startup</span></td><td class="v2">controller-mediated bridge to the 5 control tools</td></tr>
+        <tr><td>Where the gate lives</td><td class="v1">Decision 36 (owned by <a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a>)</td><td class="v2">—</td></tr>
+        <tr><td>What this doc lands</td><td class="v1">analysis only — the <em>why</em> + what a fix needs</td><td class="v2">a binding compatibility design (separate FRD)</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <p class="note">Workflows on the default in-worker backend are unaffected — this is strictly about the combination with the ACA sandbox backend.</p>
+
+  <footer>
+    <p><strong>FRD 0008.14 · Finalized</strong> (analysis accepted as part of FRD 0008, 2026-07-27) — <em>not</em> a feature-enable. The combination stays fail-closed per <a href="https://gistpreview.github.io/?99f20e91c634fe20e0fcd92004dd9222">0008.7</a> Decision 36; the compatibility fix is deferred to a future implementation FRD.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>

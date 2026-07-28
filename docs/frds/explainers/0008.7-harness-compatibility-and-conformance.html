@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FRD 0008.7 — Harness compatibility &amp; conformance · ACA Sandbox Session Runtime</title>
+<script>
+  (() => {
+    const param = new URLSearchParams(window.location.search).get("clawpilotTheme");
+    const theme =
+      param || (window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
+    document.documentElement.setAttribute("data-theme", theme);
+  })();
+</script>
+<style>
+:root {
+  color-scheme: light;
+  --cp-bg: #f7f4ef; --cp-bg-elevated: #fcfbf8; --cp-surface: #ffffff; --cp-surface-soft: #f5f5f5;
+  --cp-border: #dedede; --cp-border-strong: #919191; --cp-text: #242424; --cp-text-muted: #5c5c5c;
+  --cp-text-soft: #6f6f6f; --cp-accent: #b11f4b; --cp-accent-hover: #9a1a41; --cp-accent-soft: rgba(177, 31, 75, 0.08);
+  --cp-accent-fg: #ffffff; --cp-success: #16a34a; --cp-danger: #dc2626; --cp-warning: #f59e0b; --cp-link: #0078d4;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.12); --cp-overlay: rgba(255, 255, 255, 0.8);
+  --cp-panel: rgba(255, 255, 255, 0.86); --cp-panel-strong: rgba(255, 255, 255, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.55); --cp-highlight: rgba(177, 31, 75, 0.12);
+}
+html[data-theme="dark"] {
+  color-scheme: dark;
+  --cp-bg: #3d3b3a; --cp-bg-elevated: #343231; --cp-surface: #292929; --cp-surface-soft: #2e2e2e;
+  --cp-border: #474747; --cp-border-strong: #5f5f5f; --cp-text: #dedede; --cp-text-muted: #919191;
+  --cp-text-soft: #b0b0b0; --cp-accent: #fd8ea1; --cp-accent-hover: #fb7b91; --cp-accent-soft: rgba(253, 142, 161, 0.14);
+  --cp-accent-fg: #1a1a1a; --cp-success: #4ade80; --cp-danger: #f87171; --cp-warning: #fbbf24; --cp-link: #4da6ff;
+  --cp-shadow: 0 18px 48px rgba(0, 0, 0, 0.32); --cp-overlay: rgba(41, 41, 41, 0.88);
+  --cp-panel: rgba(41, 41, 41, 0.72); --cp-panel-strong: rgba(41, 41, 41, 0.96);
+  --cp-sheen: rgba(255, 255, 255, 0.04); --cp-highlight: rgba(253, 142, 161, 0.12);
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0; background: var(--cp-bg); color: var(--cp-text);
+  font-family: "Segoe UI", Aptos, Calibri, -apple-system, BlinkMacSystemFont, sans-serif;
+  line-height: 1.6; font-size: 16px;
+}
+code, .mono { font-family: Consolas, "Courier New", Courier, monospace; font-size: 0.9em; }
+.wrap { max-width: 1080px; margin: 0 auto; padding: 0 24px 96px; }
+header.hero {
+  background: var(--cp-bg-elevated); border-bottom: 1px solid var(--cp-border); padding: 30px 24px 32px; margin-bottom: 40px;
+}
+.hero-inner { max-width: 1080px; margin: 0 auto; }
+.backlink { display: inline-flex; align-items: center; gap: 6px; font-size: .82rem; font-weight: 600; color: var(--cp-link); text-decoration: none; margin-bottom: 14px; }
+.backlink:hover { text-decoration: underline; }
+.eyebrow { color: var(--cp-accent); font-weight: 700; letter-spacing: .08em; text-transform: uppercase; font-size: .72rem; }
+h1 { font-size: 2.0rem; margin: 8px 0 6px; letter-spacing: -0.01em; }
+.tagline { font-size: 1.14rem; color: var(--cp-text-muted); margin: 0 0 18px; max-width: 760px; }
+.badges { display: flex; flex-wrap: wrap; gap: 8px; }
+.badge { font-size: .74rem; font-weight: 600; padding: 4px 10px; border-radius: 999px; border: 1px solid var(--cp-border); background: var(--cp-surface); color: var(--cp-text-muted); }
+.badge.accent { background: var(--cp-accent-soft); border-color: transparent; color: var(--cp-accent); }
+.badge.warn { color: var(--cp-warning); }
+h2 { font-size: 1.5rem; margin: 48px 0 4px; letter-spacing: -0.01em; }
+h2 .n { color: var(--cp-accent); font-variant-numeric: tabular-nums; margin-right: 10px; }
+.lead { color: var(--cp-text-muted); margin: 0 0 20px; }
+.card { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 20px 22px; box-shadow: 0 0 2px rgba(0,0,0,0.12), 0 1px 2px rgba(0,0,0,0.14); }
+.grid { display: grid; gap: 16px; }
+.g2 { grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); }
+.g3 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.card h3 { margin: 0 0 6px; font-size: 1.06rem; }
+.card h3 .ic { color: var(--cp-accent); margin-right: 8px; }
+.card p { margin: 0; color: var(--cp-text-muted); font-size: .95rem; }
+.plain { background: var(--cp-accent-soft); border-left: 3px solid var(--cp-accent); border-radius: 8px; padding: 12px 16px; margin: 14px 0; }
+.plain strong { color: var(--cp-accent); }
+.kv { color: var(--cp-text); }
+table { width: 100%; border-collapse: collapse; margin-top: 8px; font-size: .92rem; }
+th, td { text-align: left; padding: 10px 12px; border-bottom: 1px solid var(--cp-border); vertical-align: top; }
+th { color: var(--cp-text-soft); font-weight: 600; font-size: .8rem; text-transform: uppercase; letter-spacing: .04em; }
+td.v1 { color: var(--cp-success); font-weight: 600; }
+td.v2 { color: var(--cp-text-muted); }
+.pill { display: inline-block; font-size: .72rem; font-weight: 700; padding: 2px 8px; border-radius: 6px; }
+.pill.v1 { background: rgba(22,163,74,.14); color: var(--cp-success); }
+.pill.v2 { background: var(--cp-surface-soft); color: var(--cp-text-muted); border: 1px solid var(--cp-border); }
+.pill.no { background: rgba(220,38,38,.12); color: var(--cp-danger); }
+.diagram { background: var(--cp-surface); border: 1px solid var(--cp-border); border-radius: 16px; padding: 8px; overflow-x: auto; box-shadow: 0 0 2px rgba(0,0,0,0.12); }
+.flow { counter-reset: step; display: grid; gap: 10px; }
+.flow .step { display: grid; grid-template-columns: 34px 1fr; gap: 14px; align-items: start; }
+.flow .step .num { width: 30px; height: 30px; border-radius: 50%; background: var(--cp-accent); color: var(--cp-accent-fg); display: grid; place-items: center; font-weight: 700; font-size: .85rem; }
+.flow .step .txt { padding-top: 3px; }
+.flow .step .txt b { color: var(--cp-text); }
+.flow .step .txt span { color: var(--cp-text-muted); }
+.decision { border-left: 3px solid var(--cp-border-strong); padding: 4px 0 4px 16px; margin: 0 0 18px; }
+.decision h4 { margin: 0 0 3px; font-size: 1rem; }
+.decision .why { color: var(--cp-text-muted); font-size: .93rem; }
+.reject { border-left-color: var(--cp-danger); }
+.reject h4 { color: var(--cp-danger); }
+footer { margin-top: 56px; padding-top: 20px; border-top: 1px solid var(--cp-border); color: var(--cp-text-soft); font-size: .86rem; }
+.note { color: var(--cp-text-soft); font-size: .82rem; margin-top: 6px; }
+a { color: var(--cp-link); }
+.legend { display:flex; gap:18px; flex-wrap:wrap; margin-top:10px; font-size:.82rem; color:var(--cp-text-muted); }
+.legend span { display:inline-flex; align-items:center; gap:6px; }
+.sw { width:14px; height:14px; border-radius:4px; display:inline-block; }
+/* ===== shared animation toolkit (pure CSS; reduced-motion aware) ===== */
+.viz{ position:relative; margin:18px 0 4px; }
+.viz .cap{ text-align:center; font-size:.76rem; color:var(--cp-text-soft); margin-top:10px; }
+.flow-row{ position:relative; display:flex; gap:8px; align-items:stretch; overflow:hidden; padding:2px; border-radius:12px; }
+.fnode{ position:relative; flex:1 1 0; min-width:0; text-align:center; padding:12px 6px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); font-size:.74rem; font-weight:700; color:var(--cp-text); z-index:1; }
+.fnode .fico{ display:block; font-size:1.05rem; margin-bottom:3px; color:var(--cp-accent); }
+.fnode .fsub{ display:block; font-size:.62rem; font-weight:500; color:var(--cp-text-muted); margin-top:2px; }
+.fnode.term{ border-color:var(--cp-danger); color:var(--cp-danger); } .fnode.term .fico{ color:var(--cp-danger); }
+.flow-row .beam{ position:absolute; top:0; bottom:0; left:-30%; width:28%; z-index:2; pointer-events:none; background:linear-gradient(90deg, transparent, var(--cp-accent-soft) 40%, var(--cp-accent-soft) 60%, transparent); animation:beam 4.6s linear infinite; }
+@keyframes beam{ 0%{ left:-30%; } 100%{ left:104%; } }
+.breather{ width:120px; height:52px; margin:6px auto 16px; border-radius:14px; background:var(--cp-accent-soft); border:1.5px solid var(--cp-accent); display:flex; align-items:center; justify-content:center; font-size:.72rem; font-weight:700; letter-spacing:.04em; color:var(--cp-accent); animation:breathe 8s ease-in-out infinite; }
+@keyframes breathe{ 0%{transform:scale(1);box-shadow:0 0 0 0 var(--cp-accent-soft);} 15%{transform:scale(1.07);box-shadow:0 0 0 9px var(--cp-accent-soft);} 40%{transform:scale(.9);opacity:.55;box-shadow:none;background:var(--cp-surface-soft);border-color:var(--cp-border);color:var(--cp-text-muted);} 58%{transform:scale(1.07);opacity:1;box-shadow:0 0 0 9px var(--cp-accent-soft);background:var(--cp-accent-soft);border-color:var(--cp-accent);color:var(--cp-accent);} 86%{transform:scale(1);} 93%{transform:scale(.85);opacity:.4;background:var(--cp-surface-soft);border-color:var(--cp-danger);color:var(--cp-danger);box-shadow:none;} 100%{transform:scale(1);opacity:1;} }
+.gate-row{ position:relative; display:flex; align-items:center; gap:10px; padding:10px 0; }
+.gate-end{ flex:0 0 auto; text-align:center; font-size:.72rem; font-weight:700; color:var(--cp-text); padding:10px 12px; border-radius:10px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); }
+.gate-track{ position:relative; flex:1 1 0; height:44px; }
+.gate-node{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); min-width:56px; height:42px; padding:0 8px; border-radius:10px; display:flex; align-items:center; justify-content:center; font-size:.9rem; font-weight:700; border:1.5px solid var(--cp-border); background:var(--cp-surface); animation:gverdict 4.4s ease-in-out infinite; }
+@keyframes gverdict{ 0%,42%{ border-color:var(--cp-success); color:var(--cp-success); box-shadow:0 0 0 4px rgba(22,163,74,.12);} 56%,100%{ border-color:var(--cp-danger); color:var(--cp-danger); box-shadow:0 0 0 4px rgba(220,38,38,.12);} }
+.gate-tok{ position:absolute; top:50%; margin-top:-6px; left:0; width:12px; height:12px; border-radius:50%; background:var(--cp-accent); box-shadow:0 0 0 4px var(--cp-accent-soft); animation:gtok 4.4s ease-in-out infinite; }
+@keyframes gtok{ 0%{left:0;opacity:0;background:var(--cp-accent);} 8%{opacity:1;} 38%{left:42%;} 46%{left:100%;opacity:1;background:var(--cp-success);} 50%{opacity:0;} 58%{left:0;opacity:0;background:var(--cp-accent);} 66%{opacity:1;} 92%{left:42%;background:var(--cp-danger);} 100%{left:42%;opacity:0;} }
+.chip-row{ display:flex; gap:6px; flex-wrap:wrap; margin-top:16px; }
+.chip{ font-size:.72rem; font-weight:600; padding:3px 10px; border-radius:999px; background:var(--cp-surface-soft); border:1px solid var(--cp-border); color:var(--cp-text-muted); }
+.chip.k{ color:var(--cp-accent); background:var(--cp-accent-soft); border-color:transparent; }
+.chip.no{ color:var(--cp-danger); background:rgba(220,38,38,.10); border-color:transparent; }
+/* motion plays regardless of OS reduce-motion (author intent for these explainers) */
+</style>
+</head>
+<body>
+<header class="hero">
+  <div class="hero-inner">
+    <a class="backlink" href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">‹ ACA Sandbox Runtime — Simple Guide</a>
+    <div class="eyebrow">FRD 0008.7 · Sub-FRD · for team feedback</div>
+    <h1>Harness compatibility &amp; conformance</h1>
+    <p class="tagline">How v1 keeps the same MAF behavior inside ACA, proves it with golden traces, and fails closed when a feature is not proven.</p>
+    <div class="badges">
+      <span class="badge accent">Owns Decisions 34–37</span>
+      <span class="badge">MAF-only v1</span>
+      <span class="badge warn">Golden-trace gate</span>
+      <span class="badge">Finalized</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <h2><span class="n">1</span>The big idea</h2>
+  <p class="lead">A harness is the engine that runs the agent loop: model calls, tools, skills, events, cancellation, and final output. For v1, ACA changes <em>where</em> that engine runs, not <em>which</em> engine runs.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> v1 keeps Microsoft Agent Framework (MAF) as the only trusted harness. Before any sandbox harness is trusted, it must pass a normalized <b>golden-trace conformance</b> check against today's local MAF behavior. If an agent needs something the harness has not proven, registration fails instead of silently downgrading.
+  </div>
+  <div class="viz" role="img" aria-label="Candidate harness reaches the golden-trace conformance gate; passing becomes trusted and failing is rejected">
+    <div class="gate-row">
+      <div class="gate-end">Candidate<br>harness</div>
+      <div class="gate-track">
+        <span class="gate-tok"></span>
+        <div class="gate-node">✓✗</div>
+      </div>
+      <div class="gate-end">Trusted<br>harness</div>
+    </div>
+    <div class="cap">Golden-trace gate: pass → trusted · fail → rejected</div>
+    <div class="chip-row">
+      <span class="chip k">MAF-only v1</span>
+      <span class="chip">ABI from Functions base image</span>
+      <span class="chip no">invalid output → run failed</span>
+    </div>
+  </div>
+  <div class="grid g3" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>One variable at a time</h3><p>Relocate MAF into the session sandbox, but do not swap to a different harness in the same release. That keeps regressions attributable.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Proof before trust</h3><p>The sandbox adapter must match core MAF behavior: event ordering, key fields, terminal status, errors, cancellation, tools, MCP, skills, and structured-output cases.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>Fail closed</h3><p>Unsupported or unrecognized capabilities stop startup. A capability is supported only after a conformance trace exercises it.</p></div>
+  </div>
+
+  <h2><span class="n">2</span>What the harness contract actually is</h2>
+  <p class="lead">The design separates the stable runtime protocol from the code that adapts a specific harness to it.</p>
+  <div class="card">
+    <div class="flow">
+      <div class="step"><div class="num">1</div><div class="txt"><b>Wire protocol</b> <span>— the harness-neutral file/event contract: request envelope, status/result, monotonic events, cancellation, checkpoints, manifest, and <span class="mono">protocol_version</span>. It rides on the six-verb controller↔sandbox transport (<a href="https://gistpreview.github.io/?bc4e1c21fe17cc60259702118101c17d">0008.5</a>).</span></div></div>
+      <div class="step"><div class="num">2</div><div class="txt"><b>Library adapter</b> <span>— the v1 path. The MAF adapter wraps the existing Python runner behavior inside the sandbox and recreates clients after resume.</span></div></div>
+      <div class="step"><div class="num">3</div><div class="txt"><b>Process shim later</b> <span>— future CLI/process harnesses need their own reviewed shim, exit-code mapping, event translation, and denial rules. They are not implied by image compatibility.</span></div></div>
+      <div class="step"><div class="num">4</div><div class="txt"><b>Manifest capabilities</b> <span>— instructions, history, tools, MCP, skills, streaming, structured output, reasoning/tool-call records, cancellation, checkpoints, observability, and subagent delegation (<a href="https://gistpreview.github.io/?f7a28d45f9d50b246514aa98fae2bdce">0008.13</a>) are enumerated under the single v1 <span class="mono">protocol_version</span>.</span></div></div>
+    </div>
+  </div>
+
+  <h2><span class="n">3</span>Conformance: same core behavior, not byte-identical logs</h2>
+  <p class="lead">Golden traces make “MAF still behaves like MAF” testable without locking the system to model wording or streaming timing.</p>
+  <div class="grid g2">
+    <div class="card"><h3><span class="ic">◆</span>What is asserted</h3><p>Event type and ordering, presence of key fields, terminal status, status/error body contracts, input/output success, structured-output failure, timeout, mid-run cancellation, and tool/MCP/skill behavior across a small core suite.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>What is normalized away</h3><p>Reasoning text, exact wording, token-by-token streaming timing, and provider-specific metadata. Re-baselining happens only for an intentional behavior change or <span class="mono">protocol_version</span> bump.</p></div>
+  </div>
+  <div class="decision" style="margin-top:18px"><h4>Invalid output is a failed run</h4>
+  <p class="why">If the harness completes but returns output that fails schema or conformance validation, the run is terminal <span class="mono">failed</span> with a typed validation <span class="mono">RunError</span>. It is never reported as succeeded with a bad payload. The controller remains the authoritative input pre-dispatch and output post-run validation gate.</p></div>
+  <div class="decision"><h4><span class="mono">ensure_ready</span> is a session consistency guard</h4>
+  <p class="why"><span class="mono">ensure_ready</span> asks: “does this sandbox still speak <em>this session's</em> captured-runtime protocol?” It is not a supported-version window and does not make old and new content epochs coexist. In v1, a content digest change drains and tombstones the old session; clients start fresh.</p></div>
+
+  <h2><span class="n">4</span>Image and ABI boundaries</h2>
+  <p class="lead">This sub-FRD owns the harness runtime/ABI definition, but it does so by inheriting the Functions base image rather than inventing a new customer contract.</p>
+  <div class="plain">
+    <strong>In plain terms:</strong> the bootstrap image is built <em>FROM</em> the Azure Functions Python base for Linux Python 3.13–3.14. The customer's vendored <span class="mono">.python_packages</span> — including compiled wheels — were built for that same base, so importing them in the sandbox is ABI-compatible by construction. The image bakes no MAF and no app dependencies; it runs the single captured environment delivered by packaging (<a href="https://gistpreview.github.io/?cdea2c7ee2a3dbd3705240579f69559e">0008.6</a>).
+  </div>
+  <div class="grid g2" style="margin-top:16px">
+    <div class="card"><h3><span class="ic">◆</span>Custom image is allowed</h3><p>A custom sandbox image may be used, but v1 still requires it to be MAF-conformant and to pass the same golden-trace gate before it is trusted.</p></div>
+    <div class="card"><h3><span class="ic">◆</span>What is deferred</h3><p>A non-MAF or bring-your-own harness is deferred to a separate FRD with its own adapter, shim validation, capability map, and conformance suite.</p></div>
+  </div>
+
+  <h2><span class="n">5</span>v1 today vs later</h2>
+  <div class="card" style="padding:6px 22px">
+    <table>
+      <thead><tr><th>Aspect</th><th>v1</th><th>Deferred / v2+</th></tr></thead>
+      <tbody>
+        <tr><td>Trusted harness</td><td class="v1">MAF only, inside the session sandbox</td><td class="v2">non-MAF harnesses by separate FRD</td></tr>
+        <tr><td>Trust gate</td><td class="v1">normalized golden-trace conformance before use</td><td class="v2">richer semantic diff / future adapters</td></tr>
+        <tr><td>Capabilities</td><td class="v1">single <span class="mono">protocol_version</span>; total feature→capability map</td><td class="v2">split capability version only if needed</td></tr>
+        <tr><td>Unsupported features</td><td class="v1">startup rejection with named reason</td><td class="v2">explicit compatibility designs</td></tr>
+        <tr><td>ABI</td><td class="v1">inherits Functions Python base image ABI</td><td class="v2">same rule for future image paths unless changed by FRD</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <footer>
+    <p><strong>FRD 0008.7 · Finalized</strong> (whole-FRD sign-off, 2026-07-27). Owns harness compatibility, conformance, capability negotiation, and the ABI definition; cross-cutting boundaries align with 0008.5 transport, 0008.6 packaging/image, and 0008.13 subagent conformance.</p>
+    <p class="note">Part of <a href="https://gistpreview.github.io/?97bbda5c5663c182c82431588fd0a539">FRD 0008 — ACA Sandbox Session Runtime</a>. A companion to the FRD for team feedback; the FRD documents remain the source of truth. Toggle light/dark with your OS theme or <span class="mono">?clawpilotTheme=dark</span>.</p>
+  </footer>
+</div>
+</body>
+</html>
