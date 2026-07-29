@@ -603,7 +603,7 @@ session_runtime:
 session_runtime:
   provider: aca_sandbox
   aca_sandbox:
-    sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sessionPools/<pool-name>
+    sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sandboxGroups/<group-name>
 ```
 
 **Dropped fields:** `max_run_seconds`, `region`, `disk`, and `content_package` were evaluated during design and explicitly removed from the surface. Configuring any of them under `aca_sandbox` fails startup with an explicit "field no longer supported" error — they are never silently ignored.
@@ -619,7 +619,7 @@ session_runtime:
 session_runtime:
   provider: aca_sandbox
   aca_sandbox:
-    sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sessionPools/<pool-name>
+    sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sandboxGroups/<group-name>
   retention:
     auto_suspend_idle: 300   # Suspend after 5 minutes idle
     reclaim_idle: 3600       # Reclaim after 1 hour idle
