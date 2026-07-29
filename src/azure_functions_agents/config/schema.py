@@ -213,6 +213,29 @@ def _reject_dropped_session_runtime_fields(value: Any, *, scope: str) -> Any:
     return value
 
 
+def _reject_explicit_null_aca_sandbox(value: Any) -> Any:
+    """Fail closed on an explicitly-null `aca_sandbox`, not just an absent key.
+
+    `aca_sandbox: AcaSandboxConfig | None = None` means Pydantic matches an
+    explicit `None` directly against the union's `None` arm without ever
+    attempting to construct `AcaSandboxConfig` -- so that model's own
+    required-field validation (`sandbox_group_resource_id`) never runs. A
+    bare YAML key (`aca_sandbox:` with nothing after it) parses to exactly
+    this explicit `None`, which would otherwise silently fall back to the
+    in-process default instead of failing startup -- fail-open, not
+    fail-closed. Distinguish that from the key being omitted entirely, which
+    must keep defaulting to `None` with no error.
+    """
+    if isinstance(value, dict) and "aca_sandbox" in value and value["aca_sandbox"] is None:
+        raise ValueError(
+            "session_runtime.aca_sandbox: must not be explicitly `null`. Omit "
+            "the `aca_sandbox` key entirely to use the in-process default, or "
+            "provide a block with `sandbox_group_resource_id` to select the "
+            "ACA Sandbox backend. See docs/frds/0008-aca-sandbox-session-runtime.md."
+        )
+    return value
+
+
 class RetentionConfig(BaseModel):
     """Idle/reclaim retention policy for ``aca_sandbox`` session state.
 
@@ -280,6 +303,11 @@ class SessionRuntimeConfig(BaseModel):
     @classmethod
     def _check_dropped_fields(cls, value: Any) -> Any:
         return _reject_dropped_session_runtime_fields(value, scope="session_runtime")
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_explicit_null_aca_sandbox(cls, value: Any) -> Any:
+        return _reject_explicit_null_aca_sandbox(value)
 
 
 class GlobalConfig(BaseModel):

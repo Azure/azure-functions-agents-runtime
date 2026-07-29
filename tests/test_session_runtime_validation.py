@@ -1,7 +1,7 @@
 """Startup-validation tests for FRD 0008's ``session_runtime`` config surface (P2).
 
 Each test below drives ``create_function_app()`` against a static fixture
-folder under ``fixtures/config_scenarios/`` (17-29, with gaps at 22 and 28 --
+folder under ``fixtures/config_scenarios/`` (17-30, with gaps at 22 and 28 --
 see below), mirroring the existing pipeline-level test style in
 ``test_app.py`` (fixture + ``pytest.raises``) rather than the schema-level
 ``pytest.raises(ValidationError)`` style used for pure Pydantic rejections
@@ -30,6 +30,11 @@ row text):
   ``auto_delete_backstop_violated``'s docstring in ``config/validation.py``),
   so the same otherwise-fully-valid fixture is exercised three times below
   with different ``platform``/``sys.version_info`` monkeypatching per test.
+* ``30_aca_sandbox_explicit_null``                        -> Row 5 edge case:
+  a bare ``aca_sandbox:`` key (explicit ``null``, present in the mapping --
+  distinct from the key being *omitted*, which is fixture 17's case). See the
+  Row 5 discussion below for why this is schema-level, not
+  ``validate_session_runtime``-level.
 
 **Gaps at 22 and 28 (former Row 5 / Row 11 fixtures):** the ``provider``
 field's removal (Decision #84) eliminated the fixture *scenario* each of
@@ -48,10 +53,29 @@ framing):
   ``session_runtime: {provider: aca_sandbox}`` (no ``aca_sandbox:`` block)
   now just fails Pydantic's ``extra="forbid"`` on the unknown ``provider``
   key (see ``test_config_schema.py::test_session_runtime_config_rejects_provider_field``).
-  The one remaining Row-5-shaped case -- an ``aca_sandbox: {}`` block present
-  but missing its required ``sandbox_group_resource_id`` -- was always a
-  plain Pydantic required-field error, never something
-  ``validate_session_runtime`` itself raised.
+  Two Row-5-shaped cases remain, both enforced at the schema layer (never
+  something ``validate_session_runtime`` itself raises):
+
+  * an ``aca_sandbox: {}`` block present but missing its required
+    ``sandbox_group_resource_id`` -- a plain Pydantic required-field error;
+    ``AcaSandboxConfig`` construction runs (the key's value is a dict, not
+    ``None``) and fails on the missing field. No dedicated fixture; see
+    ``test_config_schema.py::test_aca_sandbox_config_rejects_missing_sandbox_group_resource_id``.
+  * a bare ``aca_sandbox:`` key -- explicit ``None``, present in the mapping
+    but distinct from the key being *omitted*. Pydantic's union matching for
+    ``AcaSandboxConfig | None`` matches an explicit ``None`` directly against
+    the ``None`` arm *without ever attempting to construct*
+    ``AcaSandboxConfig``, so its required-field check never runs -- left
+    unguarded, this silently selects the in-process default instead of
+    failing startup (fail-open, not fail-closed). A dedicated
+    ``model_validator(mode="before")`` on ``SessionRuntimeConfig``
+    (``_check_explicit_null_aca_sandbox``, alongside the existing
+    ``_check_dropped_fields``) rejects this explicitly. See fixture
+    ``30_aca_sandbox_explicit_null`` and
+    ``test_row5_explicit_null_aca_sandbox_fails_startup`` below, plus the
+    schema-level tests in ``test_config_schema.py``
+    (``test_session_runtime_config_rejects_explicit_null_aca_sandbox`` and
+    ``test_global_config_session_runtime_rejects_explicit_null_aca_sandbox``).
 * Row 11 ("``retention`` set but provider != aca_sandbox") required
   authoring ``retention`` as a sibling of ``aca_sandbox`` while some other
   provider was active. ``retention`` moved onto ``AcaSandboxConfig`` (Decision
@@ -127,6 +151,20 @@ def test_row1_bad_harness_fails_startup() -> None:
     message = str(exc_info.value)
     assert "maf" in message
     assert "custom-harness" in message
+
+
+def test_row5_explicit_null_aca_sandbox_fails_startup() -> None:
+    """Row 5 edge case: a bare ``aca_sandbox:`` key (explicit ``null``) must
+    fail startup, not silently select the in-process default.
+
+    This fires at the Pydantic schema layer (``GlobalConfig.model_validate``
+    inside ``load_global_config``), before ``validate_session_runtime`` ever
+    runs -- like rows 1, 9, and 10, no environment/monkeypatching is needed.
+    """
+    with pytest.raises(ValueError, match=r"aca_sandbox.*must not be explicitly `null`") as exc_info:
+        create_function_app(FIXTURES_ROOT / "30_aca_sandbox_explicit_null")
+    message = str(exc_info.value)
+    assert "session_runtime.aca_sandbox" in message
 
 
 def test_row2_workflows_enabled_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -322,6 +322,22 @@ def _validate_state_storage_dedicated_account() -> None:
     ``__tableServiceUri`` sibling form), not that it is actually distinct
     storage-account infrastructure from ``AzureWebJobsStorage`` at the API
     level (a later-phase, live check).
+
+    Known gap (disclosed, not fixed in this phase): FRD Decision #31 / matrix
+    row 7 scope this requirement to *production* -- reuse of
+    ``AzureWebJobsStorage`` is explicitly allowed for local/dev and explicit
+    preview trials. This function has no environment carve-out and requires
+    the dedicated account unconditionally in every environment, which is
+    stricter than designed. Implementing the carve-out correctly needs a
+    "how do we detect production" mechanism that does not exist anywhere in
+    this codebase and is not specified by the FRD's config-only (P2)
+    authoring surface -- the FRD's own row 6/7 "runtime (0008.3) + config
+    (0008.10)" split suggests the environment-aware half of this check is a
+    live-verification concern for a later phase, not a P2 config check.
+    Inventing an environment-detection heuristic now would be a unilateral
+    design decision outside this phase's scope, and the failure direction
+    (unconditionally strict) is fail-closed/safe rather than fail-open, so it
+    is tracked here as a known gap rather than fixed speculatively.
     """
     has_connection_string = bool(runtime_env_value(_STATE_STORAGE_SETTING_NAME))
     has_identity_based = bool(
@@ -500,9 +516,18 @@ def validate_session_runtime(
     aca_sandbox = session_runtime.aca_sandbox
     if aca_sandbox is None:
         # In-process (default): no further FRD 0008 rows apply. Row 5's
-        # "sandbox_group_resource_id required" case is enforced by
-        # AcaSandboxConfig's own Pydantic-level required field, so an
-        # `aca_sandbox: {}` block missing it never reaches this function.
+        # "sandbox_group_resource_id required" case is enforced entirely at
+        # the schema layer, before this function ever runs, for both ways an
+        # `aca_sandbox` block can fail to select the backend: an
+        # `aca_sandbox: {}` block missing the field is a plain Pydantic
+        # required-field error (AcaSandboxConfig construction runs and
+        # fails), while a bare `aca_sandbox:` key (explicit `null`, distinct
+        # from the key being omitted -- which is this branch) is rejected by
+        # `SessionRuntimeConfig`'s `_check_explicit_null_aca_sandbox`
+        # model_validator, since Pydantic would otherwise match that `None`
+        # directly against the `AcaSandboxConfig | None` union's `None` arm
+        # without ever attempting construction, silently falling through to
+        # this same in-process return instead of failing startup.
         return
 
     retention = aca_sandbox.retention

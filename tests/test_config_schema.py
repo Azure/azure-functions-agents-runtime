@@ -336,6 +336,36 @@ def test_global_config_session_runtime_absent_aca_sandbox_means_default_backend(
     assert config.session_runtime.aca_sandbox is None
 
 
+def test_session_runtime_config_rejects_explicit_null_aca_sandbox() -> None:
+    """A bare `aca_sandbox:` key (present in the mapping, explicit `None`) is
+    NOT the same as the key being omitted. `aca_sandbox: AcaSandboxConfig |
+    None` means Pydantic matches an explicit `None` directly against the
+    union's `None` arm without ever attempting to construct
+    `AcaSandboxConfig` -- so that model's own required-field validation
+    (`sandbox_group_resource_id`) never runs, and the config would otherwise
+    silently select the in-process default instead of failing startup
+    (fail-open, not fail-closed)."""
+    with pytest.raises(
+        ValidationError, match=r"aca_sandbox.*must not be explicitly `null`"
+    ):
+        SessionRuntimeConfig.model_validate({"aca_sandbox": None})
+
+
+def test_session_runtime_config_omitted_aca_sandbox_still_defaults_to_none() -> None:
+    """The explicit-null guard above must not affect the key being omitted
+    entirely -- that must keep defaulting to `None` (in-process backend)
+    with no error, exactly as before the guard was added."""
+    config = SessionRuntimeConfig.model_validate({})
+    assert config.aca_sandbox is None
+
+
+def test_global_config_session_runtime_rejects_explicit_null_aca_sandbox() -> None:
+    """Same guard, exercised through the full `GlobalConfig` -- proves the
+    fix closes the bug end-to-end and not just on the isolated sub-model."""
+    with pytest.raises(ValidationError, match=r"aca_sandbox.*must not be explicitly `null`"):
+        GlobalConfig.model_validate({"session_runtime": {"aca_sandbox": None}})
+
+
 def test_session_runtime_config_rejects_provider_field() -> None:
     """`provider` was removed entirely (Decision #84) -- presence of the
     `aca_sandbox` block is now the sole backend discriminant, so an
