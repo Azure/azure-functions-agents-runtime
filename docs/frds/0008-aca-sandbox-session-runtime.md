@@ -881,8 +881,8 @@ session_runtime:
   aca_sandbox:                          # presence of this block selects the ACA backend
     sandbox_group_resource_id: $ACA_SANDBOX_GROUP_RESOURCE_ID
     retention:                          # optional; app-scoped only
-      auto_suspend_idle: 5m
-      reclaim_idle: 24h
+      auto_suspend_idle: 300            # seconds; int
+      reclaim_idle: 3600                # seconds; int, must exceed auto_suspend_idle
 ```
 
 * Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, and `retention` (nested under `aca_sandbox`). There is no `provider` field — the backend is selected by the presence of the `aca_sandbox` block; its absence means `in_lang_worker`. The remaining SDK spike is only the accepted identifier value format and its Pydantic validation.

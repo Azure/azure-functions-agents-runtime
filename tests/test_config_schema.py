@@ -253,6 +253,16 @@ def test_aca_sandbox_config_rejects_empty_sandbox_group_resource_id() -> None:
         AcaSandboxConfig(sandbox_group_resource_id="   ")
 
 
+def test_aca_sandbox_config_rejects_missing_sandbox_group_resource_id() -> None:
+    """FRD Row 5 remains fully enforced -- ``sandbox_group_resource_id`` is a
+    required Pydantic field on ``AcaSandboxConfig`` independent of the
+    presence-based backend selection removed by Decision #84, so an
+    ``aca_sandbox`` block that omits it entirely (not just a blank string)
+    must still fail at the schema level."""
+    with pytest.raises(ValidationError, match="sandbox_group_resource_id"):
+        AcaSandboxConfig.model_validate({})
+
+
 def test_aca_sandbox_config_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
         AcaSandboxConfig.model_validate(
