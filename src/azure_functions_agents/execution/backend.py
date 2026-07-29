@@ -101,7 +101,7 @@ class AgentExecutionBackend(Protocol):
     ``StartRunRequest.timeout`` (the resolved agent's authored timeout) and
     records watchdog expiry as ``timed_out``. The controller/HTTP layer owns its
     separate synchronous wait boundary of ``min(timeout, 180 seconds)``; it is
-    not a seam field. ``in_process`` execution has no 180-second cap.
+    not a seam field. ``in_lang_worker`` execution has no 180-second cap.
 
     ``cancel_run`` is used only for explicit cancellation or the synchronous
     wait cap. A client disconnect never cancels a run.

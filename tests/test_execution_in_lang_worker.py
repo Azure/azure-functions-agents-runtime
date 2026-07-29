@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-import azure_functions_agents.execution.local as local_execution
+import azure_functions_agents.execution.in_lang_worker as language_worker_execution
 from azure_functions_agents import runner
 from azure_functions_agents.execution import (
     DEFAULT_EXECUTION_PROVIDER,
@@ -33,7 +33,7 @@ from azure_functions_agents.execution import (
     run_to_agent_result,
     status_to_agent_result,
 )
-from azure_functions_agents.execution.local import LocalExecutionBackend
+from azure_functions_agents.execution.in_lang_worker import LanguageWorkerExecutionBackend
 from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR, _ensure_sandbox
 from azure_functions_agents.registration import _handlers, endpoints
 from tests.test_execution_backend import assert_event_cursor_conformance, collect_run_events
@@ -70,7 +70,7 @@ def _install_runner(
     run_agent_stream: Any,
 ) -> None:
     runner_module = SimpleNamespace(run_agent=run_agent, run_agent_stream=run_agent_stream)
-    monkeypatch.setattr(local_execution, "import_module", lambda _: runner_module)
+    monkeypatch.setattr(language_worker_execution, "import_module", lambda _: runner_module)
 
 
 async def _wait_for_terminal(
@@ -84,18 +84,18 @@ async def _wait_for_terminal(
         await asyncio.sleep(0)
 
 
-def test_factory_returns_the_default_in_process_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_factory_returns_the_default_in_lang_worker_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     import_calls: list[str] = []
 
     def fail_if_runner_imported(name: str) -> Any:
         import_calls.append(name)
         raise AssertionError("runner should not be imported while resolving a backend")
 
-    monkeypatch.setattr(local_execution, "import_module", fail_if_runner_imported)
+    monkeypatch.setattr(language_worker_execution, "import_module", fail_if_runner_imported)
     backend = create_execution_backend(binding=_binding())
 
-    assert DEFAULT_EXECUTION_PROVIDER == "in_process"
-    assert isinstance(backend, LocalExecutionBackend)
+    assert DEFAULT_EXECUTION_PROVIDER == "in_lang_worker"
+    assert isinstance(backend, LanguageWorkerExecutionBackend)
     assert import_calls == []
     with pytest.raises(ValueError, match="Unsupported execution provider"):
         create_execution_backend(binding=_binding(), provider="unsupported")
@@ -132,7 +132,7 @@ def test_registration_import_defers_runner_loading() -> None:
     assert result.stdout.strip() == "False"
 
 
-def test_local_backend_routes_non_streaming_runs_through_the_lifecycle(
+def test_language_worker_backend_routes_non_streaming_runs_through_the_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
@@ -156,7 +156,7 @@ def test_local_backend_routes_non_streaming_runs_through_the_lifecycle(
     _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
 
     async def exercise() -> None:
-        backend = LocalExecutionBackend(_binding())
+        backend = LanguageWorkerExecutionBackend(_binding())
         assert not hasattr(backend, "run_agent")
         assert not hasattr(backend, "run_agent_stream")
         handle = await backend.start_run(
@@ -228,7 +228,7 @@ class _StreamingAgent:
         yield _StreamUpdate(_StreamContent("text", text="answer"))
 
 
-def test_local_backend_stream_round_trips_real_runner_sse_bytes(
+def test_language_worker_backend_stream_round_trips_real_runner_sse_bytes(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_build_agent_session_history(
@@ -248,7 +248,7 @@ def test_local_backend_stream_round_trips_real_runner_sse_bytes(
                 **binding.runner_kwargs(stream=True),
             )
         )
-        backend = LocalExecutionBackend(binding, stream_events=True)
+        backend = LanguageWorkerExecutionBackend(binding, stream_events=True)
         handle = await backend.start_run(
             StartRunRequest(prompt="hello", session_id="session-1", timeout=60.0)
         )
@@ -267,7 +267,7 @@ def test_local_backend_stream_round_trips_real_runner_sse_bytes(
     asyncio.run(exercise())
 
 
-def test_closing_a_stream_reader_does_not_cancel_the_local_run(
+def test_closing_a_stream_reader_does_not_cancel_the_language_worker_run(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def exercise() -> None:
@@ -282,7 +282,7 @@ def test_closing_a_stream_reader_does_not_cancel_the_local_run(
             yield "data: {\"type\": \"done\"}\n\n"
 
         _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
-        backend = LocalExecutionBackend(_binding(), stream_events=True)
+        backend = LanguageWorkerExecutionBackend(_binding(), stream_events=True)
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
         reader = backend.read_events(context, after_sequence=0)
@@ -298,7 +298,7 @@ def test_closing_a_stream_reader_does_not_cancel_the_local_run(
     asyncio.run(exercise())
 
 
-def test_local_backend_reuses_event_cursor_conformance_harness(
+def test_language_worker_backend_reuses_event_cursor_conformance_harness(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
@@ -324,7 +324,7 @@ def test_local_backend_reuses_event_cursor_conformance_harness(
     _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
 
     async def exercise() -> None:
-        backend = LocalExecutionBackend(_binding(), event_retention=3)
+        backend = LanguageWorkerExecutionBackend(_binding(), event_retention=3)
         assert isinstance(backend, AgentExecutionBackend)
         handle = await backend.start_run(
             StartRunRequest(
@@ -363,7 +363,7 @@ def test_local_backend_reuses_event_cursor_conformance_harness(
     asyncio.run(exercise())
 
 
-def test_local_backend_maps_runner_timeout_to_timed_out(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_language_worker_backend_maps_runner_timeout_to_timed_out(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_build_agent_session_history(
         *args: Any,
         **kwargs: Any,
@@ -376,7 +376,7 @@ def test_local_backend_maps_runner_timeout_to_timed_out(monkeypatch: pytest.Monk
         with pytest.raises(RuntimeError) as raised:
             await runner.run_agent("hello", session_id="session-1", timeout=0.0)
         timeout_error = raised.value
-        assert str(timeout_error).startswith(local_execution._RUNNER_TIMEOUT_PREFIX)
+        assert str(timeout_error).startswith(language_worker_execution._RUNNER_TIMEOUT_PREFIX)
 
         async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
             raise timeout_error
@@ -385,7 +385,7 @@ def test_local_backend_maps_runner_timeout_to_timed_out(monkeypatch: pytest.Monk
             yield "data: {\"type\": \"done\"}\n\n"
 
         _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
-        backend = LocalExecutionBackend(_binding())
+        backend = LanguageWorkerExecutionBackend(_binding())
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
 
@@ -398,7 +398,7 @@ def test_local_backend_maps_runner_timeout_to_timed_out(monkeypatch: pytest.Monk
     asyncio.run(exercise())
 
 
-def test_local_backend_preserves_runner_value_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_language_worker_backend_preserves_runner_value_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     async def fake_run_agent(*args: Any, **kwargs: Any) -> AgentResult:
         raise ValueError("Invalid session_id (must match [A-Za-z0-9._-]{1,128})")
 
@@ -408,7 +408,7 @@ def test_local_backend_preserves_runner_value_errors(monkeypatch: pytest.MonkeyP
     _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
 
     async def exercise() -> None:
-        backend = LocalExecutionBackend(_binding())
+        backend = LanguageWorkerExecutionBackend(_binding())
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="invalid session"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
         status, events = await collect_terminal_run(backend, context)
@@ -422,7 +422,7 @@ def test_local_backend_preserves_runner_value_errors(monkeypatch: pytest.MonkeyP
     asyncio.run(exercise())
 
 
-def test_local_backend_terminalizes_unexpected_base_exceptions(
+def test_language_worker_backend_terminalizes_unexpected_base_exceptions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class UnexpectedBaseFailure(BaseException):
@@ -437,7 +437,7 @@ def test_local_backend_terminalizes_unexpected_base_exceptions(
     _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
 
     async def exercise() -> None:
-        backend = LocalExecutionBackend(_binding())
+        backend = LanguageWorkerExecutionBackend(_binding())
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
 
@@ -448,7 +448,7 @@ def test_local_backend_terminalizes_unexpected_base_exceptions(
     asyncio.run(exercise())
 
 
-def test_local_backend_streaming_base_exception_emits_terminal_error(
+def test_language_worker_backend_streaming_base_exception_emits_terminal_error(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class UnexpectedBaseFailure(BaseException):
@@ -467,7 +467,7 @@ def test_local_backend_streaming_base_exception_emits_terminal_error(
     _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
 
     async def exercise() -> None:
-        backend = LocalExecutionBackend(_binding(), stream_events=True)
+        backend = LanguageWorkerExecutionBackend(_binding(), stream_events=True)
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
         reader = backend.read_events(context, after_sequence=0)
@@ -484,7 +484,7 @@ def test_local_backend_streaming_base_exception_emits_terminal_error(
     asyncio.run(exercise())
 
 
-def test_local_backend_logs_original_runner_failure(
+def test_language_worker_backend_logs_original_runner_failure(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -500,7 +500,7 @@ def test_local_backend_logs_original_runner_failure(
     _install_runner(monkeypatch, fake_run_agent, fake_run_agent_stream)
 
     async def exercise() -> RunStatus:
-        backend = LocalExecutionBackend(_binding())
+        backend = LanguageWorkerExecutionBackend(_binding())
         handle = await backend.start_run(StartRunRequest(prompt="hello", session_id="session-1"))
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
         return (await collect_terminal_run(backend, context))[0]
@@ -699,7 +699,7 @@ def test_registration_stream_emits_terminal_error_for_backend_failure(
     def fail_runner_import(_name: str) -> Any:
         raise RuntimeError("runner unavailable")
 
-    monkeypatch.setattr(local_execution, "import_module", fail_runner_import)
+    monkeypatch.setattr(language_worker_execution, "import_module", fail_runner_import)
 
     result = asyncio.run(
         _collect_stream(

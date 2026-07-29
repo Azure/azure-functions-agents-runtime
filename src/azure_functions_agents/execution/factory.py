@@ -1,13 +1,13 @@
-"""Factory for the execution backend selected by ``session_runtime.provider``."""
+"""Factory for the execution backend selected by whether ``session_runtime.aca_sandbox`` is configured."""
 
 from __future__ import annotations
 
 from .backend import AgentExecutionBackend
 from .binding import AgentBinding
-from .local import LocalExecutionBackend
+from .in_lang_worker import LanguageWorkerExecutionBackend
 from .unavailable import UnavailableBackend
 
-DEFAULT_EXECUTION_PROVIDER = "in_process"
+DEFAULT_EXECUTION_PROVIDER = "in_lang_worker"
 ACA_SANDBOX_EXECUTION_PROVIDER = "aca_sandbox"
 
 
@@ -28,7 +28,7 @@ def create_execution_backend(
     gate.
     """
     if provider == DEFAULT_EXECUTION_PROVIDER:
-        return LocalExecutionBackend(binding, stream_events=stream_events)
+        return LanguageWorkerExecutionBackend(binding, stream_events=stream_events)
     if provider == ACA_SANDBOX_EXECUTION_PROVIDER:
         return UnavailableBackend(provider=provider)
     raise ValueError(f"Unsupported execution provider: {provider}")

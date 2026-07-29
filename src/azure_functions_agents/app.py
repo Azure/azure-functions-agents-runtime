@@ -142,8 +142,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     # FRD 0008: enforce the `session_runtime` startup validation matrix before
     # any other cross-agent validation/registration runs. A no-op (returns
-    # immediately) unless `session_runtime` is configured at all; `provider:
-    # aca_sandbox` always fails here (capability gate), never at request time.
+    # immediately) unless `session_runtime` is configured at all; configuring
+    # `aca_sandbox` always fails here (capability gate), never at request time.
     validate_session_runtime(global_config, resolved_agents)
 
     # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---

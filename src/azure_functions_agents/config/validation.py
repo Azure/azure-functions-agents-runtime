@@ -347,8 +347,8 @@ def _validate_agent_workflows_disabled(resolved: ResolvedAgent) -> None:
     if resolved.is_main and _workflows_requested(resolved.workflows):
         raise _session_runtime_error(
             "workflows.enabled",
-            "Dynamic Workflows are not supported when session_runtime.provider "
-            "is aca_sandbox",
+            "Dynamic Workflows are not supported when session_runtime.aca_sandbox "
+            "is configured",
             source_file=resolved.source_file,
         )
 
@@ -374,13 +374,13 @@ def _validate_agent_no_sandbox_config(
         raise _session_runtime_error(
             "system_tools.dynamic_sessions_code_interpreter",
             "The Dynamic Sessions code interpreter is not supported when "
-            "session_runtime.provider is aca_sandbox",
+            "session_runtime.aca_sandbox is configured",
         )
     if resolved.sandbox_config is not None:
         raise _session_runtime_error(
             "system_tools.dynamic_sessions_code_interpreter",
             "The Dynamic Sessions code interpreter is not supported when "
-            "session_runtime.provider is aca_sandbox",
+            "session_runtime.aca_sandbox is configured",
             source_file=resolved.source_file,
         )
 
@@ -395,8 +395,8 @@ def _validate_agent_http_trigger_only(resolved: ResolvedAgent) -> None:
     if trigger is not None and trigger.type != "http_trigger":
         raise _session_runtime_error(
             "trigger.type",
-            "Only http_trigger agents are supported when session_runtime.provider "
-            f"is aca_sandbox (got `{trigger.type}`)",
+            "Only http_trigger agents are supported when session_runtime.aca_sandbox "
+            f"is configured (got `{trigger.type}`)",
             source_file=resolved.source_file,
         )
 
@@ -453,8 +453,8 @@ def _validate_agent_endpoint_auth_configured(resolved: ResolvedAgent) -> None:
     if _agent_has_anonymous_http_surface(resolved):
         raise _session_runtime_error(
             "builtin_endpoints.http_auth",
-            "Anonymous access is not supported when session_runtime.provider "
-            "is aca_sandbox; configure a function key or Entra ID auth",
+            "Anonymous access is not supported when session_runtime.aca_sandbox "
+            "is configured; configure a function key or Entra ID auth",
             source_file=resolved.source_file,
         )
 
@@ -463,16 +463,20 @@ def validate_session_runtime(
     global_config: GlobalConfig,
     resolved_agents: list[ResolvedAgent],
 ) -> None:
-    """Enforce FRD 0008's 13-row ``aca_sandbox`` startup validation matrix.
+    """Enforce FRD 0008's ``aca_sandbox`` startup validation matrix.
 
-    Absence of ``session_runtime`` is valid and selects ``provider:
-    in_process`` with no behavior change; none of the matrix rows below can
-    fire in that case. Every row raises a plain ``ValueError``, matching this
-    module's existing convention (see ``validate_resolved_agent``,
-    ``validate_subagent_references``).
+    Absence of ``session_runtime`` is valid and selects the default
+    in-process backend with no behavior change; none of the matrix rows
+    below can fire in that case. There is no explicit backend-selector
+    field: configuring the ``aca_sandbox`` block is itself what selects the
+    ACA Sandbox execution backend, so every row below other than the
+    harness check is conditioned on ``session_runtime.aca_sandbox`` being
+    present, not on a ``provider`` value. Every row raises a plain
+    ``ValueError``, matching this module's existing convention (see
+    ``validate_resolved_agent``, ``validate_subagent_references``).
 
     ``aca_sandbox`` is not implemented yet (see
-    ``execution/unavailable.py``): once rows 1-12 all pass, this function
+    ``execution/unavailable.py``): once all other rows pass, this function
     still unconditionally raises a final capability-gate error so that an
     otherwise well-formed ``aca_sandbox`` configuration fails **application
     startup** with a clear, typed diagnostic rather than a confusing runtime
@@ -486,40 +490,22 @@ def validate_session_runtime(
     # Row 1 (owning rule: 0008.7 #34/#36): harness describes agent-execution
     # semantics, not the physical execution backend, so it is checked
     # whenever `session_runtime` is present at all -- not conditioned on
-    # `provider`.
+    # `aca_sandbox`.
     if session_runtime.harness != "maf":
         raise _session_runtime_error(
             "session_runtime.harness",
             f"Only `maf` is supported (got `{session_runtime.harness}`)",
         )
 
-    provider = session_runtime.provider
-    retention = session_runtime.retention
-
-    # Row 11 (owning rule: 0008.10): retention is aca_sandbox-only, checked
-    # before the general in_process early-return below so it still fires for
-    # `provider: in_process` (or the default) plus a `retention` block.
-    if retention is not None and provider != "aca_sandbox":
-        raise _session_runtime_error(
-            "session_runtime.retention",
-            "retention is only supported when session_runtime.provider is aca_sandbox",
-        )
-
-    if provider != "aca_sandbox":
-        # in_process (default or explicit): no further FRD 0008 rows apply.
+    aca_sandbox = session_runtime.aca_sandbox
+    if aca_sandbox is None:
+        # In-process (default): no further FRD 0008 rows apply. Row 5's
+        # "sandbox_group_resource_id required" case is enforced by
+        # AcaSandboxConfig's own Pydantic-level required field, so an
+        # `aca_sandbox: {}` block missing it never reaches this function.
         return
 
-    # --- provider == "aca_sandbox" from here down. ---
-
-    # Row 5 (owning rule: 0008.10): a pre-provisioned Sandbox Group reference
-    # is mandatory. Schema-level validation already rejects an empty/blank
-    # `sandbox_group_resource_id` string when `aca_sandbox` is present; this
-    # covers the block being missing entirely.
-    if session_runtime.aca_sandbox is None:
-        raise _session_runtime_error(
-            "session_runtime.aca_sandbox.sandbox_group_resource_id",
-            "Required when session_runtime.provider is aca_sandbox",
-        )
+    retention = aca_sandbox.retention
 
     if retention is not None:
         # Row 9 (owning rule: 0008.10 + 0008.12): auto_suspend_idle must be
@@ -527,14 +513,14 @@ def validate_session_runtime(
         if retention.auto_suspend_idle not in _ALLOWED_AUTO_SUSPEND_IDLE_SECONDS:
             allowed = ", ".join(str(value) for value in _ALLOWED_AUTO_SUSPEND_IDLE_SECONDS)
             raise _session_runtime_error(
-                "session_runtime.retention.auto_suspend_idle",
+                "session_runtime.aca_sandbox.retention.auto_suspend_idle",
                 f"Must be one of {allowed} seconds (got {retention.auto_suspend_idle})",
             )
         # Row 10 (owning rule: 0008.10 + 0008.12): reclaim_idle must be
         # positive and strictly greater than auto_suspend_idle.
         if retention.reclaim_idle <= 0 or retention.reclaim_idle <= retention.auto_suspend_idle:
             raise _session_runtime_error(
-                "session_runtime.retention.reclaim_idle",
+                "session_runtime.aca_sandbox.retention.reclaim_idle",
                 "Must be positive and strictly greater than "
                 f"retention.auto_suspend_idle ({retention.auto_suspend_idle}); "
                 f"got {retention.reclaim_idle}",
@@ -561,17 +547,18 @@ def validate_session_runtime(
     # Row 12 (owning rule: 0008.7 + 0008.10): Function App host ABI gate.
     # Deliberately checked last among the fail-closed rows (not in FRD table
     # order): it is an independent, atomic host check with no ordering
-    # dependency on rows 1-11 or 2/3/4/8, and placing it last means a
+    # dependency on rows 1-10 or 2/3/4/8, and placing it last means a
     # misconfigured app (wrong retention, workflows enabled, anonymous auth,
     # etc.) is reported with its *specific* error even when also running on
     # an unsupported host -- e.g. during local development on Windows/macOS.
     _validate_platform_capability()
 
-    # Capability gate: rows 1-12 all passed, but aca_sandbox execution is not
-    # implemented in this build (see execution/unavailable.py). This also
-    # vacuously satisfies row 13's "always a hard fail" -- no aca_sandbox
-    # session can ever run in this build regardless of retention/backstop math.
+    # Capability gate: all other rows passed, but aca_sandbox execution is
+    # not implemented in this build (see execution/unavailable.py). This
+    # also vacuously satisfies row 13's "always a hard fail" -- no
+    # aca_sandbox session can ever run in this build regardless of
+    # retention/backstop math.
     raise _session_runtime_error(
-        "session_runtime.provider",
+        "session_runtime.aca_sandbox",
         "aca_sandbox backend not available in this build",
     )

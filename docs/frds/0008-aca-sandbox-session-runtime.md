@@ -90,7 +90,7 @@ flowchart LR
     F --> A["Easy Auth / endpoint auth"]
     A --> D["Authoritative SessionDirectory row<br/>dedicated customer Azure Storage (scoped RBAC)"]
     F --> E["AgentExecutionBackend"]
-    E --> L["LocalExecutionBackend<br/>current runner.py"]
+    E --> L["LanguageWorkerExecutionBackend<br/>current runner.py"]
     E --> S["AcaSandboxExecutionBackend"]
     S --> ADC["ACA Sandbox ADC data plane<br/>create / resume / files / exec"]
     ADC --> SB["One sandbox per session"]
@@ -119,7 +119,7 @@ provenance.
 
 | Area | Scope | Decisions / source of authority |
 | --- | --- | --- |
-| Execution backend & controller | Provider-neutral seam, controller role, and in-process default | 1, 2, 12, 13 |
+| Execution backend & controller | Provider-neutral seam, controller role, and in-lang-worker default | 1, 2, 12, 13 |
 | Session identity, ownership & concurrency | Opaque sessions, standard Functions auth, one active run | 6, 15, 55 |
 | State store & tamper-evident trust | Dedicated state account, authoritative controller row, generation/manifest checks | 5, 20, 31–33, 39, 51–52 |
 | Resource residency & provisioning | Customer subscription, one group/app environment, customer IaC/runtime boundary | 30, 65 |
@@ -184,7 +184,7 @@ provenance.
   capability (see 0008.13).
 - Apply deny-by-default egress before untrusted work starts; support proxy-side
   credential injection.
-- Keep the in-process runner as the default backend.
+- Keep the in-lang-worker runner as the default backend.
 - Govern persistent ACA session ownership with the **standard Azure Functions auth
   gate** (function keys **or** App Service Authentication / Easy Auth) — the
   controller adds no second identity layer; the **app is the trust boundary**
@@ -303,7 +303,7 @@ provenance.
 | 61 | Active-session quota (Q4) | per-owner cap / aggregate-only / no runtime counter | v1 = no caps (aggregate bounded by ACA live capacity + reap-on-capacity-failure); per-owner fairness = v2 | Agent | 2026-07-24 | 0008.12 |
 | 62 | Lost-sandbox recovery / 410 (Q5) | rebuild-from-checkpoint in v1 / status-only durability | v1 = status durable (Tables), content best-effort (sandbox-only), sandbox gone → 410; rebuild-from-checkpoint = v2 (with the external mirror) | Agent | 2026-07-24 | 0008.12 |
 | 63 | Auto-suspend restore & reclaim mechanism | harness self-restore / sandbox→controller callback / ACA TTL-disable / periodic reconciler | Periodic reconciler is the irreducible floor (crash-before-signal); self-restore + callback rejected (privilege escalation / pull-only transport / cannot catch a crash); self-suspend-request + long interval = future/optional; carries the idle-policy-repair re-arm duty that 0008.8 D27 leans on (xref 0008.8, dependency RESOLVED cd0f619) | Agent | 2026-07-24 | 0008.12 |
-| 64 | Session retention model | fixed TTL / group-only / idle-based hybrid | Idle-based hybrid: group default (~5 min suspend / ~24 h reclaim) < app-level session_runtime.retention (live v1) < per-agent .agent.md (v2); no absolute creation-time TTL | Human | 2026-07-24 | 0008.12 (xref 0008.10, 0008.4) |
+| 64 | Session retention model | fixed TTL / group-only / idle-based hybrid | Idle-based hybrid: group default (~5 min suspend / ~24 h reclaim) < app-level session_runtime.aca_sandbox.retention (live v1) < per-agent .agent.md (v2); no absolute creation-time TTL | Human | 2026-07-24 | 0008.12 (xref 0008.10, 0008.4) |
 | 65 | Resource residency & provisioning boundary (refines #30) | Microsoft-operated provisioning service / always-on cross-tenant identity / customer-run IaC under the customer's own credentials | Customer-run Bicep/ARM via `az deployment` under the customer's own credentials (interactive az login or their CI/CD federated identity / service principal) — no Microsoft-operated identity, nothing cross-tenant. Four #30 scope clarifications: (1) group capacity uses ACA Sandboxes preview DEFAULT quotas (the 100-concurrent target is validated by 0008.5's live-spike gate, not residency); (2) hard 1:1 — one Sandbox Group per Function App/environment for v1 (revisitable later); (3) the customer picks the group's region and the runtime co-locates every session sandbox in that region (single-region v1; DR is a customer IaC concern); (4) the customer owns standing-IaC teardown (symmetric with creation), and the runtime deletes only individual session sandboxes. The generic harness image is authored/built/published by the runtime project and only referenced (digest-pinned) by customer IaC. v1 ships documented, composable SAMPLE IaC; the one-command composite "quickstart" module is the post-v1 DX target. | Human | 2026-07-22 | 0008.4 |
 | 66 | Sandbox identity — v1 identity-less (supersedes #56/#57 v1 mechanism) | carry app UAMI into the sandbox (#56/#57) / dedicated sandbox workload UAMI / identity-less sandbox | v1 sandbox is IDENTITY-LESS — no managed identity or AAD token inside, ever. Outbound auth is via ADC egress-proxy credential injection (primary mechanism). The controller delivers the content package into the sandbox, so the sandbox needs no storage access. Supersedes the v1 mechanism of #56/#57 (carrying the app UAMI into the sandbox); MI-carry and HOBOv2 are deferred to a future version. Reinforces 0008.3 (identity-less ⇒ the sandbox cannot write state; the controller MI stays the sole writer) and fixes the function-key package-download gap. | Human | 2026-07-24 | 0008.9 (xref 0008.3, 0008.6) |
 | 67 | Sandbox-loss vs harness-crash recovery (refines #9/#62; v1 durability) | continue/reuse the session on any interruption / tombstone on any interruption / distinguish loss vs crash | Distinguish two cases. (a) Sandbox/snapshot LOST ⇒ session TOMBSTONED; the same session_id returns 410 Gone; the client creates a new session (v1 accepted limitation — no external mirror, context is gone). (b) Harness CRASH with the sandbox/disk INTACT ⇒ the run is terminal Abandoned but the session CONTINUES; a resubmit starts a fresh run on the SAME sandbox, resuming from the last COMMITTED checkpoint. Adds a v1 requirement: atomic per-turn commit of conversation history + working files (a crash never yields corrupted-state resume). Case (b) reuses the SAME sandbox instance and SAME generation; the generation advances ONLY on a state-preserving rebind to a DIFFERENT instance (a v2 capability, not a tombstone), never on a crash, and a true loss (case a) tombstones without ever bumping the generation. The self-heal (0008.12) language applies to case (b); the new-generation/rebind path (0008.2) is v2-only. | Human | 2026-07-24 | 0008.12 (xref 0008.8, 0008.2, 0008.5) |
@@ -338,6 +338,8 @@ and folds in the mirror job to hold the 2-min-p95 SLO. It is not a second timer.
 | 81 | Stateless controller recovery | Retain live SDK client in Functions worker / reconstruct client from persisted identity | Persist `sandbox_id` and construct `SandboxClient` directly after a Functions recycle; a group client helper is only a convenience. | SDK verification pass | 2026-07-28 | SDK verification |
 | 82 | Preview SDK containment | Distribute SDK use / pinned adapter firewall | Pin preview/beta `azure-containerapps-sandbox==0.1.0b4`, confine every SDK symbol to `transport/aca_sdk.py`, keep production free of test doubles, and run real ACA smoke from the first adapter phase. | SDK verification pass | 2026-07-28 | SDK verification |
 | 83 | Execution event-stream Protocol signature | `async def read_events(...) -> AsyncIterator` / `def read_events(...) -> AsyncIterator` | Declare `read_events` as a non-async Protocol method returning `AsyncIterator[RunEvent]`; implementations may be async generators. An `async def` Protocol stub without `yield` instead describes a coroutine returning an iterator. A type-only structural conformance guard prevents regression. | P0 type-check verification | 2026-07-28 | P0 contract correction |
+| 84 | `session_runtime` backend selection uses presence-based discrimination, not an explicit `provider` enum | (a) keep `provider: Literal["in_process","aca_sandbox"]` as shipped in P2; (b) rename only the `in_process` value; (c) remove `provider` entirely — presence of `aca_sandbox` selects the backend, absence means default execution; nest `retention` inside `aca_sandbox` | (c) | Human | 2026-07-29 | 0008.10 |
+| 85 | Internal execution backend renamed for maintainer clarity: `LocalExecutionBackend`/`"in_process"` → `LanguageWorkerExecutionBackend`/`"in_lang_worker"` (never exposed to config authors) | (a) leave as-is; (b) rename value only; (c) rename class + value + files + test names for full consistency | (c) | Human | 2026-07-29 | 0008.1 (xref 0008.10, refines #12) |
 
 ## 6. Test plan, docs impact & rollout (cross-cutting)
 
@@ -349,14 +351,14 @@ area (e.g. failure table + state machines → 0008.12; conformance/golden traces
 fixtures → 0008.10; subagent co-location/egress-union/delegation-trace → 0008.13).
 Consolidated highlights:
 
-- **Compatibility.** No `session_runtime` block ⇒ today's in-process MAF execution.
+- **Compatibility.** No `session_runtime` block ⇒ today's in-lang-worker MAF execution.
   Existing endpoint auth, request/response schemas, function names, session
   headers, and SSE event names remain compatible. ACA `/chatstream` preserves event
   semantics but allows ≤ 2 s chunk visibility in experimental v1. Persistent ACA
   session ownership is governed by the **standard Functions auth gate** (function
   keys or Easy Auth); **function-key callers can own persistent ACA sessions** and
   ownership is app-scoped — function-key surfaces are *not* restricted to the
-  in-process backend (Decision 55, revises #15).
+  in-lang-worker backend (Decision 55, revises #15).
   The ACA backend is MAF-only in v1. **Multi-agent delegation (FRD 0007) is
   preserved**: a coordinator's specialists run in the same session sandbox, the
   content package/catalog spans all reachable agents, egress is the union across
@@ -566,7 +568,7 @@ superseded by the controlling SDK contract and Decisions 71–82 above.
 
 **Resolution rule.** The parent master Decisions log is append-only. A later row explicitly marked *revises*, *refines*, *supersedes*, or *defers* controls the prior row. The approved plan is explicitly reconciled and wheel-verified against `azure-containerapps-sandbox==0.1.0b4`; its SDK corrections override contrary implementation assumptions in the extracted FRDs. No source authorizes silently reviving superseded requirements.
 
-**Product boundary.** v1 is an experimental, opt-in `aca_sandbox` provider. `in_process` remains the default and existing behavior must be byte-for-byte unaffected. The complete MAF harness executes in **one ACA Sandbox per session**; Functions is the authenticated controller, never the agent runtime or a dumb byte proxy. Discovery remains read-only; registration is the only Azure-aware pipeline stage; handlers depend on `AgentExecutionBackend`, not ACA SDK types. Direct Functions Host integration, non-MAF harnesses, external durable mirror, non-HTTP sessions, native user OBO, queues/fan-out/automatic retry, and per-owner quotas are not v1 scope.
+**Product boundary.** v1 support for `aca_sandbox` is experimental and opt-in, selected by declaring the `aca_sandbox` block under `session_runtime`. The in-lang-worker backend remains the default and existing behavior must be byte-for-byte unaffected. The complete MAF harness executes in **one ACA Sandbox per session**; Functions is the authenticated controller, never the agent runtime or a dumb byte proxy. Discovery remains read-only; registration is the only Azure-aware pipeline stage; handlers depend on `AgentExecutionBackend`, not ACA SDK types. Direct Functions Host integration, non-MAF harnesses, external durable mirror, non-HTTP sessions, native user OBO, queues/fan-out/automatic retry, and per-owner quotas are not v1 scope.
 
 #### Required execution-seam interface and exact data contract
 
@@ -578,7 +580,7 @@ class AgentExecutionBackend(Protocol):
     async def cancel_run(self, context: RunContext) -> RunStatus: ...
 ```
 
-* Implementations are `LocalExecutionBackend` (thin `runner.py` wrapper) and `AcaSandboxExecutionBackend`. `start_run` **always creates a run resource**; sync is start + wait/poll, never a second path. There is no fifth result method at this public seam: terminal `RunStatus` carries the authoritative complete result.
+* Implementations are `LanguageWorkerExecutionBackend` (thin `runner.py` wrapper) and `AcaSandboxExecutionBackend`. `start_run` **always creates a run resource**; sync is start + wait/poll, never a second path. There is no fifth result method at this public seam: terminal `RunStatus` carries the authoritative complete result.
 * Only serializable per-turn data crosses this seam. Never cross live `ResolvedAgent`, tools, catalog, raw owner claims, sandbox id, owner hash, generation, epoch digest, group, protocol, or egress policy. Registration binds resolved/capabilities; ACA captures script-root content.
 * `StartRunRequest`: `prompt: str`; `session_id: str | None = None` (ACA controller always supplies; local may mint ephemeral when `None`); `idempotency_key: str | None = None` (pass-through only); `timeout: float | None = None` (the one authored run-watchdog knob).
 * `RunHandle`: `run_id`, `session_id`, `state`, `created_at`.
@@ -593,7 +595,7 @@ class AgentExecutionBackend(Protocol):
 ##### Timing, cancellation, replay
 
 * One authored `timeout`, no `max_run_seconds`. Backend watchdog expiration -> `timed_out`; local uses `asyncio.wait_for`, sandbox watchdog enforces it.
-* HTTP controller owns sync wait, which is not an interface field. ACA unary effective wait is `min(timeout, 180s)`; an over-180 timeout is honored only async. `in_process` does not acquire the 180-second cap.
+* HTTP controller owns sync wait, which is not an interface field. ACA unary effective wait is `min(timeout, 180s)`; an over-180 timeout is honored only async. `in_lang_worker` does not acquire the 180-second cap.
 * Only explicit cancel or ACA sync-cap expiry invokes `cancel_run`; both terminalize `canceled`. A disconnect **never cancels**; run remains attachable. Unary cap -> HTTP 504; started SSE -> in-band terminal timeout frame then close.
 * `read_events(..., after_sequence)` is sole replay API. It is exclusive lower bound: no header => 0; `Last-Event-ID: N` => N; if earliest retained is E, reconnect at `E-1`. It tails a live journal and stops after terminal event. Cursor >= last sequence waits/yields nothing, not error. If before retained range, raise typed `EventCursorExpiredError`, distinct from `RunError`, never silently skip; recovery is `get_run().result.content`.
 * Harness capability negotiation, not backend capability descriptors, gates v1. No descriptor/versioned backend capability surface. Harness feature gaps (`workflows.enabled`, nested Dynamic Sessions) fail startup.
@@ -654,7 +656,7 @@ class AgentExecutionBackend(Protocol):
 
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
 * Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async run is `200`, never 5xx. Active slot -> `409 active_run_exists`; result evicted/tombstoned -> `410`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
-* Config/startup: absence of session runtime means `in_process`. Before ACA implementation exists, selecting it fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; all 13 matrix rows fail closed.
+* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. Before ACA implementation exists, declaring `aca_sandbox` fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 12 of the 13 matrix rows fail closed (row 11 is now structurally unrepresentable — see the matrix).
 * Production trust preflight must prove Shared Key disabled + exact scoped RBAC and reject dev-mode `AzureWebJobsStorage` in production. Group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment all fail closed.
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at local seam refactor; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke P4a onward; P9 full e2e plus 100-concurrent and large-payload gates.
 
@@ -686,7 +688,7 @@ class AgentExecutionBackend(Protocol):
 
 #### 1. Governing v1 contracts and boundaries
 
-* Execution is seam-first and additive. `in_process` remains the default; `aca_sandbox` is opt-in and hard-fails application startup until the required phase is present. Discovery is read-only; registration is the only Azure-aware stage; execution is lazy.
+* Execution is seam-first and additive. `in_lang_worker` remains the default; declaring `aca_sandbox` opts in and hard-fails application startup until the required phase is present. Discovery is read-only; registration is the only Azure-aware stage; execution is lazy.
 * The controller (Functions app) owns identity/owner resolution, Azure Tables, sandbox binding/provisioning, package capture/delivery, budgets, HTTP/SSE, egress-policy compilation, and reconciliation. The sandbox/harness owns only stdlib bootstrap, MAF adapter, journal writes, whole-turn atomic commit, watchdog, and in-process delegation. It is identity-less in v1.
 * Runtime sandbox groups are pre-provisioned customer IaC. Runtime never creates a group, never opens inbound ports, and only creates individual sandboxes in the bound region. Group absence or cross-region binding fails closed.
 * The deployment has two targets: controller Functions process and sandbox image. Harness code is importable for tests but guarded by `_ensure_sandbox()` and must raise outside a marked sandbox. The bootstrap image is stdlib-only; MAF is not baked.
@@ -711,7 +713,7 @@ class AgentExecutionBackend(Protocol):
 
 `AgentExecutionBackend` has exactly four methods: `start_run(StartRunRequest)->RunHandle`, `get_run(RunContext)->RunStatus`, `read_events(RunContext, after_sequence)->AsyncIterator[RunEvent]`, and `cancel_run(RunContext)->RunStatus`. Contract dataclasses are `StartRunRequest`, `RunHandle`, `RunContext`, `RunStatus`, `RunEvent`, `RunResult`, and `RunError`. Run states are exactly `accepted`, `running`, `succeeded`, `failed`, `canceled`, `timed_out`, and `abandoned`; terminal categories are not folded into `failed`. `EventCursorExpiredError` is typed and distinct from `RunError`.
 
-Cursor is an exclusive lower bound: zero begins history; after a restart at earliest event `E`, resume at `E-1`. A run watchdog uses the authored `ResolvedAgent.timeout`; synchronous wait is separately capped at `min(timeout, 180s)`, while `in_process` has no 180s cap. Explicit cancel or sync-cap expiry may cancel; client disconnect never cancels.
+Cursor is an exclusive lower bound: zero begins history; after a restart at earliest event `E`, resume at `E-1`. A run watchdog uses the authored `ResolvedAgent.timeout`; synchronous wait is separately capped at `min(timeout, 180s)`, while `in_lang_worker` has no 180s cap. Explicit cancel or sync-cap expiry may cancel; client disconnect never cancels.
 
 ##### Transport port and journal
 
@@ -867,7 +869,7 @@ Every phase also runs ruff, strict mypy, pytest, observability/redaction and doc
 
 This is a consolidation extraction of source FRDs 0008.10–0008.14 and the SDK-verified approved implementation plan. The sub-FRDs are finalized, but 0008.14 remains analysis-only and does not enable Dynamic Workflows. The verified plan is authoritative where it explicitly corrects earlier FRD assumptions about the published `azure-containerapps-sandbox==0.1.0b4` SDK.
 
-**Core v1 posture:** `in_process` is unchanged and default. `aca_sandbox` is app-level, opt-in, fail-closed until implemented, and supports HTTP-triggered MAF agents only. The controller is Azure-aware and sole state writer; the sandbox is identity-less, has no inbound ports, and never holds controller/state credentials.
+**Core v1 posture:** the in-lang-worker backend is unchanged and default. `aca_sandbox` is app-level, opt-in (selected purely by declaring the `aca_sandbox` block — there is no separate `provider` field), fail-closed until implemented, and supports HTTP-triggered MAF agents only. The controller is Azure-aware and sole state writer; the sandbox is identity-less, has no inbound ports, and never holds controller/state credentials.
 
 #### 1. Authoring surface and startup validation
 
@@ -875,22 +877,21 @@ This is a consolidation extraction of source FRDs 0008.10–0008.14 and the SDK-
 
 ```yaml
 session_runtime:
-  provider: aca_sandbox                 # default: in_process
   harness: maf                          # default and only v1 value
-  aca_sandbox:
+  aca_sandbox:                          # presence of this block selects the ACA backend
     sandbox_group_resource_id: $ACA_SANDBOX_GROUP_RESOURCE_ID
-  retention:                            # optional; app-scoped only
-    auto_suspend_idle: 5m
-    reclaim_idle: 24h
+    retention:                          # optional; app-scoped only
+      auto_suspend_idle: 5m
+      reclaim_idle: 24h
 ```
 
-* Keys are locked: `session_runtime`, `provider`, `harness`, `aca_sandbox`, and `sandbox_group_resource_id`. The remaining SDK spike is only the accepted identifier value format and its Pydantic validation.
+* Keys are locked: `session_runtime`, `harness`, `aca_sandbox`, `sandbox_group_resource_id`, and `retention` (nested under `aca_sandbox`). There is no `provider` field — the backend is selected by the presence of the `aca_sandbox` block; its absence means `in_lang_worker`. The remaining SDK spike is only the accepted identifier value format and its Pydantic validation.
 * This is global application configuration in `agents.config.yaml`, never per-agent front matter. Per-agent harness/group/retention is deferred; future retention precedence is per-agent > app-level > group default.
 * The resource ID is non-secret and uses existing environment substitution. Its region is derived from the resolved group; it is not authored.
 * No `max_run_seconds`, `region`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
-* The watchdog equals authored `timeout`; synchronous wait is `min(timeout, 180s)`. The in-process provider has no 180-second cap.
+* The watchdog equals authored `timeout`; synchronous wait is `min(timeout, 180s)`. The in-lang-worker backend has no 180-second cap.
 * Disk is a customer-IaC-pinned generic MAF-conformant harness image. Content is controller-captured from script root at session start and delivered over the transport; it is not a Run-From-Package or Blob artifact. A custom image is IaC-plane only and must remain MAF-conformant.
-* Egress is derived from existing MCP URLs, `web_request.allowed_hosts`, model endpoint, telemetry, and future broker—not a new field. The sandbox’s outbound auth is injected by the external egress proxy (managed-identity Transform preferred; group Secrets/Key Vault/static-secret fallback); it must not use `DefaultAzureCredential`/IMDS. Local in-process behavior remains unchanged.
+* Egress is derived from existing MCP URLs, `web_request.allowed_hosts`, model endpoint, telemetry, and future broker—not a new field. The sandbox’s outbound auth is injected by the external egress proxy (managed-identity Transform preferred; group Secrets/Key Vault/static-secret fallback); it must not use `DefaultAzureCredential`/IMDS. Local in-lang-worker behavior remains unchanged.
 * Deployment supplies the dedicated `AzureFunctionsAgentsStateStorage` trust anchor in production: Table + container, Shared Key disabled and scoped RBAC. There is no Key Vault signing-key validation.
 * Compatibility: the legacy `runtime:` frontmatter key remains ignored and is not
   reused for `aca_sandbox`.
@@ -909,11 +910,11 @@ session_runtime:
 | 8 | Neither function-key nor Easy Auth/Entra Functions authentication is configured | Fail startup; some valid Functions auth is mandatory, but Entra-only is not. | 0008.2 (method-agnostic) |
 | 9 | `auto_suspend_idle` is not 60/120/300/600/1800/3600 seconds | Fail startup. | 0008.10 + 0008.12 |
 | 10 | `reclaim_idle` is non-positive or not strictly greater than `auto_suspend_idle` | Fail startup. | 0008.10 + 0008.12 |
-| 11 | `retention` is set for a provider other than `aca_sandbox` | Fail startup. | 0008.10 |
+| 11 | ~~`retention` is set for a provider other than `aca_sandbox`~~ — **superseded** (Decision 84): `retention` now nests inside the `aca_sandbox` block itself, so this condition is structurally unrepresentable — `SessionRuntimeConfig`'s `extra="forbid"` rejects a sibling `retention` key outright at parse time. | N/A — condition cannot occur; row retained for numbering stability. | 0008.10 (superseded by #84) |
 | 12 | Functions app is not Linux x86_64 Python 3.13/3.14 | Fail startup; no in-sandbox ABI rebuild/fallback. Flex Consumption, Premium Linux, or Dedicated Linux is required in practice; Linux Consumption tops out at 3.12. | 0008.7 (ABI) + 0008.10 (config) |
 | 13 | `reclaim_idle > auto_delete - cadence - grace` | **Always fail startup/configuration** because SDK `AutoDeletePolicy.delete_interval_seconds` is readable. Use seconds; comparison is inclusive, so fail only on strict `>`. `cadence` is configured v1 reaper cadence (~1 h default), and `grace` defaults to ~300 s. | 0008.12 (inequality + terms) + 0008.10 (config) |
 
-Absence of `session_runtime` is valid and selects `in_process`; none of these ACA rows apply. Rows 1–12 are fail-closed. The old row-13 “cannot read backstop => warn and runtime clamp” fallback is invalidated by SDK verification and must not be implemented.
+Absence of `session_runtime` (or of the `aca_sandbox` block within it) is valid and selects the in-lang-worker backend; none of these ACA rows apply. Rows 1–10 and 12 are fail-closed; row 11 is superseded and structurally unrepresentable following Decision 84 (see row 11). The old row-13 “cannot read backstop => warn and runtime clamp” fallback is invalidated by SDK verification and must not be implemented.
 
 #### 2. HTTP, status, async, and SSE contract
 

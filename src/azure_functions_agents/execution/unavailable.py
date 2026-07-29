@@ -1,4 +1,4 @@
-"""Fail-closed execution backend for ``session_runtime.provider: aca_sandbox``.
+"""Fail-closed execution backend for ``session_runtime.aca_sandbox``.
 
 The ACA Sandbox execution backend itself is not implemented yet — it lands in
 a later phase of FRD 0008 (see ``docs/frds/0008-aca-sandbox-session-runtime.md``).
@@ -9,7 +9,7 @@ practice nothing should ever construct :class:`UnavailableBackend`.
 
 It exists as defense in depth: if that startup gate is ever bypassed (a
 future refactor, a direct unit test, an unusual composition path), attempting
-to use the ``aca_sandbox`` provider must still fail loudly and immediately —
+to use the ``aca_sandbox`` backend must still fail loudly and immediately —
 never silently fall back to another backend, and never fabricate or simulate
 a result.
 """

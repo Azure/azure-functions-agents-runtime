@@ -25,7 +25,7 @@ from .factory import (
     DEFAULT_EXECUTION_PROVIDER,
     create_execution_backend,
 )
-from .local import LocalExecutionBackend
+from .in_lang_worker import LanguageWorkerExecutionBackend
 from .result import AgentResult
 from .unavailable import BackendUnavailableError, UnavailableBackend, unavailable_backend_message
 
@@ -37,7 +37,7 @@ __all__ = [
     "AgentResult",
     "BackendUnavailableError",
     "EventCursorExpiredError",
-    "LocalExecutionBackend",
+    "LanguageWorkerExecutionBackend",
     "RunContext",
     "RunError",
     "RunEvent",

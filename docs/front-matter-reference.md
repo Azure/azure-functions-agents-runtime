@@ -55,18 +55,17 @@ Optional file in the root directory. All properties are optional.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `provider` | `"in_process"` \| `"aca_sandbox"` | No | `"in_process"` | Execution backend for agent sessions. `in_process` (default) runs agents in the Function App process; `aca_sandbox` isolates each session in a pre-provisioned Azure Container Apps Sandbox Group. [Details](#global-session_runtimeaca_sandbox) |
 | `harness` | string | No | `"maf"` | Agent execution harness. Only `maf` (Microsoft Agent Framework) is supported. |
-| `aca_sandbox` | object | No | `null` | Reference to the pre-provisioned ACA Sandbox Group. Required when `provider` is `aca_sandbox`. [Details](#global-session_runtimeaca_sandbox) |
-| `retention` | object | No | `null` | Idle/reclaim retention policy. Only supported when `provider` is `aca_sandbox`. [Details](#global-session_runtimeretention) |
+| `aca_sandbox` | object | No | `null` | Reference to the pre-provisioned ACA Sandbox Group. Configuring this block is itself what selects the ACA Sandbox execution backend for all agent sessions; its absence selects the default in-process backend. [Details](#global-session_runtimeaca_sandbox) |
 
 ### Global: `session_runtime.aca_sandbox`
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `sandbox_group_resource_id` | string | **Yes** | N/A | Azure resource ID of a pre-provisioned Sandbox Group. The runtime never creates one; this must reference an existing, customer-owned Sandbox Group. |
+| `retention` | object | No | `null` | Idle/reclaim retention policy for ACA Sandbox sessions. [Details](#global-session_runtimeaca_sandboxretention) |
 
-### Global: `session_runtime.retention`
+### Global: `session_runtime.aca_sandbox.retention`
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|

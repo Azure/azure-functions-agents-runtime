@@ -4,6 +4,5 @@ system_tools:
   dynamic_sessions_code_interpreter:
     endpoint: "https://example-pool.region.dynamicsessions.io"
 session_runtime:
-  provider: aca_sandbox
   aca_sandbox:
     sandbox_group_resource_id: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.App/sandboxGroups/example-sandbox-group"

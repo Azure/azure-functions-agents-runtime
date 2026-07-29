@@ -186,9 +186,6 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
-type SessionRuntimeProvider = Literal["in_process", "aca_sandbox"]
-
-DEFAULT_SESSION_RUNTIME_PROVIDER: SessionRuntimeProvider = "in_process"
 DEFAULT_SESSION_RUNTIME_HARNESS = "maf"
 
 # FRD 0008 fields removed by design during consolidation. A config that still
@@ -216,16 +213,35 @@ def _reject_dropped_session_runtime_fields(value: Any, *, scope: str) -> Any:
     return value
 
 
+class RetentionConfig(BaseModel):
+    """Idle/reclaim retention policy for ``aca_sandbox`` session state.
+
+    Both fields are required together. ``reclaim_idle`` is only meaningful as
+    a value relative to ``auto_suspend_idle`` (it must exceed it), so a
+    partial block authoring only one of the two is rejected rather than
+    silently paired with an implicit default for the other.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_suspend_idle: int
+    reclaim_idle: int
+
+
 class AcaSandboxConfig(BaseModel):
     """Reference to a pre-provisioned, customer-owned ACA Sandbox Group.
 
     The runtime never creates a Sandbox Group on the customer's behalf;
     ``sandbox_group_resource_id`` must point at one that already exists.
+    Configuring this block is itself what selects the ACA Sandbox execution
+    backend for all agent sessions (FRD 0008) — there is no separate
+    ``provider`` flag; the block's presence is the discriminant.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     sandbox_group_resource_id: str
+    retention: RetentionConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -243,36 +259,22 @@ class AcaSandboxConfig(BaseModel):
         return trimmed
 
 
-class RetentionConfig(BaseModel):
-    """Idle/reclaim retention policy for ``aca_sandbox`` session state.
-
-    Both fields are required together. ``reclaim_idle`` is only meaningful as
-    a value relative to ``auto_suspend_idle`` (it must exceed it), so a
-    partial block authoring only one of the two is rejected rather than
-    silently paired with an implicit default for the other.
-    """
-
-    model_config = ConfigDict(extra="forbid")
-
-    auto_suspend_idle: int
-    reclaim_idle: int
-
-
 class SessionRuntimeConfig(BaseModel):
     """Global session-execution-backend selection (FRD 0008).
 
-    Absence of this entire block is the default and means ``provider:
-    in_process`` with no behavior change versus the runtime that existed
-    before FRD 0008. This is app-wide configuration authored only in
-    ``agents.config.yaml``; it is never a per-agent front-matter field.
+    Absence of this entire block is the default and means agent sessions
+    execute in-process, with no behavior change versus the runtime that
+    existed before FRD 0008. There is no explicit backend-selector field:
+    configuring the ``aca_sandbox`` block is itself what selects the ACA
+    Sandbox execution backend; its absence selects the in-process default.
+    This is app-wide configuration authored only in ``agents.config.yaml``;
+    it is never a per-agent front-matter field.
     """
 
     model_config = ConfigDict(extra="forbid")
 
-    provider: SessionRuntimeProvider = DEFAULT_SESSION_RUNTIME_PROVIDER
     harness: str = DEFAULT_SESSION_RUNTIME_HARNESS
     aca_sandbox: AcaSandboxConfig | None = None
-    retention: RetentionConfig | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -302,9 +304,10 @@ class GlobalConfig(BaseModel):
         default=None,
         description=(
             "Session execution backend selection (FRD 0008). Omitting this block "
-            "entirely is the default and selects `provider: in_process` with no "
-            "behavior change. Set `provider: aca_sandbox` to isolate each agent "
-            "session in a pre-provisioned Azure Container Apps Sandbox Group."
+            "entirely is the default and executes agent sessions in-process, with "
+            "no behavior change. Configure `aca_sandbox` to isolate each agent "
+            "session in a pre-provisioned Azure Container Apps Sandbox Group; its "
+            "presence (not a separate provider flag) selects that backend."
         ),
     )
 
@@ -456,28 +459,18 @@ GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
 }
 
 SESSION_RUNTIME_DESCRIPTIONS: dict[str, str] = {
-    "provider": (
-        "Execution backend for agent sessions. `in_process` (default) runs agents "
-        "in the Function App process; `aca_sandbox` isolates each session in a "
-        "pre-provisioned Azure Container Apps Sandbox Group. "
-        "[Details](#global-session_runtimeaca_sandbox)"
-    ),
     "harness": "Agent execution harness. Only `maf` (Microsoft Agent Framework) is supported.",
     "aca_sandbox": (
-        "Reference to the pre-provisioned ACA Sandbox Group. Required when "
-        "`provider` is `aca_sandbox`. [Details](#global-session_runtimeaca_sandbox)"
-    ),
-    "retention": (
-        "Idle/reclaim retention policy. Only supported when `provider` is "
-        "`aca_sandbox`. [Details](#global-session_runtimeretention)"
+        "Reference to the pre-provisioned ACA Sandbox Group. Configuring this "
+        "block is itself what selects the ACA Sandbox execution backend for "
+        "all agent sessions; its absence selects the default in-process "
+        "backend. [Details](#global-session_runtimeaca_sandbox)"
     ),
 }
 
 SESSION_RUNTIME_DEFAULTS: dict[str, str] = {
-    "provider": '`"in_process"`',
     "harness": '`"maf"`',
     "aca_sandbox": "`null`",
-    "retention": "`null`",
 }
 
 ACA_SANDBOX_DESCRIPTIONS: dict[str, str] = {
@@ -485,6 +478,14 @@ ACA_SANDBOX_DESCRIPTIONS: dict[str, str] = {
         "Azure resource ID of a pre-provisioned Sandbox Group. The runtime never "
         "creates one; this must reference an existing, customer-owned Sandbox Group."
     ),
+    "retention": (
+        "Idle/reclaim retention policy for ACA Sandbox sessions. "
+        "[Details](#global-session_runtimeaca_sandboxretention)"
+    ),
+}
+
+ACA_SANDBOX_DEFAULTS: dict[str, str] = {
+    "retention": "`null`",
 }
 
 RETENTION_DESCRIPTIONS: dict[str, str] = {

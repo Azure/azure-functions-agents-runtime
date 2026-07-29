@@ -26,7 +26,7 @@ from azure_functions_agents.execution import (
     unavailable_backend_message,
 )
 from azure_functions_agents.execution.backend import StartRunRequest
-from tests.test_execution_local import _binding
+from tests.test_execution_in_lang_worker import _binding
 
 
 def test_unavailable_backend_message_mentions_provider_and_frd() -> None:
@@ -52,7 +52,7 @@ def test_factory_resolves_aca_sandbox_to_unavailable_backend() -> None:
 
     This is the P2 extension to ``create_execution_backend``: unlike an
     unrecognized provider string (which raises a plain ``ValueError``,
-    covered in ``test_execution_local.py``), ``aca_sandbox`` is a *known*
+    covered in ``test_execution_in_lang_worker.py``), ``aca_sandbox`` is a *known*
     provider that resolves to :class:`UnavailableBackend`, which raises
     :class:`BackendUnavailableError` from its own ``__init__``.
     """

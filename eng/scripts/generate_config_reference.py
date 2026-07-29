@@ -64,6 +64,7 @@ WEB_REQUEST_DESCRIPTIONS = schema.WEB_REQUEST_DESCRIPTIONS
 SESSION_RUNTIME_DESCRIPTIONS = schema.SESSION_RUNTIME_DESCRIPTIONS
 SESSION_RUNTIME_DEFAULTS = schema.SESSION_RUNTIME_DEFAULTS
 ACA_SANDBOX_DESCRIPTIONS = schema.ACA_SANDBOX_DESCRIPTIONS
+ACA_SANDBOX_DEFAULTS = schema.ACA_SANDBOX_DEFAULTS
 RETENTION_DESCRIPTIONS = schema.RETENTION_DESCRIPTIONS
 
 
@@ -71,8 +72,8 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
     """Format field type annotation as a readable string."""
     annotation = field_info.annotation
 
-    # Resolve PEP 695 `type X = Literal[...]` aliases (e.g. SessionRuntimeProvider)
-    # to their actual literal values, so docs show `"in_process" | "aca_sandbox"`
+    # Resolve PEP 695 `type X = Literal[...]` aliases (e.g. EndpointAuthMode)
+    # to their actual literal values, so docs show `"function" | "admin" | ...`
     # instead of the internal Python type-alias name. Because this script loads
     # schema.py via importlib without registering it in sys.modules, Pydantic
     # sometimes can't fully resolve these aliases and leaves a bare ForwardRef
@@ -395,8 +396,8 @@ def generate_markdown() -> str:
     lines.extend(["", "### Global: `session_runtime`", ""])
     lines.extend(generate_model_table(SessionRuntimeConfig, descriptions=SESSION_RUNTIME_DESCRIPTIONS, custom_defaults=SESSION_RUNTIME_DEFAULTS))
     lines.extend(["", "### Global: `session_runtime.aca_sandbox`", ""])
-    lines.extend(generate_model_table(AcaSandboxConfig, descriptions=ACA_SANDBOX_DESCRIPTIONS))
-    lines.extend(["", "### Global: `session_runtime.retention`", ""])
+    lines.extend(generate_model_table(AcaSandboxConfig, descriptions=ACA_SANDBOX_DESCRIPTIONS, custom_defaults=ACA_SANDBOX_DEFAULTS))
+    lines.extend(["", "### Global: `session_runtime.aca_sandbox.retention`", ""])
     lines.extend(generate_model_table(RetentionConfig, descriptions=RETENTION_DESCRIPTIONS))
 
     lines.extend([

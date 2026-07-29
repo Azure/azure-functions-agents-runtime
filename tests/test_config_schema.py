@@ -224,17 +224,15 @@ def test_agent_spec_subagents_defaults_to_none() -> None:
 
 
 def test_global_config_session_runtime_defaults_to_none() -> None:
-    """Absence of the block is the default and means `provider: in_process`."""
+    """Absence of the block is the default and means the default in-process backend."""
     config = GlobalConfig()
     assert config.session_runtime is None
 
 
 def test_session_runtime_config_defaults() -> None:
     config = SessionRuntimeConfig()
-    assert config.provider == "in_process"
     assert config.harness == "maf"
     assert config.aca_sandbox is None
-    assert config.retention is None
 
 
 def test_session_runtime_config_extra_forbidden() -> None:
@@ -247,6 +245,7 @@ def test_aca_sandbox_config_parses() -> None:
         {"sandbox_group_resource_id": "/subscriptions/.../sandboxGroups/my-group"}
     )
     assert config.sandbox_group_resource_id == "/subscriptions/.../sandboxGroups/my-group"
+    assert config.retention is None
 
 
 def test_aca_sandbox_config_rejects_empty_sandbox_group_resource_id() -> None:
@@ -284,27 +283,69 @@ def test_retention_config_extra_forbidden() -> None:
         )
 
 
+def test_aca_sandbox_config_retention_nests_inside_aca_sandbox() -> None:
+    """`retention` is a field on `AcaSandboxConfig`, not a sibling under
+    `session_runtime` -- the presence of `aca_sandbox` alone selects the
+    backend, so `retention` only makes sense nested inside it."""
+    config = AcaSandboxConfig.model_validate(
+        {
+            "sandbox_group_resource_id": "/subscriptions/.../sandboxGroups/my-group",
+            "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
+        }
+    )
+    assert config.retention is not None
+    assert config.retention.reclaim_idle == 3600
+
+
 def test_global_config_session_runtime_aca_sandbox_parses() -> None:
     config = GlobalConfig.model_validate(
         {
             "session_runtime": {
-                "provider": "aca_sandbox",
                 "harness": "maf",
                 "aca_sandbox": {
                     "sandbox_group_resource_id": (
                         "/subscriptions/sub-1/resourceGroups/rg-1/providers/"
                         "Microsoft.App/sandboxGroups/my-group"
-                    )
+                    ),
+                    "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
                 },
-                "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
             }
         }
     )
     assert config.session_runtime is not None
-    assert config.session_runtime.provider == "aca_sandbox"
     assert config.session_runtime.aca_sandbox is not None
-    assert config.session_runtime.retention is not None
-    assert config.session_runtime.retention.reclaim_idle == 3600
+    assert config.session_runtime.aca_sandbox.retention is not None
+    assert config.session_runtime.aca_sandbox.retention.reclaim_idle == 3600
+
+
+def test_global_config_session_runtime_absent_aca_sandbox_means_default_backend() -> None:
+    """No `provider` field exists -- omitting `aca_sandbox` entirely selects
+    the default (in-process) backend, it is not an error."""
+    config = GlobalConfig.model_validate({"session_runtime": {"harness": "maf"}})
+    assert config.session_runtime is not None
+    assert config.session_runtime.aca_sandbox is None
+
+
+def test_session_runtime_config_rejects_provider_field() -> None:
+    """`provider` was removed entirely (Decision #84) -- presence of the
+    `aca_sandbox` block is now the sole backend discriminant, so an
+    author-supplied `provider` key is rejected the same as any other unknown
+    field (`extra="forbid"`)."""
+    with pytest.raises(ValidationError):
+        SessionRuntimeConfig.model_validate({"provider": "aca_sandbox"})
+
+
+def test_session_runtime_config_rejects_retention_as_sibling_of_aca_sandbox() -> None:
+    """`retention` moved onto `AcaSandboxConfig` (Decision #84) -- authoring
+    it as a sibling of `aca_sandbox` under `session_runtime` (its pre-move
+    location) is rejected, not silently ignored."""
+    with pytest.raises(ValidationError):
+        SessionRuntimeConfig.model_validate(
+            {
+                "aca_sandbox": {"sandbox_group_resource_id": "/subscriptions/.../x"},
+                "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
+            }
+        )
 
 
 @pytest.mark.parametrize(
