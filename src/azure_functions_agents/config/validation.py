@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import platform
+import sys
 from pathlib import Path
+from typing import Any
+
+from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger as _logger
 
-from .schema import ResolvedAgent
+from .env import runtime_env_value
+from .schema import EndpointAuthConfig, GlobalConfig, ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -165,3 +171,407 @@ def validate_subagent_references(
                 )
             )
         seen.add(ref.agent)
+
+
+# ---------------------------------------------------------------------------
+# FRD 0008 -- ACA Sandbox Session Runtime: startup validation matrix.
+#
+# `validate_session_runtime` enforces every row of the FRD's "Matrix: aca_sandbox
+# startup/configuration behavior" table (docs/frds/0008-aca-sandbox-session-runtime.md
+# #1 Authoring surface and startup validation). It is intentionally independent of
+# `execution/*`: it raises its own `ValueError`s (matching this module's existing
+# convention) rather than importing execution.unavailable.BackendUnavailableError,
+# so this module keeps its existing config-only import graph and does not gain a
+# new dependency edge on the execution package.
+# ---------------------------------------------------------------------------
+
+_FRD_0008_LINK = "docs/frds/0008-aca-sandbox-session-runtime.md"
+
+# Row 9: the platform's documented idle auto-suspend values.
+_ALLOWED_AUTO_SUSPEND_IDLE_SECONDS: tuple[int, ...] = (60, 120, 300, 600, 1800, 3600)
+
+# Row 13's arithmetic-only defaults (see `auto_delete_backstop_violated`).
+_RECONCILER_CADENCE_SECONDS_DEFAULT = 3600
+_AUTO_DELETE_GRACE_SECONDS_DEFAULT = 300
+
+# Rows 6/7: the dedicated state-storage app setting. Identity-based ("RBAC")
+# connections use the standard Azure Functions `<name>__blobServiceUri` /
+# `<name>__tableServiceUri` sibling-setting convention instead of a bare
+# connection string.
+_STATE_STORAGE_SETTING_NAME = "AzureFunctionsAgentsStateStorage"
+_SHARED_KEY_MARKER = "accountkey="
+
+# Row 12: the only Function App host ABI aca_sandbox supports.
+_SUPPORTED_PLATFORM_SYSTEM = "Linux"
+_SUPPORTED_PLATFORM_MACHINES = frozenset({"x86_64", "amd64"})
+_SUPPORTED_PYTHON_MINOR_VERSIONS = frozenset({13, 14})
+
+
+def _session_runtime_error(
+    field: str,
+    message: str,
+    *,
+    source_file: str | Path | None = None,
+) -> ValueError:
+    """Build a ``ValueError`` for a ``session_runtime`` startup-validation-matrix row.
+
+    Shaped like ``_format_error``'s "field: message. See <link>." convention,
+    but points at FRD 0008 (the ``session_runtime`` authoring surface is
+    app-wide configuration, never per-agent front matter) and tolerates the
+    absence of a natural per-agent ``source_file`` for whole-app rows.
+    """
+    location = f"{Path(source_file)}: " if source_file is not None else ""
+    normalized = message if message.endswith(".") else f"{message}."
+    return ValueError(f"{location}field `{field}`: {normalized} See {_FRD_0008_LINK}.")
+
+
+def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
+    """Mirror ``app.py``'s predicate of the same name.
+
+    Duplicated rather than imported: ``app.py`` is the composition root and
+    imports *from* ``config``, so importing it back here would invert the
+    discover -> translate -> register -> execute pipeline direction (see
+    ``docs/architecture.md``).
+    """
+    return isinstance(workflows, dict) and workflows.get("enabled") is True
+
+
+def auto_delete_backstop_violated(
+    *,
+    reclaim_idle_seconds: int,
+    auto_delete_seconds: int,
+    reconciler_cadence_seconds: int = _RECONCILER_CADENCE_SECONDS_DEFAULT,
+    grace_seconds: int = _AUTO_DELETE_GRACE_SECONDS_DEFAULT,
+) -> bool:
+    """Row 13's pure formula: does ``reclaim_idle`` violate the platform's auto-delete backstop?
+
+    Returns ``True`` when ``reclaim_idle_seconds`` leaves the reconciler no
+    margin to reclaim a session before the ACA platform's own absolute
+    auto-delete backstop deletes it out from under the runtime -- i.e. when::
+
+        reclaim_idle_seconds > auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
+
+    The comparison is inclusive (fails only on strict ``>``), matching the
+    FRD's row 13 wording exactly.
+
+    Deliberately **not** wired into :func:`validate_session_runtime` in this
+    phase: the ACA SDK exposes ``AutoDeletePolicy.delete_interval_seconds``
+    only as a live, per-Sandbox-Group property (see the FRD's SDK-corrected
+    contradictions section), so there is no static ``auto_delete_seconds``
+    this config-only validator could check against without adding the ACA
+    SDK dependency -- out of scope until a later phase. Row 13's "always a
+    hard fail" requirement is satisfied unconditionally by the capability
+    gate at the end of :func:`validate_session_runtime`: no ``aca_sandbox``
+    session can run in this build regardless of retention math. This
+    function exists so the exact formula is implemented and directly
+    unit-tested now, ready to be wired against a live value in a later phase.
+    """
+    return reclaim_idle_seconds > (
+        auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
+    )
+
+
+def _validate_platform_capability() -> None:
+    """Row 12: the Function App host must be Linux x86_64 Python 3.13/3.14."""
+    system = platform.system()
+    if system != _SUPPORTED_PLATFORM_SYSTEM:
+        raise _session_runtime_error(
+            "session_runtime",
+            f"aca_sandbox requires a Linux Function App host (detected `{system}`)",
+        )
+    machine = platform.machine().lower()
+    if machine not in _SUPPORTED_PLATFORM_MACHINES:
+        raise _session_runtime_error(
+            "session_runtime",
+            f"aca_sandbox requires an x86_64 Function App host (detected `{machine}`)",
+        )
+    major, minor = sys.version_info[:2]
+    if major != 3 or minor not in _SUPPORTED_PYTHON_MINOR_VERSIONS:
+        raise _session_runtime_error(
+            "session_runtime",
+            f"aca_sandbox requires Python 3.13 or 3.14 (detected {major}.{minor})",
+        )
+
+
+def _validate_state_storage_auth_mode() -> None:
+    """Row 6: the dedicated state-storage connection must not use a Shared Key.
+
+    P2 is config-only: there is no live Storage-API access here to inspect
+    account-level Shared-Key-disabled / RBAC-scoping settings (that is the
+    FRD's runtime half of this row). This is a config-only proxy limited to
+    the literal connection-string shape: an ``AccountKey=`` fragment in the
+    ``AzureFunctionsAgentsStateStorage`` app setting means a Shared Key
+    connection string was used instead of an identity-based (RBAC)
+    connection. True live verification is a later phase.
+    """
+    value = runtime_env_value(_STATE_STORAGE_SETTING_NAME)
+    if _SHARED_KEY_MARKER in value.lower():
+        raise _session_runtime_error(
+            "session_runtime",
+            f"the `{_STATE_STORAGE_SETTING_NAME}` connection must use a "
+            "managed-identity (RBAC) connection, not a Shared Key connection string",
+        )
+
+
+def _validate_state_storage_dedicated_account() -> None:
+    """Row 7: aca_sandbox must not reuse ``AzureWebJobsStorage`` for session state.
+
+    P2 is config-only: this checks only that a dedicated
+    ``AzureFunctionsAgentsStateStorage`` setting exists at all (either a bare
+    connection string, or its identity-based ``__blobServiceUri`` /
+    ``__tableServiceUri`` sibling form), not that it is actually distinct
+    storage-account infrastructure from ``AzureWebJobsStorage`` at the API
+    level (a later-phase, live check).
+    """
+    has_connection_string = bool(runtime_env_value(_STATE_STORAGE_SETTING_NAME))
+    has_identity_based = bool(
+        runtime_env_value(f"{_STATE_STORAGE_SETTING_NAME}__blobServiceUri")
+        or runtime_env_value(f"{_STATE_STORAGE_SETTING_NAME}__tableServiceUri")
+    )
+    if not has_connection_string and not has_identity_based:
+        raise _session_runtime_error(
+            "session_runtime",
+            f"a dedicated `{_STATE_STORAGE_SETTING_NAME}` connection is required; "
+            "the shared `AzureWebJobsStorage` account must not be reused for session state",
+        )
+
+
+def _validate_agent_workflows_disabled(resolved: ResolvedAgent) -> None:
+    """Row 2: Dynamic Workflows are incompatible with ``aca_sandbox`` (Decision 36).
+
+    Mirrors ``app.py``'s own workflows-requested scoping: only the main
+    agent's ``workflows.enabled`` is ever honored there (a non-main agent's
+    ``workflows.enabled`` is silently ignored with a warning), so only the
+    main agent can trigger this row.
+    """
+    if resolved.is_main and _workflows_requested(resolved.workflows):
+        raise _session_runtime_error(
+            "workflows.enabled",
+            "Dynamic Workflows are not supported when session_runtime.provider "
+            "is aca_sandbox",
+            source_file=resolved.source_file,
+        )
+
+
+def _validate_agent_no_sandbox_config(
+    resolved: ResolvedAgent, global_config: GlobalConfig
+) -> None:
+    """Row 3: the Dynamic Sessions code interpreter cannot combine with ``aca_sandbox``.
+
+    These are two independent ACA-backed features (see the FRD's authoring
+    surface section) and are never conflated. The global check runs once,
+    ahead of the per-agent one, so a globally-configured interpreter that
+    every agent has opted out of via ``system_tools.dynamic_sessions_code_interpreter:
+    false`` is still reported (the per-agent ``resolved.sandbox_config`` is
+    already opt-out aware -- see ``config.merge._resolve_sandbox`` -- so it
+    alone would miss that all-opted-out case).
+    """
+    global_system_tools = global_config.system_tools
+    if (
+        global_system_tools is not None
+        and global_system_tools.dynamic_sessions_code_interpreter is not None
+    ):
+        raise _session_runtime_error(
+            "system_tools.dynamic_sessions_code_interpreter",
+            "The Dynamic Sessions code interpreter is not supported when "
+            "session_runtime.provider is aca_sandbox",
+        )
+    if resolved.sandbox_config is not None:
+        raise _session_runtime_error(
+            "system_tools.dynamic_sessions_code_interpreter",
+            "The Dynamic Sessions code interpreter is not supported when "
+            "session_runtime.provider is aca_sandbox",
+            source_file=resolved.source_file,
+        )
+
+
+def _validate_agent_http_trigger_only(resolved: ResolvedAgent) -> None:
+    """Row 4: ``aca_sandbox`` agents must be bound to an HTTP-shaped trigger.
+
+    An agent with no explicit trigger (relying solely on ``builtin_endpoints``)
+    is still HTTP-shaped under the hood, so it does not fail this row.
+    """
+    trigger = resolved.trigger
+    if trigger is not None and trigger.type != "http_trigger":
+        raise _session_runtime_error(
+            "trigger.type",
+            "Only http_trigger agents are supported when session_runtime.provider "
+            f"is aca_sandbox (got `{trigger.type}`)",
+            source_file=resolved.source_file,
+        )
+
+
+def _resolve_http_trigger_auth_mode(trigger_args: dict[str, Any]) -> str:
+    """Resolve an ``http_trigger``'s effective auth mode for row 8's purposes.
+
+    Mirrors ``registration.triggers._resolve_http_trigger_auth``'s precedence
+    (the nested ``http_auth`` object -- same shared model builtin endpoints
+    use, supporting ``entra`` -- wins over the legacy flat ``auth_level``
+    string; default is ``function``) using only the shared
+    ``EndpointAuthConfig`` model, without importing the registration layer
+    here (config must not depend on registration -- see
+    ``docs/architecture.md``'s discover -> translate -> register -> execute
+    pipeline direction). A malformed ``http_auth`` is deliberately not
+    treated as anonymous here; ``registration.triggers`` reports that error
+    independently at registration time.
+    """
+    raw_auth = trigger_args.get("http_auth")
+    if raw_auth is not None:
+        try:
+            return EndpointAuthConfig.model_validate(raw_auth).mode
+        except ValidationError:
+            return "function"
+    raw_level = trigger_args.get("auth_level")
+    if raw_level is not None:
+        return str(raw_level).strip().lower()
+    return "function"
+
+
+def _agent_has_anonymous_http_surface(resolved: ResolvedAgent) -> bool:
+    builtin_endpoints = resolved.builtin_endpoints
+    has_builtin_endpoints = bool(
+        builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
+    )
+    if has_builtin_endpoints and builtin_endpoints.http_auth.mode == "anonymous":
+        return True
+    trigger = resolved.trigger
+    return (
+        trigger is not None
+        and trigger.type == "http_trigger"
+        and _resolve_http_trigger_auth_mode(trigger.args) == "anonymous"
+    )
+
+
+def _validate_agent_endpoint_auth_configured(resolved: ResolvedAgent) -> None:
+    """Row 8: anonymous HTTP access is not supported for ``aca_sandbox`` agents.
+
+    Some valid Functions auth is mandatory (function key or Entra), but the
+    FRD is explicit that Entra-only is not itself sufficient scope for this
+    row -- it only requires that access is *not anonymous*; a deeper
+    Entra-claims policy is out of scope here.
+    """
+    if _agent_has_anonymous_http_surface(resolved):
+        raise _session_runtime_error(
+            "builtin_endpoints.http_auth",
+            "Anonymous access is not supported when session_runtime.provider "
+            "is aca_sandbox; configure a function key or Entra ID auth",
+            source_file=resolved.source_file,
+        )
+
+
+def validate_session_runtime(
+    global_config: GlobalConfig,
+    resolved_agents: list[ResolvedAgent],
+) -> None:
+    """Enforce FRD 0008's 13-row ``aca_sandbox`` startup validation matrix.
+
+    Absence of ``session_runtime`` is valid and selects ``provider:
+    in_process`` with no behavior change; none of the matrix rows below can
+    fire in that case. Every row raises a plain ``ValueError``, matching this
+    module's existing convention (see ``validate_resolved_agent``,
+    ``validate_subagent_references``).
+
+    ``aca_sandbox`` is not implemented yet (see
+    ``execution/unavailable.py``): once rows 1-12 all pass, this function
+    still unconditionally raises a final capability-gate error so that an
+    otherwise well-formed ``aca_sandbox`` configuration fails **application
+    startup** with a clear, typed diagnostic rather than a confusing runtime
+    error at first request. That same unconditional final raise also
+    satisfies row 13 (see :func:`auto_delete_backstop_violated`'s docstring).
+    """
+    session_runtime = global_config.session_runtime
+    if session_runtime is None:
+        return
+
+    # Row 1 (owning rule: 0008.7 #34/#36): harness describes agent-execution
+    # semantics, not the physical execution backend, so it is checked
+    # whenever `session_runtime` is present at all -- not conditioned on
+    # `provider`.
+    if session_runtime.harness != "maf":
+        raise _session_runtime_error(
+            "session_runtime.harness",
+            f"Only `maf` is supported (got `{session_runtime.harness}`)",
+        )
+
+    provider = session_runtime.provider
+    retention = session_runtime.retention
+
+    # Row 11 (owning rule: 0008.10): retention is aca_sandbox-only, checked
+    # before the general in_process early-return below so it still fires for
+    # `provider: in_process` (or the default) plus a `retention` block.
+    if retention is not None and provider != "aca_sandbox":
+        raise _session_runtime_error(
+            "session_runtime.retention",
+            "retention is only supported when session_runtime.provider is aca_sandbox",
+        )
+
+    if provider != "aca_sandbox":
+        # in_process (default or explicit): no further FRD 0008 rows apply.
+        return
+
+    # --- provider == "aca_sandbox" from here down. ---
+
+    # Row 5 (owning rule: 0008.10): a pre-provisioned Sandbox Group reference
+    # is mandatory. Schema-level validation already rejects an empty/blank
+    # `sandbox_group_resource_id` string when `aca_sandbox` is present; this
+    # covers the block being missing entirely.
+    if session_runtime.aca_sandbox is None:
+        raise _session_runtime_error(
+            "session_runtime.aca_sandbox.sandbox_group_resource_id",
+            "Required when session_runtime.provider is aca_sandbox",
+        )
+
+    if retention is not None:
+        # Row 9 (owning rule: 0008.10 + 0008.12): auto_suspend_idle must be
+        # one of the platform's documented idle-timeout values.
+        if retention.auto_suspend_idle not in _ALLOWED_AUTO_SUSPEND_IDLE_SECONDS:
+            allowed = ", ".join(str(value) for value in _ALLOWED_AUTO_SUSPEND_IDLE_SECONDS)
+            raise _session_runtime_error(
+                "session_runtime.retention.auto_suspend_idle",
+                f"Must be one of {allowed} seconds (got {retention.auto_suspend_idle})",
+            )
+        # Row 10 (owning rule: 0008.10 + 0008.12): reclaim_idle must be
+        # positive and strictly greater than auto_suspend_idle.
+        if retention.reclaim_idle <= 0 or retention.reclaim_idle <= retention.auto_suspend_idle:
+            raise _session_runtime_error(
+                "session_runtime.retention.reclaim_idle",
+                "Must be positive and strictly greater than "
+                f"retention.auto_suspend_idle ({retention.auto_suspend_idle}); "
+                f"got {retention.reclaim_idle}",
+            )
+        # Row 13 (owning rule: 0008.12 + 0008.10) is always a hard fail in
+        # this build -- see auto_delete_backstop_violated's docstring.
+        # Satisfied unconditionally by the capability gate below.
+
+    # Row 6 (owning rule: 0008.3 + 0008.10): state storage must not use a
+    # Shared Key connection.
+    _validate_state_storage_auth_mode()
+
+    # Row 7 (owning rule: 0008.3 #31 + 0008.10): state storage must be a
+    # dedicated account, not AzureWebJobsStorage.
+    _validate_state_storage_dedicated_account()
+
+    # Rows 2, 3, 4, 8: per-agent checks.
+    for resolved in resolved_agents:
+        _validate_agent_workflows_disabled(resolved)
+        _validate_agent_no_sandbox_config(resolved, global_config)
+        _validate_agent_http_trigger_only(resolved)
+        _validate_agent_endpoint_auth_configured(resolved)
+
+    # Row 12 (owning rule: 0008.7 + 0008.10): Function App host ABI gate.
+    # Deliberately checked last among the fail-closed rows (not in FRD table
+    # order): it is an independent, atomic host check with no ordering
+    # dependency on rows 1-11 or 2/3/4/8, and placing it last means a
+    # misconfigured app (wrong retention, workflows enabled, anonymous auth,
+    # etc.) is reported with its *specific* error even when also running on
+    # an unsupported host -- e.g. during local development on Windows/macOS.
+    _validate_platform_capability()
+
+    # Capability gate: rows 1-12 all passed, but aca_sandbox execution is not
+    # implemented in this build (see execution/unavailable.py). This also
+    # vacuously satisfies row 13's "always a hard fail" -- no aca_sandbox
+    # session can ever run in this build regardless of retention/backstop math.
+    raise _session_runtime_error(
+        "session_runtime.provider",
+        "aca_sandbox backend not available in this build",
+    )

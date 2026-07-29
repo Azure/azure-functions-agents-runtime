@@ -19,6 +19,7 @@ Optional file in the root directory. All properties are optional.
 | `timeout` | number | No | `900` | Default execution timeout in seconds |
 | `tools` | object | No | `{}` | Global tool filtering configuration. [Details](#global-tools) |
 | `http_auth` | object | No | `function` (per-agent default) | App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`. |
+| `session_runtime` | object | No | `{}` | Session execution backend selection. [Details](#global-session_runtime) |
 
 ### Global: `system_tools`
 
@@ -49,6 +50,28 @@ Optional file in the root directory. All properties are optional.
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
 | `exclude` | string[] | No | `[]` | Tool names to exclude globally from all agents |
+
+### Global: `session_runtime`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `provider` | `"in_process"` \| `"aca_sandbox"` | No | `"in_process"` | Execution backend for agent sessions. `in_process` (default) runs agents in the Function App process; `aca_sandbox` isolates each session in a pre-provisioned Azure Container Apps Sandbox Group. [Details](#global-session_runtimeaca_sandbox) |
+| `harness` | string | No | `"maf"` | Agent execution harness. Only `maf` (Microsoft Agent Framework) is supported. |
+| `aca_sandbox` | object | No | `null` | Reference to the pre-provisioned ACA Sandbox Group. Required when `provider` is `aca_sandbox`. [Details](#global-session_runtimeaca_sandbox) |
+| `retention` | object | No | `null` | Idle/reclaim retention policy. Only supported when `provider` is `aca_sandbox`. [Details](#global-session_runtimeretention) |
+
+### Global: `session_runtime.aca_sandbox`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `sandbox_group_resource_id` | string | **Yes** | N/A | Azure resource ID of a pre-provisioned Sandbox Group. The runtime never creates one; this must reference an existing, customer-owned Sandbox Group. |
+
+### Global: `session_runtime.retention`
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `auto_suspend_idle` | integer | **Yes** | N/A | Idle seconds before a session is auto-suspended. Must be one of 60, 120, 300, 600, 1800, 3600. |
+| `reclaim_idle` | integer | **Yes** | N/A | Idle seconds before a suspended session's state is reclaimed. Must be positive and strictly greater than `auto_suspend_idle`. |
 
 **See:** [Front Matter Spec - Global Configuration](./front-matter-spec.md#global-configuration-agentsconfigyaml)
 

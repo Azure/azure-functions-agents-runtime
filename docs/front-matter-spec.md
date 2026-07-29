@@ -46,7 +46,7 @@ For capabilities (MCP, skills, tools):
 
 | Level | Required Properties | Optional Properties |
 |-------|-------------------|-------------------|
-| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `http_auth` |
+| **Global** (`agents.config.yaml`) | None (entire file is optional) | `system_tools`, `model`, `timeout`, `tools`, `http_auth`, `session_runtime` |
 | **Agent** (`.agent.md` front matter) | `name`, `description`, `trigger`* | `debug`, `model`, `timeout`, `logger`, `substitute_variables`, `system_tools`, `mcp`, `skills`, `tools`, `workflows`, `subagents`, `input_schema`, `response_schema`, `response_example`, `metadata` |
 
 
@@ -67,6 +67,7 @@ Optional file in the root directory that defines shared infrastructure and runti
 - `timeout` — Number specifying default execution timeout in seconds
 - `tools` — Object for tool filtering configuration
 - `http_auth` — String or object specifying the app-wide default inbound HTTP authentication policy (same model as `builtin_endpoints.http_auth`). Every agent's built-in HTTP endpoints inherit this value unless the agent authors its own `builtin_endpoints.http_auth`, which always overrides. When omitted, endpoints default to `function`. Applies only to HTTP endpoints and does not affect the MCP endpoint. Example: `http_auth: entra` requires every agent's chat API to use Entra ID by default.
+- `session_runtime` — Object selecting the session execution backend (`in_process` default, or `aca_sandbox`) for every agent in the app. Never configured per-agent. See [`session_runtime`](#session_runtime).
 
 **Note:** MCP servers (from `mcp.json`), skills (from `skills/` directory), and custom tools (from `tools/` directory) are automatically discovered. Agents can filter them out using exclude lists.
 
@@ -562,6 +563,72 @@ tools: false
 ```
 
 **Note:** Agents inherit all globally available custom tools by default. Use `exclude` to filter out unwanted tools.
+
+---
+
+#### `session_runtime`
+- **Type:** `object`
+- **Location:** Global (`agents.config.yaml`) only — this is app-wide configuration and is never set in agent front matter.
+- **Description:** Selects the session execution backend used to run every agent in the app. Omitting `session_runtime` entirely (or omitting `provider` within it) is equivalent to `provider: in_process` — agents run in-process inside the Function App worker, identical to pre-ACA-sandbox behavior. Setting `provider: aca_sandbox` isolates each session in a pre-provisioned, customer-owned Azure Container Apps Sandbox Group instead.
+
+**Structure:**
+```yaml
+session_runtime:
+  provider: in_process               # "in_process" (default) | "aca_sandbox"
+  harness: maf                       # Agent harness; "maf" is the only supported value
+  aca_sandbox:                       # Required when provider is "aca_sandbox"
+    sandbox_group_resource_id: string  # ARM resource ID of a pre-provisioned Sandbox Group
+  retention:                         # Optional; only valid when provider is "aca_sandbox"
+    auto_suspend_idle: integer       # Seconds; one of 60, 120, 300, 600, 1800, 3600
+    reclaim_idle: integer            # Seconds; positive and > auto_suspend_idle
+```
+
+**Default (no configuration needed):**
+```yaml
+# Omitting session_runtime entirely is equivalent to:
+session_runtime:
+  provider: in_process
+```
+
+> **Status:** `provider: aca_sandbox` parses successfully today, but application **startup** fails with a clear `aca_sandbox backend not available in this build` diagnostic — the executing backend ships in a later release. Use this section to author configuration ahead of time; do not deploy `aca_sandbox` expecting agents to run yet.
+
+---
+
+##### `session_runtime.aca_sandbox`
+- **Type:** `object`
+- **Required when:** `provider: aca_sandbox`
+- **Description:** Points at a **pre-provisioned, customer-owned** Azure Container Apps Sandbox Group. The runtime only references this resource by ID — it never creates, deletes, or otherwise manages the Sandbox Group's lifecycle.
+
+```yaml
+session_runtime:
+  provider: aca_sandbox
+  aca_sandbox:
+    sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sessionPools/<pool-name>
+```
+
+**Dropped fields:** `max_run_seconds`, `region`, `disk`, and `content_package` were evaluated during design and explicitly removed from the surface. Configuring any of them under `aca_sandbox` fails startup with an explicit "field no longer supported" error — they are never silently ignored.
+
+---
+
+##### `session_runtime.retention`
+- **Type:** `object`
+- **Valid only when:** `provider: aca_sandbox` (present without it is a startup error)
+- **Description:** Controls idle-suspend and idle-reclaim timing for sandboxed sessions.
+
+```yaml
+session_runtime:
+  provider: aca_sandbox
+  aca_sandbox:
+    sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sessionPools/<pool-name>
+  retention:
+    auto_suspend_idle: 300   # Suspend after 5 minutes idle
+    reclaim_idle: 3600       # Reclaim after 1 hour idle
+```
+
+**Validation rules (enforced at application startup, not at first request):**
+- `auto_suspend_idle` must be one of `60, 120, 300, 600, 1800, 3600` seconds — these mirror the platform's documented idle-timeout values and map directly to the ACA SDK's `auto_suspend_seconds`.
+- `reclaim_idle` must be a positive integer **and** strictly greater than `auto_suspend_idle`. A `reclaim_idle` that is smaller than, or equal to, `auto_suspend_idle` fails startup rather than silently racing the suspend timer.
+- `retention` configured while `provider` is `in_process` (the default) fails startup — retention timing only applies to sandboxed sessions.
 
 ---
 

@@ -1,0 +1,6 @@
+model: gpt-4o
+timeout: 300
+session_runtime:
+  retention:
+    auto_suspend_idle: 300
+    reclaim_idle: 3600

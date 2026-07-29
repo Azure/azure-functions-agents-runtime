@@ -6,11 +6,14 @@ import pytest
 from pydantic import ValidationError
 
 from azure_functions_agents.config.schema import (
+    AcaSandboxConfig,
     AgentSpec,
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
     McpFilter,
+    RetentionConfig,
+    SessionRuntimeConfig,
     SubagentRef,
     SystemToolsConfig,
     ToolsFilter,
@@ -215,3 +218,127 @@ def test_agent_spec_subagents_rejects_string_shorthand() -> None:
 def test_agent_spec_subagents_defaults_to_none() -> None:
     spec = AgentSpec(name="X", description="Y")
     assert spec.subagents is None
+
+
+# --- session_runtime / aca_sandbox / retention (FRD 0008, P2) --------------
+
+
+def test_global_config_session_runtime_defaults_to_none() -> None:
+    """Absence of the block is the default and means `provider: in_process`."""
+    config = GlobalConfig()
+    assert config.session_runtime is None
+
+
+def test_session_runtime_config_defaults() -> None:
+    config = SessionRuntimeConfig()
+    assert config.provider == "in_process"
+    assert config.harness == "maf"
+    assert config.aca_sandbox is None
+    assert config.retention is None
+
+
+def test_session_runtime_config_extra_forbidden() -> None:
+    with pytest.raises(ValidationError):
+        SessionRuntimeConfig.model_validate({"extra_field": 1})
+
+
+def test_aca_sandbox_config_parses() -> None:
+    config = AcaSandboxConfig.model_validate(
+        {"sandbox_group_resource_id": "/subscriptions/.../sandboxGroups/my-group"}
+    )
+    assert config.sandbox_group_resource_id == "/subscriptions/.../sandboxGroups/my-group"
+
+
+def test_aca_sandbox_config_rejects_empty_sandbox_group_resource_id() -> None:
+    with pytest.raises(ValidationError):
+        AcaSandboxConfig(sandbox_group_resource_id="   ")
+
+
+def test_aca_sandbox_config_extra_forbidden() -> None:
+    with pytest.raises(ValidationError):
+        AcaSandboxConfig.model_validate(
+            {"sandbox_group_resource_id": "x", "extra_field": 1}
+        )
+
+
+def test_retention_config_parses() -> None:
+    retention = RetentionConfig.model_validate({"auto_suspend_idle": 300, "reclaim_idle": 3600})
+    assert retention.auto_suspend_idle == 300
+    assert retention.reclaim_idle == 3600
+
+
+def test_retention_config_requires_both_fields() -> None:
+    """Both fields are required together -- `reclaim_idle` is only meaningful
+    relative to `auto_suspend_idle`, so a partial block is rejected rather
+    than silently paired with an implicit default for the missing field."""
+    with pytest.raises(ValidationError):
+        RetentionConfig.model_validate({"auto_suspend_idle": 300})
+    with pytest.raises(ValidationError):
+        RetentionConfig.model_validate({"reclaim_idle": 3600})
+
+
+def test_retention_config_extra_forbidden() -> None:
+    with pytest.raises(ValidationError):
+        RetentionConfig.model_validate(
+            {"auto_suspend_idle": 300, "reclaim_idle": 3600, "extra_field": 1}
+        )
+
+
+def test_global_config_session_runtime_aca_sandbox_parses() -> None:
+    config = GlobalConfig.model_validate(
+        {
+            "session_runtime": {
+                "provider": "aca_sandbox",
+                "harness": "maf",
+                "aca_sandbox": {
+                    "sandbox_group_resource_id": (
+                        "/subscriptions/sub-1/resourceGroups/rg-1/providers/"
+                        "Microsoft.App/sandboxGroups/my-group"
+                    )
+                },
+                "retention": {"auto_suspend_idle": 300, "reclaim_idle": 3600},
+            }
+        }
+    )
+    assert config.session_runtime is not None
+    assert config.session_runtime.provider == "aca_sandbox"
+    assert config.session_runtime.aca_sandbox is not None
+    assert config.session_runtime.retention is not None
+    assert config.session_runtime.retention.reclaim_idle == 3600
+
+
+@pytest.mark.parametrize(
+    "dropped_field",
+    ["max_run_seconds", "region", "disk", "content_package"],
+)
+def test_session_runtime_rejects_dropped_field(dropped_field: str) -> None:
+    """FRD 0008 explicitly removed these fields during consolidation; a config
+    still authoring one must fail loudly, not be silently ignored."""
+    with pytest.raises(ValidationError, match="no longer supported"):
+        SessionRuntimeConfig.model_validate({dropped_field: "anything"})
+
+
+@pytest.mark.parametrize(
+    "dropped_field",
+    ["max_run_seconds", "region", "disk", "content_package"],
+)
+def test_aca_sandbox_config_rejects_dropped_field(dropped_field: str) -> None:
+    with pytest.raises(ValidationError, match="no longer supported"):
+        AcaSandboxConfig.model_validate(
+            {"sandbox_group_resource_id": "x", dropped_field: "anything"}
+        )
+
+
+def test_session_runtime_dropped_field_error_names_scope_and_field() -> None:
+    with pytest.raises(ValidationError, match=r"session_runtime.*`region`"):
+        SessionRuntimeConfig.model_validate({"region": "eastus"})
+
+
+def test_aca_sandbox_dropped_field_error_names_scope_and_field() -> None:
+    with pytest.raises(ValidationError, match=r"session_runtime\.aca_sandbox.*`disk`"):
+        AcaSandboxConfig.model_validate({"sandbox_group_resource_id": "x", "disk": "10Gi"})
+
+
+def test_session_runtime_rejects_multiple_dropped_fields_at_once() -> None:
+    with pytest.raises(ValidationError, match=r"`max_run_seconds`, `region`"):
+        SessionRuntimeConfig.model_validate({"max_run_seconds": 60, "region": "eastus"})
