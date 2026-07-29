@@ -13,7 +13,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, Literal, get_args, get_origin
+from typing import Any, get_origin
 
 # Add src to path for imports - import schema module directly to avoid package side effects
 repo_root = Path(__file__).parent.parent.parent
@@ -24,6 +24,7 @@ sys.path.insert(0, str(schema_module_path))
 import importlib.util
 spec = importlib.util.spec_from_file_location("schema", schema_module_path / "schema.py")
 schema = importlib.util.module_from_spec(spec)
+sys.modules["schema"] = schema
 spec.loader.exec_module(schema)
 
 from pydantic import BaseModel
@@ -71,25 +72,7 @@ RETENTION_DESCRIPTIONS = schema.RETENTION_DESCRIPTIONS
 def format_type(field_info: FieldInfo, field_name: str) -> str:
     """Format field type annotation as a readable string."""
     annotation = field_info.annotation
-
-    # Resolve PEP 695 `type X = Literal[...]` aliases (e.g. EndpointAuthMode)
-    # to their actual literal values, so docs show `"function" | "admin" | ...`
-    # instead of the internal Python type-alias name. Because this script loads
-    # schema.py via importlib without registering it in sys.modules, Pydantic
-    # sometimes can't fully resolve these aliases and leaves a bare ForwardRef
-    # instead of the live TypeAliasType - so look the name up on `schema`
-    # directly rather than assuming `annotation` is already the resolved object.
     import re
-
-    alias_name_match = re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", str(annotation)) or re.fullmatch(
-        r"ForwardRef\('([A-Za-z_][A-Za-z0-9_]*)'\)", str(annotation)
-    )
-    if alias_name_match:
-        alias_name = alias_name_match.group(1) if alias_name_match.groups() else alias_name_match.group(0)
-        alias_obj = getattr(schema, alias_name, None)
-        alias_value = getattr(alias_obj, "__value__", None)
-        if alias_value is not None and get_origin(alias_value) is Literal:
-            return " \\| ".join(f'`"{arg}"`' for arg in get_args(alias_value))
 
     # Handle Union types (e.g., str | None, bool | object)
     origin = get_origin(annotation)

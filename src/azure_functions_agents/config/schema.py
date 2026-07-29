@@ -188,30 +188,6 @@ class SystemToolsAgentOverride(BaseModel):
 
 DEFAULT_SESSION_RUNTIME_HARNESS = "maf"
 
-# FRD 0008 fields removed by design during consolidation. A config that still
-# uses one of these must fail loudly (row-level, in schema.py) rather than
-# silently drop the field via `extra="forbid"`'s more generic message.
-_DROPPED_ACA_SANDBOX_FIELDS: tuple[str, ...] = (
-    "max_run_seconds",
-    "region",
-    "disk",
-    "content_package",
-)
-
-
-def _reject_dropped_session_runtime_fields(value: Any, *, scope: str) -> Any:
-    """Fail closed on `session_runtime` fields removed by design (FRD 0008)."""
-    if isinstance(value, dict):
-        found = sorted(name for name in _DROPPED_ACA_SANDBOX_FIELDS if name in value)
-        if found:
-            joined = ", ".join(f"`{name}`" for name in found)
-            verb = "is" if len(found) == 1 else "are"
-            raise ValueError(
-                f"{scope}: {joined} {verb} no longer supported and must be removed. "
-                "See docs/frds/0008-aca-sandbox-session-runtime.md."
-            )
-    return value
-
 
 def _reject_explicit_null_aca_sandbox(value: Any) -> Any:
     """Fail closed on an explicitly-null `aca_sandbox`, not just an absent key.
@@ -257,21 +233,14 @@ class AcaSandboxConfig(BaseModel):
     The runtime never creates a Sandbox Group on the customer's behalf;
     ``sandbox_group_resource_id`` must point at one that already exists.
     Configuring this block is itself what selects the ACA Sandbox execution
-    backend for all agent sessions (FRD 0008) — there is no separate
-    ``provider`` flag; the block's presence is the discriminant.
+    backend for all agent sessions (FRD 0008); the block's presence is the
+    discriminant.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     sandbox_group_resource_id: str
     retention: RetentionConfig | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _check_dropped_fields(cls, value: Any) -> Any:
-        return _reject_dropped_session_runtime_fields(
-            value, scope="session_runtime.aca_sandbox"
-        )
 
     @field_validator("sandbox_group_resource_id")
     @classmethod
@@ -298,11 +267,6 @@ class SessionRuntimeConfig(BaseModel):
 
     harness: str = DEFAULT_SESSION_RUNTIME_HARNESS
     aca_sandbox: AcaSandboxConfig | None = None
-
-    @model_validator(mode="before")
-    @classmethod
-    def _check_dropped_fields(cls, value: Any) -> Any:
-        return _reject_dropped_session_runtime_fields(value, scope="session_runtime")
 
     @model_validator(mode="before")
     @classmethod
@@ -335,7 +299,7 @@ class GlobalConfig(BaseModel):
             "entirely is the default and executes agent sessions in-process, with "
             "no behavior change. Configure `aca_sandbox` to isolate each agent "
             "session in a pre-provisioned Azure Container Apps Sandbox Group; its "
-            "presence (not a separate provider flag) selects that backend."
+            "presence selects that backend."
         ),
     )
 
@@ -497,7 +461,7 @@ SESSION_RUNTIME_DESCRIPTIONS: dict[str, str] = {
 }
 
 SESSION_RUNTIME_DEFAULTS: dict[str, str] = {
-    "harness": '`"maf"`',
+    "harness": f'`"{DEFAULT_SESSION_RUNTIME_HARNESS}"`',
     "aca_sandbox": "`null`",
 }
 

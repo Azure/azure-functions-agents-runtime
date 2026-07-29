@@ -69,8 +69,7 @@ framing):
     unguarded, this silently selects the in-process default instead of
     failing startup (fail-open, not fail-closed). A dedicated
     ``model_validator(mode="before")`` on ``SessionRuntimeConfig``
-    (``_check_explicit_null_aca_sandbox``, alongside the existing
-    ``_check_dropped_fields``) rejects this explicitly. See fixture
+    (``_check_explicit_null_aca_sandbox``) rejects this explicitly. See fixture
     ``30_aca_sandbox_explicit_null`` and
     ``test_row5_explicit_null_aca_sandbox_fails_startup`` below, plus the
     schema-level tests in ``test_config_schema.py``

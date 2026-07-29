@@ -569,7 +569,7 @@ tools: false
 #### `session_runtime`
 - **Type:** `object`
 - **Location:** Global (`agents.config.yaml`) only — this is app-wide configuration and is never set in agent front matter.
-- **Description:** Selects the session execution backend used to run every agent in the app. The backend is chosen by **presence**, not by an explicit discriminant field: omitting `session_runtime` entirely, or configuring it without an `aca_sandbox` block, means agents run in-process inside the Function App worker (the default, identical to pre-ACA-sandbox behavior). Configuring the `aca_sandbox` block isolates each session in a pre-provisioned, customer-owned Azure Container Apps Sandbox Group instead — its presence *is* the selection, so there is no separate provider flag to keep in sync with it.
+- **Description:** Selects the session execution backend used to run every agent in the app. The backend is chosen by **presence**, not by an explicit discriminant field: omitting `session_runtime` entirely, or configuring it without an `aca_sandbox` block, means agents run in-process inside the Function App worker (the default, identical to pre-ACA-sandbox behavior). Configuring the `aca_sandbox` block isolates each session in a pre-provisioned, customer-owned Azure Container Apps Sandbox Group instead — its presence *is* the selection.
 
 **Structure:**
 ```yaml
@@ -585,8 +585,7 @@ session_runtime:
 **Default (no configuration needed):**
 ```yaml
 # Omitting session_runtime entirely (or omitting aca_sandbox within it) is
-# equivalent to the default in-process backend -- there is no separate
-# provider field to set.
+# equivalent to the default in-process backend.
 ```
 
 > **Status:** Configuring `aca_sandbox` parses successfully today, but application **startup** fails with a clear `aca_sandbox backend not available in this build` diagnostic — the executing backend ships in a later release. Use this section to author configuration ahead of time; do not deploy `aca_sandbox` expecting agents to run yet.
@@ -595,7 +594,7 @@ session_runtime:
 
 ##### `session_runtime.aca_sandbox`
 - **Type:** `object`
-- **Selects:** the ACA Sandbox execution backend — its presence under `session_runtime` *is* the backend selection (there is no separate `provider` field). Omit this block entirely to keep the default in-process backend.
+- **Selects:** the ACA Sandbox execution backend — its presence under `session_runtime` *is* the backend selection. Omit this block entirely to keep the default in-process backend.
 - **Description:** Points at a **pre-provisioned, customer-owned** Azure Container Apps Sandbox Group. The runtime only references this resource by ID — it never creates, deletes, or otherwise manages the Sandbox Group's lifecycle.
 
 ```yaml
@@ -603,8 +602,6 @@ session_runtime:
   aca_sandbox:
     sandbox_group_resource_id: /subscriptions/<sub-id>/resourceGroups/<rg>/providers/Microsoft.App/sandboxGroups/<group-name>
 ```
-
-**Dropped fields:** `max_run_seconds`, `region`, `disk`, and `content_package` were evaluated during design and explicitly removed from the surface. Configuring any of them under `aca_sandbox` fails startup with an explicit "field no longer supported" error — they are never silently ignored.
 
 ---
 

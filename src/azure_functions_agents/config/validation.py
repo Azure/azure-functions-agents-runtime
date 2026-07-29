@@ -12,7 +12,7 @@ from pydantic import ValidationError
 from azure_functions_agents._logger import logger as _logger
 
 from .env import runtime_env_value
-from .schema import EndpointAuthConfig, GlobalConfig, ResolvedAgent
+from .schema import DEFAULT_SESSION_RUNTIME_HARNESS, EndpointAuthConfig, GlobalConfig, ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -243,28 +243,21 @@ def auto_delete_backstop_violated(
     reconciler_cadence_seconds: int = _RECONCILER_CADENCE_SECONDS_DEFAULT,
     grace_seconds: int = _AUTO_DELETE_GRACE_SECONDS_DEFAULT,
 ) -> bool:
-    """Row 13's pure formula: does ``reclaim_idle`` violate the platform's auto-delete backstop?
-
-    Returns ``True`` when ``reclaim_idle_seconds`` leaves the reconciler no
-    margin to reclaim a session before the ACA platform's own absolute
-    auto-delete backstop deletes it out from under the runtime -- i.e. when::
+    """Row 13's pure formula: does ``reclaim_idle`` leave the reconciler no
+    margin before the ACA platform's own auto-delete backstop deletes a
+    session out from under the runtime? True when::
 
         reclaim_idle_seconds > auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
 
-    The comparison is inclusive (fails only on strict ``>``), matching the
-    FRD's row 13 wording exactly.
+    Inclusive: fails only on strict ``>``, matching the FRD's row 13 wording.
 
-    Deliberately **not** wired into :func:`validate_session_runtime` in this
-    phase: the ACA SDK exposes ``AutoDeletePolicy.delete_interval_seconds``
-    only as a live, per-Sandbox-Group property (see the FRD's SDK-corrected
-    contradictions section), so there is no static ``auto_delete_seconds``
-    this config-only validator could check against without adding the ACA
-    SDK dependency -- out of scope until a later phase. Row 13's "always a
-    hard fail" requirement is satisfied unconditionally by the capability
-    gate at the end of :func:`validate_session_runtime`: no ``aca_sandbox``
-    session can run in this build regardless of retention math. This
-    function exists so the exact formula is implemented and directly
-    unit-tested now, ready to be wired against a live value in a later phase.
+    Not wired into :func:`validate_session_runtime` yet -- the ACA SDK only
+    exposes ``AutoDeletePolicy.delete_interval_seconds`` live, per Sandbox
+    Group, so there is no static value to check without the SDK dependency
+    (a later phase). Row 13's "always a hard fail" is met today by the
+    unconditional capability gate at the end of ``validate_session_runtime``;
+    this function implements the formula now so it's ready to wire against a
+    live value later.
     """
     return reclaim_idle_seconds > (
         auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
@@ -296,13 +289,11 @@ def _validate_platform_capability() -> None:
 def _validate_state_storage_auth_mode() -> None:
     """Row 6: the dedicated state-storage connection must not use a Shared Key.
 
-    P2 is config-only: there is no live Storage-API access here to inspect
-    account-level Shared-Key-disabled / RBAC-scoping settings (that is the
-    FRD's runtime half of this row). This is a config-only proxy limited to
-    the literal connection-string shape: an ``AccountKey=`` fragment in the
-    ``AzureFunctionsAgentsStateStorage`` app setting means a Shared Key
-    connection string was used instead of an identity-based (RBAC)
-    connection. True live verification is a later phase.
+    Config-only proxy (no live Storage-API access here): an ``AccountKey=``
+    fragment in the ``AzureFunctionsAgentsStateStorage`` app setting means a
+    Shared Key connection string was used instead of identity-based (RBAC)
+    auth. Live verification (account-level Shared-Key-disabled / RBAC
+    scoping) is a later phase.
     """
     value = runtime_env_value(_STATE_STORAGE_SETTING_NAME)
     if _SHARED_KEY_MARKER in value.lower():
@@ -483,21 +474,19 @@ def validate_session_runtime(
 
     Absence of ``session_runtime`` is valid and selects the default
     in-process backend with no behavior change; none of the matrix rows
-    below can fire in that case. There is no explicit backend-selector
-    field: configuring the ``aca_sandbox`` block is itself what selects the
-    ACA Sandbox execution backend, so every row below other than the
-    harness check is conditioned on ``session_runtime.aca_sandbox`` being
-    present, not on a ``provider`` value. Every row raises a plain
+    below can fire in that case. Configuring the ``aca_sandbox`` block is
+    itself what selects the ACA Sandbox execution backend, so every row
+    below other than the harness check is conditioned on
+    ``session_runtime.aca_sandbox`` being present. Every row raises a plain
     ``ValueError``, matching this module's existing convention (see
     ``validate_resolved_agent``, ``validate_subagent_references``).
 
-    ``aca_sandbox`` is not implemented yet (see
-    ``execution/unavailable.py``): once all other rows pass, this function
-    still unconditionally raises a final capability-gate error so that an
-    otherwise well-formed ``aca_sandbox`` configuration fails **application
-    startup** with a clear, typed diagnostic rather than a confusing runtime
-    error at first request. That same unconditional final raise also
-    satisfies row 13 (see :func:`auto_delete_backstop_violated`'s docstring).
+    ``aca_sandbox`` is not implemented yet (see ``execution/unavailable.py``):
+    once all other rows pass, this function still unconditionally raises a
+    final capability-gate error so a well-formed ``aca_sandbox`` config fails
+    **application startup** with a clear, typed diagnostic rather than a
+    confusing runtime error at first request. That same unconditional final
+    raise also satisfies row 13 (see :func:`auto_delete_backstop_violated`).
     """
     session_runtime = global_config.session_runtime
     if session_runtime is None:
@@ -507,10 +496,10 @@ def validate_session_runtime(
     # semantics, not the physical execution backend, so it is checked
     # whenever `session_runtime` is present at all -- not conditioned on
     # `aca_sandbox`.
-    if session_runtime.harness != "maf":
+    if session_runtime.harness != DEFAULT_SESSION_RUNTIME_HARNESS:
         raise _session_runtime_error(
             "session_runtime.harness",
-            f"Only `maf` is supported (got `{session_runtime.harness}`)",
+            f"Only `{DEFAULT_SESSION_RUNTIME_HARNESS}` is supported (got `{session_runtime.harness}`)",
         )
 
     aca_sandbox = session_runtime.aca_sandbox

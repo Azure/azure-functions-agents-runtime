@@ -393,9 +393,10 @@ def test_session_runtime_config_rejects_retention_as_sibling_of_aca_sandbox() ->
     ["max_run_seconds", "region", "disk", "content_package"],
 )
 def test_session_runtime_rejects_dropped_field(dropped_field: str) -> None:
-    """FRD 0008 explicitly removed these fields during consolidation; a config
-    still authoring one must fail loudly, not be silently ignored."""
-    with pytest.raises(ValidationError, match="no longer supported"):
+    """These names were considered and rejected during FRD 0008 design and
+    never shipped as real fields, so Pydantic's own `extra="forbid"` policy
+    rejects them like any other unknown field -- no dedicated check needed."""
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         SessionRuntimeConfig.model_validate({dropped_field: "anything"})
 
 
@@ -404,22 +405,37 @@ def test_session_runtime_rejects_dropped_field(dropped_field: str) -> None:
     ["max_run_seconds", "region", "disk", "content_package"],
 )
 def test_aca_sandbox_config_rejects_dropped_field(dropped_field: str) -> None:
-    with pytest.raises(ValidationError, match="no longer supported"):
+    with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         AcaSandboxConfig.model_validate(
             {"sandbox_group_resource_id": "x", dropped_field: "anything"}
         )
 
 
 def test_session_runtime_dropped_field_error_names_scope_and_field() -> None:
-    with pytest.raises(ValidationError, match=r"session_runtime.*`region`"):
+    """No custom message is involved, but Pydantic's structured error still
+    identifies exactly which field was rejected."""
+    with pytest.raises(ValidationError) as exc_info:
         SessionRuntimeConfig.model_validate({"region": "eastus"})
+    errors = exc_info.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "extra_forbidden"
+    assert errors[0]["loc"] == ("region",)
 
 
 def test_aca_sandbox_dropped_field_error_names_scope_and_field() -> None:
-    with pytest.raises(ValidationError, match=r"session_runtime\.aca_sandbox.*`disk`"):
+    with pytest.raises(ValidationError) as exc_info:
         AcaSandboxConfig.model_validate({"sandbox_group_resource_id": "x", "disk": "10Gi"})
+    errors = exc_info.value.errors()
+    assert len(errors) == 1
+    assert errors[0]["type"] == "extra_forbidden"
+    assert errors[0]["loc"] == ("disk",)
 
 
 def test_session_runtime_rejects_multiple_dropped_fields_at_once() -> None:
-    with pytest.raises(ValidationError, match=r"`max_run_seconds`, `region`"):
+    """Pydantic reports each extra field as its own error entry rather than
+    a single combined message."""
+    with pytest.raises(ValidationError) as exc_info:
         SessionRuntimeConfig.model_validate({"max_run_seconds": 60, "region": "eastus"})
+    locs = {error["loc"] for error in exc_info.value.errors()}
+    assert locs == {("max_run_seconds",), ("region",)}
+    assert all(error["type"] == "extra_forbidden" for error in exc_info.value.errors())
