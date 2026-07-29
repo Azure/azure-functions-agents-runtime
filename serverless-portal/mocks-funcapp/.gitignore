@@ -1,0 +1,12 @@
+# Static site content is copied from ../mocks at deploy time; not tracked here.
+content/
+
+# Local Azure Functions development
+local.settings.json
+.venv/
+__pycache__/
+*.pyc
+.python_packages/
+
+# azd / tooling
+.azure/

@@ -1,0 +1,145 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Console — New agent (bring markdown)</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, tools, sessions…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Manage</div>
+    <a class="item" href="index.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item active" href="new-agent.html"><span class="ico">＋</span> New agent</a>
+    <a class="item" href="tools.html"><span class="ico">🧩</span> Tools</a>
+    <a class="item" href="session.html"><span class="ico">⚡</span> Sessions</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Other concept</div>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — no canvas. You bring the <span class="mono">.agent.md</span>; we parse it and wire the rest.</div>
+    <div class="breadcrumb"><a href="index.html">Agents</a> / New</div>
+    <div class="page-title"><h1>Bring your markdown</h1></div>
+    <p class="page-sub">Drop or paste an <span class="mono">.agent.md</span>. We read the front matter and tell you what still needs attaching.</p>
+
+    <div class="grid cols-2">
+      <div class="card">
+        <div class="dropzone" style="margin-bottom:14px">
+          <span class="big">📄⬇️</span>
+          <div><strong>Drag your <span class="mono">.agent.md</span> here</strong> — or paste it below</div>
+          <div style="margin-top:8px"><button class="btn sm">Browse files…</button></div>
+        </div>
+        <div class="md-editor">
+          <textarea id="src" spellcheck="false">---
+name: support-triage
+description: Triage inbound support email and draft a grounded reply.
+model: gpt-5.4
+skills: [support-taxonomy]
+tools: [lookup_customer]
+trigger:
+  type: connector_trigger
+  args:
+    connector: outlook
+    event: messageReceived
+builtin_endpoints: true
+---
+
+You are a support triage assistant. Classify the incoming
+email (billing, bug, how-to, other), look up the customer
+by sender address, and draft a friendly reply grounded in
+the support taxonomy. Open a ticket with the category and a
+short summary.</textarea>
+        </div>
+        <div class="pill-row" style="margin-top:8px">
+          <span class="muted" style="font-size:12px">Start from a template:</span>
+          <a href="#" class="tag" onclick="return false">HTTP chat</a>
+          <a href="#" class="tag" onclick="return false">Timer report</a>
+          <a href="#" class="tag" onclick="return false">Outlook connector</a>
+          <a href="#" class="tag" onclick="return false">Queue worker</a>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Parsed from front matter</h3><span class="badge blue" id="pv-trigger">connector</span></div>
+        <dl class="kv">
+          <dt>Name</dt><dd class="mono" id="pv-name">support-triage</dd>
+          <dt>File</dt><dd class="mono" id="pv-file">support-triage.agent.md</dd>
+          <dt>Model</dt><dd class="mono" id="pv-model">gpt-5.4</dd>
+          <dt>Trigger</dt><dd id="pv-trigger2" class="mono">connector_trigger (outlook)</dd>
+          <dt>Endpoints</dt><dd id="pv-endpoints">Built-in chat + MCP</dd>
+        </dl>
+
+        <div class="divider"></div>
+        <h3>Referenced attachments</h3>
+        <div class="artifact">
+          <span class="ico2">🧩</span>
+          <div class="grow"><div class="t mono" id="pv-tools">lookup_customer</div><div class="s">Tool referenced — <span style="color:var(--amber)">not uploaded yet</span></div></div>
+          <a class="btn sm" href="tools.html">Upload .py</a>
+        </div>
+        <div class="artifact">
+          <span class="ico2">📚</span>
+          <div class="grow"><div class="t mono" id="pv-skills">support-taxonomy</div><div class="s">Skill referenced — will be created as <span class="mono">skills/support-taxonomy/SKILL.md</span></div></div>
+          <span class="badge green"><span class="dot"></span>OK</span>
+        </div>
+        <div class="artifact">
+          <span class="ico2">🔗</span>
+          <div class="grow"><div class="t">Outlook connector</div><div class="s">Trigger — connect during setup</div></div>
+          <a class="btn sm" href="../connectors.html">Connect</a>
+        </div>
+
+        <div class="divider"></div>
+        <h3>Host in</h3>
+        <div class="field" style="margin-bottom:10px">
+          <select>
+            <option>func-support-team — rg-support · eastus2 (3 agents)</option>
+            <option>New Function App…</option>
+          </select>
+        </div>
+
+        <div class="note">We'll scaffold <span class="mono">agents.config.yaml</span>, <span class="mono">host.json</span>, and <span class="mono">requirements.txt</span> if missing. Referenced tools that aren't uploaded yet will block publish until attached.</div>
+
+        <div class="pill-row" style="margin-top:14px">
+          <a class="btn primary" href="agent.html">Create &amp; manage →</a>
+          <a class="btn" href="index.html">Cancel</a>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  const src = document.getElementById('src');
+  function val(re, d){ const m = src.value.match(re); return m ? m[1].trim() : d; }
+  function list(re){ const m = src.value.match(re); return m ? m[1].trim() : ''; }
+  function parse(){
+    const name = val(/name:\s*(.+)/, 'my-agent');
+    document.getElementById('pv-name').textContent = name;
+    document.getElementById('pv-file').textContent = name + '.agent.md';
+    document.getElementById('pv-model').textContent = val(/model:\s*(.+)/, '(default)');
+    const conn = list(/connector:\s*(.+)/);
+    const ttype = list(/type:\s*(\w+_trigger)/) || 'http_trigger';
+    document.getElementById('pv-trigger').textContent = ttype.replace('_trigger','');
+    document.getElementById('pv-trigger2').textContent = ttype + (conn ? ' (' + conn + ')' : '');
+    document.getElementById('pv-endpoints').textContent = /builtin_endpoints:\s*true/.test(src.value) ? 'Built-in chat + MCP' : 'None';
+    document.getElementById('pv-tools').textContent = list(/tools:\s*\[(.*?)\]/) || '—';
+    document.getElementById('pv-skills').textContent = list(/skills:\s*\[(.*?)\]/) || '—';
+  }
+  src.addEventListener('input', parse);
+  parse();
+</script>
+</body>
+</html>

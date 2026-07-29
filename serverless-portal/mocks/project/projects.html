@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Projects — Serverless Agent Portal</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="project.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search projects, agents, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Build</div>
+    <a class="item active" href="projects.html"><span class="ico">📁</span> Projects</a>
+    <a class="item" href="new-project.html"><span class="ico">＋</span> New project</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Concepts</div>
+    <a class="item" href="../console/index.html"><span class="ico">🤖</span> Agent console</a>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — a <strong>Project</strong> groups agents, tools, skills, connectors &amp; (optional) workflows, and deploys to <strong>one Function App</strong>.</div>
+    <div class="breadcrumb">Home / Projects</div>
+    <div class="page-title"><h1>Projects</h1></div>
+    <p class="page-sub">A project is your logical grouping of everything an app needs — authored together, deployed together. <span class="muted">1 project → 1 Function App (for now).</span></p>
+
+    <div class="toolbar">
+      <a class="btn primary" href="new-project.html">＋ New project</a>
+      <a class="btn" href="#" onclick="return false">⬆ Import existing app</a>
+      <div class="spacer" style="flex:1"></div>
+      <input class="search" style="width:240px;background:#fff;border:1px solid var(--border-strong);color:var(--text)" placeholder="Filter projects…">
+      <select style="width:auto"><option>All environments</option><option>dev</option><option>prod</option></select>
+    </div>
+
+    <div class="grid cols-3">
+      <a class="card proj-card" href="project.html" style="color:inherit">
+        <div class="top">
+          <span class="glyph">🎫</span>
+          <div><h3>Support Ops</h3><div class="muted" style="font-size:12.5px">Inbox triage, replies &amp; ticketing</div></div>
+        </div>
+        <div class="counts">
+          <span class="c"><b>2</b> agents</span><span class="c"><b>2</b> tools</span><span class="c"><b>1</b> skill</span><span class="c"><b>2</b> connectors</span><span class="c"><b>1</b> workflow</span>
+        </div>
+        <div class="pill-row" style="margin-top:2px">
+          <span class="badge green"><span class="dot"></span>Published</span>
+          <span class="badge blue">dev</span>
+          <span class="tag">func-support-team</span>
+        </div>
+      </a>
+
+      <a class="card proj-card" href="project.html" style="color:inherit">
+        <div class="top">
+          <span class="glyph">🌦️</span>
+          <div><h3>Weather Buddy</h3><div class="muted" style="font-size:12.5px">Weather lookup + outfit suggestion</div></div>
+        </div>
+        <div class="counts">
+          <span class="c"><b>2</b> agents</span><span class="c"><b>1</b> tool</span><span class="c"><b>0</b> skills</span><span class="c"><b>1</b> connector</span><span class="c"><b>0</b> workflows</span>
+        </div>
+        <div class="pill-row" style="margin-top:2px">
+          <span class="badge amber"><span class="dot"></span>Draft</span>
+          <span class="badge blue">dev</span>
+          <span class="tag">not deployed</span>
+        </div>
+      </a>
+
+      <a class="card proj-card" href="project.html" style="color:inherit">
+        <div class="top">
+          <span class="glyph">📰</span>
+          <div><h3>Daily Digest</h3><div class="muted" style="font-size:12.5px">Scheduled tech-news email</div></div>
+        </div>
+        <div class="counts">
+          <span class="c"><b>1</b> agent</span><span class="c"><b>1</b> tool</span><span class="c"><b>1</b> skill</span><span class="c"><b>1</b> connector</span><span class="c"><b>0</b> workflows</span>
+        </div>
+        <div class="pill-row" style="margin-top:2px">
+          <span class="badge green"><span class="dot"></span>Published</span>
+          <span class="badge purple">prod</span>
+          <span class="tag">func-digest-prod</span>
+        </div>
+      </a>
+
+      <a class="card proj-card" href="new-project.html" style="color:inherit;border-style:dashed;display:grid;place-items:center;min-height:150px">
+        <div style="text-align:center;color:var(--text-muted)">
+          <div style="font-size:30px">＋</div>
+          <div><strong>New project</strong></div>
+          <div style="font-size:12px">Group agents, tools &amp; connectors → one app</div>
+        </div>
+      </a>
+    </div>
+
+    <div class="divider"></div>
+    <div class="note">A project is a lightweight record — <span class="mono">{ name, targetFunctionApp, members[] }</span> — layered over the file-based runtime. Members (agents, tools, skills, connectors, workflows) stay editable and are the real source of truth.</div>
+  </main>
+</div>
+</body>
+</html>

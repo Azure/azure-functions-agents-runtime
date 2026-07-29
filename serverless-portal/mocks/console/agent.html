@@ -1,0 +1,167 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Console — Manage agent</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, tools, sessions…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Manage</div>
+    <a class="item active" href="index.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="new-agent.html"><span class="ico">＋</span> New agent</a>
+    <a class="item" href="tools.html"><span class="ico">🧩</span> Tools</a>
+    <a class="item" href="session.html"><span class="ico">⚡</span> Sessions</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Other concept</div>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — manage the agent as its <span class="mono">.agent.md</span> plus attached tools, connectors, and a session. No node graph.</div>
+    <div class="breadcrumb"><a href="index.html">Agents</a> / support-triage</div>
+    <div class="page-title">
+      <h1>support-triage</h1>
+      <span class="badge green"><span class="dot"></span>Published</span>
+      <span class="badge blue">📧 Outlook</span>
+    </div>
+    <div class="toolbar">
+      <a class="btn primary" href="session.html">⚡ Run in session</a>
+      <button class="btn">💾 Save</button>
+      <button class="btn">🚀 Publish</button>
+      <div class="spacer" style="flex:1"></div>
+      <span class="muted" style="font-size:12px">Hosted on <span class="mono">func-support-team</span> · eastus2</span>
+    </div>
+
+    <div class="grid cols-2" style="grid-template-columns: 1.15fr 0.85fr">
+      <!-- Left: the markdown IS the agent -->
+      <div class="card">
+        <div class="card-head"><h3><span class="mono">support-triage.agent.md</span></h3>
+          <div class="pill-row"><span class="tag">name: support-triage</span><span class="tag">model: gpt-5.4</span></div>
+        </div>
+        <div class="md-editor">
+          <textarea spellcheck="false">---
+name: support-triage
+description: Triage inbound support email and draft a grounded reply.
+model: gpt-5.4
+skills: [support-taxonomy]
+tools: [lookup_customer]
+trigger:
+  type: connector_trigger
+  args:
+    connector: outlook
+    event: messageReceived
+builtin_endpoints: true
+---
+
+You are a support triage assistant. Classify the incoming
+email (billing, bug, how-to, other), look up the customer
+by sender address, and draft a friendly reply grounded in
+the support taxonomy. Open a ticket with the category and a
+short summary.</textarea>
+        </div>
+        <div class="note" style="margin-top:12px">The file is the source of truth. Editing the front matter here updates the attachment panels on the right, and vice-versa.</div>
+      </div>
+
+      <!-- Right: stacked artifact panels (the "manage" surface) -->
+      <div>
+        <div class="panel">
+          <div class="card-head"><h3>🔗 Trigger &amp; connectors</h3><a class="btn sm" href="../connectors.html">＋ Add</a></div>
+          <div class="artifact">
+            <span class="ico2">📧</span>
+            <div class="grow"><div class="t">Outlook — new message</div><div class="s">Input trigger · support@contoso.com</div></div>
+            <span class="badge green"><span class="dot"></span>Connected</span>
+          </div>
+          <div class="artifact">
+            <span class="ico2">🎫</span>
+            <div class="grow"><div class="t">ServiceNow — create incident</div><div class="s">Output · category + summary</div></div>
+            <span class="badge green"><span class="dot"></span>Connected</span>
+          </div>
+          <div class="artifact">
+            <span class="ico2">💬</span>
+            <div class="grow"><div class="t">Teams — post to channel</div><div class="s">Output · #support-alerts</div></div>
+            <span class="badge amber"><span class="dot"></span>Auth needed</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="card-head"><h3>🧩 Tools <span class="sub">tools/*.py</span></h3><a class="btn sm" href="tools.html">⬆ Upload files</a></div>
+          <div class="artifact">
+            <span class="ico2">🐍</span>
+            <div class="grow"><div class="t mono">lookup_customer</div><div class="s mono">lookup_customer.py · def lookup_customer(email: str) -&gt; dict</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span></label>
+          </div>
+          <div class="artifact">
+            <span class="ico2">🐍</span>
+            <div class="grow"><div class="t mono">open_ticket</div><div class="s mono">ticketing.py · def open_ticket(category: str, summary: str) -&gt; str</div></div>
+            <label class="switch"><input type="checkbox" checked><span class="track"></span></label>
+          </div>
+          <div class="artifact">
+            <span class="ico2">🛠️</span>
+            <div class="grow"><div class="t">execute_python</div><div class="s">Sandbox tool · ACA Dynamic Sessions</div></div>
+            <label class="switch"><input type="checkbox"><span class="track"></span></label>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="card-head"><h3>📚 Skills &amp; MCP</h3><a class="btn sm" href="#" onclick="return false">＋ Add</a></div>
+          <div class="artifact">
+            <span class="ico2">📚</span>
+            <div class="grow"><div class="t mono">support-taxonomy</div><div class="s">Skill · skills/support-taxonomy/SKILL.md</div></div>
+            <span class="badge green"><span class="dot"></span>Attached</span>
+          </div>
+          <div class="artifact">
+            <span class="ico2">🔌</span>
+            <div class="grow"><div class="t">crm-mcp</div><div class="s mono">mcp.json · https://crm.internal/mcp</div></div>
+            <span class="badge green"><span class="dot"></span>Attached</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="card-head"><h3>⚡ Dynamic session</h3><span class="sub">ephemeral sandbox</span></div>
+          <div class="artifact" style="border:none">
+            <span class="ico2">⚡</span>
+            <div class="grow" id="sess-state"><div class="t">No active session</div><div class="s">Provision an isolated sandbox to run &amp; test this agent. Auto-expires after 20 min.</div></div>
+            <button class="btn primary sm" id="sess-btn" onclick="provision()">Provision</button>
+          </div>
+          <div id="sess-open" style="display:none">
+            <a class="btn sm" href="session.html">Open test console →</a>
+          </div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  function provision(){
+    document.getElementById('sess-state').innerHTML =
+      '<div class="t">Session <span class="mono">sess_ab12cd</span> <span class="badge green"><span class="dot"></span>Active</span></div>' +
+      '<div class="s mono">ACA Dynamic Session · TTL 20:00 · storage + identity attached</div>';
+    const b = document.getElementById('sess-btn'); b.textContent = 'End'; b.classList.remove('primary');
+    b.setAttribute('onclick','endSession()');
+    document.getElementById('sess-open').style.display = 'block';
+  }
+  function endSession(){
+    document.getElementById('sess-state').innerHTML =
+      '<div class="t">No active session</div><div class="s">Provision an isolated sandbox to run &amp; test this agent. Auto-expires after 20 min.</div>';
+    const b = document.getElementById('sess-btn'); b.textContent = 'Provision'; b.classList.add('primary');
+    b.setAttribute('onclick','provision()');
+    document.getElementById('sess-open').style.display = 'none';
+  }
+</script>
+</body>
+</html>

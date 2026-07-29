@@ -1,0 +1,170 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Ops — Components</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="project.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search projects, agents, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Build</div>
+    <a class="item active" href="projects.html"><span class="ico">📁</span> Projects</a>
+    <a class="item" href="new-project.html"><span class="ico">＋</span> New project</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Concepts</div>
+    <a class="item" href="../console/index.html"><span class="ico">🤖</span> Agent console</a>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — members stay fully editable in project context. Click items in the explorer to switch the editor.</div>
+    <div class="breadcrumb"><a href="projects.html">Projects</a> / <a href="project.html">Support Ops</a> / Components</div>
+    <div class="page-title"><h1>📁 Support Ops</h1><span class="badge blue">dev</span></div>
+
+    <div class="tabs">
+      <a href="project.html">Overview</a>
+      <a href="components.html" class="active">Components</a>
+      <a href="runs.html">Runs &amp; sessions</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="#" onclick="return false">Settings</a>
+    </div>
+
+    <div class="layout-split">
+      <!-- Solution explorer -->
+      <div class="explorer">
+        <div class="grp">Agents <a href="#" onclick="return false" title="Add">＋</a></div>
+        <a class="node active" href="#" onclick="pick('agent');return false"><span class="ico">🤖</span> support-triage <span class="count">Outlook</span></a>
+        <a class="node" href="#" onclick="pick('agent');return false"><span class="ico">🤖</span> escalation-writer</a>
+        <div class="grp">Tools <a href="#" onclick="return false" title="Upload">⬆</a></div>
+        <a class="node" href="#" onclick="pick('tool');return false"><span class="ico">🐍</span> lookup_customer.py</a>
+        <a class="node" href="#" onclick="pick('tool');return false"><span class="ico">🐍</span> ticketing.py</a>
+        <div class="grp">Skills <a href="#" onclick="return false" title="Add">＋</a></div>
+        <a class="node" href="#" onclick="pick('skill');return false"><span class="ico">📚</span> support-taxonomy</a>
+        <div class="grp">Connectors &amp; triggers <a href="../connectors.html" title="Add">＋</a></div>
+        <a class="node" href="../connectors.html"><span class="ico">📧</span> Outlook <span class="count">trigger</span></a>
+        <a class="node" href="../connectors.html"><span class="ico">🎫</span> ServiceNow <span class="count">out</span></a>
+        <a class="node" href="../connectors.html"><span class="ico">💬</span> Teams <span class="count">out</span></a>
+        <div class="grp">Workflows <a href="../workflows/index.html" title="New">＋</a></div>
+        <a class="node" href="../workflows/index.html"><span class="ico">🕸️</span> triage-flow <span class="count">optional</span></a>
+      </div>
+
+      <!-- Editor pane -->
+      <div>
+        <!-- AGENT editor -->
+        <div id="ed-agent">
+          <div class="toolbar" style="margin-bottom:12px">
+            <span class="badge blue">🤖 Agent</span>
+            <strong class="mono">support-triage.agent.md</strong>
+            <div class="spacer" style="flex:1"></div>
+            <button class="btn sm">💾 Save</button>
+            <a class="btn sm" href="runs.html">▶ Test</a>
+          </div>
+          <div class="grid cols-2" style="grid-template-columns:1.1fr .9fr">
+            <div class="card">
+              <div class="card-head"><h3 class="mono" style="font-size:13px">support-triage.agent.md</h3><span class="tag">model: gpt-5.4</span></div>
+              <div class="md-editor"><textarea spellcheck="false">---
+name: support-triage
+description: Triage inbound support email and draft a grounded reply.
+model: gpt-5.4
+skills: [support-taxonomy]
+tools: [lookup_customer, open_ticket]
+trigger:
+  type: connector_trigger
+  args: { connector: outlook, event: messageReceived }
+builtin_endpoints: true
+---
+
+You are a support triage assistant. Classify the incoming
+email, look up the customer, draft a friendly reply grounded
+in the support taxonomy, and open a ticket.</textarea></div>
+            </div>
+            <div>
+              <div class="panel">
+                <div class="card-head"><h3>🧩 Tools used</h3><span class="sub">from this project</span></div>
+                <div class="artifact"><span class="ico2">🐍</span><div class="grow"><div class="t mono">lookup_customer</div><div class="s mono">lookup_customer.py</div></div><label class="switch"><input type="checkbox" checked><span class="track"></span></label></div>
+                <div class="artifact"><span class="ico2">🐍</span><div class="grow"><div class="t mono">open_ticket</div><div class="s mono">ticketing.py</div></div><label class="switch"><input type="checkbox" checked><span class="track"></span></label></div>
+              </div>
+              <div class="panel">
+                <div class="card-head"><h3>📚 Skills &amp; 🔗 connectors</h3></div>
+                <div class="artifact"><span class="ico2">📚</span><div class="grow"><div class="t mono">support-taxonomy</div><div class="s">grounding</div></div><span class="badge green"><span class="dot"></span>Attached</span></div>
+                <div class="artifact"><span class="ico2">📧</span><div class="grow"><div class="t">Outlook</div><div class="s">input trigger</div></div><span class="badge green"><span class="dot"></span>Connected</span></div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <!-- TOOL editor -->
+        <div id="ed-tool" style="display:none">
+          <div class="toolbar" style="margin-bottom:12px">
+            <span class="badge purple">🐍 Tool</span>
+            <strong class="mono">lookup_customer.py</strong>
+            <div class="spacer" style="flex:1"></div>
+            <span class="muted" style="font-size:12px">Used by <b>1</b> agent</span>
+            <button class="btn sm">💾 Save</button>
+          </div>
+          <div class="note" style="margin-bottom:12px">Editing a shared tool affects every agent that uses it (blast radius). This one is used by <span class="mono">support-triage</span>.</div>
+          <div class="md-editor"><textarea spellcheck="false">from azure_functions_agents import tool
+
+
+@tool
+def lookup_customer(email: str) -> dict:
+    """Look up a customer by email address."""
+    return crm.find(email)</textarea></div>
+        </div>
+
+        <!-- SKILL editor -->
+        <div id="ed-skill" style="display:none">
+          <div class="toolbar" style="margin-bottom:12px">
+            <span class="badge green">📚 Skill</span>
+            <strong class="mono">skills/support-taxonomy/SKILL.md</strong>
+            <div class="spacer" style="flex:1"></div>
+            <button class="btn sm">💾 Save</button>
+          </div>
+          <div class="md-editor"><textarea spellcheck="false">---
+name: support-taxonomy
+description: Category definitions, tone guide, and canned-response patterns.
+---
+
+# Support taxonomy
+
+## Categories
+- **billing** — invoices, refunds, charges
+- **bug** — something is broken
+- **how-to** — usage questions
+- **other** — anything else
+
+## Tone
+Friendly, concise, solution-first. Always acknowledge the issue.</textarea></div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+
+<script>
+  function pick(kind){
+    for (const k of ['agent','tool','skill']) {
+      document.getElementById('ed-'+k).style.display = (k===kind) ? 'block' : 'none';
+    }
+    // move active highlight
+    event.currentTarget.parentNode.querySelectorAll('a.node').forEach(n=>n.classList.remove('active'));
+    // (simplified: only highlight within clicked group is skipped for brevity)
+    document.querySelectorAll('.explorer a.node').forEach(n=>{ if(n.contains(event.target)) n.classList.add('active'); });
+    event.currentTarget.classList.add('active');
+  }
+</script>
+</body>
+</html>

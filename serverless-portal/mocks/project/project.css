@@ -1,0 +1,95 @@
+/* Project workbench — concept-specific components.
+   Self-contained: depends only on ../styles.css (shared tokens & base).
+   A few component styles (md-editor, panel, artifact, timeline, tag, switch)
+   are re-declared here so this folder doesn't depend on ../console/. */
+
+/* ---------- Project cards (home gallery) ---------- */
+.proj-card { display: flex; flex-direction: column; gap: 10px; }
+.proj-card .top { display: flex; align-items: flex-start; gap: 12px; }
+.proj-card .glyph {
+  width: 40px; height: 40px; border-radius: 9px; flex: none; display: grid; place-items: center;
+  font-size: 20px; background: var(--brand-soft); color: var(--brand-dark);
+}
+.proj-card h3 { margin: 0; font-size: 15px; }
+.proj-card .counts { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 4px; }
+.proj-card .counts .c { font-size: 12.5px; color: var(--text-muted); }
+.proj-card .counts .c b { color: var(--text); font-weight: 600; }
+
+/* ---------- Tabs helper (project sub-nav uses shared .tabs) ---------- */
+
+/* ---------- Solution explorer ---------- */
+.layout-split { display: grid; grid-template-columns: 268px 1fr; gap: 18px; align-items: start; }
+.explorer { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 8px; position: sticky; top: 16px; }
+.explorer .grp { font-size: 11px; text-transform: uppercase; letter-spacing: .5px; color: var(--text-faint); padding: 10px 8px 4px; display: flex; align-items: center; justify-content: space-between; }
+.explorer .grp a { font-size: 14px; color: var(--text-faint); }
+.explorer a.node { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; color: var(--text); font-size: 13px; }
+.explorer a.node:hover { background: var(--surface-2); text-decoration: none; }
+.explorer a.node.active { background: var(--brand-soft); color: var(--brand-dark); font-weight: 600; }
+.explorer a.node .ico { width: 16px; text-align: center; opacity: .9; }
+.explorer a.node .count { margin-left: auto; font-size: 11px; color: var(--text-faint); }
+.explorer .sub { padding-left: 18px; }
+.explorer .sub a.node { font-size: 12.5px; color: var(--text-muted); }
+
+/* ---------- Component group cards + chips ---------- */
+.group-card .card-head .ico2 { width: 30px; height: 30px; border-radius: 7px; background: var(--surface-2); display: grid; place-items: center; font-size: 15px; border: 1px solid var(--border); }
+.chips { display: flex; flex-wrap: wrap; gap: 8px; }
+.chip { display: inline-flex; align-items: center; gap: 7px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; background: var(--surface); font-size: 12.5px; }
+.chip .k { color: var(--text-faint); font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; }
+.chip.add { border-style: dashed; color: var(--brand-dark); cursor: pointer; }
+
+/* ---------- Topology (logical grouping → physical target) ---------- */
+.topo { display: flex; align-items: stretch; gap: 0; flex-wrap: wrap; }
+.topo .arrow { align-self: center; padding: 0 16px; color: var(--text-faint); font-size: 22px; text-align: center; }
+.topo .arrow small { display: block; font-size: 10px; letter-spacing: .3px; }
+.box { border: 1px solid var(--border-strong); border-radius: var(--radius); background: var(--surface); padding: 14px 16px; }
+.box.proj { border-color: var(--brand); background: var(--brand-soft); min-width: 210px; }
+.box.app { flex: 1; min-width: 320px; }
+.box.app.future { border-style: dashed; background: var(--surface-2); opacity: .75; }
+.box h4 { margin: 0 0 2px; font-size: 14px; }
+.box .meta { color: var(--text-muted); font-size: 12px; margin-bottom: 10px; }
+.comp-lane { display: flex; align-items: flex-start; gap: 10px; padding: 7px 0; border-top: 1px dashed var(--border); }
+.comp-lane:first-of-type { border-top: none; }
+.comp-lane .lbl { width: 116px; flex: none; color: var(--text-muted); font-size: 12px; padding-top: 4px; }
+.comp-lane .items { display: flex; flex-wrap: wrap; gap: 6px; }
+
+/* ---------- Run path (emergent / observed flow) ---------- */
+.runpath { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin: 4px 0 8px; }
+.runpath .step { display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px; border: 1px solid var(--border); border-radius: 8px; background: var(--surface); font-size: 12.5px; }
+.runpath .step.trigger { border-color: var(--purple); background: #efe7f8; color: var(--purple); }
+.runpath .step.agent { border-color: var(--brand); background: var(--brand-soft); color: var(--brand-dark); font-weight: 600; }
+.runpath .step.tool { font-family: "Cascadia Code", Consolas, monospace; }
+.runpath .step.out { border-color: var(--green); background: var(--green-soft); color: var(--green); }
+.runpath .arr { color: var(--text-faint); }
+
+/* ---------- Re-declared shared bits (keep folder independent) ---------- */
+.panel { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 16px; }
+.panel .card-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
+.panel h3 { margin: 0; font-size: 13.5px; font-weight: 600; }
+.panel .card-head .sub { color: var(--text-faint); font-size: 12px; }
+
+.artifact { display: flex; align-items: center; gap: 12px; padding: 10px 0; border-bottom: 1px solid var(--border); }
+.artifact:last-child { border-bottom: none; }
+.artifact .ico2 { width: 32px; height: 32px; border-radius: 7px; background: var(--surface-2); display: grid; place-items: center; font-size: 16px; flex: none; border: 1px solid var(--border); }
+.artifact .grow { flex: 1; min-width: 0; }
+.artifact .t { font-weight: 600; font-size: 13px; }
+.artifact .s { color: var(--text-muted); font-size: 12px; }
+
+.md-editor { background: #1e242b; color: #d7dde5; border-radius: var(--radius); font-family: "Cascadia Code", "SF Mono", Consolas, monospace; font-size: 12.5px; line-height: 1.65; overflow: hidden; }
+.md-editor textarea { width: 100%; min-height: 300px; background: transparent; color: #d7dde5; border: none; padding: 16px 18px; font: inherit; resize: vertical; }
+.md-editor textarea:focus { outline: none; }
+
+.timeline { position: relative; padding-left: 6px; }
+.timeline .ev { position: relative; padding: 0 0 14px 18px; }
+.timeline .ev::before { content: ""; position: absolute; left: 0; top: 4px; width: 8px; height: 8px; border-radius: 50%; background: var(--brand); }
+.timeline .ev::after { content: ""; position: absolute; left: 3px; top: 12px; bottom: 0; width: 2px; background: var(--border); }
+.timeline .ev:last-child::after { display: none; }
+.timeline .ev .t { font-weight: 600; font-size: 13px; }
+.timeline .ev .s { color: var(--text-muted); font-size: 12px; }
+
+.tag { display: inline-flex; align-items: center; gap: 5px; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px; background: var(--surface-2); border: 1px solid var(--border); border-radius: 5px; padding: 2px 7px; color: var(--text-muted); }
+.switch { position: relative; width: 34px; height: 20px; flex: none; display: inline-block; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.switch .track { position: absolute; inset: 0; background: var(--border-strong); border-radius: 999px; transition: .15s; cursor: pointer; }
+.switch .track::before { content: ""; position: absolute; width: 16px; height: 16px; left: 2px; top: 2px; background: #fff; border-radius: 50%; transition: .15s; }
+.switch input:checked + .track { background: var(--green); }
+.switch input:checked + .track::before { transform: translateX(14px); }

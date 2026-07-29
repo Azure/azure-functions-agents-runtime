@@ -1,0 +1,134 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Ops — Runs &amp; sessions</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="project.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search projects, agents, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Build</div>
+    <a class="item active" href="projects.html"><span class="ico">📁</span> Projects</a>
+    <a class="item" href="new-project.html"><span class="ico">＋</span> New project</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Concepts</div>
+    <a class="item" href="../console/index.html"><span class="ico">🤖</span> Agent console</a>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — no workflow authored? The run flow is <strong>discovered from traces</strong>. A session ties every component in a run together.</div>
+    <div class="breadcrumb"><a href="projects.html">Projects</a> / <a href="project.html">Support Ops</a> / Runs</div>
+    <div class="page-title"><h1>📁 Support Ops</h1><span class="badge blue">dev</span></div>
+
+    <div class="tabs">
+      <a href="project.html">Overview</a>
+      <a href="components.html">Components</a>
+      <a href="runs.html" class="active">Runs &amp; sessions</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="#" onclick="return false">Settings</a>
+    </div>
+
+    <!-- Selected session: observed flow -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head">
+        <h3>Session <span class="mono">sess_ab12cd34</span> · observed flow</h3>
+        <div class="pill-row">
+          <span class="badge gray">no workflow authored</span>
+          <button class="btn sm">🕸️ Promote to workflow</button>
+        </div>
+      </div>
+      <p class="muted" style="font-size:12.5px;margin:0 0 10px">Reconstructed from <span class="mono">gen_ai</span> traces + blob session history — this is what actually ran, component by component.</p>
+      <div class="runpath">
+        <span class="step trigger">📧 Outlook <span class="k" style="opacity:.7">trigger</span></span>
+        <span class="arr">→</span>
+        <span class="step agent">🤖 support-triage</span>
+        <span class="arr">→</span>
+        <span class="step tool">🔧 lookup_customer</span>
+        <span class="arr">→</span>
+        <span class="step agent">🤖 support-triage</span>
+        <span class="arr">→</span>
+        <span class="step tool">🔧 open_ticket</span>
+        <span class="arr">→</span>
+        <span class="step agent">🤖 escalation-writer</span>
+        <span class="arr">→</span>
+        <span class="step out">💬 Teams</span>
+      </div>
+      <div class="note" style="margin-top:6px">Same components can take different paths per run — the flow is emergent (LLM-driven), not declared. Promote a common path to a <a href="../workflows/index.html">workflow</a> when you want it fixed &amp; visual.</div>
+    </div>
+
+    <div class="grid cols-2" style="grid-template-columns:1fr .9fr">
+      <!-- Recent sessions -->
+      <div class="table-wrap" style="align-self:start">
+        <table>
+          <thead><tr><th>Session</th><th>Trigger</th><th>Components touched</th><th>Dur</th><th>Status</th></tr></thead>
+          <tbody>
+            <tr style="background:var(--brand-soft)">
+              <td class="cell-title mono">sess_ab12cd34<div class="cell-sub">2m ago</div></td>
+              <td><span class="badge purple">📧 Outlook</span></td>
+              <td><span class="tag">3 agents</span> <span class="tag">2 tools</span> <span class="tag">1 out</span></td>
+              <td>2.4s</td>
+              <td><span class="badge green"><span class="dot"></span>OK</span></td>
+            </tr>
+            <tr>
+              <td class="cell-title mono">sess_9f7e21<div class="cell-sub">14m ago</div></td>
+              <td><span class="badge blue">🌐 HTTP</span></td>
+              <td><span class="tag">1 agent</span> <span class="tag">1 tool</span></td>
+              <td>1.2s</td>
+              <td><span class="badge green"><span class="dot"></span>OK</span></td>
+            </tr>
+            <tr>
+              <td class="cell-title mono">sess_77aa03<div class="cell-sub">1h ago</div></td>
+              <td><span class="badge purple">📧 Outlook</span></td>
+              <td><span class="tag">2 agents</span> <span class="tag">2 tools</span> <span class="tag">1 out</span></td>
+              <td>3.9s</td>
+              <td><span class="badge amber"><span class="dot"></span>Tool retry</span></td>
+            </tr>
+            <tr>
+              <td class="cell-title mono">sess_5120bd<div class="cell-sub">3h ago</div></td>
+              <td><span class="badge blue">🌐 HTTP</span></td>
+              <td><span class="tag">1 agent</span></td>
+              <td>0.8s</td>
+              <td><span class="badge red"><span class="dot"></span>Model 400</span></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <!-- Trace of selected session -->
+      <div class="panel">
+        <div class="card-head"><h3>Turn trace</h3><span class="sub mono">2.4s · 1,930 tok · 6 spans</span></div>
+        <div class="timeline">
+          <div class="ev"><div class="t">📧 Trigger — Outlook messageReceived</div><div class="s">connector · correlation sess_ab12cd34</div></div>
+          <div class="ev"><div class="t">🤖 support-triage — classify + plan</div><div class="s">model gpt-5.4 · 720 ms</div></div>
+          <div class="ev"><div class="t mono">🔧 lookup_customer</div><div class="s">tool · 140 ms · C-4821</div></div>
+          <div class="ev"><div class="t">🤖 support-triage — draft reply</div><div class="s">grounded in support-taxonomy · 1.1 s</div></div>
+          <div class="ev"><div class="t mono">🔧 open_ticket</div><div class="s">tool · 260 ms · INC-20481</div></div>
+          <div class="ev"><div class="t">🤖 escalation-writer — summarize</div><div class="s">agent-as-tool hand-off · 410 ms</div></div>
+          <div class="ev"><div class="t">💬 Teams — post to #support-alerts</div><div class="s">connector out · ok</div></div>
+        </div>
+        <div class="divider"></div>
+        <dl class="kv">
+          <dt>Session id</dt><dd class="mono">sess_ab12cd34</dd>
+          <dt>History</dt><dd class="mono">blob: sessions/sess_ab12cd34</dd>
+          <dt>Trace</dt><dd><a href="#" onclick="return false">Open in App Insights →</a></dd>
+        </dl>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

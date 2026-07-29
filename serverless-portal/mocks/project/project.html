@@ -1,0 +1,139 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Ops — Overview</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="project.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search projects, agents, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Build</div>
+    <a class="item active" href="projects.html"><span class="ico">📁</span> Projects</a>
+    <a class="item" href="new-project.html"><span class="ico">＋</span> New project</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Concepts</div>
+    <a class="item" href="../console/index.html"><span class="ico">🤖</span> Agent console</a>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — the project overview: what's inside, and where it deploys.</div>
+    <div class="breadcrumb"><a href="projects.html">Projects</a> / Support Ops</div>
+    <div class="page-title">
+      <h1>📁 Support Ops</h1>
+      <span class="badge green"><span class="dot"></span>Published</span>
+      <span class="badge blue">dev</span>
+    </div>
+    <div class="toolbar">
+      <a class="btn primary" href="runs.html">▶ Run / test</a>
+      <a class="btn" href="deploy.html">🚀 Build &amp; deploy</a>
+      <div class="spacer" style="flex:1"></div>
+      <span class="muted" style="font-size:12px">Deploys to <span class="mono">func-support-team</span> · eastus2</span>
+    </div>
+
+    <div class="tabs">
+      <a href="project.html" class="active">Overview</a>
+      <a href="components.html">Components</a>
+      <a href="runs.html">Runs &amp; sessions</a>
+      <a href="deploy.html">Deploy</a>
+      <a href="#" onclick="return false">Settings</a>
+    </div>
+
+    <!-- Topology: logical grouping -> physical target -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h3>Topology</h3><span class="muted" style="font-size:12px">logical project → physical Function App</span></div>
+      <div class="topo">
+        <div class="box proj">
+          <h4>📁 Support Ops</h4>
+          <div class="meta">project · 6 members</div>
+          <div class="tag">1 project → 1 app</div>
+        </div>
+        <div class="arrow">→<small>deploys to</small></div>
+        <div class="box app">
+          <h4>📦 func-support-team</h4>
+          <div class="meta">Function App · Flex Consumption · eastus2 · <span class="badge green" style="font-size:10px"><span class="dot"></span>running</span></div>
+          <div class="comp-lane"><span class="lbl">🔗 Connectors / triggers</span><div class="items"><span class="chip">📧 Outlook <span class="k">trigger</span></span><span class="chip">🎫 ServiceNow <span class="k">out</span></span><span class="chip">💬 Teams <span class="k">out</span></span></div></div>
+          <div class="comp-lane"><span class="lbl">🤖 Agents</span><div class="items"><span class="chip">support-triage</span><span class="chip">escalation-writer</span></div></div>
+          <div class="comp-lane"><span class="lbl">🧩 Tools</span><div class="items"><span class="chip">lookup_customer<span class="k">.py</span></span><span class="chip">ticketing<span class="k">.py</span></span></div></div>
+          <div class="comp-lane"><span class="lbl">📚 Skills</span><div class="items"><span class="chip">support-taxonomy</span></div></div>
+          <div class="comp-lane"><span class="lbl">🕸️ Workflows</span><div class="items"><span class="chip">triage-flow <span class="k">optional</span></span></div></div>
+        </div>
+        <div class="arrow">┈</div>
+        <div class="box app future" style="min-width:220px;flex:0 0 240px">
+          <h4>📦 App B <span class="badge gray" style="font-size:10px">future</span></h4>
+          <div class="meta">multi-app is deferred</div>
+          <div class="comp-lane" style="border:none"><span class="lbl">shared via</span><div class="items"><span class="tag">MCP / HTTP</span><span class="tag">managed identity</span></div></div>
+          <p class="muted" style="font-size:11.5px;margin:6px 0 0">A member hosted elsewhere is called by its published endpoint; the project records the binding. Not in this mock.</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Component group summary -->
+    <div class="grid cols-2">
+      <div class="card group-card">
+        <div class="card-head"><h3><span class="ico2">🤖</span> Agents</h3><a class="btn sm" href="components.html">Open →</a></div>
+        <div class="chips">
+          <span class="chip">support-triage <span class="k">Outlook</span></span>
+          <span class="chip">escalation-writer <span class="k">agent-as-tool</span></span>
+          <span class="chip add" onclick="location.href='components.html'">＋ Add agent</span>
+        </div>
+      </div>
+      <div class="card group-card">
+        <div class="card-head"><h3><span class="ico2">🧩</span> Tools</h3><a class="btn sm" href="components.html">Open →</a></div>
+        <div class="chips">
+          <span class="chip">lookup_customer<span class="k">.py</span></span>
+          <span class="chip">ticketing<span class="k">.py</span></span>
+          <span class="chip add" onclick="location.href='components.html'">⬆ Upload .py</span>
+        </div>
+      </div>
+      <div class="card group-card">
+        <div class="card-head"><h3><span class="ico2">📚</span> Skills</h3><a class="btn sm" href="components.html">Open →</a></div>
+        <div class="chips">
+          <span class="chip">support-taxonomy</span>
+          <span class="chip add" onclick="location.href='components.html'">＋ Add skill</span>
+        </div>
+      </div>
+      <div class="card group-card">
+        <div class="card-head"><h3><span class="ico2">🔗</span> Connectors &amp; triggers</h3><a class="btn sm" href="../connectors.html">Open →</a></div>
+        <div class="chips">
+          <span class="chip">📧 Outlook <span class="k">trigger</span></span>
+          <span class="chip">🎫 ServiceNow <span class="k">out</span></span>
+          <span class="chip">💬 Teams <span class="k">auth needed</span></span>
+          <span class="chip add" onclick="location.href='../connectors.html'">＋ Add connector</span>
+        </div>
+      </div>
+      <div class="card group-card">
+        <div class="card-head"><h3><span class="ico2">🕸️</span> Workflows <span class="sub" style="color:var(--text-faint);font-size:12px">optional</span></h3><a class="btn sm" href="../workflows/index.html">Open canvas →</a></div>
+        <div class="chips">
+          <span class="chip">triage-flow</span>
+          <span class="chip add" onclick="location.href='../workflows/index.html'">＋ New workflow</span>
+        </div>
+        <p class="muted" style="font-size:12px;margin:10px 0 0">No workflow required — components still compose at runtime. See <a href="runs.html">Runs &amp; sessions</a> for the observed flow.</p>
+      </div>
+      <div class="card group-card">
+        <div class="card-head"><h3><span class="ico2">📄</span> App files</h3><span class="muted" style="font-size:12px">project-level</span></div>
+        <div class="chips">
+          <span class="chip mono">agents.config.yaml</span>
+          <span class="chip mono">host.json</span>
+          <span class="chip mono">requirements.txt</span>
+          <span class="chip mono">function_app.py</span>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

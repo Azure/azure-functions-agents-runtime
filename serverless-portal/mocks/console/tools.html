@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Console — Tools</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, tools, sessions…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Manage</div>
+    <a class="item" href="index.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="new-agent.html"><span class="ico">＋</span> New agent</a>
+    <a class="item active" href="tools.html"><span class="ico">🧩</span> Tools</a>
+    <a class="item" href="session.html"><span class="ico">⚡</span> Sessions</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Other concept</div>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — upload your own <span class="mono">tools/*.py</span>; we discover <span class="mono">@tool</span> functions and let you attach them.</div>
+    <div class="breadcrumb">Home / Tools</div>
+    <div class="page-title"><h1>Tools</h1></div>
+    <p class="page-sub">Upload Python tool files. Each <span class="mono">@tool</span> function becomes attachable to any agent — no wiring diagram.</p>
+
+    <div class="dropzone tall" style="margin-bottom:18px">
+      <span class="big">🐍⬆️</span>
+      <div><strong>Drag <span class="mono">.py</span> files here</strong> to upload — or <button class="btn sm">Browse files…</button></div>
+      <div class="muted" style="margin-top:8px;font-size:12px">We scan for <span class="mono">@tool</span>-decorated functions and read their signatures &amp; docstrings.</div>
+    </div>
+
+    <div class="grid cols-2" style="grid-template-columns: 1fr 0.9fr">
+      <div class="table-wrap" style="align-self:start">
+        <table>
+          <thead><tr><th>Tool file</th><th>Discovered @tool</th><th>Attached to</th><th></th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="cell-title mono">lookup_customer.py<div class="cell-sub">uploaded 2m ago · 640 B</div></td>
+              <td><span class="tag">lookup_customer(email)</span></td>
+              <td><span class="badge blue">support-triage</span></td>
+              <td><a href="#" onclick="return false">View</a></td>
+            </tr>
+            <tr>
+              <td class="cell-title mono">ticketing.py<div class="cell-sub">uploaded 5m ago · 1.1 KB</div></td>
+              <td><span class="tag">open_ticket(category, summary)</span> <span class="tag">close_ticket(id)</span></td>
+              <td><span class="badge blue">support-triage</span></td>
+              <td><a href="#" onclick="return false">View</a></td>
+            </tr>
+            <tr>
+              <td class="cell-title mono">weather.py<div class="cell-sub">uploaded 1h ago · 512 B</div></td>
+              <td><span class="tag">get_weather(location)</span></td>
+              <td><span class="badge blue">weather-outfit</span></td>
+              <td><a href="#" onclick="return false">View</a></td>
+            </tr>
+            <tr>
+              <td class="cell-title mono">crm.py<div class="cell-sub">uploaded 1d ago · 2.3 KB</div></td>
+              <td><span class="tag">find_account(name)</span> <span class="tag">list_orders(id)</span></td>
+              <td><span class="badge gray">unattached</span></td>
+              <td><a href="#" onclick="return false">View</a></td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h3>Preview · <span class="mono">lookup_customer.py</span></h3><span class="badge green"><span class="dot"></span>1 @tool</span></div>
+        <div class="code"><span class="c"># discovered automatically on upload</span>
+<span class="k">from</span> azure_functions_agents <span class="k">import</span> tool
+
+<span class="frontmatter">@tool</span>
+<span class="k">def</span> lookup_customer(email: <span class="k">str</span>) -> <span class="k">dict</span>:
+    <span class="s">"""Look up a customer by email address."""</span>
+    <span class="k">return</span> crm.find(email)</div>
+
+        <div class="divider"></div>
+        <h3>Attach to agents</h3>
+        <div class="artifact">
+          <span class="ico2">🤖</span>
+          <div class="grow"><div class="t">support-triage</div><div class="s mono">tools: [lookup_customer]</div></div>
+          <label class="switch"><input type="checkbox" checked><span class="track"></span></label>
+        </div>
+        <div class="artifact">
+          <span class="ico2">🤖</span>
+          <div class="grow"><div class="t">outlook-reply</div><div class="s">not referenced</div></div>
+          <label class="switch"><input type="checkbox"><span class="track"></span></label>
+        </div>
+        <div class="note" style="margin-top:12px">Attaching adds the name to the agent's <span class="mono">tools:</span> front matter and ships the file under <span class="mono">tools/</span> on next publish.</div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

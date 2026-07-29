@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Console — Dynamic session</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, tools, sessions…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Manage</div>
+    <a class="item" href="index.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="new-agent.html"><span class="ico">＋</span> New agent</a>
+    <a class="item" href="tools.html"><span class="ico">🧩</span> Tools</a>
+    <a class="item active" href="session.html"><span class="ico">⚡</span> Sessions</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Other concept</div>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — a <strong>dynamic session</strong> is an ephemeral, isolated sandbox (ACA Dynamic Sessions) to run &amp; test the agent. Auto-expires.</div>
+    <div class="breadcrumb"><a href="index.html">Agents</a> / <a href="agent.html">support-triage</a> / Session</div>
+    <div class="page-title"><h1>Session — support-triage</h1></div>
+
+    <!-- Session lifecycle bar -->
+    <div class="session-bar">
+      <span class="badge green"><span class="dot"></span>Active</span>
+      <span class="mono">sess_ab12cd34</span>
+      <span class="muted" style="font-size:12px">ACA Dynamic Session · Python sandbox · storage + managed identity attached</span>
+      <span class="grow"></span>
+      <span class="ttl">⏳ TTL 18:42 remaining</span>
+      <button class="btn sm">Extend</button>
+      <button class="btn sm">↻ New session</button>
+      <button class="btn sm">End</button>
+    </div>
+
+    <div class="grid cols-2" style="grid-template-columns: 1.1fr 0.9fr">
+      <!-- Test console -->
+      <div class="card">
+        <div class="card-head"><h3>Test console</h3><span class="muted" style="font-size:12px">HTTP + streaming · isolated from prod</span></div>
+        <div class="chat">
+          <div class="msg user">A customer emailed: "I was charged twice for my May invoice — please help." From: jane@northwind.com</div>
+          <div class="toolcall">🔧 lookup_customer(email="jane@northwind.com")
+   → { "id": "C-4821", "plan": "Business", "since": "2023" }</div>
+          <div class="msg bot"><strong>Classification:</strong> billing · high confidence<br><br><strong>Draft reply:</strong> Hi Jane, thanks for flagging this. I can see a duplicate charge on your May invoice for account C-4821 and I've started a refund for the extra amount…</div>
+          <div class="toolcall">🔧 open_ticket(category="billing", summary="Duplicate May invoice charge — refund started")
+   → "INC-20481"</div>
+          <div class="msg bot">Opened ticket <span class="mono">INC-20481</span> and posted a note to <span class="mono">#support-alerts</span>. Anything else?</div>
+        </div>
+        <div class="composer">
+          <input type="text" placeholder="Send a test message to the agent…">
+          <button class="btn primary">Send</button>
+        </div>
+      </div>
+
+      <!-- Trace / activity for the last turn -->
+      <div>
+        <div class="panel">
+          <div class="card-head"><h3>Turn trace</h3><span class="sub mono">gen_ai · 2.4s · 1,930 tok</span></div>
+          <div class="timeline">
+            <div class="ev"><div class="t">📨 Trigger — inbound email</div><div class="s">connector: outlook · messageReceived</div></div>
+            <div class="ev"><div class="t">🧠 Model call — gpt-5.4</div><div class="s">classify + plan · 720 ms</div></div>
+            <div class="ev"><div class="t mono">🔧 lookup_customer</div><div class="s">tool · 140 ms · ok</div></div>
+            <div class="ev"><div class="t">🧠 Model call — draft reply</div><div class="s">grounded in support-taxonomy · 1.1 s</div></div>
+            <div class="ev"><div class="t mono">🔧 open_ticket</div><div class="s">tool · 260 ms · INC-20481</div></div>
+            <div class="ev"><div class="t">💬 Output — Teams</div><div class="s">posted to #support-alerts</div></div>
+          </div>
+        </div>
+
+        <div class="panel">
+          <div class="card-head"><h3>Session resources</h3></div>
+          <dl class="kv">
+            <dt>Sandbox</dt><dd class="mono">aca-dynsess / pool-eastus2</dd>
+            <dt>Identity</dt><dd class="mono">mi-support-triage (no keys)</dd>
+            <dt>History</dt><dd class="mono">blob: sessions/sess_ab12cd34</dd>
+            <dt>Tools loaded</dt><dd><span class="tag">lookup_customer</span> <span class="tag">open_ticket</span></dd>
+            <dt>Expires</dt><dd>in 18m 42s · <a href="#" onclick="return false">extend</a></dd>
+          </dl>
+          <div class="note" style="margin-top:12px">Sessions are disposable: nothing here touches the published agent until you <a href="agent.html">Publish</a>. End the session (or let it expire) to release the sandbox.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>

@@ -1,0 +1,114 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Console — Agents</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="console.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search agents, tools, sessions…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Manage</div>
+    <a class="item active" href="index.html"><span class="ico">🤖</span> Agents</a>
+    <a class="item" href="new-agent.html"><span class="ico">＋</span> New agent</a>
+    <a class="item" href="tools.html"><span class="ico">🧩</span> Tools</a>
+    <a class="item" href="session.html"><span class="ico">⚡</span> Sessions</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Other concept</div>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — artifact-first console (bring markdown · attach tools &amp; connectors · provision a session). An alternative to the workflow canvas.</div>
+    <div class="breadcrumb">Home / Agents</div>
+    <div class="page-title"><h1>Agents</h1></div>
+    <p class="page-sub">Bring your markdown, attach tools and connectors, and run each agent in a live session — no canvas to wire.</p>
+
+    <div class="steps">
+      <div class="step"><span class="n">1</span><div><h4>Bring your markdown</h4><p>Paste or upload a <span class="mono">.agent.md</span>. We parse the front matter.</p></div></div>
+      <span class="arrow">→</span>
+      <div class="step"><span class="n">2</span><div><h4>Attach tools &amp; connectors</h4><p>Upload <span class="mono">tools/*.py</span>, wire a trigger and outputs.</p></div></div>
+      <span class="arrow">→</span>
+      <div class="step"><span class="n">3</span><div><h4>Provision a session</h4><p>Spin up an ephemeral sandbox and test it live.</p></div></div>
+    </div>
+
+    <div class="toolbar">
+      <a class="btn primary" href="new-agent.html">＋ New agent (bring markdown)</a>
+      <a class="btn" href="tools.html">⬆ Upload tools</a>
+      <div class="spacer" style="flex:1"></div>
+      <input class="search" style="width:240px;background:#fff;border:1px solid var(--border-strong);color:var(--text)" placeholder="Filter agents…">
+      <select style="width:auto"><option>All triggers</option><option>HTTP</option><option>Timer</option><option>Connector</option><option>Queue</option></select>
+    </div>
+
+    <div class="table-wrap">
+      <table>
+        <thead>
+          <tr><th>Agent</th><th>Trigger &amp; connectors</th><th>Tools</th><th>Model</th><th>Session</th><th>Status</th><th></th></tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="cell-title">support-triage <div class="cell-sub mono">support-triage.agent.md</div></td>
+            <td><span class="badge blue">📧 Outlook</span> <span class="badge gray">→ ServiceNow</span></td>
+            <td>2 <span class="cell-sub">files</span></td>
+            <td class="mono">gpt-5.4</td>
+            <td><span class="badge green"><span class="dot"></span>Active · 18:42</span></td>
+            <td><span class="badge green"><span class="dot"></span>Published</span></td>
+            <td><a href="session.html">Open session →</a> · <a href="agent.html">Manage</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">weather-outfit <div class="cell-sub mono">weather.agent.md</div></td>
+            <td><span class="badge blue">🌐 HTTP</span> <span class="badge gray">POST /weather-outfit</span></td>
+            <td>1 <span class="cell-sub">file</span></td>
+            <td class="mono">gpt-5.4</td>
+            <td><a href="session.html">Provision →</a></td>
+            <td><span class="badge amber"><span class="dot"></span>Draft</span></td>
+            <td><a href="session.html">Run</a> · <a href="agent.html">Manage</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">daily-report <div class="cell-sub mono">daily-report.agent.md</div></td>
+            <td><span class="badge purple">⏱️ Timer</span> <span class="badge gray">0 8 * * *</span> <span class="badge gray">→ Email</span></td>
+            <td>3 <span class="cell-sub">files</span></td>
+            <td class="mono">gpt-5.4</td>
+            <td><a href="session.html">Provision →</a></td>
+            <td><span class="badge green"><span class="dot"></span>Published</span></td>
+            <td><a href="session.html">Run</a> · <a href="agent.html">Manage</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">outlook-reply <div class="cell-sub mono">outlook-reply.agent.md</div></td>
+            <td><span class="badge blue">📧 Outlook</span> <span class="badge gray">→ Outlook draft</span></td>
+            <td>0 <span class="cell-sub">files</span></td>
+            <td class="mono">gpt-4o</td>
+            <td><a href="session.html">Provision →</a></td>
+            <td><span class="badge red"><span class="dot"></span>Needs tool</span></td>
+            <td><a href="tools.html">Upload tool</a> · <a href="agent.html">Manage</a></td>
+          </tr>
+          <tr>
+            <td class="cell-title">tech-news-email <div class="cell-sub mono">news.agent.md</div></td>
+            <td><span class="badge purple">⏱️ Timer</span> <span class="badge gray">→ Email</span></td>
+            <td>1 <span class="cell-sub">file</span></td>
+            <td class="mono">gpt-5.4</td>
+            <td><a href="session.html">Provision →</a></td>
+            <td><span class="badge gray"><span class="dot"></span>Idle</span></td>
+            <td><a href="session.html">Run</a> · <a href="agent.html">Manage</a></td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
+    <p class="page-sub" style="margin-top:14px">5 agents · <span class="muted">1 live session · hosted on <span class="mono">func-support-team</span> (Flex Consumption, eastus2)</span></p>
+  </main>
+</div>
+</body>
+</html>

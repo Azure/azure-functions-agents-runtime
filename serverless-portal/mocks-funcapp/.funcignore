@@ -1,0 +1,12 @@
+.git*
+.vscode/
+__pycache__/
+.venv/
+venv/
+*.pyc
+local.settings.json
+infra/
+deploy.ps1
+deploy.sh
+/README.md
+.azure/

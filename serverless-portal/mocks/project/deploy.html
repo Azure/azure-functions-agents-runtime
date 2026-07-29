@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Support Ops — Deploy</title>
+<link rel="stylesheet" href="../styles.css">
+<link rel="stylesheet" href="project.css">
+</head>
+<body>
+<div class="app">
+  <header class="header">
+    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
+    <div class="spacer"></div>
+    <input class="search" placeholder="Search projects, agents, tools…">
+    <div class="user">SN</div>
+  </header>
+
+  <nav class="nav">
+    <div class="group-label">Build</div>
+    <a class="item active" href="projects.html"><span class="ico">📁</span> Projects</a>
+    <a class="item" href="new-project.html"><span class="ico">＋</span> New project</a>
+    <div class="group-label">Configure</div>
+    <a class="item" href="../connectors.html"><span class="ico">🔗</span> Connectors</a>
+    <a class="item" href="../providers.html"><span class="ico">🔌</span> Providers</a>
+    <a class="item" href="../settings.html"><span class="ico">⚙️</span> Settings</a>
+    <div class="group-label">Concepts</div>
+    <a class="item" href="../console/index.html"><span class="ico">🤖</span> Agent console</a>
+    <a class="item" href="../workflows/index.html"><span class="ico">🕸️</span> Workflow canvas</a>
+  </nav>
+
+  <main class="main">
+    <div class="mock-banner">📐 Concept mock — a project builds to the runtime's file layout and deploys to <strong>one</strong> Function App.</div>
+    <div class="breadcrumb"><a href="projects.html">Projects</a> / <a href="project.html">Support Ops</a> / Deploy</div>
+    <div class="page-title"><h1>📁 Support Ops</h1><span class="badge green"><span class="dot"></span>Published</span></div>
+
+    <div class="tabs">
+      <a href="project.html">Overview</a>
+      <a href="components.html">Components</a>
+      <a href="runs.html">Runs &amp; sessions</a>
+      <a href="deploy.html" class="active">Deploy</a>
+      <a href="#" onclick="return false">Settings</a>
+    </div>
+
+    <!-- 1:1 mapping -->
+    <div class="card" style="margin-bottom:16px">
+      <div class="card-head"><h3>Deployment target</h3><span class="badge blue">1 project → 1 Function App</span></div>
+      <div class="topo">
+        <div class="box proj"><h4>📁 Support Ops</h4><div class="meta">6 members</div></div>
+        <div class="arrow">→<small>builds &amp; deploys to</small></div>
+        <div class="box app">
+          <h4>📦 func-support-team</h4>
+          <div class="meta">Flex Consumption · eastus2 · rg-support</div>
+          <div class="comp-lane" style="border:none"><span class="lbl">Environment</span><div class="items"><span class="badge blue">dev</span><span class="badge gray">prod (not deployed)</span></div></div>
+        </div>
+      </div>
+      <div class="toolbar" style="margin-top:14px">
+        <button class="btn primary">🚀 Build &amp; deploy to dev</button>
+        <button class="btn">Promote dev → prod</button>
+        <div class="spacer" style="flex:1"></div>
+        <span class="muted" style="font-size:12px">Last deploy 3h ago · v7 · by SN</span>
+      </div>
+    </div>
+
+    <div class="grid cols-2">
+      <!-- Build output -->
+      <div class="card">
+        <div class="card-head"><h3>Build output</h3><span class="muted" style="font-size:12px">project → runtime files</span></div>
+        <p class="muted" style="font-size:12.5px;margin:0 0 10px">All members compile into one Function App project the runtime understands.</p>
+        <dl class="kv">
+          <dt class="mono">support-triage.agent.md</dt><dd class="muted">agent</dd>
+          <dt class="mono">escalation-writer.agent.md</dt><dd class="muted">agent</dd>
+          <dt class="mono">tools/lookup_customer.py</dt><dd class="muted">tool</dd>
+          <dt class="mono">tools/ticketing.py</dt><dd class="muted">tool</dd>
+          <dt class="mono">skills/support-taxonomy/SKILL.md</dt><dd class="muted">skill</dd>
+          <dt class="mono">mcp.json</dt><dd class="muted">connectors / MCP</dd>
+          <dt class="mono">agents.config.yaml</dt><dd class="muted">project defaults</dd>
+          <dt class="mono">host.json · requirements.txt</dt><dd class="muted">app-level</dd>
+        </dl>
+        <div class="pill-row" style="margin-top:10px"><a class="btn sm" href="#" onclick="return false">Preview compiled files</a></div>
+      </div>
+
+      <!-- History + future multi-app -->
+      <div>
+        <div class="panel">
+          <div class="card-head"><h3>Deploy history</h3></div>
+          <div class="artifact"><span class="ico2">🚀</span><div class="grow"><div class="t">v7 · dev</div><div class="s">6 members · added escalation-writer · 3h ago</div></div><span class="badge green"><span class="dot"></span>Success</span></div>
+          <div class="artifact"><span class="ico2">🚀</span><div class="grow"><div class="t">v6 · dev</div><div class="s">5 members · edited lookup_customer · 1d ago</div></div><span class="badge green"><span class="dot"></span>Success</span></div>
+          <div class="artifact"><span class="ico2">🚀</span><div class="grow"><div class="t">v5 · prod</div><div class="s">5 members · 4d ago</div></div><span class="badge green"><span class="dot"></span>Success</span></div>
+        </div>
+        <div class="panel" style="border-style:dashed">
+          <div class="card-head"><h3>Future · multi-app deployment</h3><span class="badge gray">deferred</span></div>
+          <p class="muted" style="font-size:12.5px;margin:0 0 8px">When a project spans multiple Function Apps, deployment <strong>fans out per app</strong>:</p>
+          <ul class="muted" style="font-size:12.5px;margin:0;padding-left:18px">
+            <li>Each member has a <span class="mono">home</span> app; the build groups members by app.</li>
+            <li>Cross-app calls resolve to a member's published <span class="mono">MCP / HTTP</span> endpoint (managed identity, no keys).</li>
+            <li>The project records each remote <span class="mono">binding</span> + per-app deploy status.</li>
+          </ul>
+          <div class="note" style="margin-top:10px">Kept out of scope for now — <span class="mono">1 project → 1 app</span> keeps the project store to just membership + target.</div>
+        </div>
+      </div>
+    </div>
+  </main>
+</div>
+</body>
+</html>
