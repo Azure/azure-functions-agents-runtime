@@ -57,6 +57,19 @@ def test_manifest_parse_and_verify_accepts_exact_authoritative_binding() -> None
     verify_sandbox_manifest(expected, observed, _live_identity(expected))
 
 
+def test_manifest_parser_accepts_fields_owned_by_later_harness_contracts() -> None:
+    expected = _expected()
+    payload = {
+        **asdict(expected),
+        "capabilities": {"events": "v1"},
+        "created_at": "2026-07-30T00:00:00Z",
+    }
+
+    observed = parse_sandbox_manifest_binding(json.dumps(payload).encode("utf-8"))
+
+    verify_sandbox_manifest(expected, observed, _live_identity(expected))
+
+
 @pytest.mark.parametrize(
     ("field_name", "forged_value"),
     [
@@ -131,8 +144,29 @@ def test_manifest_verifier_rejects_repointed_live_group_even_if_manifest_matches
         b"not-json",
         b"[]",
         b'{"session_id": "partial"}',
-        json.dumps({**asdict(_expected()), "unexpected": True}).encode("utf-8"),
         json.dumps({**asdict(_expected()), "generation": "4"}).encode("utf-8"),
+        json.dumps(
+            {
+                **asdict(_expected()),
+                "sandbox_group_resource_id": "/not/a/sandbox/group",
+            }
+        ).encode("utf-8"),
+        json.dumps(
+            {
+                **asdict(_expected()),
+                "sandbox_group_resource_id": (
+                    "/subscriptions/ /resourceGroups/rg-agent/providers/Microsoft.App/"
+                    "sandboxGroups/session-group"
+                ),
+            }
+        ).encode("utf-8"),
+        (
+            b'{"manifest_version":1,"manifest_version":2,'
+            b'"protocol_version":"v","session_id":"s","owner_hash_version":"o1",'
+            b'"owner_hash":"o","app_hash":"a","sandbox_group_resource_id":"'
+            + _GROUP.encode()
+            + b'","sandbox_id":"sb","generation":1,"digest_kind":"k","digest":"d"}'
+        ),
     ],
 )
 def test_manifest_parser_fails_closed_without_echoing_content(payload: bytes) -> None:

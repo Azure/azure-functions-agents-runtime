@@ -22,7 +22,6 @@ from azure_functions_agents.transport.models import (
     SandboxCreateRequest,
     SandboxGroupBinding,
     SandboxProvisioningLabels,
-    SnapshotIdSource,
 )
 
 if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
@@ -32,11 +31,10 @@ if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
     )
 
 
-def _source_from_environment() -> DiskSource | DiskIdSource | SnapshotIdSource | PresetSource:
+def _source_from_environment() -> DiskSource | DiskIdSource | PresetSource:
     values = {
         "disk": os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK"),
         "disk_id": os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK_ID"),
-        "snapshot_id": os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_SNAPSHOT_ID"),
         "preset": os.environ.get("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_PRESET"),
     }
     selected = [(kind, value) for kind, value in values.items() if value]
@@ -48,8 +46,6 @@ def _source_from_environment() -> DiskSource | DiskIdSource | SnapshotIdSource |
         return DiskSource(value)
     if kind == "disk_id":
         return DiskIdSource(value)
-    if kind == "snapshot_id":
-        return SnapshotIdSource(value)
     return PresetSource(value)
 
 
@@ -126,6 +122,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
                 group=group_binding,
             ),
             expected,
+            readiness_timeout_seconds=30,
         )
         assert await resumed.read_file(SESSION_MANIFEST_PATH)
         await resumed.delete()

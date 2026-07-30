@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any
@@ -38,12 +39,15 @@ class FakeCredential:
 class FakeSdkSandboxClient:
     """A direct-file SDK-client stand-in with advisory ``get`` intentionally forbidden."""
 
-    def __init__(self, sandbox_id: str) -> None:
+    def __init__(self, sandbox_id: str, *, labels: dict[str, str] | None = None) -> None:
         self.sandbox_id = sandbox_id
+        self.labels = dict(labels or {})
         self.transport = FakeSandboxTransport()
         self.calls = self.transport.calls
         self.closed = False
         self.deleted = False
+        self.stop_kwargs: dict[str, Any] | None = None
+        self.delete_kwargs: dict[str, Any] | None = None
 
     async def list_files(self, path: str) -> SimpleNamespace:
         entries = await self.transport.list_files(path)
@@ -96,27 +100,45 @@ class FakeSdkSandboxClient:
     async def get(self) -> None:
         raise AssertionError("P4a readiness must not trust advisory sandbox state")
 
-    async def stop(self) -> None:
+    async def begin_stop(self, **kwargs: Any) -> FakePoller:
+        self.stop_kwargs = kwargs
         self.calls.append(RecordedTransportCall("stop"))
+        return FakePoller(None)
 
     async def resume(self) -> None:
         self.calls.append(RecordedTransportCall("resume"))
 
-    async def delete(self) -> None:
-        self.deleted = True
+    async def begin_delete(self, **kwargs: Any) -> FakePoller:
+        self.delete_kwargs = kwargs
         self.calls.append(RecordedTransportCall("delete"))
+        return FakePoller(None, on_result=self._mark_deleted)
 
     async def close(self) -> None:
         self.closed = True
+
+    def _mark_deleted(self) -> None:
+        self.deleted = True
 
 
 class FakePoller:
     """The async poller returned by the preview client's create method."""
 
-    def __init__(self, result: FakeSdkSandboxClient) -> None:
+    def __init__(
+        self,
+        result: object,
+        *,
+        error: Exception | None = None,
+        on_result: Callable[[], None] | None = None,
+    ) -> None:
         self._result = result
+        self._error = error
+        self._on_result = on_result
 
-    async def result(self) -> FakeSdkSandboxClient:
+    async def result(self) -> object:
+        if self._error is not None:
+            raise self._error
+        if self._on_result is not None:
+            self._on_result()
         return self._result
 
 
@@ -127,14 +149,43 @@ class FakeSdkGroupClient:
         self.sandboxes = sandboxes
         self.constructor_kwargs = kwargs
         self.create_calls: list[dict[str, Any]] = []
+        self.deleted_sandbox_ids: list[str] = []
+        self.create_result_error: Exception | None = None
         self.closed = False
         self.add_port_calls = 0
 
     async def begin_create_sandbox(self, **kwargs: Any) -> FakePoller:
         self.create_calls.append(kwargs)
-        sandbox = FakeSdkSandboxClient(f"created-{len(self.create_calls)}")
+        sandbox = FakeSdkSandboxClient(
+            f"created-{len(self.create_calls)}",
+            labels=kwargs.get("labels"),
+        )
         self.sandboxes[sandbox.sandbox_id] = sandbox
-        return FakePoller(sandbox)
+        return FakePoller(sandbox, error=self.create_result_error)
+
+    def list_sandboxes(
+        self,
+        *,
+        labels: dict[str, str] | None = None,
+    ) -> AsyncIterator[SimpleNamespace]:
+        async def iterate() -> AsyncIterator[SimpleNamespace]:
+            for sandbox in tuple(self.sandboxes.values()):
+                if labels and any(sandbox.labels.get(key) != value for key, value in labels.items()):
+                    continue
+                yield SimpleNamespace(id=sandbox.sandbox_id, labels=sandbox.labels)
+
+        return iterate()
+
+    async def begin_delete_sandbox(self, sandbox_id: str, **kwargs: Any) -> FakePoller:
+        del kwargs
+        sandbox = self.sandboxes[sandbox_id]
+
+        def delete() -> None:
+            sandbox.deleted = True
+            self.deleted_sandbox_ids.append(sandbox_id)
+            del self.sandboxes[sandbox_id]
+
+        return FakePoller(None, on_result=delete)
 
     async def close(self) -> None:
         self.closed = True
@@ -151,6 +202,7 @@ class FakeSdkEnvironment:
         self.sandboxes: dict[str, FakeSdkSandboxClient] = {}
         self.group_clients: list[FakeSdkGroupClient] = []
         self.endpoint_regions: list[str] = []
+        self.sandbox_client_ids: list[str] = []
 
     def factories(self) -> SdkFactories:
         return SdkFactories(
@@ -174,6 +226,7 @@ class FakeSdkEnvironment:
         self, endpoint: str, credential: object, *, sandbox_id: str, **kwargs: Any
     ) -> FakeSdkSandboxClient:
         del endpoint, credential, kwargs
+        self.sandbox_client_ids.append(sandbox_id)
         return self.sandboxes[sandbox_id]
 
     def add_sandbox(self, sandbox_id: str) -> FakeSdkSandboxClient:

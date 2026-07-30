@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict
 from typing import Any
 
 import pytest
+from azure.core.exceptions import ServiceRequestError
 
 from azure_functions_agents.transport import aca_sdk
 from azure_functions_agents.transport.manifest import (
@@ -26,7 +28,6 @@ from azure_functions_agents.transport.models import (
     SandboxGroupBindingError,
     SandboxProvisioningError,
     SandboxProvisioningLabels,
-    SnapshotIdSource,
 )
 from tests.doubles.fake_aca_sdk import (
     FakeCredential,
@@ -135,18 +136,23 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
 
     call = environment.group_client.create_calls[0]
     assert handle.identity.sandbox_id == "created-1"
-    assert {key for key in call if key in {"disk", "disk_id", "snapshot_id", "preset"}} == {"disk"}
+    assert {key for key in call if key in {"disk", "disk_id", "preset"}} == {"disk"}
     assert call["disk"] == "runtime-bootstrap"
     assert call["ports"] == []
     assert call["skip_egress_proxy"] is False
     assert call["polling_timeout"] == 30.0
     assert call["polling_interval"] == 3
-    assert call["labels"] == {
+    assert {
+        key: value
+        for key, value in call["labels"].items()
+        if key != "provisioning_attempt_id"
+    } == {
         "owner_hash_version": "o1",
         "owner_hash": "owner-fingerprint",
         "app_hash": "app-fingerprint",
         "session_id": "session-123",
     }
+    assert len(call["labels"]["provisioning_attempt_id"]) == 32
     assert call["environment"] == {"HARNESS_MODE": "test"}
     assert call["entrypoint"] == ["python"]
     assert call["cmd"] == ["-m", "harness"]
@@ -166,13 +172,12 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
     [
         (DiskSource("runtime-bootstrap"), "disk"),
         (DiskIdSource("disk-id"), "disk_id"),
-        (SnapshotIdSource("snapshot-id"), "snapshot_id"),
         (PresetSource("copilot"), "preset"),
     ],
 )
 async def test_create_accepts_each_single_explicit_source_and_forwards_remaining_budget(
     monkeypatch: pytest.MonkeyPatch,
-    source: DiskSource | DiskIdSource | SnapshotIdSource | PresetSource,
+    source: DiskSource | DiskIdSource | PresetSource,
     source_key: str,
 ) -> None:
     environment = FakeSdkEnvironment()
@@ -185,11 +190,52 @@ async def test_create_accepts_each_single_explicit_source_and_forwards_remaining
     )
 
     call = environment.group_client.create_calls[0]
-    source_keys = {"disk", "disk_id", "snapshot_id", "preset"}
+    source_keys = {"disk", "disk_id", "preset"}
     assert {key for key in call if key in source_keys} == {source_key}
     assert call["polling_timeout"] == 12.5
 
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_reconciles_and_deletes_remote_sandbox_when_polling_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    environment.group_client.create_result_error = TimeoutError("polling timed out")
+
+    with pytest.raises(TimeoutError, match="polling timed out"):
+        await adapter.create(_request(), persisted_group=_binding())
+
+    assert environment.group_client.deleted_sandbox_ids == ["created-1"]
+    assert environment.sandboxes == {}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_preserves_cancellation_when_cleanup_cannot_find_a_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    async def cancelled_create(**_: Any) -> None:
+        raise asyncio.CancelledError
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(environment.group_client, "begin_create_sandbox", cancelled_create)
+    monkeypatch.setattr(aca_sdk.asyncio, "sleep", no_delay)
+
+    with pytest.raises(asyncio.CancelledError):
+        await adapter.create(_request(), persisted_group=_binding())
+
+    assert environment.sandboxes == {}
     await adapter.close()
 
 
@@ -244,6 +290,7 @@ async def test_attach_uses_direct_manifest_read_before_any_advisory_state(
     handle = await adapter.attach(
         PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
         expected,
+        readiness_timeout_seconds=1,
     )
 
     assert handle.identity.sandbox_id == sandbox.sandbox_id
@@ -268,12 +315,69 @@ async def test_resume_requires_manifest_handshake_after_resume(
     handle = await adapter.resume(
         PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
         expected,
+        readiness_timeout_seconds=1,
     )
 
     assert [call.operation for call in sandbox.calls] == ["resume", "read_file"]
 
     await handle.delete()
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_retries_direct_manifest_until_nonblocking_resume_is_ready(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    sandbox.transport.seed_file(SESSION_MANIFEST_PATH, json.dumps(asdict(expected)).encode())
+    sandbox.transport.read_errors.append(ServiceRequestError("data plane not ready"))
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(aca_sdk.asyncio, "sleep", no_delay)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    handle = await adapter.resume(
+        PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
+        expected,
+        readiness_timeout_seconds=1,
+    )
+
+    assert [call.operation for call in sandbox.calls] == [
+        "resume",
+        "read_file",
+        "read_file",
+    ]
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", ["attach", "resume"])
+async def test_readiness_timeout_is_validated_before_constructing_a_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    operation: str,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    persisted = PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding())
+
+    with pytest.raises(SandboxProvisioningError, match="readiness_timeout_seconds"):
+        if operation == "attach":
+            await adapter.attach(persisted, expected, readiness_timeout_seconds=0)
+        else:
+            await adapter.resume(persisted, expected, readiness_timeout_seconds=0)
+
+    assert environment.sandbox_client_ids == []
+    assert sandbox.calls == []
     await adapter.close()
 
 
@@ -293,6 +397,7 @@ async def test_attach_closes_suspect_handle_on_forged_digest(
         await adapter.attach(
             PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
             expected,
+            readiness_timeout_seconds=1,
         )
 
     assert sandbox.closed
@@ -352,6 +457,7 @@ async def test_attach_rejects_a_live_handle_repointed_from_the_persisted_sandbox
         await adapter.attach(
             PersistedSandboxBinding(sandbox_id="persisted-1", group=_binding()),
             expected,
+            readiness_timeout_seconds=1,
         )
 
     assert sandbox.closed

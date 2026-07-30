@@ -9,14 +9,19 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import math
+import time
+import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib import import_module
 from typing import Any, cast
 
 import aiohttp
+from azure.core.exceptions import AzureError, HttpResponseError, ServiceRequestError
 
 from azure_functions_agents._credential import build_async_credential
+from azure_functions_agents._logger import logger
 
 from .manifest import (
     SESSION_MANIFEST_PATH,
@@ -44,6 +49,13 @@ from .ports import SandboxFileTransport, SandboxProcessTransport
 
 _ARM_SCOPE = "https://management.azure.com/.default"
 _ARM_API_VERSION = "2026-02-01-preview"
+_PROVISIONING_ATTEMPT_LABEL = "provisioning_attempt_id"
+_CONTROL_OPERATION_TIMEOUT_SECONDS = 30
+_CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
+_FAILED_CREATE_LOOKUP_ATTEMPTS = 3
+_FAILED_CREATE_LOOKUP_DELAY_SECONDS = 1.0
+_MANIFEST_RETRY_INTERVAL_SECONDS = 0.5
+_RETRYABLE_MANIFEST_STATUS_CODES = frozenset({404, 409, 423, 425, 429, 500, 502, 503, 504})
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,46 +193,85 @@ class AcaSandboxAdapter:
         self._ensure_open()
         _verify_group_binding(persisted_group, self._group)
         egress = _compile_egress_policy(self._factories, request.egress_policy)
-        poller = await self._group_client.begin_create_sandbox(
-            **source_to_provider_kwargs(request.source),
-            cpu=request.cpu,
-            memory=request.memory,
-            auto_suspend_seconds=request.auto_suspend_seconds,
-            auto_suspend_mode=request.auto_suspend_mode,
-            labels=request.labels.to_provider_labels(),
-            environment=dict(request.environment),
-            egress_policy=egress,
-            ports=[],
-            entrypoint=list(request.entrypoint),
-            cmd=list(request.cmd),
-            skip_egress_proxy=False,
-            polling_timeout=request.provisioning_timeout_seconds,
-            polling_interval=request.polling_interval_seconds,
-        )
-        sdk_client = await poller.result()
-        return await self._make_handle(sdk_client)
+        provisioning_attempt_id = uuid.uuid4().hex
+        labels = {
+            **request.labels.to_provider_labels(),
+            _PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id,
+        }
+        try:
+            poller = await self._group_client.begin_create_sandbox(
+                **source_to_provider_kwargs(request.source),
+                cpu=request.cpu,
+                memory=request.memory,
+                auto_suspend_seconds=request.auto_suspend_seconds,
+                auto_suspend_mode=request.auto_suspend_mode,
+                labels=labels,
+                environment=dict(request.environment),
+                egress_policy=egress,
+                ports=[],
+                entrypoint=list(request.entrypoint),
+                cmd=list(request.cmd),
+                skip_egress_proxy=False,
+                polling_timeout=request.provisioning_timeout_seconds,
+                polling_interval=request.polling_interval_seconds,
+            )
+            sdk_client = await poller.result()
+            return await self._make_handle(sdk_client)
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(self._cleanup_failed_create(provisioning_attempt_id))
+            except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+                logger.error(
+                    "ACA sandbox create was cancelled before cleanup could be confirmed; "
+                    "provisioning attempt %s requires reconciliation.",
+                    provisioning_attempt_id,
+                )
+            raise
+        except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            await self._cleanup_failed_create(provisioning_attempt_id)
+            raise
 
     async def attach(
         self,
         persisted: PersistedSandboxBinding,
         expected: ExpectedSandboxManifestBinding,
+        *,
+        readiness_timeout_seconds: float,
     ) -> AcaSandboxHandle:
         """Attach by persisted ID, then prove readiness through a direct manifest read."""
 
+        _validate_positive_finite_seconds(
+            readiness_timeout_seconds,
+            "readiness_timeout_seconds",
+        )
         handle = await self._attach_handle(persisted, expected)
-        await self._verify_manifest_handshake(handle, expected)
+        await self._verify_manifest_handshake(
+            handle,
+            expected,
+            readiness_timeout_seconds=readiness_timeout_seconds,
+        )
         return handle
 
     async def resume(
         self,
         persisted: PersistedSandboxBinding,
         expected: ExpectedSandboxManifestBinding,
+        *,
+        readiness_timeout_seconds: float,
     ) -> AcaSandboxHandle:
         """Resume by persisted ID and require the same data-plane manifest handshake."""
 
+        _validate_positive_finite_seconds(
+            readiness_timeout_seconds,
+            "readiness_timeout_seconds",
+        )
         handle = await self._attach_handle(persisted, expected)
         await handle.resume()
-        await self._verify_manifest_handshake(handle, expected)
+        await self._verify_manifest_handshake(
+            handle,
+            expected,
+            readiness_timeout_seconds=readiness_timeout_seconds,
+        )
         return handle
 
     async def close(self) -> None:
@@ -282,17 +333,58 @@ class AcaSandboxAdapter:
         )
 
     async def _verify_manifest_handshake(
-        self, handle: AcaSandboxHandle, expected: ExpectedSandboxManifestBinding
+        self,
+        handle: AcaSandboxHandle,
+        expected: ExpectedSandboxManifestBinding,
+        *,
+        readiness_timeout_seconds: float,
     ) -> None:
         verified = False
         try:
-            manifest_bytes = await handle.read_file(SESSION_MANIFEST_PATH)
+            _validate_positive_finite_seconds(
+                readiness_timeout_seconds,
+                "readiness_timeout_seconds",
+            )
+            manifest_bytes = await _read_manifest_when_ready(
+                handle,
+                readiness_timeout_seconds=readiness_timeout_seconds,
+            )
             observed = parse_sandbox_manifest_binding(manifest_bytes)
             verify_sandbox_manifest(expected, observed, handle.identity)
             verified = True
         finally:
             if not verified:
                 await handle.close()
+
+    async def _cleanup_failed_create(self, provisioning_attempt_id: str) -> None:
+        labels = {_PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id}
+        sandbox_ids: list[str] = []
+        for attempt in range(_FAILED_CREATE_LOOKUP_ATTEMPTS):
+            sandbox_ids = []
+            async for sandbox in self._group_client.list_sandboxes(labels=labels):
+                sandbox_id = getattr(sandbox, "id", None)
+                if not isinstance(sandbox_id, str) or not sandbox_id:
+                    raise SandboxProvisioningError(
+                        "Failed sandbox creation returned an invalid cleanup identity."
+                    )
+                sandbox_ids.append(sandbox_id)
+            if sandbox_ids:
+                break
+            if attempt + 1 < _FAILED_CREATE_LOOKUP_ATTEMPTS:
+                await asyncio.sleep(_FAILED_CREATE_LOOKUP_DELAY_SECONDS)
+
+        if not sandbox_ids:
+            raise SandboxProvisioningError(
+                "Failed sandbox creation could not be reconciled for cleanup."
+            )
+
+        for sandbox_id in sandbox_ids:
+            poller = await self._group_client.begin_delete_sandbox(
+                sandbox_id,
+                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+            )
+            await poller.result()
 
     def _ensure_open(self) -> None:
         if self._closed:
@@ -369,7 +461,11 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         """Stop this individual sandbox; the group remains customer-owned."""
 
         self._ensure_open()
-        await self._sdk_client.stop()
+        poller = await self._sdk_client.begin_stop(
+            polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+            polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+        )
+        await poller.result()
 
     async def resume(self) -> None:
         """Resume this individual sandbox without trusting advisory state reads."""
@@ -381,7 +477,11 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         """Delete only this individual session sandbox."""
 
         self._ensure_open()
-        await self._sdk_client.delete()
+        poller = await self._sdk_client.begin_delete(
+            polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+            polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+        )
+        await poller.result()
 
     async def close(self) -> None:
         """Close the live data-plane handle."""
@@ -443,6 +543,42 @@ def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy)
         default_action="Deny",
         traffic_inspection=policy.traffic_inspection,
     )
+
+
+async def _read_manifest_when_ready(
+    handle: AcaSandboxHandle,
+    *,
+    readiness_timeout_seconds: float,
+) -> bytes:
+    deadline = time.monotonic() + readiness_timeout_seconds
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SandboxProvisioningError("Sandbox manifest readiness timed out.")
+        try:
+            async with asyncio.timeout(remaining):
+                return await handle.read_file(SESSION_MANIFEST_PATH)
+        except ServiceRequestError:
+            pass
+        except HttpResponseError as exc:
+            if getattr(exc, "status_code", None) not in _RETRYABLE_MANIFEST_STATUS_CODES:
+                raise
+        except TimeoutError:
+            raise SandboxProvisioningError("Sandbox manifest readiness timed out.") from None
+
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SandboxProvisioningError("Sandbox manifest readiness timed out.")
+        await asyncio.sleep(min(_MANIFEST_RETRY_INTERVAL_SECONDS, remaining))
+
+
+def _validate_positive_finite_seconds(value: float, field_name: str) -> None:
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        raise SandboxProvisioningError(f"Sandbox {field_name} must be a number.")
+    if not math.isfinite(value) or value <= 0:
+        raise SandboxProvisioningError(
+            f"Sandbox {field_name} must be positive and finite."
+        )
 
 
 async def _close_resource(resource: object) -> None:

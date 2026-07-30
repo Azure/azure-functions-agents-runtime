@@ -28,6 +28,7 @@ class FakeSandboxTransport:
         self._files: dict[str, bytes] = {}
         self._directories: set[str] = {"/"}
         self.next_exec_result = SandboxExecResult(exit_code=0, stdout="", stderr="")
+        self.read_errors: list[Exception] = []
 
     def seed_file(self, path: str, content: bytes) -> None:
         """Populate a file without recording a transport operation."""
@@ -77,6 +78,8 @@ class FakeSandboxTransport:
     async def read_file(self, path: str) -> bytes:
         normalized = _normalize(path)
         self.calls.append(RecordedTransportCall("read_file", path=normalized))
+        if self.read_errors:
+            raise self.read_errors.pop(0)
         try:
             return self._files[normalized]
         except KeyError:

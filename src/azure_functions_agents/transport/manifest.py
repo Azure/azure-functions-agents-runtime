@@ -6,7 +6,12 @@ import json
 from dataclasses import dataclass
 from typing import Any, cast
 
-from .models import ProvisionedSandboxIdentity, normalize_sandbox_group_resource_id
+from .models import (
+    ProvisionedSandboxIdentity,
+    SandboxGroupBindingError,
+    SandboxProvisioningError,
+    normalize_sandbox_group_resource_id,
+)
 
 SESSION_MANIFEST_PATH = "/var/lib/azure-functions-agents/session/manifest.json"
 
@@ -74,7 +79,7 @@ class ObservedSandboxManifestBinding:
     digest: str
 
 
-_MANIFEST_KEYS = frozenset(
+_REQUIRED_MANIFEST_KEYS = frozenset(
     {
         "manifest_version",
         "protocol_version",
@@ -92,15 +97,20 @@ _MANIFEST_KEYS = frozenset(
 
 
 def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManifestBinding:
-    """Parse the complete manifest shape, failing closed without exposing content."""
+    """Parse P4a's required binding fields without owning the full harness manifest."""
 
     try:
         raw = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        decoded = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+        decoded = json.loads(raw, object_pairs_hook=_manifest_object)
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        TypeError,
+        _DuplicateManifestKeyError,
+    ):
         raise SandboxManifestMismatchError(frozenset({"manifest"})) from None
 
-    if not isinstance(decoded, dict) or set(decoded) != _MANIFEST_KEYS:
+    if not isinstance(decoded, dict) or not _REQUIRED_MANIFEST_KEYS.issubset(decoded):
         raise SandboxManifestMismatchError(frozenset({"manifest"}))
 
     try:
@@ -121,7 +131,7 @@ def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManif
             digest_kind=_parsed_string(decoded, "digest_kind"),
             digest=_parsed_string(decoded, "digest"),
         )
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, SandboxGroupBindingError, SandboxProvisioningError):
         raise SandboxManifestMismatchError(frozenset({"manifest"})) from None
     return observed
 
@@ -180,3 +190,16 @@ def _validate_integer(value: object, field_name: str) -> None:
 def _validate_string(value: object, field_name: str) -> None:
     if not isinstance(value, str) or not value:
         raise ValueError(f"{field_name} must be a non-empty string.")
+
+
+class _DuplicateManifestKeyError(ValueError):
+    """Raised internally when untrusted manifest JSON repeats a key."""
+
+
+def _manifest_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise _DuplicateManifestKeyError
+        result[key] = value
+    return result

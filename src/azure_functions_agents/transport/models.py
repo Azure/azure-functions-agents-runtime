@@ -140,16 +140,6 @@ class DiskIdSource:
 
 
 @dataclass(frozen=True, slots=True)
-class SnapshotIdSource:
-    """Use one explicit snapshot identifier."""
-
-    snapshot_id: str
-
-    def __post_init__(self) -> None:
-        _require_nonempty_string(self.snapshot_id, "snapshot_id")
-
-
-@dataclass(frozen=True, slots=True)
 class PresetSource:
     """Use one explicit provider preset."""
 
@@ -159,7 +149,7 @@ class PresetSource:
         _require_nonempty_string(self.preset, "preset")
 
 
-type SandboxCreateSource = DiskSource | DiskIdSource | SnapshotIdSource | PresetSource
+type SandboxCreateSource = DiskSource | DiskIdSource | PresetSource
 type SandboxEgressInspection = Literal["Full", "Partial"]
 type SandboxAutoSuspendMode = Literal["Memory", "Disk"]
 
@@ -230,9 +220,9 @@ class SandboxCreateRequest:
     polling_interval_seconds: int = 3
 
     def __post_init__(self) -> None:
-        if not isinstance(self.source, (DiskSource, DiskIdSource, SnapshotIdSource, PresetSource)):
+        if not isinstance(self.source, (DiskSource, DiskIdSource, PresetSource)):
             raise SandboxProvisioningError(
-                "Sandbox source must be exactly one of disk, disk_id, snapshot_id, or preset."
+                "Sandbox source must be exactly one of disk, disk_id, or preset."
             )
         _require_nonempty_string(self.cpu, "cpu")
         _require_nonempty_string(self.memory, "memory")
@@ -333,12 +323,10 @@ def source_to_provider_kwargs(source: SandboxCreateSource) -> dict[str, str]:
         return {"disk": source.disk}
     if isinstance(source, DiskIdSource):
         return {"disk_id": source.disk_id}
-    if isinstance(source, SnapshotIdSource):
-        return {"snapshot_id": source.snapshot_id}
     if isinstance(source, PresetSource):
         return {"preset": source.preset}
     raise SandboxProvisioningError(
-        "Sandbox source must be exactly one of disk, disk_id, snapshot_id, or preset."
+        "Sandbox source must be exactly one of disk, disk_id, or preset."
     )
 
 
