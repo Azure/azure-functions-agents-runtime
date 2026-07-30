@@ -63,11 +63,11 @@ End to end, a request flows like this:
    the controller derives the session **owner** via the adaptive `OwnerContext` —
    the Easy Auth user when one is resolved, otherwise the function-app identity
    (Decision 55).
-3. **Authoritative state-row lookup.** The controller reads a *customer-owned* state
-   store whose row is written only by the controller managed identity (scoped RBAC,
-   Shared Key disabled), so the row is authoritative by construction. Routing is
-   validated by a monotonic generation on the row plus a live sandbox manifest
-   cross-check — the row, the live ACA resource, and the live manifest must agree.
+3. **Authoritative state-row lookup.** The controller reads a state-row store in
+   the Function App's own `AzureWebJobsStorage` (Decision #86 — no separate
+   dedicated account, in any environment). Routing is validated by a monotonic
+   generation on the row plus a live sandbox manifest cross-check — the row,
+   the live ACA resource, and the live manifest must agree.
 4. **Create or resume the sandbox.** If none exists, create one on the generic
    stdlib-only bootstrap harness image and deliver the **controller-captured
    script-root content** into it (the epoch digest is computed over that captured
@@ -368,10 +368,11 @@ Consolidated highlights:
   content package/catalog spans all reachable agents, egress is the union across
   them, and delegation is a negotiated harness capability (0008.13).
 - **Rollout.** The backend launches experimental and requires an explicit config
-  block, ACA preview enablement, a compatible disk image, customer storage, and
+  block, ACA preview enablement, a compatible disk image, and
   sandbox-group data-plane RBAC. Infrastructure templates (customer subscription)
-  create the sandbox group, identity/RBAC, egress policy,
-  production state storage (scoped RBAC, Shared Key disabled), and identities, and
+  create the sandbox group, identity/RBAC, egress policy, and identities (session
+  state reuses the Function App's own `AzureWebJobsStorage`, Decision #86 — no
+  separate state-storage resource to provision), and
   reference the runtime-authored generic **stdlib-only bootstrap** harness image
   (digest-pinned; it bakes no MAF/runtime — Decisions 65, 69). At run time the
   controller captures the customer app content from its own local script root and
@@ -404,9 +405,11 @@ infrastructure samples.
   functional transport gate passed (recorded in 0008.5), and the pilot target is
   bounded at 100 concurrent active runs. A second deep-dive pass added
   customer-subscription residency, a tamper-evident customer-owned state-row trust
-  model (scoped RBAC + monotonic generation + live manifest cross-check),
-  dedicated production state storage, MAF-only conformance, and non-HTTP
-  fast-follow reservations. Those revisions passed the final independent
+  model (monotonic generation + live manifest cross-check; that pass's original
+  scoped-RBAC/Shared-Key-disabled requirement was later dropped by Decision #87),
+  dedicated production state storage (later dropped by Decision #86 — session
+  state now always reuses `AzureWebJobsStorage`), MAF-only conformance, and
+  non-HTTP fast-follow reservations. Those revisions passed the final independent
   consistency/security review with no remaining blocker (Decision 40).
 - **Multi-agent delegation merge (2026-07-21):** `main` merged multi-agent
   delegation as **FRD 0007**, so this FRD was renumbered **0007 → 0008** (and the
@@ -623,7 +626,7 @@ class AgentExecutionBackend(Protocol):
 * `RowKey = session:{session_id}` or `run:{session_id}:{run_id}`. Public run locators must contain `session_id` (v1 session-scoped URLs) unless future explicit run index.
 * Session row fields: sandbox pointer/`sandbox_id`, `generation`, `digest_kind`, `digest`, `owner_hash_version`, `protocol`, `status`, `last_activity_at`, `expires_at` (idle-reclaim deadline), `idle_policy_armed`, `active_run_id`, and plan-required `snapshot_ids` for pruning. Run row holds `status`, `expires_at` (run watchdog deadline), and lifecycle data. Run/session admission is an entity-group transaction.
 * Blob container: `azure-functions-agents-state`; paths `sandbox-runtime/history/{owner_hash}/{session_id}.jsonl` and `sandbox-runtime/checkpoints/{owner_hash}/{session_id}/{generation}.json`. It is deletable. v1 provisions but does not populate external history/checkpoint mirror.
-* Controller MI is sole writer: Shared Key disabled; exact table/container scoped roles; no user credentials; identity-less sandbox has no state access.
+* Controller writes via its Function App identity to the shared `AzureWebJobsStorage` account (Decision #86: no dedicated account; Decision #87: no Shared-Key gate — RBAC or Shared Key both accepted, matching core Functions' own posture); identity-less sandbox has no state access regardless.
 * Every routing/submit does: (1) resolved authenticated owner, never request hash; (2) deterministic owner partition; (3) authoritative row; (4) ETag monotonic generation validation; (5) short lease and group-scoped sandbox resolution; (6) **live ACA data-plane** manifest match for owner/app/session/group/generation/`(digest_kind,digest)`/protocol; (7) real readiness operation then submit. Generation/manifest mismatch -> not-found semantics, security event, quarantine sandbox; do not delete state.
 * Table-only reads are correct for authorization, status, result availability, tombstone/post-reap. Do not require manifest for these reads; terminal status remains readable after sandbox unavailable; result eviction is 410.
 
@@ -660,19 +663,19 @@ class AgentExecutionBackend(Protocol):
 
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
 * Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async run is `200`, never 5xx. Active slot -> `409 active_run_exists`; result evicted/tombstoned -> `410`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
-* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. Before ACA implementation exists, declaring `aca_sandbox` fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 12 of the 13 matrix rows fail closed (row 11 is now structurally unrepresentable — see the matrix).
-* Production trust preflight must prove Shared Key disabled + exact scoped RBAC and reject dev-mode `AzureWebJobsStorage` in production. Group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment all fail closed.
+* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. Before ACA implementation exists, declaring `aca_sandbox` fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
+* Config/startup and runtime gates fail closed on: group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at local seam refactor; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke P4a onward; P9 full e2e plus 100-concurrent and large-payload gates.
 
 #### Source contradictions, stale assertions, and required consolidation edits
 
 1. **Parent status conflict:** front matter says `Finalized`, while parent introduction says status stays `In review` and no implementation before sign-off. Consolidated status must follow finalization/master review record (and not preserve the stale in-review blocker).
-2. **D5 vs D31:** original `AzureWebJobsStorage` default is invalid for production. Preserve only local/dev/explicit preview exception; production must use dedicated account.
+2. **D5 vs D31 (further revised by #86):** original `AzureWebJobsStorage` default is invalid for production. Preserve only local/dev/explicit preview exception; production must use dedicated account. **Since superseded:** Decision #86 removed the dedicated-account concept entirely — session state always reuses `AzureWebJobsStorage`, in every environment, with no configurability.
 3. **D9 vs D53/54:** “snapshot never correctness record” is not v1. v1 accepts snapshot/sandbox loss; external mirror and never-correctness guarantee are v2.
 4. **D15 vs D55 (also stale 0008.2 cross-cutting note):** Entra-only persistent ownership is invalid. Function key is valid app-scoped ownership; controller adds no ACA identity layer.
 5. **D17/D48 vs D68/69:** signed package, sandbox download of RFP artifact, and baked MAF/runtime are obsolete. Actual v1 content is controller-captured local script-root zip with vendored `.python_packages`; bootstrap is stdlib-only and sandbox has no storage identity. The parent’s later prose that still calls Path 1 “Run-From-Package deploy artifact” must be rewritten/qualified as historical provenance, not runtime source.
 6. **D18/D24 vs D54/D58/D59:** v1 neither mirrors checkpoints nor runs one-minute reconciliation. Use mandatory approximately-hourly backstop; one-minute/2-minute SLO is v2 mirror-only.
-7. **D32/D39 vs D51/D52:** KV per-binding signing and WORM binding log are removed. Do not provision KV signing key/WORM container; authoritative row + scoped RBAC + ETag generation + live manifest are the v1 trust design.
+7. **D32/D39 vs D51/D52 (further revised by #87):** KV per-binding signing and WORM binding log are removed. Do not provision KV signing key/WORM container; authoritative row + ETag generation + live manifest are the v1 trust design (Decision #87 dropped the scoped-RBAC/Shared-Key requirement from this list — `AzureWebJobsStorage` accepts either).
 8. **D56/D57 vs D66:** any sandbox UAMI, Identity Proxy token, MI carry, or HOBOv2 as v1 requirement is invalid. v1 is identity-less; proxy credential injection only. HOBO/MI carry are future.
 9. **Group-lifecycle claims in 0008.4:** wording that treats the lifecycle behavior as group-only or says runtime cannot adjust it is invalidated by verified SDK: `set_lifecycle_policy` is per sandbox and auto-delete interval is readable. Retain group residency/IaC ownership, but express active-run disable/rearm and app retention as per-sandbox data-plane actions.
 10. **Transport lifecycle/file assumptions:** all references to `suspend()` must become `stop()`/`resume()`; file journal is first-class SDK file APIs, not exec scripts. Store `sandbox_id` and construct `SandboxClient` directly for recovery.
@@ -812,7 +815,7 @@ Managed identity/HOBO is not user OAuth OBO. Real OBO is deferred: reserve an ex
 
 #### 7. Persistent control records and invariants
 
-`OwnerContext` kinds are `entra_user`, `function_app`, and reserved `trigger_binding`; unresolved owner fails closed. Canonical owner hash is discriminator-first `o1-<hex>` with version retained. Table `AzureFunctionsAgentsSessions`: partition `{owner_hash_version}:{app_hash}:{owner_kind}:{owner_hash}`; session row `session:{id}`, run row `run:{session_id}:{run_id}`. Session record stores sandbox_id, forward-only generation, digest kind/digest, protocol, status, activity/expiry, idle policy armed, active_run_id, snapshot IDs, and region. Controller MI is sole writer; Shared Key disabled. ETag/CAS plus entity-group transaction admits one active run; second returns 409. Raw claims never enter labels/session IDs. Binding is Table-row authoritative, monotonic, rollback-proof, and live-manifest cross-checked; no per-binding Key Vault signature/WORM log.
+`OwnerContext` kinds are `entra_user`, `function_app`, and reserved `trigger_binding`; unresolved owner fails closed. Canonical owner hash is discriminator-first `o1-<hex>` with version retained. Table `AzureFunctionsAgentsSessions`: partition `{owner_hash_version}:{app_hash}:{owner_kind}:{owner_hash}`; session row `session:{id}`, run row `run:{session_id}:{run_id}`. Session record stores sandbox_id, forward-only generation, digest kind/digest, protocol, status, activity/expiry, idle policy armed, active_run_id, snapshot IDs, and region. Controller is the intended writer via its Function App identity to the shared `AzureWebJobsStorage` account; Shared Key is an accepted connection method (Decision #87). ETag/CAS plus entity-group transaction admits one active run; second returns 409. Raw claims never enter labels/session IDs. Binding is Table-row authoritative, monotonic, rollback-proof, and live-manifest cross-checked; no per-binding Key Vault signature/WORM log.
 
 Invariants: no anonymous ingress; no ingress ports; one active run; free slot only on terminal plus verified death; OS lock/journal—not lease—is liveness authority; controller does not mint owner identity; controller captures/delivers content before run; sandbox never accepts partial/digest-mismatched content; client disconnect cannot cancel; content changes drain rather than generation bump; loss always tombstones v1; status/content split after reaping; and redaction across journal, Tables, traces, and egress.
 
@@ -1019,7 +1022,7 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 ##### State and durability invariants
 
 * Session: `Creating -> Ready -> Running -> Ready`, `Running -> Canceling -> Ready`, `Ready -> Suspending -> Suspended -> Resuming -> Ready`; nonterminal failure can go to `Failed`; `Ready/Suspended/Failed -> Deleting -> Deleted`.
-* The controller is the sole Table writer; Shared Key is disabled. Admission is an ETag-CAS of session `active_run_id` (null -> run ID), in an entity-group transaction with the nonterminal run and idempotency record. Conditional run-row creation alone is insufficient.
+* The controller is the intended Table writer via its Function App identity to the shared `AzureWebJobsStorage` account; Shared Key is an accepted connection method (Decision #87 — no separate auth-mode gate). Admission is an ETag-CAS of session `active_run_id` (null -> run ID), in an entity-group transaction with the nonterminal run and idempotency record. Conditional run-row creation alone is insufficient.
 * All mutations are idempotent ETag-CAS and generation-guarded. Monotonic transitions are nonterminal->terminal; generation only increases. Concurrent reconciles re-read and converge; a distributed leader lock is not correctness-critical (timer singleton lease is optional serialization only).
 * Do not infer liveness from controller lease or platform state. OS lock/process group + journal + generation are the authority. Never free `active_run_id` while a process might retain the lock.
 * V1 stores durable terminal status in Tables, but result/transcript content only in the live sandbox. `events.jsonl` rotation is replay bound, not durability; terminal adoption reads non-rotating `runs/{run_id}/status.json`/`result.json`.
