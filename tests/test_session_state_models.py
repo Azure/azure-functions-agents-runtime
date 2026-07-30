@@ -35,7 +35,6 @@ _STATE_FINGERPRINT = (
 def _partition(*, site_name: str = "agent-app") -> OwnerPartition:
     app = AppIdentity(
         subscription_id="11111111-2222-3333-4444-555555555555",
-        resource_group="agents-rg",
         site_name=site_name,
     )
     return owner_partition(FunctionAppOwnerContext(app, "main"))

@@ -213,10 +213,14 @@ def validate_generation_transition(
 
 @dataclass(frozen=True, slots=True, repr=False)
 class AppIdentity:
-    """Stable Function App/slot identity derived from platform inputs."""
+    """Stable Function App/slot identity derived from portable platform inputs.
+
+    Uses the SKU-portable lowest common denominator only: subscription id, site
+    name, and optional slot. Resource group is intentionally excluded because it
+    is not injected on Flex Consumption.
+    """
 
     subscription_id: str
-    resource_group: str
     site_name: str
     slot_name: str | None = None
 
@@ -225,11 +229,6 @@ class AppIdentity:
             self,
             "subscription_id",
             _normalize_guid(self.subscription_id, "subscription_id"),
-        )
-        object.__setattr__(
-            self,
-            "resource_group",
-            _normalize_arm_segment(self.resource_group, "resource_group"),
         )
         object.__setattr__(
             self,
@@ -248,19 +247,15 @@ class AppIdentity:
                 )
 
     @property
-    def resource_id(self) -> str:
-        """Return the canonical slot-aware ARM resource ID."""
-        site_id = (
-            f"/subscriptions/{self.subscription_id}"
-            f"/resourcegroups/{self.resource_group}"
-            f"/providers/microsoft.web/sites/{self.site_name}"
-        )
+    def logical_id(self) -> str:
+        """Return a stable non-secret logical app/slot identifier."""
+        base = f"app:{self.subscription_id}:{self.site_name}"
         if self.slot_name is None:
-            return site_id
-        return f"{site_id}/slots/{self.slot_name}"
+            return base
+        return f"{base}:slot:{self.slot_name}"
 
     def __repr__(self) -> str:
-        return "AppIdentity(resource_id=<redacted>)"
+        return "AppIdentity(logical_id=<redacted>)"
 
 
 @dataclass(frozen=True, slots=True, repr=False)

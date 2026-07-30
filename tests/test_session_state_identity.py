@@ -44,21 +44,20 @@ _SUBSCRIPTION_ID = "11111111-2222-3333-4444-555555555555"
 _TENANT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 _OBJECT_ID = "01234567-89ab-cdef-0123-456789abcdef"
 _PRODUCTION_APP_HASH = (
-    "a1-bc3822ff85a843160dff861af0be268447dfb1b5ee6c55220268e2471c64e914"
+    "a1-2b828269fbc64b418b473a69c0007d49a00e11fb4adc99dbdc246a7907105b24"
 )
 _PRODUCTION_FUNCTION_OWNER_HASH = (
-    "o1-dc2751e67656dea8efdadd4c85e1c89914bfa0419c4f308b3ec4806f7a7fff9b"
+    "o1-e40e6b66bc51427ea4b4d71105c99e9306b8ca2820b86624555537e42ff87495"
 )
 _PRODUCTION_ENTRA_OWNER_HASH = (
-    "o1-d047f88d43aa3f12b03d754c0d318ae0dfe36f3e2c2c4c4002da83a55825d7dc"
+    "o1-10e7d2b8ad8d4ab6e9b0bd68b9885770d4b743ed86c12ee66f393d7462648590"
 )
-_SLOT_APP_HASH = "a1-2f1a153c5f36a9e899e14fcbb900db41ac1e36aed491f1f0595a6c0541de3a9d"
+_SLOT_APP_HASH = "a1-121be65a0768e3f3a8493ed8a466e7bcbb4d7c193356a3a3fcca7cf3630d2762"
 
 
 def _app(*, slot_name: str | None = None) -> AppIdentity:
     return AppIdentity(
         subscription_id=_SUBSCRIPTION_ID,
-        resource_group="Agents-RG",
         site_name="Agent-App",
         slot_name=slot_name,
     )
@@ -90,7 +89,6 @@ def test_v1_canonicalizers_do_not_depend_on_mutable_current_version_globals(
 def test_case_normalization_preserves_stable_identity() -> None:
     upper = AppIdentity(
         subscription_id=_SUBSCRIPTION_ID.upper(),
-        resource_group="AGENTS-RG",
         site_name="AGENT-APP",
         slot_name="PRODUCTION",
     )
@@ -167,7 +165,6 @@ def test_function_app_identity_resolves_production_slot(
 ) -> None:
     values = {
         "WEBSITE_OWNER_NAME": f"{_SUBSCRIPTION_ID}+westuswebspace",
-        "WEBSITE_RESOURCE_GROUP": "Agents-RG",
         "WEBSITE_SITE_NAME": "Agent-App",
     }
     if slot_value is not None:
@@ -176,31 +173,34 @@ def test_function_app_identity_resolves_production_slot(
     assert resolve_function_app_identity(values.get) == _app()
 
 
-def test_function_app_identity_resolves_named_slot_without_hostname() -> None:
+def test_function_app_identity_resolves_named_slot_without_hostname_or_rg() -> None:
     values = {
-        "WEBSITE_OWNER_NAME": f"{_SUBSCRIPTION_ID}+westuswebspace",
-        "WEBSITE_RESOURCE_GROUP": "Agents-RG",
+        # Flex-shaped owner name still only contributes the subscription prefix.
+        "WEBSITE_OWNER_NAME": f"{_SUBSCRIPTION_ID}+flex-deadbeef-webspace",
         "WEBSITE_SITE_NAME": "Agent-App",
         "WEBSITE_SLOT_NAME": "Blue",
         "WEBSITE_HOSTNAME": "unstable.example.invalid",
+        # Resource group may be absent (Flex) or present (Premium/Standard); ignored.
+        "WEBSITE_RESOURCE_GROUP": "Agents-RG",
     }
 
     identity = resolve_function_app_identity(values.get)
 
     assert identity == _app(slot_name="blue")
-    assert identity.resource_id.endswith("/sites/agent-app/slots/blue")
+    assert identity.logical_id == (
+        f"app:{_SUBSCRIPTION_ID}:agent-app:slot:blue"
+    )
 
 
 @pytest.mark.parametrize(
     "missing",
-    ["WEBSITE_OWNER_NAME", "WEBSITE_RESOURCE_GROUP", "WEBSITE_SITE_NAME"],
+    ["WEBSITE_OWNER_NAME", "WEBSITE_SITE_NAME"],
 )
 def test_function_app_identity_fails_closed_when_stable_input_is_missing(
     missing: str,
 ) -> None:
     values = {
         "WEBSITE_OWNER_NAME": f"{_SUBSCRIPTION_ID}+westuswebspace",
-        "WEBSITE_RESOURCE_GROUP": "Agents-RG",
         "WEBSITE_SITE_NAME": "Agent-App",
     }
     del values[missing]
@@ -209,10 +209,17 @@ def test_function_app_identity_fails_closed_when_stable_input_is_missing(
         resolve_function_app_identity(values.get)
 
 
+def test_function_app_identity_ignores_missing_resource_group() -> None:
+    values = {
+        "WEBSITE_OWNER_NAME": f"{_SUBSCRIPTION_ID}+flex-abc-webspace",
+        "WEBSITE_SITE_NAME": "Agent-App",
+    }
+    assert resolve_function_app_identity(values.get) == _app()
+
+
 def test_function_app_identity_fails_closed_on_invalid_owner_name() -> None:
     values = {
         "WEBSITE_OWNER_NAME": _SUBSCRIPTION_ID,
-        "WEBSITE_RESOURCE_GROUP": "Agents-RG",
         "WEBSITE_SITE_NAME": "Agent-App",
     }
     with pytest.raises(AppIdentityResolutionError, match="subscription prefix"):
@@ -222,7 +229,6 @@ def test_function_app_identity_fails_closed_on_invalid_owner_name() -> None:
 def test_function_app_identity_fails_closed_on_invalid_subscription_guid() -> None:
     values = {
         "WEBSITE_OWNER_NAME": "not-a-guid+westuswebspace",
-        "WEBSITE_RESOURCE_GROUP": "Agents-RG",
         "WEBSITE_SITE_NAME": "Agent-App",
     }
     with pytest.raises(AppIdentityResolutionError, match="inputs are invalid"):

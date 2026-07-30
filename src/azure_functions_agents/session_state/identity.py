@@ -66,12 +66,14 @@ def frame_canonical_components(components: Sequence[str]) -> bytes:
 
 
 def _canonicalize_app_a1(app_identity: AppIdentity) -> bytes:
+    # Portable across Flex/Premium/Standard: no resource-group component and no
+    # SKU conditionals. Function-key auth still means app-owned sessions; this
+    # only identifies which app/slot the process is.
     return frame_canonical_components(
         (
             "app",
             _APP_HASH_V1,
             app_identity.subscription_id,
-            app_identity.resource_group,
             app_identity.site_name,
             app_identity.slot_name or "",
         )
@@ -216,14 +218,12 @@ def resolve_function_app_identity(
         raise AppIdentityResolutionError(
             "WEBSITE_OWNER_NAME does not contain a stable subscription prefix"
         )
-    resource_group = require("WEBSITE_RESOURCE_GROUP")
     site_name = require("WEBSITE_SITE_NAME")
     slot_value = get_environment("WEBSITE_SLOT_NAME")
     slot_name = slot_value.strip() if slot_value is not None else None
     try:
         return AppIdentity(
             subscription_id=subscription_id,
-            resource_group=resource_group,
             site_name=site_name,
             slot_name=slot_name,
         )
