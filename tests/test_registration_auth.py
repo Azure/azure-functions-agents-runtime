@@ -143,7 +143,7 @@ def test_owner_principal_seam_resolves_stable_entra_identity() -> None:
         auth,
     )
 
-    assert principal == EntraPrincipal(
+    assert principal == EntraPrincipal.create(
         tenant_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
         object_id="01234567-89ab-cdef-0123-456789abcdef",
     )

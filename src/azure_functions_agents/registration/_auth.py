@@ -108,33 +108,24 @@ def _short_claim_name(claim_type: str) -> str:
     return claim_type.rsplit("/", 1)[-1]
 
 
-def _as_string_mapping(value: object) -> dict[str, object] | None:
-    if not isinstance(value, dict):
-        return None
-    result: dict[str, object] = {}
-    for key, item in value.items():
-        if not isinstance(key, str):
-            return None
-        result[key] = item
-    return result
-
-
 def _flatten_claims(principal: Mapping[str, object]) -> dict[str, list[str]]:
-    """Normalize an Easy Auth principal or decoded JWT into short-name -> values."""
+    """Normalize an Easy Auth principal into short-name -> values.
+
+    Easy Auth injects ``claims`` as a list of ``{typ, val}`` maps. Unknown or
+    malformed entries are skipped; allow-list checks only see string claim values.
+    """
     flat: dict[str, list[str]] = {}
     claims = principal.get("claims")
     if isinstance(claims, list):
-        # Easy Auth shape: a list of {"typ": ..., "val": ...} entries.
         for entry in claims:
-            mapped_entry = _as_string_mapping(entry)
-            if mapped_entry is None:
+            if not isinstance(entry, dict):
                 continue
-            typ = mapped_entry.get("typ")
-            val = mapped_entry.get("val")
+            typ = entry.get("typ")
+            val = entry.get("val")
             if isinstance(typ, str) and isinstance(val, str):
                 flat.setdefault(_short_claim_name(typ), []).append(val)
         return flat
-    # Decoded JWT / flat dict of claims.
+    # Flat claim map fallback (rare non-Easy-Auth shapes in tests).
     for key, value in principal.items():
         short = _short_claim_name(key)
         if isinstance(value, str):
@@ -171,19 +162,15 @@ def _decode_easy_auth_principal(header_value: str) -> dict[str, object] | None:
         data: object = json.loads(raw)
     except (binascii.Error, ValueError):
         return None
-    return _as_string_mapping(data)
+    return data if isinstance(data, dict) else None
 
 
-def _authorized_entra_claims(
+def _authorized_entra_principal(
     get_header: HeaderGetter,
     auth: EndpointAuthConfig,
-) -> tuple[
-    dict[str, object] | None,
-    dict[str, list[str]] | None,
-    AuthError | None,
-]:
+) -> tuple[dict[str, object] | None, AuthError | None]:
     if not _easy_auth_enforced():
-        return None, None, AuthError(
+        return None, AuthError(
             401,
             "Entra authentication requires App Service Authentication (Easy Auth) "
             "to be enabled in front of this app.",
@@ -191,27 +178,26 @@ def _authorized_entra_claims(
 
     principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
     if not principal_header:
-        return None, None, AuthError(
+        return None, AuthError(
             401,
             "Entra authentication required (App Service Authentication).",
         )
 
     principal = _decode_easy_auth_principal(principal_header)
     if principal is None:
-        return None, None, AuthError(401, "Invalid client principal header.")
+        return None, AuthError(401, "Invalid client principal header.")
 
     auth_typ = principal.get("auth_typ")
     if not isinstance(auth_typ, str) or auth_typ.lower() not in {
         "aad",
         "azureactivedirectory",
     }:
-        return None, None, AuthError(401, "Entra authentication required.")
+        return None, AuthError(401, "Entra authentication required.")
 
-    flat = _flatten_claims(principal)
-    allowlist_error = _check_allowlists(flat, auth.entra)
+    allowlist_error = _check_allowlists(_flatten_claims(principal), auth.entra)
     if allowlist_error is not None:
-        return None, None, allowlist_error
-    return principal, flat, None
+        return None, allowlist_error
+    return principal, None
 
 
 def _single_claim(claims: Mapping[str, list[str]], name: str) -> str | None:
@@ -221,41 +207,36 @@ def _single_claim(claims: Mapping[str, list[str]], name: str) -> str | None:
     return next(iter(normalized))
 
 
-def _owner_identity_claims(principal: Mapping[str, object]) -> dict[str, list[str]]:
-    """Extract only exact Entra identity claim names and supported standard aliases."""
-    result: dict[str, list[str]] = {}
+def _owner_tid_oid(principal: Mapping[str, object]) -> tuple[str, str] | None:
+    """Extract exactly one tid and oid from short names or supported aliases only."""
+    values: dict[str, list[str]] = {"tid": [], "oid": []}
     claims = principal.get("claims")
     if isinstance(claims, list):
         for entry in claims:
-            mapped_entry = _as_string_mapping(entry)
-            if mapped_entry is None:
+            if not isinstance(entry, dict):
                 continue
-            claim_type = mapped_entry.get("typ")
-            claim_value = mapped_entry.get("val")
-            if not isinstance(claim_type, str) or not isinstance(claim_value, str):
+            typ = entry.get("typ")
+            val = entry.get("val")
+            if not isinstance(typ, str) or not isinstance(val, str):
                 continue
-            short_name = (
-                claim_type
-                if claim_type in {"tid", "oid"}
-                else _CLAIM_ALIASES.get(claim_type)
-            )
-            if short_name in {"tid", "oid"}:
-                result.setdefault(short_name, []).append(claim_value)
-        return result
+            short = typ if typ in values else _CLAIM_ALIASES.get(typ)
+            if short in values:
+                values[short].append(val)
+    else:
+        for typ, val in principal.items():
+            short = typ if typ in values else _CLAIM_ALIASES.get(typ)
+            if short not in values:
+                continue
+            if isinstance(val, str):
+                values[short].append(val)
+            elif isinstance(val, list):
+                values[short].extend(item for item in val if isinstance(item, str))
 
-    for claim_type, claim_value in principal.items():
-        short_name = (
-            claim_type if claim_type in {"tid", "oid"} else _CLAIM_ALIASES.get(claim_type)
-        )
-        if short_name not in {"tid", "oid"}:
-            continue
-        if isinstance(claim_value, str):
-            result.setdefault(short_name, []).append(claim_value)
-        elif isinstance(claim_value, list):
-            result.setdefault(short_name, []).extend(
-                value for value in claim_value if isinstance(value, str)
-            )
-    return result
+    tenant_id = _single_claim(values, "tid")
+    object_id = _single_claim(values, "oid")
+    if tenant_id is None or object_id is None:
+        return None
+    return tenant_id, object_id
 
 
 def resolve_owner_principal(
@@ -274,19 +255,18 @@ def resolve_owner_principal(
     if auth.mode != "entra":
         return AuthError(401, "Persistent sessions require authenticated endpoint auth.")
 
-    principal, _claims, error = _authorized_entra_claims(get_header, auth)
+    principal, error = _authorized_entra_principal(get_header, auth)
     if error is not None:
         return error
     if principal is None:
         return AuthError(401, "Stable Entra owner identity is required.")
 
-    identity_claims = _owner_identity_claims(principal)
-    tenant_id = _single_claim(identity_claims, "tid")
-    object_id = _single_claim(identity_claims, "oid")
-    if tenant_id is None or object_id is None:
+    identity = _owner_tid_oid(principal)
+    if identity is None:
         return AuthError(401, "Stable Entra owner identity is required.")
+    tenant_id, object_id = identity
     try:
-        return EntraPrincipal(tenant_id=tenant_id, object_id=object_id)
+        return EntraPrincipal.create(tenant_id=tenant_id, object_id=object_id)
     except SessionStateContractError:
         return AuthError(401, "Stable Entra owner identity is required.")
 
@@ -309,5 +289,5 @@ def authorize_entra_request(
     """
     if auth.mode != "entra":
         return None
-    _principal, _claims, error = _authorized_entra_claims(get_header, auth)
+    _principal, error = _authorized_entra_principal(get_header, auth)
     return error

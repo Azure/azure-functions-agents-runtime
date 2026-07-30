@@ -45,9 +45,7 @@ type DurableRunStatus = Literal[
 type TableEntityValue = str | int | bool | datetime
 type TableEntity = dict[str, TableEntityValue]
 
-_OWNER_KINDS: frozenset[str] = frozenset(
-    {"entra_user", "function_app", "trigger_binding"}
-)
+_OWNER_KINDS: frozenset[str] = frozenset({"entra_user", "function_app", "trigger_binding"})
 _SESSION_STATUSES: frozenset[str] = frozenset(
     {
         "creating",
@@ -103,6 +101,15 @@ def _normalize_arm_segment(value: str, field_name: str) -> str:
     if any(unicodedata.category(character) == "Cc" for character in normalized):
         raise SessionStateContractError(f"{field_name} must not contain control characters")
     return normalized
+
+
+def _normalize_slot(slot_name: str | None) -> str | None:
+    if slot_name is None:
+        return None
+    normalized = slot_name.strip()
+    if not normalized or normalized.lower() == "production":
+        return None
+    return _normalize_arm_segment(normalized, "slot_name")
 
 
 def _normalize_agent_slug(value: str) -> str:
@@ -182,13 +189,22 @@ def _utc_datetime(value: datetime, field_name: str) -> datetime:
     return value.astimezone(UTC)
 
 
+def _normalize_region(value: str) -> str:
+    normalized = value.strip().lower()
+    if _REGION_PATTERN.fullmatch(normalized) is None:
+        raise SessionStateContractError("region must be a normalized Azure region")
+    return normalized
+
+
+def _require_bool(value: object, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise SessionStateContractError(f"{field_name} must be a boolean")
+    return value
+
+
 def validate_generation(generation: int) -> int:
     """Validate a forward-only session-backing generation."""
-    if (
-        isinstance(generation, bool)
-        or not isinstance(generation, int)
-        or generation < 1
-    ):
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise SessionStateContractError("generation must be an integer >= 1")
     return generation
 
@@ -210,7 +226,6 @@ def validate_generation_transition(
     elif candidate != previous:
         raise SessionStateContractError("normal session mutations must preserve generation")
 
-
 @dataclass(frozen=True, slots=True, repr=False)
 class AppIdentity:
     """Stable Function App/slot identity derived from portable platform inputs.
@@ -218,33 +233,26 @@ class AppIdentity:
     Uses the SKU-portable lowest common denominator only: subscription id, site
     name, and optional slot. Resource group is intentionally excluded because it
     is not injected on Flex Consumption.
+
+    Construct with :meth:`create` so values are normalized once.
     """
 
     subscription_id: str
     site_name: str
     slot_name: str | None = None
 
-    def __post_init__(self) -> None:
-        object.__setattr__(
-            self,
-            "subscription_id",
-            _normalize_guid(self.subscription_id, "subscription_id"),
+    @classmethod
+    def create(
+        cls,
+        subscription_id: str,
+        site_name: str,
+        slot_name: str | None = None,
+    ) -> AppIdentity:
+        return cls(
+            subscription_id=_normalize_guid(subscription_id, "subscription_id"),
+            site_name=_normalize_arm_segment(site_name, "site_name"),
+            slot_name=_normalize_slot(slot_name),
         )
-        object.__setattr__(
-            self,
-            "site_name",
-            _normalize_arm_segment(self.site_name, "site_name"),
-        )
-        if self.slot_name is not None:
-            normalized_slot = self.slot_name.strip()
-            if not normalized_slot or normalized_slot.lower() == "production":
-                object.__setattr__(self, "slot_name", None)
-            else:
-                object.__setattr__(
-                    self,
-                    "slot_name",
-                    _normalize_arm_segment(normalized_slot, "slot_name"),
-                )
 
     @property
     def logical_id(self) -> str:
@@ -265,9 +273,12 @@ class EntraPrincipal:
     tenant_id: str
     object_id: str
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "tenant_id", _normalize_guid(self.tenant_id, "tenant_id"))
-        object.__setattr__(self, "object_id", _normalize_guid(self.object_id, "object_id"))
+    @classmethod
+    def create(cls, tenant_id: str, object_id: str) -> EntraPrincipal:
+        return cls(
+            tenant_id=_normalize_guid(tenant_id, "tenant_id"),
+            object_id=_normalize_guid(object_id, "object_id"),
+        )
 
     def __repr__(self) -> str:
         return "EntraPrincipal(<redacted>)"
@@ -296,10 +307,20 @@ class EntraUserOwnerContext:
     object_id: str
     kind: Literal["entra_user"] = field(default="entra_user", init=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "agent_slug", _normalize_agent_slug(self.agent_slug))
-        object.__setattr__(self, "tenant_id", _normalize_guid(self.tenant_id, "tenant_id"))
-        object.__setattr__(self, "object_id", _normalize_guid(self.object_id, "object_id"))
+    @classmethod
+    def create(
+        cls,
+        app_identity: AppIdentity,
+        agent_slug: str,
+        tenant_id: str,
+        object_id: str,
+    ) -> EntraUserOwnerContext:
+        return cls(
+            app_identity=app_identity,
+            agent_slug=_normalize_agent_slug(agent_slug),
+            tenant_id=_normalize_guid(tenant_id, "tenant_id"),
+            object_id=_normalize_guid(object_id, "object_id"),
+        )
 
     def __repr__(self) -> str:
         return (
@@ -316,8 +337,9 @@ class FunctionAppOwnerContext:
     agent_slug: str
     kind: Literal["function_app"] = field(default="function_app", init=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "agent_slug", _normalize_agent_slug(self.agent_slug))
+    @classmethod
+    def create(cls, app_identity: AppIdentity, agent_slug: str) -> FunctionAppOwnerContext:
+        return cls(app_identity=app_identity, agent_slug=_normalize_agent_slug(agent_slug))
 
     def __repr__(self) -> str:
         return (
@@ -334,8 +356,13 @@ class TriggerBindingOwnerContext:
     agent_slug: str
     kind: Literal["trigger_binding"] = field(default="trigger_binding", init=False)
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "agent_slug", _normalize_agent_slug(self.agent_slug))
+    @classmethod
+    def create(
+        cls,
+        app_identity: AppIdentity,
+        agent_slug: str,
+    ) -> TriggerBindingOwnerContext:
+        return cls(app_identity=app_identity, agent_slug=_normalize_agent_slug(agent_slug))
 
     def __repr__(self) -> str:
         return (
@@ -358,21 +385,32 @@ class OwnerPartition:
     owner_kind: OwnerKind
     owner_hash: str
 
-    def __post_init__(self) -> None:
-        if _OWNER_VERSION_PATTERN.fullmatch(self.owner_hash_version) is None:
+    @classmethod
+    def create(
+        cls,
+        owner_hash_version: str,
+        app_hash: str,
+        owner_kind: OwnerKind,
+        owner_hash: str,
+    ) -> OwnerPartition:
+        if _OWNER_VERSION_PATTERN.fullmatch(owner_hash_version) is None:
             raise SessionStateContractError("owner_hash_version must match o<version>")
-        _validate_hash(self.app_hash, "app_hash")
-        _validate_hash(self.owner_hash, "owner_hash")
-        if not self.app_hash.startswith("a"):
+        app_hash = _validate_hash(app_hash, "app_hash")
+        owner_hash = _validate_hash(owner_hash, "owner_hash")
+        if not app_hash.startswith("a"):
             raise SessionStateContractError("app_hash must use an app canonicalizer prefix")
-        if self.owner_hash != (
-            f"{self.owner_hash_version}-{self.owner_hash.rsplit('-', 1)[-1]}"
-        ):
+        if owner_hash != f"{owner_hash_version}-{owner_hash.rsplit('-', 1)[-1]}":
             raise SessionStateContractError(
                 "owner_hash prefix must match owner_hash_version"
             )
-        if self.owner_kind not in _OWNER_KINDS:
+        if owner_kind not in _OWNER_KINDS:
             raise SessionStateContractError("unsupported owner_kind")
+        return cls(
+            owner_hash_version=owner_hash_version,
+            app_hash=app_hash,
+            owner_kind=owner_kind,
+            owner_hash=owner_hash,
+        )
 
     @property
     def partition_key(self) -> str:
@@ -389,7 +427,7 @@ class OwnerPartition:
         owner_hash_version, app_hash, owner_kind_value, owner_hash = parts
         if owner_kind_value not in _OWNER_KINDS:
             raise SessionStateContractError("unsupported owner_kind")
-        return cls(
+        return cls.create(
             owner_hash_version=owner_hash_version,
             app_hash=app_hash,
             owner_kind=cast(OwnerKind, owner_kind_value),
@@ -401,8 +439,9 @@ class OwnerPartition:
 class SessionRowKey:
     session_id: str
 
-    def __post_init__(self) -> None:
-        _validate_opaque_id(self.session_id, "session_id")
+    @classmethod
+    def create(cls, session_id: str) -> SessionRowKey:
+        return cls(session_id=_validate_opaque_id(session_id, "session_id"))
 
     def __str__(self) -> str:
         return f"session:{self.session_id}"
@@ -413,9 +452,12 @@ class RunRowKey:
     session_id: str
     run_id: str
 
-    def __post_init__(self) -> None:
-        _validate_opaque_id(self.session_id, "session_id")
-        _validate_opaque_id(self.run_id, "run_id")
+    @classmethod
+    def create(cls, session_id: str, run_id: str) -> RunRowKey:
+        return cls(
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            run_id=_validate_opaque_id(run_id, "run_id"),
+        )
 
     def __str__(self) -> str:
         return f"run:{self.session_id}:{self.run_id}"
@@ -426,9 +468,12 @@ class IdempotencyRowKey:
     session_id: str
     idempotency_hash: str
 
-    def __post_init__(self) -> None:
-        _validate_opaque_id(self.session_id, "session_id")
-        _validate_sha256(self.idempotency_hash, "idempotency_hash")
+    @classmethod
+    def create(cls, session_id: str, idempotency_hash: str) -> IdempotencyRowKey:
+        return cls(
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            idempotency_hash=_validate_sha256(idempotency_hash, "idempotency_hash"),
+        )
 
     def __str__(self) -> str:
         return f"idem:{self.session_id}:{self.idempotency_hash}"
@@ -441,13 +486,12 @@ def parse_row_key(value: str) -> DurableRowKey:
     """Parse a P3a durable row key without accepting ambiguous extra components."""
     parts = value.split(":")
     if len(parts) == 2 and parts[0] == "session":
-        return SessionRowKey(parts[1])
+        return SessionRowKey.create(parts[1])
     if len(parts) == 3 and parts[0] == "run":
-        return RunRowKey(parts[1], parts[2])
+        return RunRowKey.create(parts[1], parts[2])
     if len(parts) == 3 and parts[0] == "idem":
-        return IdempotencyRowKey(parts[1], parts[2])
+        return IdempotencyRowKey.create(parts[1], parts[2])
     raise SessionStateContractError("invalid durable row key")
-
 
 def _validate_snapshot_id(value: str) -> str:
     return _bounded_text(value, "snapshot_id", max_bytes=256)
@@ -474,9 +518,7 @@ def decode_snapshot_ids(value: str) -> tuple[str, ...]:
         decoded: object = json.loads(value)
     except json.JSONDecodeError as exc:
         raise SessionStateContractError("snapshot_ids is not valid JSON") from exc
-    if not isinstance(decoded, list) or not all(
-        isinstance(item, str) for item in decoded
-    ):
+    if not isinstance(decoded, list) or not all(isinstance(item, str) for item in decoded):
         raise SessionStateContractError("snapshot_ids must be a JSON array of strings")
     values = tuple(cast(str, item) for item in decoded)
     if encode_snapshot_ids(values) != value:
@@ -484,10 +526,7 @@ def decode_snapshot_ids(value: str) -> tuple[str, ...]:
     return values
 
 
-def _base_entity(
-    partition: OwnerPartition,
-    row_key: DurableRowKey,
-) -> TableEntity:
+def _base_entity(partition: OwnerPartition, row_key: DurableRowKey) -> TableEntity:
     return {
         "PartitionKey": partition.partition_key,
         "RowKey": str(row_key),
@@ -520,82 +559,79 @@ class DurableSessionRecord:
     created_at: datetime
     updated_at: datetime
 
-    def __post_init__(self) -> None:
-        _validate_opaque_id(self.session_id, "session_id")
-        object.__setattr__(
-            self,
-            "sandbox_id",
-            _optional_bounded_text(
-                self.sandbox_id,
-                "sandbox_id",
-                max_bytes=256,
-            ),
-        )
-        validate_generation(self.generation)
-        object.__setattr__(
-            self,
-            "digest_kind",
-            _bounded_text(self.digest_kind, "digest_kind", max_bytes=64),
-        )
-        object.__setattr__(
-            self,
-            "digest",
-            _bounded_text(self.digest, "digest", max_bytes=256),
-        )
-        object.__setattr__(
-            self,
-            "protocol",
-            _bounded_text(self.protocol, "protocol", max_bytes=64),
-        )
-        if self.status not in _SESSION_STATUSES:
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        sandbox_id: str | None,
+        generation: int,
+        digest_kind: str,
+        digest: str,
+        protocol: str,
+        status: SessionStatus,
+        last_activity_at: datetime,
+        expires_at: datetime,
+        idle_policy_armed: bool,
+        active_run_id: str | None,
+        snapshot_ids: Sequence[str],
+        region: str,
+        state_store_fingerprint: str,
+        quarantine_reason: str | None,
+        tombstone_reason: str | None,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> DurableSessionRecord:
+        if status not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
-        object.__setattr__(
-            self,
-            "last_activity_at",
-            _utc_datetime(self.last_activity_at, "last_activity_at"),
-        )
-        object.__setattr__(self, "expires_at", _utc_datetime(self.expires_at, "expires_at"))
-        if not isinstance(self.idle_policy_armed, bool):
-            raise SessionStateContractError("idle_policy_armed must be a boolean")
-        if self.active_run_id is not None:
-            _validate_opaque_id(self.active_run_id, "active_run_id")
-        normalized_snapshots = tuple(self.snapshot_ids)
+        normalized_snapshots = tuple(snapshot_ids)
         encode_snapshot_ids(normalized_snapshots)
-        object.__setattr__(self, "snapshot_ids", normalized_snapshots)
-        normalized_region = self.region.strip().lower()
-        if _REGION_PATTERN.fullmatch(normalized_region) is None:
-            raise SessionStateContractError("region must be a normalized Azure region")
-        object.__setattr__(self, "region", normalized_region)
-        if _STATE_STORE_FINGERPRINT_PATTERN.fullmatch(
-            self.state_store_fingerprint
-        ) is None:
+        if _STATE_STORE_FINGERPRINT_PATTERN.fullmatch(state_store_fingerprint) is None:
             raise SessionStateContractError(
                 "state_store_fingerprint must match s1-<lower-case sha256>"
             )
-        object.__setattr__(
-            self,
-            "quarantine_reason",
-            _validate_reason(self.quarantine_reason, "quarantine_reason"),
-        )
-        object.__setattr__(
-            self,
-            "tombstone_reason",
-            _validate_reason(self.tombstone_reason, "tombstone_reason"),
-        )
-        if self.status == "quarantined" and self.quarantine_reason is None:
+        quarantine_reason = _validate_reason(quarantine_reason, "quarantine_reason")
+        tombstone_reason = _validate_reason(tombstone_reason, "tombstone_reason")
+        if status == "quarantined" and quarantine_reason is None:
             raise SessionStateContractError(
                 "quarantined sessions require quarantine_reason"
             )
-        if self.status == "tombstoned" and self.tombstone_reason is None:
+        if status == "tombstoned" and tombstone_reason is None:
             raise SessionStateContractError("tombstoned sessions require tombstone_reason")
-        object.__setattr__(self, "created_at", _utc_datetime(self.created_at, "created_at"))
-        object.__setattr__(self, "updated_at", _utc_datetime(self.updated_at, "updated_at"))
-        if self.updated_at < self.created_at:
+        created_at_n = _utc_datetime(created_at, "created_at")
+        updated_at_n = _utc_datetime(updated_at, "updated_at")
+        if updated_at_n < created_at_n:
             raise SessionStateContractError("updated_at must not precede created_at")
+        return cls(
+            owner_partition=owner_partition,
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            sandbox_id=_optional_bounded_text(sandbox_id, "sandbox_id", max_bytes=256),
+            generation=validate_generation(generation),
+            digest_kind=_bounded_text(digest_kind, "digest_kind", max_bytes=64),
+            digest=_bounded_text(digest, "digest", max_bytes=256),
+            protocol=_bounded_text(protocol, "protocol", max_bytes=64),
+            status=status,
+            last_activity_at=_utc_datetime(last_activity_at, "last_activity_at"),
+            expires_at=_utc_datetime(expires_at, "expires_at"),
+            idle_policy_armed=_require_bool(idle_policy_armed, "idle_policy_armed"),
+            active_run_id=(
+                None
+                if active_run_id is None
+                else _validate_opaque_id(active_run_id, "active_run_id")
+            ),
+            snapshot_ids=normalized_snapshots,
+            region=_normalize_region(region),
+            state_store_fingerprint=state_store_fingerprint,
+            quarantine_reason=quarantine_reason,
+            tombstone_reason=tombstone_reason,
+            created_at=created_at_n,
+            updated_at=updated_at_n,
+        )
 
     @property
     def row_key(self) -> SessionRowKey:
-        return SessionRowKey(self.session_id)
+        return SessionRowKey.create(self.session_id)
 
     def to_table_entity(self) -> TableEntity:
         entity = _base_entity(self.owner_partition, self.row_key)
@@ -632,7 +668,7 @@ class DurableSessionRecord:
         status_value = _require_str(entity, "status")
         if status_value not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
-        return cls(
+        return cls.create(
             owner_partition=partition,
             session_id=row_key.session_id,
             sandbox_id=_optional_entity_str(entity, "sandbox_id"),
@@ -643,7 +679,10 @@ class DurableSessionRecord:
             status=cast(SessionStatus, status_value),
             last_activity_at=_require_datetime(entity, "last_activity_at"),
             expires_at=_require_datetime(entity, "expires_at"),
-            idle_policy_armed=_require_bool(entity, "idle_policy_armed"),
+            idle_policy_armed=_require_bool(
+                entity.get("idle_policy_armed"),
+                "idle_policy_armed",
+            ),
             active_run_id=_optional_entity_str(entity, "active_run_id"),
             snapshot_ids=decode_snapshot_ids(_require_str(entity, "snapshot_ids")),
             region=_require_str(entity, "region"),
@@ -653,7 +692,6 @@ class DurableSessionRecord:
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
         )
-
 
 @dataclass(frozen=True, slots=True)
 class DurableRunRecord:
@@ -670,32 +708,48 @@ class DurableRunRecord:
     created_at: datetime
     updated_at: datetime
 
-    def __post_init__(self) -> None:
-        _validate_opaque_id(self.session_id, "session_id")
-        _validate_opaque_id(self.run_id, "run_id")
-        validate_generation(self.generation)
-        if self.status not in _RUN_STATUSES:
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        generation: int,
+        status: DurableRunStatus,
+        result_available: bool,
+        status_reason: str | None,
+        expires_at: datetime,
+        created_at: datetime,
+        updated_at: datetime,
+    ) -> DurableRunRecord:
+        if status not in _RUN_STATUSES:
             raise SessionStateContractError("unsupported run status")
-        if not isinstance(self.result_available, bool):
-            raise SessionStateContractError("result_available must be a boolean")
-        if self.result_available and self.status != "succeeded":
+        result_available_n = _require_bool(result_available, "result_available")
+        if result_available_n and status != "succeeded":
             raise SessionStateContractError(
                 "result_available may be true only for a succeeded run"
             )
-        object.__setattr__(
-            self,
-            "status_reason",
-            _validate_reason(self.status_reason, "status_reason"),
-        )
-        object.__setattr__(self, "expires_at", _utc_datetime(self.expires_at, "expires_at"))
-        object.__setattr__(self, "created_at", _utc_datetime(self.created_at, "created_at"))
-        object.__setattr__(self, "updated_at", _utc_datetime(self.updated_at, "updated_at"))
-        if self.updated_at < self.created_at:
+        created_at_n = _utc_datetime(created_at, "created_at")
+        updated_at_n = _utc_datetime(updated_at, "updated_at")
+        if updated_at_n < created_at_n:
             raise SessionStateContractError("updated_at must not precede created_at")
+        return cls(
+            owner_partition=owner_partition,
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            run_id=_validate_opaque_id(run_id, "run_id"),
+            generation=validate_generation(generation),
+            status=status,
+            result_available=result_available_n,
+            status_reason=_validate_reason(status_reason, "status_reason"),
+            expires_at=_utc_datetime(expires_at, "expires_at"),
+            created_at=created_at_n,
+            updated_at=updated_at_n,
+        )
 
     @property
     def row_key(self) -> RunRowKey:
-        return RunRowKey(self.session_id, self.run_id)
+        return RunRowKey.create(self.session_id, self.run_id)
 
     def to_table_entity(self) -> TableEntity:
         entity = _base_entity(self.owner_partition, self.row_key)
@@ -722,13 +776,16 @@ class DurableRunRecord:
         status_value = _require_str(entity, "status")
         if status_value not in _RUN_STATUSES:
             raise SessionStateContractError("unsupported run status")
-        return cls(
+        return cls.create(
             owner_partition=partition,
             session_id=row_key.session_id,
             run_id=row_key.run_id,
             generation=_require_int(entity, "generation"),
             status=cast(DurableRunStatus, status_value),
-            result_available=_require_bool(entity, "result_available"),
+            result_available=_require_bool(
+                entity.get("result_available"),
+                "result_available",
+            ),
             status_reason=_optional_entity_str(entity, "status_reason"),
             expires_at=_require_datetime(entity, "expires_at"),
             created_at=_require_datetime(entity, "created_at"),
@@ -748,17 +805,31 @@ class DurableIdempotencyRecord:
     expires_at: datetime
     created_at: datetime
 
-    def __post_init__(self) -> None:
-        _validate_opaque_id(self.session_id, "session_id")
-        _validate_sha256(self.idempotency_hash, "idempotency_hash")
-        _validate_sha256(self.request_hash, "request_hash")
-        _validate_opaque_id(self.run_id, "run_id")
-        object.__setattr__(self, "expires_at", _utc_datetime(self.expires_at, "expires_at"))
-        object.__setattr__(self, "created_at", _utc_datetime(self.created_at, "created_at"))
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        idempotency_hash: str,
+        request_hash: str,
+        run_id: str,
+        expires_at: datetime,
+        created_at: datetime,
+    ) -> DurableIdempotencyRecord:
+        return cls(
+            owner_partition=owner_partition,
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            idempotency_hash=_validate_sha256(idempotency_hash, "idempotency_hash"),
+            request_hash=_validate_sha256(request_hash, "request_hash"),
+            run_id=_validate_opaque_id(run_id, "run_id"),
+            expires_at=_utc_datetime(expires_at, "expires_at"),
+            created_at=_utc_datetime(created_at, "created_at"),
+        )
 
     @property
     def row_key(self) -> IdempotencyRowKey:
-        return IdempotencyRowKey(self.session_id, self.idempotency_hash)
+        return IdempotencyRowKey.create(self.session_id, self.idempotency_hash)
 
     def to_table_entity(self) -> TableEntity:
         entity = _base_entity(self.owner_partition, self.row_key)
@@ -773,16 +844,13 @@ class DurableIdempotencyRecord:
         return entity
 
     @classmethod
-    def from_table_entity(
-        cls,
-        entity: Mapping[str, object],
-    ) -> DurableIdempotencyRecord:
+    def from_table_entity(cls, entity: Mapping[str, object]) -> DurableIdempotencyRecord:
         partition = _read_partition(entity)
         row_key = parse_row_key(_require_str(entity, "RowKey"))
         if not isinstance(row_key, IdempotencyRowKey):
             raise SessionStateContractError("entity RowKey is not an idempotency row")
         _validate_entity_header(entity, partition)
-        return cls(
+        return cls.create(
             owner_partition=partition,
             session_id=row_key.session_id,
             idempotency_hash=row_key.idempotency_hash,
@@ -801,38 +869,44 @@ class AdmissionRecords:
     run: DurableRunRecord
     idempotency: DurableIdempotencyRecord | None = None
 
-    def __post_init__(self) -> None:
-        partition_key = self.session.owner_partition.partition_key
-        if self.run.owner_partition.partition_key != partition_key:
+    @classmethod
+    def create(
+        cls,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        idempotency: DurableIdempotencyRecord | None = None,
+    ) -> AdmissionRecords:
+        partition_key = session.owner_partition.partition_key
+        if run.owner_partition.partition_key != partition_key:
             raise SessionStateContractError(
                 "session and run admission rows must share one owner partition"
             )
-        if self.run.session_id != self.session.session_id:
+        if run.session_id != session.session_id:
             raise SessionStateContractError(
                 "session and run admission rows must share session_id"
             )
-        if self.run.generation != self.session.generation:
+        if run.generation != session.generation:
             raise SessionStateContractError(
                 "session and run admission rows must share generation"
             )
-        if self.session.active_run_id != self.run.run_id:
+        if session.active_run_id != run.run_id:
             raise SessionStateContractError(
                 "admitted session active_run_id must identify the admitted run"
             )
-        if self.idempotency is None:
-            return
-        if self.idempotency.owner_partition.partition_key != partition_key:
-            raise SessionStateContractError(
-                "idempotency admission row must share the owner partition"
-            )
-        if self.idempotency.session_id != self.session.session_id:
-            raise SessionStateContractError(
-                "idempotency admission row must share session_id"
-            )
-        if self.idempotency.run_id != self.run.run_id:
-            raise SessionStateContractError(
-                "idempotency admission row must identify the admitted run"
-            )
+        if idempotency is not None:
+            if idempotency.owner_partition.partition_key != partition_key:
+                raise SessionStateContractError(
+                    "idempotency admission row must share the owner partition"
+                )
+            if idempotency.session_id != session.session_id:
+                raise SessionStateContractError(
+                    "idempotency admission row must share session_id"
+                )
+            if idempotency.run_id != run.run_id:
+                raise SessionStateContractError(
+                    "idempotency admission row must identify the admitted run"
+                )
+        return cls(session=session, run=run, idempotency=idempotency)
 
 
 def _read_partition(entity: Mapping[str, object]) -> OwnerPartition:
@@ -858,10 +932,7 @@ def _require_str(entity: Mapping[str, object], field_name: str) -> str:
     return value
 
 
-def _optional_entity_str(
-    entity: Mapping[str, object],
-    field_name: str,
-) -> str | None:
+def _optional_entity_str(entity: Mapping[str, object], field_name: str) -> str | None:
     value = _require_str(entity, field_name)
     return value or None
 
@@ -870,13 +941,6 @@ def _require_int(entity: Mapping[str, object], field_name: str) -> int:
     value = entity.get(field_name)
     if isinstance(value, bool) or not isinstance(value, int):
         raise SessionStateContractError(f"{field_name} must be an integer")
-    return value
-
-
-def _require_bool(entity: Mapping[str, object], field_name: str) -> bool:
-    value = entity.get(field_name)
-    if not isinstance(value, bool):
-        raise SessionStateContractError(f"{field_name} must be a boolean")
     return value
 
 

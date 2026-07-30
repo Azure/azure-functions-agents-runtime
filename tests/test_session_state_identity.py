@@ -56,7 +56,7 @@ _SLOT_APP_HASH = "a1-121be65a0768e3f3a8493ed8a466e7bcbb4d7c193356a3a3fcca7cf3630
 
 
 def _app(*, slot_name: str | None = None) -> AppIdentity:
-    return AppIdentity(
+    return AppIdentity.create(
         subscription_id=_SUBSCRIPTION_ID,
         site_name="Agent-App",
         slot_name=slot_name,
@@ -65,8 +65,8 @@ def _app(*, slot_name: str | None = None) -> AppIdentity:
 
 def test_app_and_owner_hash_golden_vectors() -> None:
     app = _app()
-    function_owner = FunctionAppOwnerContext(app, "main")
-    entra_owner = EntraUserOwnerContext(app, "main", _TENANT_ID, _OBJECT_ID)
+    function_owner = FunctionAppOwnerContext.create(app, "main")
+    entra_owner = EntraUserOwnerContext.create(app, "main", _TENANT_ID, _OBJECT_ID)
 
     assert compute_app_hash(app) == _PRODUCTION_APP_HASH
     assert compute_owner_hash(function_owner) == _PRODUCTION_FUNCTION_OWNER_HASH
@@ -78,7 +78,7 @@ def test_v1_canonicalizers_do_not_depend_on_mutable_current_version_globals(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     app = _app()
-    owner = FunctionAppOwnerContext(app, "main")
+    owner = FunctionAppOwnerContext.create(app, "main")
     monkeypatch.setattr(session_identity, "APP_HASH_VERSION", "a2")
     monkeypatch.setattr(session_identity, "OWNER_HASH_VERSION", "o2")
 
@@ -87,13 +87,13 @@ def test_v1_canonicalizers_do_not_depend_on_mutable_current_version_globals(
 
 
 def test_case_normalization_preserves_stable_identity() -> None:
-    upper = AppIdentity(
+    upper = AppIdentity.create(
         subscription_id=_SUBSCRIPTION_ID.upper(),
         site_name="AGENT-APP",
         slot_name="PRODUCTION",
     )
     assert upper == _app()
-    assert EntraPrincipal(_TENANT_ID.upper(), _OBJECT_ID.upper()) == EntraPrincipal(
+    assert EntraPrincipal.create(_TENANT_ID.upper(), _OBJECT_ID.upper()) == EntraPrincipal.create(
         _TENANT_ID,
         _OBJECT_ID,
     )
@@ -116,7 +116,7 @@ def test_canonical_framing_is_ordered_delimiter_safe_and_unicode_normalized() ->
 
 
 def test_owner_hash_verifies_under_stored_historical_version_without_migration() -> None:
-    owner = FunctionAppOwnerContext(_app(), "main")
+    owner = FunctionAppOwnerContext.create(_app(), "main")
     legacy_bytes = frame_canonical_components(("function_app", "o0", "legacy"))
     expected = f"o0-{hashlib.sha256(legacy_bytes).hexdigest()}"
     canonicalizers = {
@@ -241,7 +241,7 @@ def test_owner_resolution_is_explicit_and_trigger_binding_is_reserved() -> None:
     entra_owner = resolve_owner_context(
         app,
         "main",
-        EntraPrincipal(_TENANT_ID, _OBJECT_ID),
+        EntraPrincipal.create(_TENANT_ID, _OBJECT_ID),
     )
 
     assert isinstance(function_owner, FunctionAppOwnerContext)
@@ -251,7 +251,7 @@ def test_owner_resolution_is_explicit_and_trigger_binding_is_reserved() -> None:
     with pytest.raises(OwnerResolutionError, match="reserved"):
         resolve_owner_context(app, "main", TriggerBindingPrincipal())
     with pytest.raises(OwnerResolutionError, match="reserved"):
-        compute_owner_hash(TriggerBindingOwnerContext(app, "main"))
+        compute_owner_hash(TriggerBindingOwnerContext.create(app, "main"))
 
 
 @pytest.mark.parametrize(
@@ -270,11 +270,11 @@ def test_entra_principal_rejects_invalid_immutable_claims(
     values = {"tenant_id": _TENANT_ID, "object_id": _OBJECT_ID}
     values[field] = value
     with pytest.raises(SessionStateContractError, match=field):
-        EntraPrincipal(**values)
+        EntraPrincipal.create(**values)
 
 
 def test_owner_partition_has_exact_discriminator_aware_shape() -> None:
-    partition = owner_partition(FunctionAppOwnerContext(_app(), "main"))
+    partition = owner_partition(FunctionAppOwnerContext.create(_app(), "main"))
 
     assert partition.partition_key == (
         f"o1:{_PRODUCTION_APP_HASH}:function_app:{_PRODUCTION_FUNCTION_OWNER_HASH}"
@@ -359,7 +359,7 @@ def test_idempotency_key_is_hashed_and_never_retained_in_key_or_repr() -> None:
 
 
 def test_identity_repr_and_hash_labels_redact_raw_claims() -> None:
-    principal = EntraPrincipal(_TENANT_ID, _OBJECT_ID)
+    principal = EntraPrincipal.create(_TENANT_ID, _OBJECT_ID)
     owner = resolve_owner_context(_app(), "main", principal)
     label = compute_owner_hash(owner)
 

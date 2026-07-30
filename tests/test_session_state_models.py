@@ -33,11 +33,11 @@ _STATE_FINGERPRINT = (
 
 
 def _partition(*, site_name: str = "agent-app") -> OwnerPartition:
-    app = AppIdentity(
+    app = AppIdentity.create(
         subscription_id="11111111-2222-3333-4444-555555555555",
         site_name=site_name,
     )
-    return owner_partition(FunctionAppOwnerContext(app, "main"))
+    return owner_partition(FunctionAppOwnerContext.create(app, "main"))
 
 
 def _session(
@@ -46,7 +46,7 @@ def _session(
     active_run_id: str | None = _RUN_ID,
     status: str = "running",
 ) -> DurableSessionRecord:
-    return DurableSessionRecord(
+    return DurableSessionRecord.create(
         owner_partition=partition or _partition(),
         session_id=_SESSION_ID,
         sandbox_id="sandbox-1",
@@ -70,7 +70,7 @@ def _session(
 
 
 def _run(*, partition: OwnerPartition | None = None) -> DurableRunRecord:
-    return DurableRunRecord(
+    return DurableRunRecord.create(
         owner_partition=partition or _partition(),
         session_id=_SESSION_ID,
         run_id=_RUN_ID,
@@ -88,7 +88,7 @@ def _idempotency(
     *,
     partition: OwnerPartition | None = None,
 ) -> DurableIdempotencyRecord:
-    return DurableIdempotencyRecord(
+    return DurableIdempotencyRecord.create(
         owner_partition=partition or _partition(),
         session_id=_SESSION_ID,
         idempotency_hash="c" * 64,
@@ -156,7 +156,7 @@ def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> N
 
 
 def test_admission_rows_share_one_partition_and_locator_contract() -> None:
-    records = AdmissionRecords(_session(), _run(), _idempotency())
+    records = AdmissionRecords.create(_session(), _run(), _idempotency())
     partition_keys = {
         records.session.to_table_entity()["PartitionKey"],
         records.run.to_table_entity()["PartitionKey"],
@@ -168,27 +168,27 @@ def test_admission_rows_share_one_partition_and_locator_contract() -> None:
 
 def test_admission_rejects_cross_partition_or_inconsistent_rows() -> None:
     with pytest.raises(SessionStateContractError, match="share one owner partition"):
-        AdmissionRecords(_session(), _run(partition=_partition(site_name="other-app")))
+        AdmissionRecords.create(_session(), _run(partition=_partition(site_name="other-app")))
     with pytest.raises(SessionStateContractError, match="active_run_id"):
-        AdmissionRecords(_session(active_run_id=None), _run())
+        AdmissionRecords.create(_session(active_run_id=None), _run())
     with pytest.raises(SessionStateContractError, match="share session_id"):
-        AdmissionRecords(_session(), replace(_run(), session_id="other"))
+        AdmissionRecords.create(_session(), replace(_run(), session_id="other"))
     with pytest.raises(SessionStateContractError, match="share generation"):
-        AdmissionRecords(_session(), replace(_run(), generation=2))
+        AdmissionRecords.create(_session(), replace(_run(), generation=2))
     with pytest.raises(SessionStateContractError, match="idempotency admission row"):
-        AdmissionRecords(
+        AdmissionRecords.create(
             _session(),
             _run(),
             _idempotency(partition=_partition(site_name="other-app")),
         )
     with pytest.raises(SessionStateContractError, match="share session_id"):
-        AdmissionRecords(
+        AdmissionRecords.create(
             _session(),
             _run(),
             replace(_idempotency(), session_id="other"),
         )
     with pytest.raises(SessionStateContractError, match="identify the admitted run"):
-        AdmissionRecords(
+        AdmissionRecords.create(
             _session(),
             _run(),
             replace(_idempotency(), run_id="other"),
@@ -240,22 +240,95 @@ def test_reason_fields_are_bounded_codes_and_required_for_terminal_session_state
     with pytest.raises(SessionStateContractError, match="quarantine_reason"):
         _session(status="quarantined")
     with pytest.raises(SessionStateContractError, match="reason code"):
-        replace(_session(), tombstone_reason="raw user claim: secret")
+        DurableSessionRecord.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            protocol="1",
+            status="tombstoned",
+            last_activity_at=_NOW,
+            expires_at=_NOW + timedelta(hours=24),
+            idle_policy_armed=False,
+            active_run_id=None,
+            snapshot_ids=(),
+            region="westus2",
+            state_store_fingerprint=_STATE_FINGERPRINT,
+            quarantine_reason=None,
+            tombstone_reason="raw user claim: secret",
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
 
 
 def test_result_availability_is_consistent_with_run_status() -> None:
     with pytest.raises(SessionStateContractError, match="succeeded"):
-        replace(_run(), result_available=True)
+        DurableRunRecord.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            run_id=_RUN_ID,
+            generation=1,
+            status="running",
+            result_available=True,
+            status_reason=None,
+            expires_at=_NOW + timedelta(minutes=15),
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
 
-    succeeded = replace(_run(), status="succeeded", result_available=True)
+    succeeded = DurableRunRecord.create(
+        owner_partition=_partition(),
+        session_id=_SESSION_ID,
+        run_id=_RUN_ID,
+        generation=1,
+        status="succeeded",
+        result_available=True,
+        status_reason=None,
+        expires_at=_NOW + timedelta(minutes=15),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
     assert succeeded.result_available is True
 
 
 def test_row_boolean_fields_are_strict_at_construction() -> None:
     with pytest.raises(SessionStateContractError, match="idle_policy_armed"):
-        replace(_session(), idle_policy_armed=1)  # type: ignore[arg-type]
+        DurableSessionRecord.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            protocol="1",
+            status="running",
+            last_activity_at=_NOW,
+            expires_at=_NOW + timedelta(hours=24),
+            idle_policy_armed=1,  # type: ignore[arg-type]
+            active_run_id=_RUN_ID,
+            snapshot_ids=("snapshot-1",),
+            region="westus2",
+            state_store_fingerprint=_STATE_FINGERPRINT,
+            quarantine_reason=None,
+            tombstone_reason=None,
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
     with pytest.raises(SessionStateContractError, match="result_available"):
-        replace(_run(), result_available=1)  # type: ignore[arg-type]
+        DurableRunRecord.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            run_id=_RUN_ID,
+            generation=1,
+            status="running",
+            result_available=1,  # type: ignore[arg-type]
+            status_reason=None,
+            expires_at=_NOW + timedelta(minutes=15),
+            created_at=_NOW,
+            updated_at=_NOW,
+        )
 
 
 def test_row_schema_deserialization_fails_closed_on_version_or_partition_drift() -> None:
@@ -275,24 +348,75 @@ def test_rows_are_immutable_and_state_fingerprint_cannot_hold_credentials() -> N
     with pytest.raises(FrozenInstanceError):
         record.generation = 2  # type: ignore[misc]
     with pytest.raises(SessionStateContractError, match="state_store_fingerprint"):
-        replace(
-            record,
+        DurableSessionRecord.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            protocol="1",
+            status="running",
+            last_activity_at=_NOW,
+            expires_at=_NOW + timedelta(hours=24),
+            idle_policy_armed=False,
+            active_run_id=_RUN_ID,
+            snapshot_ids=(),
+            region="westus2",
             state_store_fingerprint=(
                 "DefaultEndpointsProtocol=https;AccountName=acct;AccountKey=secret"
             ),
+            quarantine_reason=None,
+            tombstone_reason=None,
+            created_at=_NOW,
+            updated_at=_NOW,
         )
 
 
 def test_row_timestamps_require_awareness_and_normalize_to_utc() -> None:
     with pytest.raises(SessionStateContractError, match="timezone-aware"):
-        replace(_session(), created_at=datetime(2026, 7, 30, 16, 0))
+        DurableSessionRecord.create(
+            owner_partition=_partition(),
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            protocol="1",
+            status="running",
+            last_activity_at=_NOW,
+            expires_at=_NOW + timedelta(hours=24),
+            idle_policy_armed=False,
+            active_run_id=_RUN_ID,
+            snapshot_ids=(),
+            region="westus2",
+            state_store_fingerprint=_STATE_FINGERPRINT,
+            quarantine_reason=None,
+            tombstone_reason=None,
+            created_at=datetime(2026, 7, 30, 16, 0),
+            updated_at=_NOW,
+        )
 
     plus_five = timezone(timedelta(hours=5))
     local_time = datetime(2026, 7, 30, 21, 0, tzinfo=plus_five)
-    record = replace(
-        _session(),
+    record = DurableSessionRecord.create(
+        owner_partition=_partition(),
+        session_id=_SESSION_ID,
+        sandbox_id="sandbox-1",
+        generation=1,
+        digest_kind="funcs_zip",
+        digest="sha256:" + ("b" * 64),
+        protocol="1",
+        status="running",
         last_activity_at=local_time,
         expires_at=local_time + timedelta(hours=24),
+        idle_policy_armed=False,
+        active_run_id=_RUN_ID,
+        snapshot_ids=(),
+        region="westus2",
+        state_store_fingerprint=_STATE_FINGERPRINT,
+        quarantine_reason=None,
+        tombstone_reason=None,
         created_at=local_time,
         updated_at=local_time,
     )

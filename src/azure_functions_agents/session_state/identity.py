@@ -222,7 +222,7 @@ def resolve_function_app_identity(
     slot_value = get_environment("WEBSITE_SLOT_NAME")
     slot_name = slot_value.strip() if slot_value is not None else None
     try:
-        return AppIdentity(
+        return AppIdentity.create(
             subscription_id=subscription_id,
             site_name=site_name,
             slot_name=slot_name,
@@ -240,14 +240,14 @@ def resolve_owner_context(
 ) -> OwnerContext:
     """Resolve only explicitly authenticated, currently supported owner kinds."""
     if isinstance(principal, EntraPrincipal):
-        return EntraUserOwnerContext(
+        return EntraUserOwnerContext.create(
             app_identity=app_identity,
             agent_slug=agent_slug,
             tenant_id=principal.tenant_id,
             object_id=principal.object_id,
         )
     if isinstance(principal, FunctionAppPrincipal):
-        return FunctionAppOwnerContext(
+        return FunctionAppOwnerContext.create(
             app_identity=app_identity,
             agent_slug=agent_slug,
         )
@@ -264,7 +264,7 @@ def owner_partition(
     app_version: str = APP_HASH_VERSION,
     owner_version: str = OWNER_HASH_VERSION,
 ) -> OwnerPartition:
-    return OwnerPartition(
+    return OwnerPartition.create(
         owner_hash_version=owner_version,
         app_hash=compute_app_hash(owner.app_identity, app_version),
         owner_kind=owner.kind,
@@ -295,11 +295,11 @@ def mint_run_id(uuid_factory: UuidFactory = uuid4) -> str:
 
 
 def session_row_key(session_id: str) -> SessionRowKey:
-    return SessionRowKey(validate_session_id(session_id))
+    return SessionRowKey.create(validate_session_id(session_id))
 
 
 def run_row_key(session_id: str, run_id: str) -> RunRowKey:
-    return RunRowKey(validate_session_id(session_id), validate_run_id(run_id))
+    return RunRowKey.create(validate_session_id(session_id), validate_run_id(run_id))
 
 
 def hash_idempotency_key(idempotency_key: str) -> str:
@@ -315,7 +315,7 @@ def idempotency_row_key(
     session_id: str,
     idempotency_key: str,
 ) -> IdempotencyRowKey:
-    return IdempotencyRowKey(
+    return IdempotencyRowKey.create(
         validate_session_id(session_id),
         hash_idempotency_key(idempotency_key),
     )
