@@ -3,3 +3,4 @@ npm-debug.log*
 .env
 .data/agent-drafts/
 .data/source-drafts/
+.data/app-sources/

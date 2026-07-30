@@ -161,6 +161,9 @@ export default function AgentsPage() {
         >
           {isFetching ? '⟳ Refreshing…' : '⟳ Hard refresh'}
         </button>
+        <Link className="btn primary" to="/create-agent">
+          ＋ Create agent
+        </Link>
       </div>
 
       <div className="table-wrap">

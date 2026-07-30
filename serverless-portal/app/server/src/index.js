@@ -9,11 +9,13 @@
 import { fileURLToPath } from 'node:url'
 import path from 'node:path'
 import fs from 'node:fs'
+import { randomUUID } from 'node:crypto'
 
 import express from 'express'
 import cors from 'cors'
 
 import * as azure from './azure.js'
+import * as provision from './provision.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const DIST_DIR = path.resolve(__dirname, '..', '..', 'frontend', 'dist')
@@ -29,7 +31,7 @@ app.use(
       'http://localhost:5173',
       'http://127.0.0.1:5173',
     ],
-    methods: ['GET'],
+    methods: ['GET', 'PUT', 'POST', 'OPTIONS'],
     allowedHeaders: ['Authorization', 'Content-Type'],
   }),
 )
@@ -302,6 +304,158 @@ app.put(
     if (typeof content !== 'string') throw new HttpError(400, 'Request body must be { content: string }.')
     await writeSourceDraft(subscription, appName, relPath, content)
     res.json({ ok: true, source: 'draft' })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Create / deploy agent — refresh the target Function App's portal-managed
+// source tree, then provision (for a new app) and push it to Azure with a
+// remote build. Every Azure call runs as the signed-in user's forwarded token.
+// ---------------------------------------------------------------------------
+
+const APP_SOURCES_DIR = path.join(__dirname, '..', '.data', 'app-sources')
+
+const SCAFFOLD = {
+  'function_app.py': 'from azure_functions_agents import create_function_app\n\napp = create_function_app()\n',
+  'host.json':
+    JSON.stringify(
+      {
+        version: '2.0',
+        extensions: { http: { routePrefix: '' } },
+        logging: { logLevel: { default: 'Information' } },
+        extensionBundle: { id: 'Microsoft.Azure.Functions.ExtensionBundle', version: '[4.*, 5.0.0)' },
+      },
+      null,
+      2,
+    ) + '\n',
+  'requirements.txt': 'azurefunctions-agents-runtime[monitor]\n',
+  'agents.config.yaml': '# Global defaults for all agents in this app.\n',
+}
+
+async function scaffoldIfMissing(filePath, content) {
+  try {
+    await fs.promises.access(filePath)
+  } catch {
+    await fs.promises.writeFile(filePath, content, 'utf-8')
+  }
+}
+
+// In-memory deploy jobs (single-instance portal). Provisioning + remote build
+// can take minutes, so the client starts a job and polls for its status rather
+// than holding one long request. Jobs are ephemeral and pruned after a while.
+const deployJobs = new Map()
+const DEPLOY_JOB_TTL_MS = 30 * 60 * 1000
+
+function setJob(id, patch) {
+  deployJobs.set(id, { ...(deployJobs.get(id) ?? {}), ...patch, updatedAt: Date.now() })
+}
+
+function pruneJobs() {
+  const cutoff = Date.now() - DEPLOY_JOB_TTL_MS
+  for (const [id, job] of deployJobs) if ((job.updatedAt ?? 0) < cutoff) deployJobs.delete(id)
+}
+
+// Provision (for a new app) then push the source with a remote build, updating
+// the job as each stage completes. Runs detached from the HTTP request.
+async function runDeployJob(id, token, ctx) {
+  const { subscription, resourceGroup, appName, target, dir, files, fileName } = ctx
+  try {
+    if (target.kind === 'new') {
+      setJob(id, { message: 'Provisioning Azure resources…' })
+      await provision.provisionFlexApp(token, {
+        subscriptionId: subscription,
+        resourceGroup,
+        appName,
+        region: target.region,
+        foundryEndpoint: target.foundryEndpoint,
+        foundryModel: target.foundryModel,
+      })
+    }
+
+    setJob(id, { message: 'Resolving Function App…' })
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site) throw new Error(`Function App "${appName}" was not found in "${resourceGroup}".`)
+    const scmHost = azure.scmHostName(site)
+    const principalId = site.identity?.principalId || ''
+
+    setJob(id, { message: 'Deploying source with a remote build…' })
+    const zip = provision.zipStore(
+      await Promise.all(
+        files.map(async (name) => ({ name, data: await fs.promises.readFile(path.join(dir, name)) })),
+      ),
+    )
+    await provision.deployZipToApp(token, scmHost, zip)
+
+    const foundryNote =
+      target.kind === 'new' && principalId
+        ? ` Grant the app identity (principalId ${principalId}) access to your Foundry project for live model calls.`
+        : ''
+    setJob(id, {
+      status: 'deployed',
+      message: `Deployed "${fileName}" to ${appName}.${foundryNote}`,
+      url: `https://${site.defaultHostName}`,
+    })
+  } catch (err) {
+    setJob(id, { status: 'error', message: String(err?.message ?? err) })
+  }
+}
+
+// Start a deploy: refresh the app's source tree, then run provisioning + deploy
+// in the background. Returns a job id the client polls via GET /api/deploy/:id.
+app.post(
+  '/api/deploy',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const agent = req.body?.agent
+    const target = req.body?.target
+    if (!agent || typeof agent.fileName !== 'string' || typeof agent.content !== 'string') {
+      throw new HttpError(400, 'Request body must include agent { fileName, content }.')
+    }
+    if (!target || typeof target.kind !== 'string') {
+      throw new HttpError(400, 'Request body must include a target.')
+    }
+    const appName = target.kind === 'existing' ? target.app : target.appName
+    if (!appName) throw new HttpError(400, 'A target Function App name is required.')
+    const resourceGroup = target.resourceGroup
+    if (!resourceGroup) throw new HttpError(400, 'A target resource group is required.')
+    if (target.kind === 'new' && !target.region) {
+      throw new HttpError(400, 'A region is required to create a new app.')
+    }
+    const fileName = safeSegment(agent.fileName)
+    if (!/\.agent\.md$/i.test(fileName)) throw new HttpError(400, 'Agent file must end with .agent.md.')
+
+    // Portal-managed source tree (kept so portal-created apps redeploy from source).
+    const dir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
+    await fs.promises.mkdir(dir, { recursive: true })
+    for (const [name, content] of Object.entries(SCAFFOLD)) {
+      await scaffoldIfMissing(path.join(dir, name), content)
+    }
+    await fs.promises.writeFile(path.join(dir, fileName), agent.content, 'utf-8')
+    const files = (await fs.promises.readdir(dir)).sort()
+
+    pruneJobs()
+    const jobId = randomUUID()
+    setJob(jobId, { status: 'running', message: 'Starting…', files, url: null })
+    runDeployJob(jobId, token, { subscription, resourceGroup, appName, target, dir, files, fileName })
+
+    res.status(202).json({ jobId, status: 'running', files })
+  }),
+)
+
+// Poll a deploy job.
+app.get(
+  '/api/deploy/:jobId',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const job = deployJobs.get(req.params.jobId)
+    if (!job) throw new HttpError(404, 'Unknown or expired deploy job.')
+    res.json({
+      status: job.status,
+      message: job.message,
+      files: job.files ?? [],
+      ...(job.url ? { url: job.url } : {}),
+    })
   }),
 )
 
