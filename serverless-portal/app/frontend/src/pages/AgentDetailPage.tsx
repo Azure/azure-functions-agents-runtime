@@ -350,6 +350,14 @@ export default function AgentDetailPage() {
             >
               {deployJob.phase === 'running' ? 'Deploying…' : '🚀 Deploy edits'}
             </button>
+            {agent.builtinEndpoints && (
+              <Link
+                className="btn"
+                to={`/playground/${subForQuery}/${encodeURIComponent(agent.app)}/${encodeURIComponent(agent.name)}`}
+              >
+                💬 Open in Playground
+              </Link>
+            )}
             <span className="muted" style={{ fontSize: 12 }}>
               Redeploys <span className="mono">{agent.app}</span> from its current source with your saved
               drafts applied.

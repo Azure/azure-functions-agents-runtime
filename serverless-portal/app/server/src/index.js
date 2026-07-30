@@ -586,6 +586,41 @@ app.post(
   }),
 )
 
+// ---------------------------------------------------------------------------
+// Agent playground — chat with a deployed agent's built-in endpoint, proxied so
+// the browser needs no function key and makes no cross-origin call.
+// ---------------------------------------------------------------------------
+
+app.post(
+  '/api/agent/chat',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.body?.app ?? '').trim()
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const agentName = String(req.body?.agent ?? '').trim()
+    const prompt = req.body?.prompt
+    const sessionId = String(req.body?.sessionId ?? '').trim()
+    if (!appName || !resourceGroup || !agentName) {
+      throw new HttpError(400, 'app, resourceGroup, and agent are required.')
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new HttpError(400, 'A non-empty prompt is required.')
+    }
+
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site) throw new HttpError(404, `Function App "${appName}" was not found.`)
+    if (!site.defaultHostName) throw new HttpError(502, 'The app has no host name.')
+
+    const key = await azure.functionHostKey(token, subscription, resourceGroup, appName)
+    try {
+      res.json(await azure.callAgentChat(site.defaultHostName, agentName, prompt.trim(), { key, sessionId }))
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
 // Any unmatched /api/* path is a 404 JSON (never the SPA shell).
 app.use('/api', (_req, res) => res.status(404).json({ detail: 'Not found' }))
 

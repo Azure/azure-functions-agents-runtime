@@ -36,6 +36,9 @@ export default function Shell({ children }: { children: ReactNode }) {
         <NavLink className={itemClass} to="/agents">
           <span className="ico">🤖</span> Agents
         </NavLink>
+        <NavLink className={itemClass} to="/playground">
+          <span className="ico">💬</span> Playground
+        </NavLink>
       </nav>
 
       <main className="main">{children}</main>

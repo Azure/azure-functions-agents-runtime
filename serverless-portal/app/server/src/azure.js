@@ -812,6 +812,70 @@ export async function getSite(accessToken, subscriptionId, resourceGroup, appNam
   }
 }
 
+// Fetch a host-level function key for invoking an app's functions (the built-in
+// chat endpoint defaults to FUNCTION auth). Best-effort: '' when unavailable.
+export async function functionHostKey(accessToken, subscriptionId, resourceGroup, appName) {
+  try {
+    const client = webClient(accessToken, subscriptionId)
+    const keys = await client.webApps.listHostKeys(resourceGroup, appName)
+    return keys?.functionKeys?.default || keys?.masterKey || ''
+  } catch {
+    return ''
+  }
+}
+
+// Call a deployed agent's built-in chat endpoint (`POST agents/<slug>/chat`).
+// Tries the default route prefix and the `api` prefix. Returns the normalised
+// chat result `{ sessionId, response, toolCalls }`.
+export async function callAgentChat(host, agentSlug, prompt, { key = '', sessionId = '' } = {}) {
+  const slug = encodeURIComponent(agentSlug)
+  const paths = [`agents/${slug}/chat`, `api/agents/${slug}/chat`]
+  const headers = { 'Content-Type': 'application/json' }
+  if (key) headers['x-functions-key'] = key
+  if (sessionId) headers['x-ms-session-id'] = sessionId
+
+  let lastErr = 'no route matched'
+  for (const p of paths) {
+    let res
+    try {
+      res = await fetch(`https://${host}/${p}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ prompt }),
+        signal: AbortSignal.timeout(120000),
+      })
+    } catch (e) {
+      lastErr = String(e?.message ?? e)
+      continue
+    }
+    if (res.status === 404) {
+      lastErr = `404 at /${p}`
+      continue // wrong route prefix — try the next
+    }
+    const text = await res.text()
+    let body
+    try {
+      body = text ? JSON.parse(text) : {}
+    } catch {
+      body = { response: text }
+    }
+    if (!res.ok) {
+      const detail = body?.error || text || `${res.status} ${res.statusText}`
+      const err = new Error(String(detail).slice(0, 600))
+      err.status = res.status
+      throw err
+    }
+    return {
+      sessionId: body.session_id ?? res.headers.get('x-ms-session-id') ?? sessionId ?? '',
+      response: body.response ?? '',
+      toolCalls: Array.isArray(body.tool_calls) ? body.tool_calls : [],
+    }
+  }
+  const err = new Error(`Agent chat endpoint not reachable (${lastErr}).`)
+  err.status = 502
+  throw err
+}
+
 // Resolve the authoritative set of agent slugs from the deployed `*.agent.md`
 // files. Prefers Kudu VFS; on Flex Consumption reads the deployment package.
 // `ok` is true only when a source returned the complete file list, so callers
