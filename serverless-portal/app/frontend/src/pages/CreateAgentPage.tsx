@@ -1,7 +1,8 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
+import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot } from '../query'
 
@@ -182,30 +183,25 @@ export default function CreateAgentPage() {
 
   const subName = subscriptions.find((s) => s.id === selected)?.name ?? selected
 
-  const deploy = useMutation({
-    mutationFn: () => {
-      const target =
-        draft.target === 'existing'
-          ? {
-              kind: 'existing' as const,
-              app: draft.existingApp,
-              resourceGroup: apps.find((a) => a.name === draft.existingApp)?.resourceGroup ?? '',
-            }
-          : { kind: 'new' as const, ...draft.newApp }
-      return api.deployAgent({
-        subscription: selected,
-        agent: { fileName, content: previewMd },
-        target,
-      })
-    },
-  })
+  const deployJob = useDeployJob()
+  const runDeploy = () => {
+    const target =
+      draft.target === 'existing'
+        ? {
+            kind: 'existing' as const,
+            app: draft.existingApp,
+            resourceGroup: apps.find((a) => a.name === draft.existingApp)?.resourceGroup ?? '',
+          }
+        : { kind: 'new' as const, ...draft.newApp }
+    deployJob.deploy({ subscription: selected, agent: { fileName, content: previewMd }, target })
+  }
 
   const nameValid = draft.name.trim().length > 0
   const targetValid =
     draft.target === 'existing'
       ? !!draft.existingApp
       : !!draft.newApp.appName && !!draft.newApp.resourceGroup && !!draft.newApp.region
-  const canDeploy = nameValid && targetValid && !!selected && !deploy.isPending
+  const canDeploy = nameValid && targetValid && !!selected && deployJob.phase !== 'running'
 
   const cancel = () => {
     sessionStorage.removeItem(DRAFT_KEY)
@@ -429,8 +425,8 @@ export default function CreateAgentPage() {
       </div>
 
       <div className="toolbar" style={{ marginTop: 18 }}>
-        <button className="btn primary" disabled={!canDeploy} onClick={() => deploy.mutate()}>
-          {deploy.isPending
+        <button className="btn primary" disabled={!canDeploy} onClick={runDeploy}>
+          {deployJob.phase === 'running'
             ? 'Deploying…'
             : draft.target === 'new'
               ? 'Create Function App & deploy'
@@ -445,41 +441,12 @@ export default function CreateAgentPage() {
         )}
       </div>
 
-      {deploy.isError && (
-        <p className="muted" style={{ color: 'var(--red)', marginTop: 10 }}>
-          Deploy failed: {(deploy.error as Error).message}
-        </p>
-      )}
-      {deploy.data && (
-        <div className="note" style={{ marginTop: 12 }}>
-          <strong style={deploy.data.status === 'error' ? { color: 'var(--red)' } : undefined}>
-            {deploy.data.status === 'deployed'
-              ? 'Deployed.'
-              : deploy.data.status === 'error'
-                ? 'Deploy failed.'
-                : 'Staged.'}
-          </strong>{' '}
-          {deploy.data.message}
-          {deploy.data.status === 'deployed' && deploy.data.url && (
-            <div style={{ marginTop: 6 }}>
-              URL:{' '}
-              <a href={deploy.data.url} target="_blank" rel="noreferrer">
-                {deploy.data.url}
-              </a>
-            </div>
-          )}
-          {deploy.data.files?.length > 0 && (
-            <div style={{ marginTop: 6 }}>
-              Source:{' '}
-              {deploy.data.files.map((f) => (
-                <span key={f} className="badge gray mono" style={{ marginRight: 6 }}>
-                  {f}
-                </span>
-              ))}
-            </div>
-          )}
-        </div>
-      )}
+      <DeploymentStatus
+        phase={deployJob.phase}
+        result={deployJob.result}
+        portalUrl={deployJob.portalUrl}
+        message={deployJob.message}
+      />
     </>
   )
 }

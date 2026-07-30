@@ -355,10 +355,84 @@ function pruneJobs() {
   for (const [id, job] of deployJobs) if ((job.updatedAt ?? 0) < cutoff) deployJobs.delete(id)
 }
 
+// Azure portal deep links, so the user can watch a deployment in the portal
+// itself instead of waiting on the wizard. Tenant is optional but targets the
+// right directory when present.
+const portalRoot = (tenantId) => `https://portal.azure.com/#${tenantId ? `@${tenantId}` : ''}`
+function portalDeploymentUrl(tenantId, subscription, resourceGroup, deploymentName) {
+  return `${portalRoot(tenantId)}/resource/subscriptions/${subscription}/resourceGroups/${resourceGroup}/providers/Microsoft.Resources/deployments/${deploymentName}/overview`
+}
+function portalAppDeploymentCenterUrl(tenantId, subscription, resourceGroup, appName) {
+  return `${portalRoot(tenantId)}/resource/subscriptions/${subscription}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}/vstscd`
+}
+
+// Best-effort tenant id from the forwarded token, for portal links.
+function tenantFromToken(token) {
+  try {
+    return azure.getSignedInIdentity(token).tenantId || ''
+  } catch {
+    return ''
+  }
+}
+
+const pathExists = async (p) => {
+  try {
+    await fs.promises.access(p)
+    return true
+  } catch {
+    return false
+  }
+}
+
+const listDirFiles = async (dir) => {
+  try {
+    return await fs.promises.readdir(dir)
+  } catch {
+    return []
+  }
+}
+
+// Read a directory of files into `[{ name, data }]`.
+async function readDirFiles(dir) {
+  const names = await listDirFiles(dir)
+  return Promise.all(
+    names.sort().map(async (name) => ({ name, data: await fs.promises.readFile(path.join(dir, name)) })),
+  )
+}
+
+// Overlay this app's saved portal drafts (edited `*.agent.md` and source files)
+// onto its base source files, matching by name/basename so an edit replaces the
+// deployed file in place rather than duplicating it.
+async function overlayDrafts(subscription, appName, baseFiles) {
+  const byName = new Map(baseFiles.map((f) => [f.name, f.data]))
+  const basenameToName = new Map(baseFiles.map((f) => [f.name.split('/').pop(), f.name]))
+  const apply = (fileName, content) => {
+    const target = byName.has(fileName) ? fileName : (basenameToName.get(fileName) ?? fileName)
+    byName.set(target, Buffer.from(content, 'utf-8'))
+  }
+
+  const agentDir = path.join(DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+  for (const file of await listDirFiles(agentDir)) {
+    apply(file, await fs.promises.readFile(path.join(agentDir, file), 'utf-8'))
+  }
+  const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+  for (const file of await listDirFiles(sourceDir)) {
+    apply(file, await fs.promises.readFile(path.join(sourceDir, file), 'utf-8'))
+  }
+  return [...byName].map(([name, data]) => ({ name, data }))
+}
+
+// Zip the prepared files and push them to the app with a remote build.
+async function pushFilesToSite(id, token, site, files) {
+  setJob(id, { message: 'Deploying source with a remote build…' })
+  const zip = provision.zipStore(files)
+  await provision.deployZipToApp(token, azure.scmHostName(site), zip)
+}
+
 // Provision (for a new app) then push the source with a remote build, updating
 // the job as each stage completes. Runs detached from the HTTP request.
 async function runDeployJob(id, token, ctx) {
-  const { subscription, resourceGroup, appName, target, dir, files, fileName } = ctx
+  const { subscription, resourceGroup, appName, target, dir, deploymentName, fileName } = ctx
   try {
     if (target.kind === 'new') {
       setJob(id, { message: 'Provisioning Azure resources…' })
@@ -369,22 +443,16 @@ async function runDeployJob(id, token, ctx) {
         region: target.region,
         foundryEndpoint: target.foundryEndpoint,
         foundryModel: target.foundryModel,
+        deploymentName,
       })
     }
 
     setJob(id, { message: 'Resolving Function App…' })
     const site = await azure.getSite(token, subscription, resourceGroup, appName)
     if (!site) throw new Error(`Function App "${appName}" was not found in "${resourceGroup}".`)
-    const scmHost = azure.scmHostName(site)
     const principalId = site.identity?.principalId || ''
 
-    setJob(id, { message: 'Deploying source with a remote build…' })
-    const zip = provision.zipStore(
-      await Promise.all(
-        files.map(async (name) => ({ name, data: await fs.promises.readFile(path.join(dir, name)) })),
-      ),
-    )
-    await provision.deployZipToApp(token, scmHost, zip)
+    await pushFilesToSite(id, token, site, await readDirFiles(dir))
 
     const foundryNote =
       target.kind === 'new' && principalId
@@ -393,6 +461,37 @@ async function runDeployJob(id, token, ctx) {
     setJob(id, {
       status: 'deployed',
       message: `Deployed "${fileName}" to ${appName}.${foundryNote}`,
+      url: `https://${site.defaultHostName}`,
+    })
+  } catch (err) {
+    setJob(id, { status: 'error', message: String(err?.message ?? err) })
+  }
+}
+
+// Redeploy an existing app from its own current source with the portal's saved
+// drafts overlaid, so a multi-agent app isn't reduced to a scaffold.
+async function runRedeployJob(id, token, ctx) {
+  const { subscription, resourceGroup, appName } = ctx
+  try {
+    setJob(id, { message: 'Resolving Function App…' })
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site) throw new Error(`Function App "${appName}" was not found in "${resourceGroup}".`)
+
+    setJob(id, { message: 'Reading current app source…' })
+    const appSrcDir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
+    let base = (await pathExists(appSrcDir)) ? await readDirFiles(appSrcDir) : null
+    if (!base || base.length === 0) base = await azure.readPackageFiles(token, subscription, site)
+    if (!base || base.length === 0) {
+      throw new Error("Couldn't read the app's current source to redeploy (permission or plan).")
+    }
+
+    const files = await overlayDrafts(subscription, appName, base)
+    setJob(id, { files: files.map((f) => f.name).sort() })
+    await pushFilesToSite(id, token, site, files)
+
+    setJob(id, {
+      status: 'deployed',
+      message: `Redeployed ${appName} with your saved edits.`,
       url: `https://${site.defaultHostName}`,
     })
   } catch (err) {
@@ -436,10 +535,16 @@ app.post(
 
     pruneJobs()
     const jobId = randomUUID()
-    setJob(jobId, { status: 'running', message: 'Starting…', files, url: null })
-    runDeployJob(jobId, token, { subscription, resourceGroup, appName, target, dir, files, fileName })
+    const tenantId = tenantFromToken(token)
+    const deploymentName = `portal-deploy-${Date.now()}`.slice(0, 64)
+    const portalUrl =
+      target.kind === 'new'
+        ? portalDeploymentUrl(tenantId, subscription, resourceGroup, deploymentName)
+        : portalAppDeploymentCenterUrl(tenantId, subscription, resourceGroup, appName)
+    setJob(jobId, { status: 'running', message: 'Starting…', files, url: null, portalUrl })
+    runDeployJob(jobId, token, { subscription, resourceGroup, appName, target, dir, deploymentName, fileName })
 
-    res.status(202).json({ jobId, status: 'running', files })
+    res.status(202).json({ jobId, status: 'running', files, portalUrl })
   }),
 )
 
@@ -455,7 +560,29 @@ app.get(
       message: job.message,
       files: job.files ?? [],
       ...(job.url ? { url: job.url } : {}),
+      ...(job.portalUrl ? { portalUrl: job.portalUrl } : {}),
     })
+  }),
+)
+
+// Redeploy an existing app with the portal's saved edits overlaid onto its own
+// current source. Safe for multi-agent apps; returns a job id to poll.
+app.post(
+  '/api/redeploy',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.body?.app ?? '').trim()
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    if (!appName || !resourceGroup) throw new HttpError(400, 'app and resourceGroup are required.')
+
+    pruneJobs()
+    const jobId = randomUUID()
+    const portalUrl = portalAppDeploymentCenterUrl(tenantFromToken(token), subscription, resourceGroup, appName)
+    setJob(jobId, { status: 'running', message: 'Starting…', files: [], url: null, portalUrl })
+    runRedeployJob(jobId, token, { subscription, resourceGroup, appName })
+
+    res.status(202).json({ jobId, status: 'running', files: [], portalUrl })
   }),
 )
 

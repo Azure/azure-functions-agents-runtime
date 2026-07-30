@@ -399,7 +399,7 @@ async function agentSourceFiles(accessToken, site) {
       try {
         const res = await fetch(`https://${scm}/api/vfs/${dir}/`, {
           headers: { Authorization: `Bearer ${accessToken}` },
-          signal: AbortSignal.timeout(8000),
+          signal: AbortSignal.timeout(2500),
         })
         if (!res.ok) return []
         if (index === 0) rootOk = true
@@ -600,6 +600,74 @@ async function flexPackageAgentFiles(accessToken, subscriptionId, site) {
   }
 }
 
+// Download a Flex Consumption app's deployment package and return its editable
+// SOURCE files (excludes build output such as `.python_packages/`), so an
+// existing app can be redeployed from its own current source with edits
+// overlaid. Returns `[{ name, data }]` or null when the package can't be read.
+export async function readPackageFiles(accessToken, subscriptionId, site) {
+  const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site)
+  if (!pkg) return null
+  let buffer
+  try {
+    buffer = await pkg.blob.downloadToBuffer()
+  } catch {
+    return null
+  }
+  return extractSourceEntries(buffer)
+}
+
+// True for zip entries that are build output / caches rather than source.
+function isBuildArtifact(name) {
+  return (
+    name.startsWith('.python_packages/') ||
+    name.startsWith('.venv/') ||
+    name.startsWith('__pycache__/') ||
+    name.includes('/__pycache__/') ||
+    name.endsWith('.pyc')
+  )
+}
+
+// Extract every source file from a zip buffer as `[{ name, data }]`.
+function extractSourceEntries(buffer) {
+  return new Promise((resolve) => {
+    const files = []
+    let settled = false
+    const finish = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(files)
+    }
+    const timer = setTimeout(finish, 20000)
+    yauzl.fromBuffer(buffer, { lazyEntries: true }, (err, zip) => {
+      if (err || !zip) return finish()
+      zip.on('entry', (entry) => {
+        const name = String(entry?.fileName ?? '')
+        if (name.endsWith('/') || isBuildArtifact(name)) {
+          zip.readEntry()
+          return
+        }
+        zip.openReadStream(entry, (streamErr, stream) => {
+          if (streamErr || !stream) {
+            zip.readEntry()
+            return
+          }
+          const chunks = []
+          stream.on('data', (chunk) => chunks.push(chunk))
+          stream.on('end', () => {
+            files.push({ name, data: Buffer.concat(chunks) })
+            zip.readEntry()
+          })
+          stream.on('error', () => zip.readEntry())
+        })
+      })
+      zip.on('end', finish)
+      zip.on('error', finish)
+      zip.readEntry()
+    })
+  })
+}
+
 // Read the text of the first zip entry whose full name satisfies `matchFn`,
 // using ranged reads (never the whole package). Returns null when not found.
 function readZipEntryContent(blob, size, matchFn) {
@@ -748,10 +816,20 @@ export async function getSite(accessToken, subscriptionId, resourceGroup, appNam
 // files. Prefers Kudu VFS; on Flex Consumption reads the deployment package.
 // `ok` is true only when a source returned the complete file list, so callers
 // know whether to trust it over the function-name heuristic.
+//
+// Flex Consumption apps have no Kudu VFS — the probe always 404s after a wait —
+// so skip it for them (they carry `functionAppConfig`) and read the deployment
+// package directly.
+function isFlexConsumption(site) {
+  return Boolean(site?.functionAppConfig)
+}
+
 async function readAgentSlugs(accessToken, subscriptionId, site) {
-  const kudu = await agentSourceFiles(accessToken, site)
-  if (kudu.ok) {
-    return { slugs: new Set(kudu.files.map(agentSlugFromFileName)), ok: true }
+  if (!isFlexConsumption(site)) {
+    const kudu = await agentSourceFiles(accessToken, site)
+    if (kudu.ok) {
+      return { slugs: new Set(kudu.files.map(agentSlugFromFileName)), ok: true }
+    }
   }
   const flex = await flexPackageAgentFiles(accessToken, subscriptionId, site)
   if (flex.ok) {
@@ -768,6 +846,26 @@ async function functionsInApp(client, resourceGroup, appName, defaultHostName) {
   if (fromArm.length > 0) return fromArm
   return functionsFromAdminApi(client, resourceGroup, appName, defaultHostName)
 }
+
+// Bounded-concurrency map: apply `fn` across `items`, at most `limit` in flight.
+// Keeps a whole-subscription refresh fast without tripping ARM 429 throttling.
+async function mapLimit(items, limit, fn) {
+  const results = new Array(items.length)
+  let next = 0
+  const worker = async () => {
+    while (next < items.length) {
+      const index = next++
+      results[index] = await fn(items[index], index)
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  return results
+}
+
+// Fan-out limits: the app-setting gate is cheap (higher), enrichment (functions
+// + source reads) is heavier (lower).
+const GATE_CONCURRENCY = 12
+const ENRICH_CONCURRENCY = 8
 
 /**
  * Discover every agent app + its agents in a subscription.
@@ -789,31 +887,42 @@ async function functionsInApp(client, resourceGroup, appName, defaultHostName) {
  */
 export async function discoverAgentApps(accessToken, subscriptionId) {
   const client = webClient(accessToken, subscriptionId)
-  const apps = []
-  for await (const site of client.webApps.list()) {
-    const kind = String(site.kind ?? '')
-    if (!kind.includes('functionapp')) continue
 
+  // Collect every Function App site up front so the per-app work can fan out
+  // instead of running one app at a time.
+  const sites = []
+  for await (const site of client.webApps.list()) {
+    if (!String(site.kind ?? '').includes('functionapp')) continue
     const resourceGroup = parseResourceGroup(site.id)
     const appName = site.name ?? ''
-    if (!appName || !resourceGroup) continue
+    if (appName && resourceGroup) sites.push({ site, resourceGroup, appName })
+  }
 
-    // Identification rule: a Function App IS a serverless agent app if — and
-    // only if — it carries the AZURE_FUNCTIONS_AGENTS_PROVIDER app setting.
-    let settingsMap
-    try {
-      const settings = await client.webApps.listApplicationSettings(resourceGroup, appName)
-      settingsMap = settingsToMap(settings.properties)
-    } catch {
-      continue
-    }
-    if (!(AGENT_PROVIDER_SETTING in settingsMap)) continue
+  // Gate (parallel, cheap): an app IS a serverless agent app if — and only if —
+  // it carries the AZURE_FUNCTIONS_AGENTS_PROVIDER app setting. Check them all
+  // concurrently and drop the rest before doing any expensive work.
+  const gated = (
+    await mapLimit(sites, GATE_CONCURRENCY, async (entry) => {
+      try {
+        const settings = await client.webApps.listApplicationSettings(entry.resourceGroup, entry.appName)
+        const settingsMap = settingsToMap(settings.properties)
+        if (!(AGENT_PROVIDER_SETTING in settingsMap)) return null
+        return { ...entry, provider: settingsMap[AGENT_PROVIDER_SETTING] ?? '' }
+      } catch {
+        return null
+      }
+    })
+  ).filter(Boolean)
 
-    // Enumerate the app's functions, then split them into agents vs supporting
-    // functions using the authoritative `*.agent.md` file list where available.
-    const functions = await functionsInApp(client, resourceGroup, appName, site.defaultHostName)
-    const { slugs, ok } = await readAgentSlugs(accessToken, subscriptionId, site)
-    const { agents, appSupportingFunctions } = parseAgentsFromFunctions(functions, slugs, ok)
+  // Enrich (parallel, heavier): list functions and read the authoritative
+  // `*.agent.md` slugs for each agent app, then classify agents vs supporting
+  // functions. The two reads per app run together.
+  const apps = await mapLimit(gated, ENRICH_CONCURRENCY, async ({ site, resourceGroup, appName, provider }) => {
+    const [functions, slugInfo] = await Promise.all([
+      functionsInApp(client, resourceGroup, appName, site.defaultHostName),
+      readAgentSlugs(accessToken, subscriptionId, site),
+    ])
+    const { agents, appSupportingFunctions } = parseAgentsFromFunctions(functions, slugInfo.slugs, slugInfo.ok)
 
     // Fall back to the app itself as a single agent when nothing was found.
     if (agents.length === 0) {
@@ -825,16 +934,17 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
         supportingFunctions: [],
       })
     }
-    apps.push({
+    return {
       name: appName,
       resourceGroup,
       location: site.location ?? '',
-      provider: settingsMap[AGENT_PROVIDER_SETTING] ?? '',
+      provider,
       defaultHostName: site.defaultHostName ?? '',
       agents,
       supportingFunctions: appSupportingFunctions,
-    })
-  }
+    }
+  })
+
   apps.sort((a, b) => a.name.localeCompare(b.name))
   return { subscriptionId, apps }
 }

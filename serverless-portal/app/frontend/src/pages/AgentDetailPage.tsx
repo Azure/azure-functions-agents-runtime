@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
+import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 
@@ -180,8 +181,8 @@ function DraftEditor({
         </p>
       )}
       <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-        Edits are saved to a portal-side working copy. Publishing to the live Function App is a
-        separate step (not yet wired).
+        Edits are saved to a portal-side working copy. Use <strong>Deploy edits</strong> above to publish
+        this app with your saved changes.
       </p>
     </div>
   )
@@ -197,6 +198,7 @@ export default function AgentDetailPage() {
   const { selected, setSelected } = useIdentity()
   type Sel = { kind: 'agent' } | { kind: 'source'; path: string; label: string } | { kind: 'endpoints' }
   const [sel, setSel] = useState<Sel>({ kind: 'agent' })
+  const deployJob = useDeployJob()
 
   // Deeplink → state: adopt the subscription from the URL so a shared/reloaded
   // detail link restores the exact view even before identity has loaded.
@@ -333,6 +335,32 @@ export default function AgentDetailPage() {
               </dl>
             </div>
           </div>
+
+          <div className="toolbar" style={{ marginBottom: 12 }}>
+            <button
+              className="btn primary"
+              disabled={deployJob.phase === 'running'}
+              onClick={() =>
+                deployJob.redeploy({
+                  subscription: subForQuery,
+                  resourceGroup: agent.resourceGroup,
+                  app: agent.app,
+                })
+              }
+            >
+              {deployJob.phase === 'running' ? 'Deploying…' : '🚀 Deploy edits'}
+            </button>
+            <span className="muted" style={{ fontSize: 12 }}>
+              Redeploys <span className="mono">{agent.app}</span> from its current source with your saved
+              drafts applied.
+            </span>
+          </div>
+          <DeploymentStatus
+            phase={deployJob.phase}
+            result={deployJob.result}
+            portalUrl={deployJob.portalUrl}
+            message={deployJob.message}
+          />
 
           <div className="components">
             <aside className="explorer">
