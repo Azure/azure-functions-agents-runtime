@@ -17,8 +17,6 @@ row text):
 * ``19_aca_sandbox_row2_workflows_enabled``               -> Row 2  (workflows.enabled)
 * ``20_aca_sandbox_row3_dynamic_sessions_conflict``        -> Row 3  (Dynamic Sessions code interpreter)
 * ``21_aca_sandbox_row4_non_http_trigger``                 -> Row 4  (non-HTTP trigger)
-* ``23_aca_sandbox_row6_shared_key_state_storage``         -> Row 6  (Shared Key state storage)
-* ``24_aca_sandbox_row7_missing_dedicated_storage``        -> Row 7  (no dedicated state storage)
 * ``25_aca_sandbox_row8_anonymous_auth``                   -> Row 8  (anonymous HTTP access)
 * ``26_aca_sandbox_row9_bad_auto_suspend_idle``            -> Row 9  (bad auto_suspend_idle)
 * ``27_aca_sandbox_row10_bad_reclaim_idle``                -> Row 10 (bad reclaim_idle)
@@ -36,15 +34,17 @@ row text):
   Row 5 discussion below for why this is schema-level, not
   ``validate_session_runtime``-level.
 
-**Gaps at 22 and 28 (former Row 5 / Row 11 fixtures):** the ``provider``
-field's removal (Decision #84) eliminated the fixture *scenario* each of
-these exercised, so their fixtures and dedicated tests were deleted outright
-instead of repurposed -- but for different underlying reasons. Only Row 11's
-*requirement* is itself gone (structurally unrepresentable); Row 5's
-requirement remains fully active and enforced, just no longer through a
-dedicated ``validate_session_runtime`` fixture (see
-``docs/architecture.md``'s "12 of the FRD's original 13 rows still active"
-framing):
+**Gaps at 22, 23, 24, and 28 (former Row 5 / Row 6 / Row 7 / Row 11 fixtures):**
+these fixture numbers are retired for two different reasons.
+
+Row 5 and Row 11 (22 and 28): the ``provider`` field's removal (Decision #84)
+eliminated the fixture *scenario* each of these exercised, so their fixtures
+and dedicated tests were deleted outright instead of repurposed -- but for
+different underlying reasons. Only Row 11's *requirement* is itself gone
+(structurally unrepresentable); Row 5's requirement remains fully active and
+enforced, just no longer through a dedicated ``validate_session_runtime``
+fixture (see ``docs/architecture.md``'s "10 of the FRD's original 13 rows
+still active" framing):
 
 * Row 5 ("``aca_sandbox`` selected but the block is absent") required a
   ``provider`` flag to select ``aca_sandbox`` independently of the block's
@@ -84,11 +84,14 @@ framing):
   on the unknown ``retention`` key (see
   ``test_config_schema.py::test_session_runtime_config_rejects_retention_as_sibling_of_aca_sandbox``).
 
-Only rows that run after ``_validate_state_storage_auth_mode`` /
-``_validate_state_storage_dedicated_account`` in ``validate_session_runtime``'s
-execution order (2, 3, 4, 8, 12, and 29's valid-but-gated case) need the
-dedicated-state-storage env vars monkeypatched at all; rows 1, 9, and 10 fire
-earlier and need no environment setup.
+Row 6 and Row 7 (23 and 24): Decisions #86/#87 removed the dedicated
+state-storage-account and Shared-Key-disallowed checks entirely. Session
+state now always reuses ``AzureWebJobsStorage``, in every environment, with
+no dedicated-account concept and no auth-mode gate at the config-validation
+layer. ``_validate_state_storage_auth_mode`` and
+``_validate_state_storage_dedicated_account`` were removed from
+``config/validation.py`` along with their call sites, fixtures, and tests; no
+test setup for either row is needed anywhere in this file any more.
 """
 
 from __future__ import annotations
@@ -102,35 +105,6 @@ import pytest
 from azure_functions_agents.app import create_function_app
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
-
-_STATE_STORAGE_SETTING_NAME = "AzureFunctionsAgentsStateStorage"
-
-
-def _set_identity_based_state_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Configure a dedicated, identity-based (RBAC) state-storage connection.
-
-    Satisfies Row 7 (a dedicated account exists) without tripping Row 6 (no
-    Shared Key marker), using the ``<name>__blobServiceUri`` /
-    ``<name>__tableServiceUri`` sibling-setting convention that
-    ``config/env.py``'s ``runtime_env_value`` reads directly from
-    ``os.environ``.
-    """
-    monkeypatch.delenv(_STATE_STORAGE_SETTING_NAME, raising=False)
-    monkeypatch.setenv(
-        f"{_STATE_STORAGE_SETTING_NAME}__blobServiceUri",
-        "https://exampleacct.blob.core.windows.net",
-    )
-    monkeypatch.setenv(
-        f"{_STATE_STORAGE_SETTING_NAME}__tableServiceUri",
-        "https://exampleacct.table.core.windows.net",
-    )
-
-
-def _clear_state_storage(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Ensure no dedicated state-storage setting exists at all (for Row 7)."""
-    monkeypatch.delenv(_STATE_STORAGE_SETTING_NAME, raising=False)
-    monkeypatch.delenv(f"{_STATE_STORAGE_SETTING_NAME}__blobServiceUri", raising=False)
-    monkeypatch.delenv(f"{_STATE_STORAGE_SETTING_NAME}__tableServiceUri", raising=False)
 
 
 def test_session_runtime_absent_defaults_to_in_lang_worker_no_row_fires() -> None:
@@ -166,8 +140,7 @@ def test_row5_explicit_null_aca_sandbox_fails_startup() -> None:
     assert "session_runtime.aca_sandbox" in message
 
 
-def test_row2_workflows_enabled_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_identity_based_state_storage(monkeypatch)
+def test_row2_workflows_enabled_fails_startup() -> None:
     with pytest.raises(ValueError, match=r"[Ww]orkflows") as exc_info:
         create_function_app(FIXTURES_ROOT / "19_aca_sandbox_row2_workflows_enabled")
     message = str(exc_info.value)
@@ -175,8 +148,7 @@ def test_row2_workflows_enabled_fails_startup(monkeypatch: pytest.MonkeyPatch) -
     assert "main.agent.md" in message
 
 
-def test_row3_dynamic_sessions_conflict_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_identity_based_state_storage(monkeypatch)
+def test_row3_dynamic_sessions_conflict_fails_startup() -> None:
     with pytest.raises(ValueError, match=r"[Dd]ynamic [Ss]essions") as exc_info:
         create_function_app(FIXTURES_ROOT / "20_aca_sandbox_row3_dynamic_sessions_conflict")
     message = str(exc_info.value)
@@ -184,8 +156,7 @@ def test_row3_dynamic_sessions_conflict_fails_startup(monkeypatch: pytest.Monkey
     assert "system_tools.dynamic_sessions_code_interpreter" in message
 
 
-def test_row4_non_http_trigger_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_identity_based_state_storage(monkeypatch)
+def test_row4_non_http_trigger_fails_startup() -> None:
     with pytest.raises(ValueError, match=r"http_trigger") as exc_info:
         create_function_app(FIXTURES_ROOT / "21_aca_sandbox_row4_non_http_trigger")
     message = str(exc_info.value)
@@ -193,32 +164,7 @@ def test_row4_non_http_trigger_fails_startup(monkeypatch: pytest.MonkeyPatch) ->
     assert "main.agent.md" in message
 
 
-def test_row6_shared_key_state_storage_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.delenv(f"{_STATE_STORAGE_SETTING_NAME}__blobServiceUri", raising=False)
-    monkeypatch.delenv(f"{_STATE_STORAGE_SETTING_NAME}__tableServiceUri", raising=False)
-    monkeypatch.setenv(
-        _STATE_STORAGE_SETTING_NAME,
-        "DefaultEndpointsProtocol=https;AccountName=fakeacct;"
-        "AccountKey=ZmFrZWtleQ==;EndpointSuffix=core.windows.net",
-    )
-    with pytest.raises(ValueError, match=r"Shared Key") as exc_info:
-        create_function_app(FIXTURES_ROOT / "23_aca_sandbox_row6_shared_key_state_storage")
-    message = str(exc_info.value)
-    assert _STATE_STORAGE_SETTING_NAME in message
-    assert "managed-identity" in message
-
-
-def test_row7_missing_dedicated_storage_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    _clear_state_storage(monkeypatch)
-    with pytest.raises(ValueError, match=r"dedicated") as exc_info:
-        create_function_app(FIXTURES_ROOT / "24_aca_sandbox_row7_missing_dedicated_storage")
-    message = str(exc_info.value)
-    assert "AzureWebJobsStorage" in message
-    assert _STATE_STORAGE_SETTING_NAME in message
-
-
-def test_row8_anonymous_auth_fails_startup(monkeypatch: pytest.MonkeyPatch) -> None:
-    _set_identity_based_state_storage(monkeypatch)
+def test_row8_anonymous_auth_fails_startup() -> None:
     with pytest.raises(ValueError, match=r"Anonymous") as exc_info:
         create_function_app(FIXTURES_ROOT / "25_aca_sandbox_row8_anonymous_auth")
     message = str(exc_info.value)
@@ -249,7 +195,6 @@ def test_row12_unsupported_platform_fails_startup(monkeypatch: pytest.MonkeyPatc
     (the fixture is otherwise fully valid) so this test's outcome does not
     depend on which OS actually runs the test suite.
     """
-    _set_identity_based_state_storage(monkeypatch)
     monkeypatch.setattr(platform, "system", lambda: "Windows")
     with pytest.raises(ValueError, match=r"Linux") as exc_info:
         create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid_but_unavailable")
@@ -273,7 +218,6 @@ def test_row13_backstop_and_valid_config_fail_capability_gate_not_row12(
     no ``aca_sandbox`` session can ever run in this build regardless of
     retention/backstop math.
     """
-    _set_identity_based_state_storage(monkeypatch)
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
     monkeypatch.setattr(sys, "version_info", (3, 13, 0, "final", 0))

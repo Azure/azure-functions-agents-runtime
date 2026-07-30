@@ -11,7 +11,6 @@ from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger as _logger
 
-from .env import runtime_env_value
 from .schema import DEFAULT_SESSION_RUNTIME_HARNESS, EndpointAuthConfig, GlobalConfig, ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
@@ -194,13 +193,6 @@ _ALLOWED_AUTO_SUSPEND_IDLE_SECONDS: tuple[int, ...] = (60, 120, 300, 600, 1800, 
 _RECONCILER_CADENCE_SECONDS_DEFAULT = 3600
 _AUTO_DELETE_GRACE_SECONDS_DEFAULT = 300
 
-# Rows 6/7: the dedicated state-storage app setting. Identity-based ("RBAC")
-# connections use the standard Azure Functions `<name>__blobServiceUri` /
-# `<name>__tableServiceUri` sibling-setting convention instead of a bare
-# connection string.
-_STATE_STORAGE_SETTING_NAME = "AzureFunctionsAgentsStateStorage"
-_SHARED_KEY_MARKER = "accountkey="
-
 # Row 12: the only Function App host ABI aca_sandbox supports.
 _SUPPORTED_PLATFORM_SYSTEM = "Linux"
 _SUPPORTED_PLATFORM_MACHINES = frozenset({"x86_64", "amd64"})
@@ -283,63 +275,6 @@ def _validate_platform_capability() -> None:
         raise _session_runtime_error(
             "session_runtime",
             f"aca_sandbox requires Python 3.13 or 3.14 (detected {major}.{minor})",
-        )
-
-
-def _validate_state_storage_auth_mode() -> None:
-    """Row 6: the dedicated state-storage connection must not use a Shared Key.
-
-    Config-only proxy (no live Storage-API access here): an ``AccountKey=``
-    fragment in the ``AzureFunctionsAgentsStateStorage`` app setting means a
-    Shared Key connection string was used instead of identity-based (RBAC)
-    auth. Live verification (account-level Shared-Key-disabled / RBAC
-    scoping) is a later phase.
-    """
-    value = runtime_env_value(_STATE_STORAGE_SETTING_NAME)
-    if _SHARED_KEY_MARKER in value.lower():
-        raise _session_runtime_error(
-            "session_runtime",
-            f"the `{_STATE_STORAGE_SETTING_NAME}` connection must use a "
-            "managed-identity (RBAC) connection, not a Shared Key connection string",
-        )
-
-
-def _validate_state_storage_dedicated_account() -> None:
-    """Row 7: aca_sandbox must not reuse ``AzureWebJobsStorage`` for session state.
-
-    P2 is config-only: this checks only that a dedicated
-    ``AzureFunctionsAgentsStateStorage`` setting exists at all (either a bare
-    connection string, or its identity-based ``__blobServiceUri`` /
-    ``__tableServiceUri`` sibling form), not that it is actually distinct
-    storage-account infrastructure from ``AzureWebJobsStorage`` at the API
-    level (a later-phase, live check).
-
-    Known gap (disclosed, not fixed in this phase): FRD Decision #31 / matrix
-    row 7 scope this requirement to *production* -- reuse of
-    ``AzureWebJobsStorage`` is explicitly allowed for local/dev and explicit
-    preview trials. This function has no environment carve-out and requires
-    the dedicated account unconditionally in every environment, which is
-    stricter than designed. Implementing the carve-out correctly needs a
-    "how do we detect production" mechanism that does not exist anywhere in
-    this codebase and is not specified by the FRD's config-only (P2)
-    authoring surface -- the FRD's own row 6/7 "runtime (0008.3) + config
-    (0008.10)" split suggests the environment-aware half of this check is a
-    live-verification concern for a later phase, not a P2 config check.
-    Inventing an environment-detection heuristic now would be a unilateral
-    design decision outside this phase's scope, and the failure direction
-    (unconditionally strict) is fail-closed/safe rather than fail-open, so it
-    is tracked here as a known gap rather than fixed speculatively.
-    """
-    has_connection_string = bool(runtime_env_value(_STATE_STORAGE_SETTING_NAME))
-    has_identity_based = bool(
-        runtime_env_value(f"{_STATE_STORAGE_SETTING_NAME}__blobServiceUri")
-        or runtime_env_value(f"{_STATE_STORAGE_SETTING_NAME}__tableServiceUri")
-    )
-    if not has_connection_string and not has_identity_based:
-        raise _session_runtime_error(
-            "session_runtime",
-            f"a dedicated `{_STATE_STORAGE_SETTING_NAME}` connection is required; "
-            "the shared `AzureWebJobsStorage` account must not be reused for session state",
         )
 
 
@@ -490,6 +425,10 @@ def validate_session_runtime(
     """
     session_runtime = global_config.session_runtime
     if session_runtime is None:
+        _logger.info(
+            "session_runtime: not configured; defaulting to in-lang-worker "
+            "(in-process) execution."
+        )
         return
 
     # Row 1 (owning rule: 0008.7 #34/#36): harness describes agent-execution
@@ -504,6 +443,10 @@ def validate_session_runtime(
 
     aca_sandbox = session_runtime.aca_sandbox
     if aca_sandbox is None:
+        _logger.info(
+            "session_runtime: no aca_sandbox block configured; defaulting to "
+            "in-lang-worker (in-process) execution."
+        )
         # In-process (default): no further FRD 0008 rows apply. Row 5's
         # "sandbox_group_resource_id required" case is enforced entirely at
         # the schema layer, before this function ever runs, for both ways an
@@ -543,13 +486,10 @@ def validate_session_runtime(
         # this build -- see auto_delete_backstop_violated's docstring.
         # Satisfied unconditionally by the capability gate below.
 
-    # Row 6 (owning rule: 0008.3 + 0008.10): state storage must not use a
-    # Shared Key connection.
-    _validate_state_storage_auth_mode()
-
-    # Row 7 (owning rule: 0008.3 #31 + 0008.10): state storage must be a
-    # dedicated account, not AzureWebJobsStorage.
-    _validate_state_storage_dedicated_account()
+    # Rows 6 and 7 (session state storage auth-mode / dedicated-account
+    # checks) are removed -- see Decisions #86/#87. Session state always
+    # reuses `AzureWebJobsStorage`, in every environment, with no dedicated
+    # account and no Shared-Key gate at this layer.
 
     # Rows 2, 3, 4, 8: per-agent checks.
     for resolved in resolved_agents:
