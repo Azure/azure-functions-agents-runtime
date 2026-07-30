@@ -26,6 +26,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Preview ACA Sandbox transport. Kept optional so the default in-language-worker
+# runtime has no preview-SDK dependency edge.
+aca_sandbox = [
+    "azure-containerapps-sandbox==0.1.0b4",
+]
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
 # only when another OpenTelemetry provider is already active (e.g. the Functions worker) and exports
@@ -141,4 +146,5 @@ warn_required_dynamic_aliases = true
 addopts = "-m 'not e2e'"
 markers = [
     "e2e: end-to-end tests that boot sample apps with `func start` (require func + Azurite).",
+    "live_aca: credential-gated ACA Sandbox smoke tests; skipped unless explicitly enabled.",
 ]
