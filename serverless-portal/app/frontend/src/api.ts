@@ -73,6 +73,24 @@ export interface SourceFile {
   source: 'draft' | 'deployed' | 'none'
 }
 
+export interface DeployResult {
+  status: 'running' | 'deployed' | 'staged' | 'error'
+  message: string
+  files: string[]
+  url?: string
+}
+
+export type DeployTarget =
+  | { kind: 'existing'; app: string; resourceGroup: string }
+  | {
+      kind: 'new'
+      appName: string
+      resourceGroup: string
+      region: string
+      foundryEndpoint: string
+      foundryModel: string
+    }
+
 // Error carrying the HTTP status so React Query's retry guard can skip 4xx.
 export class ApiError extends Error {
   readonly status: number
@@ -149,4 +167,25 @@ export const api = {
       `/api/source?subscription=${enc(p.subscription)}&app=${enc(p.app)}&path=${enc(p.path)}`,
       { content: p.content },
     ),
+
+  // Create/deploy an agent into an existing or new Function App. Provisioning +
+  // remote build can take minutes, so this starts a background job and polls it.
+  deployAgent: async (p: {
+    subscription: string
+    agent: { fileName: string; content: string }
+    target: DeployTarget
+  }): Promise<DeployResult> => {
+    const started = await req<{ jobId: string; status: string; files: string[] }>('POST', '/api/deploy', p)
+    const deadline = Date.now() + 15 * 60 * 1000
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 4000))
+      const state = await req<DeployResult>('GET', `/api/deploy/${enc(started.jobId)}`)
+      if (state.status !== 'running') return state
+    }
+    return {
+      status: 'error',
+      message: 'Deploy timed out after 15 minutes. Check the app in the Azure portal.',
+      files: started.files ?? [],
+    }
+  },
 }

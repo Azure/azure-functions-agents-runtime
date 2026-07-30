@@ -357,7 +357,7 @@ async function functionsFromAdminApi(client, resourceGroup, appName, defaultHost
 // Derive the Kudu/SCM host for a site (e.g. `app.scm.azurewebsites.net`), used
 // to read deployed source files. Prefers an advertised `*.scm.*` host name and
 // otherwise inserts `.scm.` after the app segment of the default host name.
-function scmHostName(site) {
+export function scmHostName(site) {
   const enabled = Array.isArray(site?.enabledHostNames) ? site.enabledHostNames : []
   const advertised = enabled.find((h) => typeof h === 'string' && /\.scm\./i.test(h))
   if (advertised) return advertised
