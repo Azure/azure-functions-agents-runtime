@@ -29,14 +29,19 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any
 
 import azure.functions as func
 
 from ..config import EndpointAuthConfig, EntraAuthConfig
 from ..config.env import runtime_env_value
+from ..session_state.models import (
+    EntraPrincipal,
+    FunctionAppPrincipal,
+    OwnerPrincipal,
+    SessionStateContractError,
+)
 
 _EASY_AUTH_PRINCIPAL_HEADER = "x-ms-client-principal"
 
@@ -103,12 +108,15 @@ def _short_claim_name(claim_type: str) -> str:
     return claim_type.rsplit("/", 1)[-1]
 
 
-def _flatten_claims(principal: dict[str, Any]) -> dict[str, list[str]]:
-    """Normalize an Easy Auth principal or decoded JWT into short-name -> values."""
+def _flatten_claims(principal: Mapping[str, object]) -> dict[str, list[str]]:
+    """Normalize an Easy Auth principal into short-name -> values.
+
+    Easy Auth injects ``claims`` as a list of ``{typ, val}`` maps. Unknown or
+    malformed entries are skipped; allow-list checks only see string claim values.
+    """
     flat: dict[str, list[str]] = {}
     claims = principal.get("claims")
     if isinstance(claims, list):
-        # Easy Auth shape: a list of {"typ": ..., "val": ...} entries.
         for entry in claims:
             if not isinstance(entry, dict):
                 continue
@@ -117,7 +125,7 @@ def _flatten_claims(principal: dict[str, Any]) -> dict[str, list[str]]:
             if isinstance(typ, str) and isinstance(val, str):
                 flat.setdefault(_short_claim_name(typ), []).append(val)
         return flat
-    # Decoded JWT / flat dict of claims.
+    # Flat claim map fallback (rare non-Easy-Auth shapes in tests).
     for key, value in principal.items():
         short = _short_claim_name(key)
         if isinstance(value, str):
@@ -148,13 +156,119 @@ def _check_allowlists(
     return None
 
 
-def _decode_easy_auth_principal(header_value: str) -> dict[str, Any] | None:
+def _decode_easy_auth_principal(header_value: str) -> dict[str, object] | None:
     try:
         raw = base64.b64decode(header_value, validate=True)
-        data = json.loads(raw)
+        data: object = json.loads(raw)
     except (binascii.Error, ValueError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _authorized_entra_principal(
+    get_header: HeaderGetter,
+    auth: EndpointAuthConfig,
+) -> tuple[dict[str, object] | None, AuthError | None]:
+    if not _easy_auth_enforced():
+        return None, AuthError(
+            401,
+            "Entra authentication requires App Service Authentication (Easy Auth) "
+            "to be enabled in front of this app.",
+        )
+
+    principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
+    if not principal_header:
+        return None, AuthError(
+            401,
+            "Entra authentication required (App Service Authentication).",
+        )
+
+    principal = _decode_easy_auth_principal(principal_header)
+    if principal is None:
+        return None, AuthError(401, "Invalid client principal header.")
+
+    auth_typ = principal.get("auth_typ")
+    if not isinstance(auth_typ, str) or auth_typ.lower() not in {
+        "aad",
+        "azureactivedirectory",
+    }:
+        return None, AuthError(401, "Entra authentication required.")
+
+    allowlist_error = _check_allowlists(_flatten_claims(principal), auth.entra)
+    if allowlist_error is not None:
+        return None, allowlist_error
+    return principal, None
+
+
+def _single_claim(claims: Mapping[str, list[str]], name: str) -> str | None:
+    normalized = {value.strip().lower() for value in claims.get(name, []) if value.strip()}
+    if len(normalized) != 1:
+        return None
+    return next(iter(normalized))
+
+
+def _owner_tid_oid(principal: Mapping[str, object]) -> tuple[str, str] | None:
+    """Extract exactly one tid and oid from short names or supported aliases only."""
+    values: dict[str, list[str]] = {"tid": [], "oid": []}
+    claims = principal.get("claims")
+    if isinstance(claims, list):
+        for entry in claims:
+            if not isinstance(entry, dict):
+                continue
+            typ = entry.get("typ")
+            val = entry.get("val")
+            if not isinstance(typ, str) or not isinstance(val, str):
+                continue
+            short = typ if typ in values else _CLAIM_ALIASES.get(typ)
+            if short in values:
+                values[short].append(val)
+    else:
+        for typ, val in principal.items():
+            short = typ if typ in values else _CLAIM_ALIASES.get(typ)
+            if short not in values:
+                continue
+            if isinstance(val, str):
+                values[short].append(val)
+            elif isinstance(val, list):
+                values[short].extend(item for item in val if isinstance(item, str))
+
+    tenant_id = _single_claim(values, "tid")
+    object_id = _single_claim(values, "oid")
+    if tenant_id is None or object_id is None:
+        return None
+    return tenant_id, object_id
+
+
+def resolve_owner_principal(
+    get_header: HeaderGetter,
+    auth: EndpointAuthConfig,
+) -> OwnerPrincipal | AuthError:
+    """Resolve a typed owner input without changing existing endpoint enforcement.
+
+    This seam is intentionally not wired into request execution in P3a. Functions
+    host key modes resolve to an app marker without reading a key or key name.
+    Entra mode reuses the already-authorized Easy Auth principal but additionally
+    requires stable ``tid`` and immutable ``oid`` claims for durable ownership.
+    """
+    if auth.mode in {"function", "admin"}:
+        return FunctionAppPrincipal()
+    if auth.mode != "entra":
+        return AuthError(401, "Persistent sessions require authenticated endpoint auth.")
+
+    principal, error = _authorized_entra_principal(get_header, auth)
+    if error is not None:
+        return error
+    if principal is None:
+        return AuthError(401, "Stable Entra owner identity is required.")
+
+    identity = _owner_tid_oid(principal)
+    if identity is None:
+        return AuthError(401, "Stable Entra owner identity is required.")
+    tenant_id, object_id = identity
+    try:
+        return EntraPrincipal.create(tenant_id=tenant_id, object_id=object_id)
+    except SessionStateContractError:
+        return AuthError(401, "Stable Entra owner identity is required.")
 
 
 def authorize_entra_request(
@@ -175,29 +289,5 @@ def authorize_entra_request(
     """
     if auth.mode != "entra":
         return None
-    entra = auth.entra
-
-    # The route is anonymous at the Functions key layer, so the injected principal
-    # header is only trustworthy when Easy Auth is guaranteed to have stripped any
-    # client-supplied copy. Without that guarantee, fail closed rather than trust
-    # spoofable input.
-    if not _easy_auth_enforced():
-        return AuthError(
-            401,
-            "Entra authentication requires App Service Authentication (Easy Auth) "
-            "to be enabled in front of this app.",
-        )
-
-    principal_header = get_header(_EASY_AUTH_PRINCIPAL_HEADER)
-    if not principal_header:
-        return AuthError(401, "Entra authentication required (App Service Authentication).")
-
-    principal = _decode_easy_auth_principal(principal_header)
-    if principal is None:
-        return AuthError(401, "Invalid client principal header.")
-
-    auth_typ = principal.get("auth_typ")
-    if not isinstance(auth_typ, str) or auth_typ.lower() not in {"aad", "azureactivedirectory"}:
-        return AuthError(401, "Entra authentication required.")
-
-    return _check_allowlists(_flatten_claims(principal), entra)
+    _principal, error = _authorized_entra_principal(get_header, auth)
+    return error

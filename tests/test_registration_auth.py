@@ -16,9 +16,12 @@ import pytest
 
 from azure_functions_agents.config.schema import EndpointAuthConfig, EntraAuthConfig
 from azure_functions_agents.registration._auth import (
+    AuthError,
     authorize_entra_request,
     resolve_endpoint_auth_level,
+    resolve_owner_principal,
 )
+from azure_functions_agents.session_state import EntraPrincipal, FunctionAppPrincipal
 
 _ENV_KEYS = (
     "AZURE_FUNCTIONS_AGENTS_ENTRA_EASY_AUTH",
@@ -128,6 +131,132 @@ def test_entra_easy_auth_principal_authorized() -> None:
     assert authorize_entra_request(_header_getter(headers), auth) is None
 
 
+def test_owner_principal_seam_resolves_stable_entra_identity() -> None:
+    auth = EndpointAuthConfig(mode="entra")
+    claims = [
+        {"typ": "tid", "val": "AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE"},
+        {"typ": "oid", "val": "01234567-89AB-CDEF-0123-456789ABCDEF"},
+    ]
+
+    principal = resolve_owner_principal(
+        _header_getter({"X-MS-CLIENT-PRINCIPAL": _principal_header(claims)}),
+        auth,
+    )
+
+    assert principal == EntraPrincipal.create(
+        tenant_id="aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        object_id="01234567-89ab-cdef-0123-456789abcdef",
+    )
+
+
+def test_owner_principal_seam_accepts_only_supported_standard_claim_aliases() -> None:
+    standard_claims = [
+        {
+            "typ": "http://schemas.microsoft.com/identity/claims/tenantid",
+            "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        },
+        {
+            "typ": "http://schemas.microsoft.com/identity/claims/objectidentifier",
+            "val": "01234567-89ab-cdef-0123-456789abcdef",
+        },
+    ]
+    custom_suffix_claims = [
+        {
+            "typ": "https://claims.example/tid",
+            "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+        },
+        {
+            "typ": "https://claims.example/oid",
+            "val": "01234567-89ab-cdef-0123-456789abcdef",
+        },
+    ]
+
+    standard = resolve_owner_principal(
+        _header_getter(
+            {"X-MS-CLIENT-PRINCIPAL": _principal_header(standard_claims)}
+        ),
+        EndpointAuthConfig(mode="entra"),
+    )
+    custom = resolve_owner_principal(
+        _header_getter(
+            {"X-MS-CLIENT-PRINCIPAL": _principal_header(custom_suffix_claims)}
+        ),
+        EndpointAuthConfig(mode="entra"),
+    )
+
+    assert isinstance(standard, EntraPrincipal)
+    assert isinstance(custom, AuthError)
+    assert custom.status_code == 401
+
+
+@pytest.mark.parametrize(
+    "claims",
+    [
+        [{"typ": "oid", "val": "01234567-89ab-cdef-0123-456789abcdef"}],
+        [{"typ": "tid", "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"}],
+        [
+            {"typ": "tid", "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+            {"typ": "oid", "val": "not-a-guid"},
+        ],
+        [
+            {"typ": "tid", "val": "not-a-guid"},
+            {"typ": "oid", "val": "01234567-89ab-cdef-0123-456789abcdef"},
+        ],
+        [
+            {"typ": "tid", "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+            {"typ": "tid", "val": "bbbbbbbb-cccc-dddd-eeee-ffffffffffff"},
+            {"typ": "oid", "val": "01234567-89ab-cdef-0123-456789abcdef"},
+        ],
+        [
+            {"typ": "tid", "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+            {"typ": "oid", "val": "01234567-89ab-cdef-0123-456789abcdef"},
+            {"typ": "oid", "val": "fedcba98-7654-3210-fedc-ba9876543210"},
+        ],
+    ],
+)
+def test_owner_principal_seam_fails_closed_without_one_stable_tid_and_oid(
+    claims: list[dict[str, str]],
+) -> None:
+    principal = resolve_owner_principal(
+        _header_getter({"X-MS-CLIENT-PRINCIPAL": _principal_header(claims)}),
+        EndpointAuthConfig(mode="entra"),
+    )
+
+    assert isinstance(principal, AuthError)
+    assert principal.status_code == 401
+    assert "Stable Entra owner identity" in principal.message
+
+
+@pytest.mark.parametrize("mode", ["function", "admin"])
+def test_function_key_owner_seam_is_app_scoped_and_ignores_key_rotation(mode: str) -> None:
+    auth = EndpointAuthConfig(mode=mode)  # type: ignore[arg-type]
+    first = resolve_owner_principal(
+        _header_getter(
+            {"x-functions-key": "first-secret", "x-functions-key-name": "first"}
+        ),
+        auth,
+    )
+    rotated = resolve_owner_principal(
+        _header_getter(
+            {"x-functions-key": "rotated-secret", "x-functions-key-name": "rotated"}
+        ),
+        auth,
+    )
+
+    assert first == FunctionAppPrincipal()
+    assert rotated == first
+    assert "secret" not in repr(first)
+
+
+def test_anonymous_owner_seam_fails_closed_without_changing_endpoint_behavior() -> None:
+    auth = EndpointAuthConfig(mode="anonymous")
+
+    assert authorize_entra_request(_header_getter({}), auth) is None
+    principal = resolve_owner_principal(_header_getter({}), auth)
+    assert isinstance(principal, AuthError)
+    assert principal.status_code == 401
+
+
 def test_entra_easy_auth_invalid_principal_header_is_unauthorized() -> None:
     auth = EndpointAuthConfig(mode="entra")
     headers = {"X-MS-CLIENT-PRINCIPAL": "not-base64-json!!!"}
@@ -208,4 +337,3 @@ def test_entra_config_tenant_is_enforced_regardless_of_env(
     error = authorize_entra_request(_header_getter(bad), auth)
     assert error is not None
     assert error.status_code == 403
-
