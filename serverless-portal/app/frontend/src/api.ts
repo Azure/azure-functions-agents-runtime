@@ -88,6 +88,12 @@ export interface DeployStarted {
   portalUrl?: string
 }
 
+export interface AgentChatResult {
+  sessionId: string
+  response: string
+  toolCalls: Record<string, unknown>[]
+}
+
 export type DeployTarget =
   | { kind: 'existing'; app: string; resourceGroup: string }
   | {
@@ -191,4 +197,14 @@ export const api = {
 
   // Poll a deploy/redeploy job's status.
   getDeployStatus: (jobId: string) => req<DeployResult>('GET', `/api/deploy/${enc(jobId)}`),
+
+  // Chat with a deployed agent's built-in endpoint (proxied via the backend).
+  agentChat: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    agent: string
+    prompt: string
+    sessionId?: string
+  }) => req<AgentChatResult>('POST', '/api/agent/chat', p),
 }
