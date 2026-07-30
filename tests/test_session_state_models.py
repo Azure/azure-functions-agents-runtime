@@ -170,7 +170,9 @@ def test_admission_rejects_cross_partition_or_inconsistent_rows() -> None:
     with pytest.raises(SessionStateContractError, match="share one owner partition"):
         AdmissionRecords.create(_session(), _run(partition=_partition(site_name="other-app")))
     with pytest.raises(SessionStateContractError, match="active_run_id"):
-        AdmissionRecords.create(_session(active_run_id=None), _run())
+        # Running sessions cannot be constructed without active_run_id; admission also
+        # rejects a mismatched pointer when the session points at a different run.
+        AdmissionRecords.create(_session(active_run_id="other-run"), _run())
     with pytest.raises(SessionStateContractError, match="share session_id"):
         AdmissionRecords.create(_session(), replace(_run(), session_id="other"))
     with pytest.raises(SessionStateContractError, match="share generation"):
@@ -236,9 +238,9 @@ def test_generation_is_preserved_normally_and_strictly_increases_only_for_rebind
 
 def test_reason_fields_are_bounded_codes_and_required_for_terminal_session_states() -> None:
     with pytest.raises(SessionStateContractError, match="tombstone_reason"):
-        _session(status="tombstoned")
+        _session(status="tombstoned", active_run_id=None)
     with pytest.raises(SessionStateContractError, match="quarantine_reason"):
-        _session(status="quarantined")
+        _session(status="quarantined", active_run_id=None)
     with pytest.raises(SessionStateContractError, match="reason code"):
         DurableSessionRecord.create(
             owner_partition=_partition(),
@@ -261,6 +263,28 @@ def test_reason_fields_are_bounded_codes_and_required_for_terminal_session_state
             created_at=_NOW,
             updated_at=_NOW,
         )
+
+
+def test_session_status_enforces_active_run_id_lifecycle_invariants() -> None:
+    with pytest.raises(SessionStateContractError, match="running sessions require active_run_id"):
+        _session(status="running", active_run_id=None)
+    with pytest.raises(SessionStateContractError, match="canceling sessions require active_run_id"):
+        _session(status="canceling", active_run_id=None)
+    with pytest.raises(
+        SessionStateContractError,
+        match="ready sessions require active_run_id to be unset",
+    ):
+        _session(status="ready", active_run_id=_RUN_ID)
+    with pytest.raises(
+        SessionStateContractError,
+        match="deleted sessions require active_run_id to be unset",
+    ):
+        _session(status="deleted", active_run_id=_RUN_ID)
+
+    ready = _session(status="ready", active_run_id=None)
+    canceling = _session(status="canceling", active_run_id=_RUN_ID)
+    assert ready.active_run_id is None
+    assert canceling.active_run_id == _RUN_ID
 
 
 def test_result_availability_is_consistent_with_run_status() -> None:

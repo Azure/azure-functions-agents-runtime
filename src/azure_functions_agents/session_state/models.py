@@ -79,6 +79,21 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _STATE_STORE_FINGERPRINT_PATTERN = re.compile(r"^s1-[0-9a-f]{64}$")
 _REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _REGION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
+_STATUSES_REQUIRING_ACTIVE_RUN: frozenset[str] = frozenset({"running", "canceling"})
+_STATUSES_FORBIDDING_ACTIVE_RUN: frozenset[str] = frozenset(
+    {
+        "creating",
+        "ready",
+        "suspending",
+        "suspended",
+        "resuming",
+        "failed",
+        "quarantined",
+        "tombstoned",
+        "deleting",
+        "deleted",
+    }
+)
 
 
 class SessionStateContractError(ValueError):
@@ -585,6 +600,19 @@ class DurableSessionRecord:
     ) -> DurableSessionRecord:
         if status not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
+        normalized_active_run_id = (
+            None
+            if active_run_id is None
+            else _validate_opaque_id(active_run_id, "active_run_id")
+        )
+        if status in _STATUSES_REQUIRING_ACTIVE_RUN and normalized_active_run_id is None:
+            raise SessionStateContractError(
+                f"{status} sessions require active_run_id"
+            )
+        if status in _STATUSES_FORBIDDING_ACTIVE_RUN and normalized_active_run_id is not None:
+            raise SessionStateContractError(
+                f"{status} sessions require active_run_id to be unset"
+            )
         normalized_snapshots = tuple(snapshot_ids)
         encode_snapshot_ids(normalized_snapshots)
         if _STATE_STORE_FINGERPRINT_PATTERN.fullmatch(state_store_fingerprint) is None:
@@ -615,11 +643,7 @@ class DurableSessionRecord:
             last_activity_at=_utc_datetime(last_activity_at, "last_activity_at"),
             expires_at=_utc_datetime(expires_at, "expires_at"),
             idle_policy_armed=_require_bool(idle_policy_armed, "idle_policy_armed"),
-            active_run_id=(
-                None
-                if active_run_id is None
-                else _validate_opaque_id(active_run_id, "active_run_id")
-            ),
+            active_run_id=normalized_active_run_id,
             snapshot_ids=normalized_snapshots,
             region=_normalize_region(region),
             state_store_fingerprint=state_store_fingerprint,
