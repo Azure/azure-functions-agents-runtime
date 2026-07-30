@@ -11,11 +11,17 @@
 //      it carries the app-setting marker `AZURE_FUNCTIONS_AGENTS_PROVIDER` (its
 //      value is the model provider, e.g. `foundry`). This is the sole, reliable
 //      "is this an agent app?" signal available from ARM.
-//   2. Agents inside a qualifying app are enumerated from the runtime naming
-//      convention: every registered function is prefixed `agent_`, built-in
-//      endpoints register at routes `agents/<name>/…` (chat, chatstream, page)
-//      and an MCP tool trigger `agent_<name>_builtin_mcp`. If no agents can be
-//      parsed, the app itself is surfaced as a single agent.
+//   2. The `*.agent.md` source files are the source of truth for the agent set
+//      (a developer can add their own plain Functions to `function_app.py`, and
+//      those are indistinguishable from agent triggers in ARM metadata). We read
+//      that file list — via the Kudu VFS API, or, on Flex Consumption (no Kudu),
+//      by listing the deployment package zip's central directory. Given the
+//      list: a registered function whose name matches an `.agent.md` slug (or an
+//      `agent_<slug>_builtin_*` endpoint) is an agent; every other function is a
+//      supporting function; and `.agent.md` files with no registered function
+//      (no trigger, no built-in endpoints) are surfaced as trigger-less agents.
+//      When the file list can't be read, we fall back to treating every
+//      non-built-in function as its own agent.
 //
 // Function enumeration prefers the ARM control plane (`listFunctions`). That
 // endpoint returns nothing on Linux Consumption / Flex Consumption plans, so we
@@ -27,8 +33,12 @@
 // (the same first-party app as Polaris) and forwarded as a Bearer token. Every
 // ARM call below runs as the signed-in user — no `az login` required.
 
+import { PassThrough } from 'node:stream'
+
 import { SubscriptionClient } from '@azure/arm-resources-subscriptions'
 import { WebSiteManagementClient } from '@azure/arm-appservice'
+import { ContainerClient, StorageSharedKeyCredential } from '@azure/storage-blob'
+import yauzl from 'yauzl'
 
 const AGENT_PROVIDER_SETTING = 'AZURE_FUNCTIONS_AGENTS_PROVIDER'
 
@@ -40,11 +50,18 @@ export const DEFAULT_SUBSCRIPTION_ID =
 // Built-in endpoint function suffixes we recognise, longest first so the agent
 // name is stripped correctly (e.g. `_builtin_chatstream` before `_builtin_chat`).
 const BUILTIN_SUFFIXES = [
+  '_builtin_workflow_status',
+  '_builtin_workflows',
   '_builtin_chatstream',
   '_builtin_chat_page',
   '_builtin_chat',
   '_builtin_mcp',
 ]
+
+// App-level functions the runtime registers to power Durable workflows. They
+// belong to no single agent, so they are surfaced as supporting functions —
+// never as agents.
+const SYSTEM_FUNCTION_NAMES = new Set(['agents_workflow_orchestrator', 'agents_workflow_run_tool'])
 
 /**
  * Wrap a raw ARM access token (forwarded from the browser) as a `TokenCredential`
@@ -200,22 +217,26 @@ function normalizeTrigger(type) {
 }
 
 // Fold a collection of function definitions (from ARM or the admin API) into the
-// distinct agents they represent. Shared so both discovery sources parse
-// identically.
+// agents they represent plus the supporting functions that back them.
 //
-// Two agent shapes are recognised:
-//   • Built-in-endpoint agents — one or more `agent_<slug>_builtin_*` functions
-//     (chat UI/API/SSE/MCP) sharing a slug, grouped into a single agent.
-//   • Custom-trigger agents — every other registered function is its own agent
-//     (the runtime names the trigger function after the `<agent>.agent.md`
-//     source file). Its trigger type and any HTTP route are captured so the UI
-//     can surface the real invocation endpoint.
-function parseAgentsFromFunctions(functions) {
-  const agents = new Map() // name → { name, triggers:Set, builtinEndpoints, routes:Set }
+// `agentSlugs` is the authoritative set of agent slugs from the deployed
+// `*.agent.md` files; `authoritative` is true when that list is known to be
+// complete. With it, a plain trigger function is an agent only when its name
+// matches an `.agent.md` slug — otherwise it is a developer-defined supporting
+// function. Without it (files unreadable) we fall back to treating every
+// non-built-in function as its own agent.
+//
+// Returns the agent list (each with the built-in endpoint functions that back
+// it) and the app-level supporting functions (developer functions + Durable
+// workflow plumbing) that belong to no single agent.
+function parseAgentsFromFunctions(functions, agentSlugs = new Set(), authoritative = false) {
+  // slug → { name, triggers:Set, builtinEndpoints, routes:Set, supporting:Set }
+  const agents = new Map()
+  const appSupporting = new Map() // function name → trigger label
   const getEntry = (name) => {
     let entry = agents.get(name)
     if (!entry) {
-      entry = { name, triggers: new Set(), builtinEndpoints: false, routes: new Set() }
+      entry = { name, triggers: new Set(), builtinEndpoints: false, routes: new Set(), supporting: new Set() }
       agents.set(name, entry)
     }
     return entry
@@ -224,33 +245,71 @@ function parseAgentsFromFunctions(functions) {
   for (const fn of functions) {
     // Function names arrive as `<app>/<function>`; keep the last segment.
     const shortName = String(fn?.name ?? '').split('/').pop() ?? ''
+    if (!shortName) continue
     const bindings = fn?.config?.bindings ?? []
     const triggerBinding = bindings.find(
       (b) => typeof b?.type === 'string' && b.type.toLowerCase().endsWith('trigger'),
     )
     const routeBinding = bindings.find((b) => typeof b?.route === 'string' && b.route)
     const route = routeBinding?.route ?? ''
+    const triggerLabel = triggerBinding?.type ? normalizeTrigger(triggerBinding.type) : 'http'
 
+    // App-level runtime plumbing (Durable workflow engine) — never an agent.
+    if (SYSTEM_FUNCTION_NAMES.has(shortName)) {
+      appSupporting.set(shortName, triggerLabel)
+      continue
+    }
+
+    // Built-in endpoint / workflow function → a supporting function of the agent
+    // identified by its `agents/<slug>/…` route or `agent_<slug>_builtin_*` name.
     const builtinSlug = builtinSlugFromFunction(shortName, route)
     if (builtinSlug) {
       const entry = getEntry(builtinSlug)
       entry.builtinEndpoints = true
-      entry.triggers.add('httpTrigger')
+      entry.supporting.add(shortName)
       continue
     }
 
-    if (!shortName) continue
-    const entry = getEntry(shortName)
-    if (triggerBinding?.type) entry.triggers.add(String(triggerBinding.type))
-    if (route) entry.routes.add(route)
+    // Plain trigger function. It's an agent when its name matches an `.agent.md`
+    // slug (or when we have no file list to check against); otherwise it's a
+    // developer-defined supporting function.
+    if (!authoritative || agentSlugs.has(shortName)) {
+      const entry = getEntry(shortName)
+      if (triggerBinding?.type) entry.triggers.add(String(triggerBinding.type))
+      if (route) entry.routes.add(route)
+    } else {
+      appSupporting.set(shortName, triggerLabel)
+    }
   }
 
-  return [...agents.values()].map((a) => ({
-    name: a.name,
-    trigger: a.triggers.has('httpTrigger') ? 'http' : normalizeTrigger([...a.triggers][0] ?? 'httpTrigger'),
-    builtinEndpoints: a.builtinEndpoints,
-    routes: [...a.routes],
-  }))
+  // `.agent.md` files that register no function at all (no trigger, no endpoint).
+  if (authoritative) {
+    for (const slug of agentSlugs) {
+      if (!agents.has(slug)) getEntry(slug)
+    }
+  }
+
+  const agentList = [...agents.values()]
+    .map((a) => ({
+      name: a.name,
+      trigger: a.triggers.has('httpTrigger')
+        ? 'http'
+        : a.triggers.size > 0
+          ? normalizeTrigger([...a.triggers][0])
+          : a.builtinEndpoints
+            ? 'http'
+            : 'none',
+      builtinEndpoints: a.builtinEndpoints,
+      routes: [...a.routes],
+      supportingFunctions: [...a.supporting].sort(),
+    }))
+    .sort((x, y) => x.name.localeCompare(y.name))
+
+  const appSupportingFunctions = [...appSupporting.entries()]
+    .map(([name, trigger]) => ({ name, trigger }))
+    .sort((x, y) => x.name.localeCompare(y.name))
+
+  return { agents: agentList, appSupportingFunctions }
 }
 
 // Enumerate an app's functions via the ARM control plane. Reliable on Windows /
@@ -295,20 +354,419 @@ async function functionsFromAdminApi(client, resourceGroup, appName, defaultHost
   }
 }
 
-// List the agents hosted in a single Function App. Prefers the ARM control
-// plane; on plans where that yields nothing (Linux/Flex Consumption) it falls
-// back to the app's admin metadata API so multi-agent apps and their built-in
-// endpoints are still discovered.
-async function agentsInApp(client, resourceGroup, appName, defaultHostName) {
-  let agents = parseAgentsFromFunctions(
-    await functionsFromArm(client, resourceGroup, appName),
+// Derive the Kudu/SCM host for a site (e.g. `app.scm.azurewebsites.net`), used
+// to read deployed source files. Prefers an advertised `*.scm.*` host name and
+// otherwise inserts `.scm.` after the app segment of the default host name.
+function scmHostName(site) {
+  const enabled = Array.isArray(site?.enabledHostNames) ? site.enabledHostNames : []
+  const advertised = enabled.find((h) => typeof h === 'string' && /\.scm\./i.test(h))
+  if (advertised) return advertised
+  const def = String(site?.defaultHostName ?? '')
+  return def ? def.replace(/^([^.]+)\./, '$1.scm.') : ''
+}
+
+// Replicate the runtime's function-name sanitisation so a `<name>.agent.md`
+// filename maps to the same slug the runtime registers functions under.
+function safeFunctionName(rawName) {
+  const name = String(rawName ?? '')
+    .replace(/[^a-zA-Z0-9_]/g, '_')
+    .replace(/^_+|_+$/g, '')
+  if (!name) return 'agent_function'
+  if (/^[0-9]/.test(name)) return `fn_${name}`
+  return name
+}
+
+// Map an `<name>.agent.md` filename to its agent slug.
+function agentSlugFromFileName(fileName) {
+  const base = String(fileName ?? '').replace(/\.agent\.md$/i, '')
+  return safeFunctionName(base)
+}
+
+// Enumerate the agent source files (`*.agent.md`) deployed in an app via the
+// read-only Kudu VFS API, authorised with the caller's forwarded ARM token. The
+// agent code is never invoked. Returns `{ files, ok }` where `ok` is true only
+// when the app root listing succeeded, so callers know whether the list is
+// complete. Fails (`ok: false`) when Kudu/VFS is unavailable (e.g. Flex
+// Consumption) or the caller lacks permission. The runtime discovers *.agent.md
+// at the app root and directly under agents/ (no deeper nesting).
+async function agentSourceFiles(accessToken, site) {
+  const scm = scmHostName(site)
+  if (!scm) return { files: [], ok: false }
+  const dirs = ['site/wwwroot', 'site/wwwroot/agents']
+  let rootOk = false
+  const perDir = await Promise.all(
+    dirs.map(async (dir, index) => {
+      try {
+        const res = await fetch(`https://${scm}/api/vfs/${dir}/`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+          signal: AbortSignal.timeout(8000),
+        })
+        if (!res.ok) return []
+        if (index === 0) rootOk = true
+        const entries = await res.json()
+        if (!Array.isArray(entries)) return []
+        return entries
+          .map((entry) => String(entry?.name ?? ''))
+          .filter((name) => name.toLowerCase().endsWith('.agent.md'))
+      } catch {
+        return [] // VFS unavailable or timed out — keep function-based results
+      }
+    }),
   )
-  if (agents.length === 0) {
-    agents = parseAgentsFromFunctions(
-      await functionsFromAdminApi(client, resourceGroup, appName, defaultHostName),
-    )
+  return { files: perDir.flat(), ok: rootOk }
+}
+
+// ---------------------------------------------------------------------------
+// Flex Consumption source-file reading.
+//
+// Flex Consumption has no Kudu VFS, so `*.agent.md` files can't be read from the
+// live file system. Instead we read the deployment package: Flex stores the
+// app's zip in a blob container (functionAppConfig.deployment.storage), and we
+// list just the zip's central directory (a few KB, via ranged reads) to
+// enumerate its `*.agent.md` files. Storage is accessed with an account key
+// fetched via the caller's ARM token (listKeys). Best-effort throughout.
+// ---------------------------------------------------------------------------
+
+// Resolve the Flex deployment package's blob container URL for a site.
+async function flexDeploymentContainerUrl(accessToken, site) {
+  const inline = site?.functionAppConfig?.deployment?.storage?.value
+  if (inline) return String(inline)
+  if (!site?.id) return ''
+  try {
+    const res = await fetch(`https://management.azure.com${site.id}?api-version=2023-12-01`, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (!res.ok) return ''
+    const body = await res.json()
+    return String(body?.properties?.functionAppConfig?.deployment?.storage?.value ?? '')
+  } catch {
+    return ''
   }
-  return agents
+}
+
+// Split a blob container URL into its account + container names.
+function parseBlobContainerUrl(url) {
+  try {
+    const parsed = new URL(url)
+    const account = parsed.hostname.split('.')[0]
+    const container = parsed.pathname.replace(/^\/+/, '').split('/')[0]
+    return { account, container }
+  } catch {
+    return { account: '', container: '' }
+  }
+}
+
+// Fetch a storage account access key via ARM listKeys. Tries the app's resource
+// group first (Flex co-locates them), then locates the account by name.
+async function storageAccountKey(accessToken, subscriptionId, appResourceGroup, account) {
+  const listKeys = async (rg) => {
+    if (!rg) return ''
+    try {
+      const url = `https://management.azure.com/subscriptions/${subscriptionId}/resourceGroups/${rg}/providers/Microsoft.Storage/storageAccounts/${account}/listKeys?api-version=2023-01-01`
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(10000),
+      })
+      if (!res.ok) return ''
+      const body = await res.json()
+      return String(body?.keys?.[0]?.value ?? '')
+    } catch {
+      return ''
+    }
+  }
+  const primary = await listKeys(appResourceGroup)
+  if (primary) return primary
+  try {
+    const url = `https://management.azure.com/subscriptions/${subscriptionId}/providers/Microsoft.Storage/storageAccounts?api-version=2023-01-01`
+    const res = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+      signal: AbortSignal.timeout(10000),
+    })
+    if (res.ok) {
+      const body = await res.json()
+      const match = (body?.value ?? []).find((s) => s?.name === account)
+      const rg = match ? parseResourceGroup(match.id) : ''
+      if (rg && rg !== appResourceGroup) return await listKeys(rg)
+    }
+  } catch {
+    /* fall through to empty */
+  }
+  return ''
+}
+
+// A yauzl random-access reader backed by ranged Azure Blob downloads, so only
+// the zip's central directory is fetched — never the whole package.
+class BlobRandomAccessReader extends yauzl.RandomAccessReader {
+  constructor(blob) {
+    super()
+    this._blob = blob
+  }
+  _readStreamForRange(start, end) {
+    const pass = new PassThrough()
+    this._blob
+      .download(start, end - start)
+      .then((resp) => {
+        const body = resp.readableStreamBody
+        if (!body) {
+          pass.end()
+          return
+        }
+        body.on('error', (err) => pass.destroy(err))
+        body.pipe(pass)
+      })
+      .catch((err) => pass.destroy(err))
+    return pass
+  }
+}
+
+// List `*.agent.md` entries in a zip blob by reading only its central directory.
+function agentFilesFromZip(blob, size) {
+  return new Promise((resolve) => {
+    const files = []
+    let settled = false
+    const done = () => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(files)
+    }
+    // Safety net so a stuck reader can't hang the subscription scan.
+    const timer = setTimeout(done, 15000)
+    try {
+      const reader = new BlobRandomAccessReader(blob)
+      yauzl.fromRandomAccessReader(reader, size, { lazyEntries: true, autoClose: false }, (err, zip) => {
+        if (err || !zip) return done()
+        zip.on('entry', (entry) => {
+          const name = String(entry?.fileName ?? '')
+          if (/\.agent\.md$/i.test(name)) files.push(name.split('/').pop())
+          zip.readEntry()
+        })
+        zip.on('end', () => {
+          try {
+            zip.close()
+          } catch {
+            /* ignore */
+          }
+          done()
+        })
+        zip.on('error', done)
+        zip.readEntry()
+      })
+    } catch {
+      done()
+    }
+  })
+}
+
+// Open the Flex Consumption deployment package blob for ranged reads. Returns
+// `{ blob, size }` or null when unavailable (not Flex, unreachable, or no perms).
+async function openFlexPackageBlob(accessToken, subscriptionId, site) {
+  const containerUrl = await flexDeploymentContainerUrl(accessToken, site)
+  if (!containerUrl) return null
+  const { account, container } = parseBlobContainerUrl(containerUrl)
+  if (!account || !container) return null
+  const key = await storageAccountKey(accessToken, subscriptionId, parseResourceGroup(site?.id), account)
+  if (!key) return null
+  const containerClient = new ContainerClient(containerUrl, new StorageSharedKeyCredential(account, key))
+  let blobName = ''
+  for await (const item of containerClient.listBlobsFlat()) {
+    const name = String(item?.name ?? '')
+    if (name.toLowerCase() === 'released-package.zip') {
+      blobName = name
+      break
+    }
+    if (!blobName && name.toLowerCase().endsWith('.zip')) blobName = name
+  }
+  if (!blobName) return null
+  const blob = containerClient.getBlockBlobClient(blobName)
+  const props = await blob.getProperties()
+  const size = Number(props.contentLength ?? 0)
+  if (!size) return null
+  return { blob, size }
+}
+
+// Read the deployed `*.agent.md` file names from a Flex Consumption app's
+// deployment package. Best-effort: returns `{ files: [], ok: false }` when the
+// app isn't Flex, the package can't be reached, or the caller lacks permission.
+async function flexPackageAgentFiles(accessToken, subscriptionId, site) {
+  try {
+    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site)
+    if (!pkg) return { files: [], ok: false }
+    return { files: await agentFilesFromZip(pkg.blob, pkg.size), ok: true }
+  } catch {
+    return { files: [], ok: false }
+  }
+}
+
+// Read the text of the first zip entry whose full name satisfies `matchFn`,
+// using ranged reads (never the whole package). Returns null when not found.
+function readZipEntryContent(blob, size, matchFn) {
+  return new Promise((resolve) => {
+    let settled = false
+    const done = (val) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      resolve(val)
+    }
+    const timer = setTimeout(() => done(null), 20000)
+    try {
+      const reader = new BlobRandomAccessReader(blob)
+      yauzl.fromRandomAccessReader(reader, size, { lazyEntries: true, autoClose: false }, (err, zip) => {
+        if (err || !zip) return done(null)
+        zip.on('entry', (entry) => {
+          if (matchFn(String(entry?.fileName ?? ''))) {
+            zip.openReadStream(entry, (streamErr, stream) => {
+              if (streamErr || !stream) return done(null)
+              const chunks = []
+              stream.on('data', (chunk) => chunks.push(chunk))
+              stream.on('end', () => {
+                try {
+                  zip.close()
+                } catch {
+                  /* ignore */
+                }
+                done(Buffer.concat(chunks).toString('utf-8'))
+              })
+              stream.on('error', () => done(null))
+            })
+            return
+          }
+          zip.readEntry()
+        })
+        zip.on('end', () => done(null))
+        zip.on('error', () => done(null))
+        zip.readEntry()
+      })
+    } catch {
+      done(null)
+    }
+  })
+}
+
+// Read the `*.agent.md` entry whose slug matches `agentName` from a package zip.
+function readAgentFileFromZip(blob, size, agentName) {
+  return readZipEntryContent(blob, size, (fullName) => {
+    const base = fullName.split('/').pop() ?? ''
+    return /\.agent\.md$/i.test(base) && agentSlugFromFileName(base) === agentName
+  })
+}
+
+// Read an agent's `*.agent.md` content from a Flex Consumption deployment
+// package. Returns null when unavailable.
+async function flexPackageAgentDefinition(accessToken, subscriptionId, site, agentName) {
+  try {
+    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site)
+    if (!pkg) return null
+    return await readAgentFileFromZip(pkg.blob, pkg.size, agentName)
+  } catch {
+    return null
+  }
+}
+
+// Read an agent's `*.agent.md` content via the Kudu VFS API (dedicated / some
+// Consumption plans). Returns null when unavailable.
+async function kuduAgentDefinition(accessToken, site, agentName) {
+  const scm = scmHostName(site)
+  if (!scm) return null
+  for (const dir of ['site/wwwroot', 'site/wwwroot/agents']) {
+    try {
+      const listRes = await fetch(`https://${scm}/api/vfs/${dir}/`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(8000),
+      })
+      if (!listRes.ok) continue
+      const entries = await listRes.json()
+      if (!Array.isArray(entries)) continue
+      const match = entries
+        .map((e) => String(e?.name ?? ''))
+        .find((n) => n.toLowerCase().endsWith('.agent.md') && agentSlugFromFileName(n) === agentName)
+      if (!match) continue
+      const fileRes = await fetch(`https://${scm}/api/vfs/${dir}/${encodeURIComponent(match)}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(8000),
+      })
+      if (!fileRes.ok) continue
+      return await fileRes.text()
+    } catch {
+      /* try next dir */
+    }
+  }
+  return null
+}
+
+// Read the deployed `<agent>.agent.md` source content for a single agent.
+// Prefers Kudu VFS; falls back to the Flex deployment package. Returns null when
+// the source can't be read (e.g. caller lacks permission).
+export async function readAgentDefinition(accessToken, subscriptionId, site, agentName) {
+  const kudu = await kuduAgentDefinition(accessToken, site, agentName)
+  if (kudu != null) return kudu
+  return flexPackageAgentDefinition(accessToken, subscriptionId, site, agentName)
+}
+
+// Read the text content of a deployed source file at a wwwroot-relative path
+// (e.g. `function_app.py`). Prefers Kudu VFS; falls back to the Flex deployment
+// package. Returns null when the file can't be read.
+export async function readSourceFile(accessToken, subscriptionId, site, relPath) {
+  const clean = String(relPath ?? '').replace(/^\.?\/+/, '')
+  if (!clean || clean.includes('..')) return null
+  const scm = scmHostName(site)
+  if (scm) {
+    try {
+      const encoded = clean.split('/').map(encodeURIComponent).join('/')
+      const res = await fetch(`https://${scm}/api/vfs/site/wwwroot/${encoded}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+        signal: AbortSignal.timeout(8000),
+      })
+      if (res.ok) return await res.text()
+    } catch {
+      /* fall through to the Flex package */
+    }
+  }
+  try {
+    const pkg = await openFlexPackageBlob(accessToken, subscriptionId, site)
+    if (pkg) return await readZipEntryContent(pkg.blob, pkg.size, (fullName) => fullName === clean)
+  } catch {
+    /* unavailable */
+  }
+  return null
+}
+
+// Fetch a single Function App's site object (used when reading one agent).
+export async function getSite(accessToken, subscriptionId, resourceGroup, appName) {
+  try {
+    const client = webClient(accessToken, subscriptionId)
+    return await client.webApps.get(resourceGroup, appName)
+  } catch {
+    return null
+  }
+}
+
+// Resolve the authoritative set of agent slugs from the deployed `*.agent.md`
+// files. Prefers Kudu VFS; on Flex Consumption reads the deployment package.
+// `ok` is true only when a source returned the complete file list, so callers
+// know whether to trust it over the function-name heuristic.
+async function readAgentSlugs(accessToken, subscriptionId, site) {
+  const kudu = await agentSourceFiles(accessToken, site)
+  if (kudu.ok) {
+    return { slugs: new Set(kudu.files.map(agentSlugFromFileName)), ok: true }
+  }
+  const flex = await flexPackageAgentFiles(accessToken, subscriptionId, site)
+  if (flex.ok) {
+    return { slugs: new Set(flex.files.map(agentSlugFromFileName)), ok: true }
+  }
+  return { slugs: new Set(), ok: false }
+}
+
+// Enumerate a single Function App's functions. Prefers the ARM control plane; on
+// plans where that yields nothing (Linux/Flex Consumption) it falls back to the
+// app's read-only admin metadata API.
+async function functionsInApp(client, resourceGroup, appName, defaultHostName) {
+  const fromArm = await functionsFromArm(client, resourceGroup, appName)
+  if (fromArm.length > 0) return fromArm
+  return functionsFromAdminApi(client, resourceGroup, appName, defaultHostName)
 }
 
 /**
@@ -324,7 +782,8 @@ async function agentsInApp(client, resourceGroup, appName, defaultHostName) {
  *     location: string,
  *     provider: string,
  *     defaultHostName: string,
- *     agents: Array<{name: string, trigger: string, builtinEndpoints: boolean, routes: string[]}>,
+ *     agents: Array<{name: string, trigger: string, builtinEndpoints: boolean, routes: string[], supportingFunctions: string[]}>,
+ *     supportingFunctions: Array<{name: string, trigger: string}>,
  *   }>,
  * }>}
  */
@@ -350,12 +809,21 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
     }
     if (!(AGENT_PROVIDER_SETTING in settingsMap)) continue
 
-    // The app qualifies. Enumerate individual agents from the runtime's function
-    // naming convention; if none can be parsed (e.g. trigger-only agents), fall
-    // back to representing the app itself as a single agent so it still appears.
-    let agents = await agentsInApp(client, resourceGroup, appName, site.defaultHostName)
+    // Enumerate the app's functions, then split them into agents vs supporting
+    // functions using the authoritative `*.agent.md` file list where available.
+    const functions = await functionsInApp(client, resourceGroup, appName, site.defaultHostName)
+    const { slugs, ok } = await readAgentSlugs(accessToken, subscriptionId, site)
+    const { agents, appSupportingFunctions } = parseAgentsFromFunctions(functions, slugs, ok)
+
+    // Fall back to the app itself as a single agent when nothing was found.
     if (agents.length === 0) {
-      agents = [{ name: appName, trigger: 'http', builtinEndpoints: false, routes: [] }]
+      agents.push({
+        name: appName,
+        trigger: 'http',
+        builtinEndpoints: false,
+        routes: [],
+        supportingFunctions: [],
+      })
     }
     apps.push({
       name: appName,
@@ -364,6 +832,7 @@ export async function discoverAgentApps(accessToken, subscriptionId) {
       provider: settingsMap[AGENT_PROVIDER_SETTING] ?? '',
       defaultHostName: site.defaultHostName ?? '',
       agents,
+      supportingFunctions: appSupportingFunctions,
     })
   }
   apps.sort((a, b) => a.name.localeCompare(b.name))

@@ -140,10 +140,168 @@ app.get(
         trigger: ag.trigger,
         builtinEndpoints: ag.builtinEndpoints,
         routes: ag.routes ?? [],
+        supportingFunctions: ag.supportingFunctions ?? [],
         defaultHostName: a.defaultHostName,
       })),
     )
     res.json({ subscriptionId, apps: result.apps, agents })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Agent definition — read the deployed `*.agent.md` (or the portal draft) and
+// save edits to a portal-side working copy. Publishing a draft to the live app
+// is a separate, not-yet-wired step.
+// ---------------------------------------------------------------------------
+
+const DRAFTS_DIR = path.join(__dirname, '..', '.data', 'agent-drafts')
+
+// Keep path segments to safe characters so query params can't traverse the FS.
+const safeSegment = (value) => String(value ?? '').replace(/[^a-zA-Z0-9._-]/g, '_')
+
+function draftPath(subscription, appName, name) {
+  return path.join(
+    DRAFTS_DIR,
+    safeSegment(subscription),
+    safeSegment(appName),
+    `${safeSegment(name)}.agent.md`,
+  )
+}
+
+async function readDraft(subscription, appName, name) {
+  try {
+    return await fs.promises.readFile(draftPath(subscription, appName, name), 'utf-8')
+  } catch {
+    return null
+  }
+}
+
+async function writeDraft(subscription, appName, name, content) {
+  const filePath = draftPath(subscription, appName, name)
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
+  await fs.promises.writeFile(filePath, content, 'utf-8')
+}
+
+// Read an agent's definition: the portal draft if one exists, else the deployed
+// `*.agent.md` source. Requires ?subscription, ?resourceGroup, ?app, ?name.
+app.get(
+  '/api/agents/definition',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const name = String(req.query.name ?? '').trim()
+    if (!appName || !name) throw new HttpError(400, 'app and name query parameters are required.')
+
+    const draftContent = await readDraft(subscription, appName, name)
+    let deployedContent = null
+    if (resourceGroup) {
+      const site = await azure.getSite(token, subscription, resourceGroup, appName)
+      if (site) deployedContent = await azure.readAgentDefinition(token, subscription, site, name)
+    }
+    res.json({
+      name,
+      app: appName,
+      draftContent,
+      deployedContent,
+      content: draftContent ?? deployedContent ?? '',
+      source: draftContent != null ? 'draft' : deployedContent != null ? 'deployed' : 'none',
+    })
+  }),
+)
+
+// Save an agent definition draft (portal-side working copy).
+app.put(
+  '/api/agents/definition',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const name = String(req.query.name ?? '').trim()
+    const content = req.body?.content
+    if (!appName || !name) throw new HttpError(400, 'app and name query parameters are required.')
+    if (typeof content !== 'string') throw new HttpError(400, 'Request body must be { content: string }.')
+    await writeDraft(subscription, appName, name, content)
+    res.json({ ok: true, source: 'draft' })
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Source files — read a deployed source file (e.g. function_app.py, where the
+// supporting functions live) or the portal draft, and save edits to a working
+// copy. Same draft model as agent definitions; publishing is a separate step.
+// ---------------------------------------------------------------------------
+
+const SOURCE_DRAFTS_DIR = path.join(__dirname, '..', '.data', 'source-drafts')
+
+function sourceDraftPath(subscription, appName, relPath) {
+  return path.join(
+    SOURCE_DRAFTS_DIR,
+    safeSegment(subscription),
+    safeSegment(appName),
+    safeSegment(relPath),
+  )
+}
+
+async function readSourceDraft(subscription, appName, relPath) {
+  try {
+    return await fs.promises.readFile(sourceDraftPath(subscription, appName, relPath), 'utf-8')
+  } catch {
+    return null
+  }
+}
+
+async function writeSourceDraft(subscription, appName, relPath, content) {
+  const filePath = sourceDraftPath(subscription, appName, relPath)
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true })
+  await fs.promises.writeFile(filePath, content, 'utf-8')
+}
+
+// Read a source file's content: the portal draft if one exists, else the
+// deployed file. Requires ?subscription, ?resourceGroup, ?app, ?path.
+app.get(
+  '/api/source',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const relPath = String(req.query.path ?? '').trim()
+    if (!appName || !relPath) throw new HttpError(400, 'app and path query parameters are required.')
+    if (relPath.includes('..')) throw new HttpError(400, 'Invalid path.')
+
+    const draftContent = await readSourceDraft(subscription, appName, relPath)
+    let deployedContent = null
+    if (resourceGroup) {
+      const site = await azure.getSite(token, subscription, resourceGroup, appName)
+      if (site) deployedContent = await azure.readSourceFile(token, subscription, site, relPath)
+    }
+    res.json({
+      path: relPath,
+      app: appName,
+      draftContent,
+      deployedContent,
+      content: draftContent ?? deployedContent ?? '',
+      source: draftContent != null ? 'draft' : deployedContent != null ? 'deployed' : 'none',
+    })
+  }),
+)
+
+// Save a source-file draft (portal-side working copy).
+app.put(
+  '/api/source',
+  wrap(async (req, res) => {
+    requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.query.app ?? '').trim()
+    const relPath = String(req.query.path ?? '').trim()
+    const content = req.body?.content
+    if (!appName || !relPath) throw new HttpError(400, 'app and path query parameters are required.')
+    if (relPath.includes('..')) throw new HttpError(400, 'Invalid path.')
+    if (typeof content !== 'string') throw new HttpError(400, 'Request body must be { content: string }.')
+    await writeSourceDraft(subscription, appName, relPath, content)
+    res.json({ ok: true, source: 'draft' })
   }),
 )
 

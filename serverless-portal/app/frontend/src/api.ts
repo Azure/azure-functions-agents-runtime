@@ -29,6 +29,7 @@ export interface LiveAgent {
   trigger: string
   builtinEndpoints: boolean
   routes: string[]
+  supportingFunctions: string[]
   defaultHostName: string
 }
 
@@ -38,13 +39,38 @@ export interface LiveAgentApp {
   location: string
   provider: string
   defaultHostName: string
-  agents: { name: string; trigger: string; builtinEndpoints: boolean; routes: string[] }[]
+  agents: {
+    name: string
+    trigger: string
+    builtinEndpoints: boolean
+    routes: string[]
+    supportingFunctions: string[]
+  }[]
+  supportingFunctions: { name: string; trigger: string }[]
 }
 
 export interface LiveDiscovery {
   subscriptionId: string
   apps: LiveAgentApp[]
   agents: LiveAgent[]
+}
+
+export interface AgentDefinition {
+  name: string
+  app: string
+  draftContent: string | null
+  deployedContent: string | null
+  content: string
+  source: 'draft' | 'deployed' | 'none'
+}
+
+export interface SourceFile {
+  path: string
+  app: string
+  draftContent: string | null
+  deployedContent: string | null
+  content: string
+  source: 'draft' | 'deployed' | 'none'
 }
 
 // Error carrying the HTTP status so React Query's retry guard can skip 4xx.
@@ -57,11 +83,15 @@ export class ApiError extends Error {
   }
 }
 
-async function req<T>(method: string, url: string): Promise<T> {
+async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
   const token = await acquireArmToken()
   const res = await fetch(url, {
     method,
-    headers: { Authorization: `Bearer ${token}` },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}),
+    },
+    body: body !== undefined ? JSON.stringify(body) : undefined,
   })
   const text = await res.text()
   let data: unknown = null
@@ -92,5 +122,31 @@ export const api = {
     req<LiveDiscovery>(
       'GET',
       subscription ? `/api/live/agents?subscription=${enc(subscription)}` : '/api/live/agents',
+    ),
+
+  // Agent definition (.agent.md) — read deployed source or portal draft, save draft.
+  getAgentDefinition: (p: { subscription: string; app: string; resourceGroup: string; name: string }) =>
+    req<AgentDefinition>(
+      'GET',
+      `/api/agents/definition?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}&name=${enc(p.name)}`,
+    ),
+  saveAgentDefinition: (p: { subscription: string; app: string; name: string; content: string }) =>
+    req<{ ok: boolean; source: string }>(
+      'PUT',
+      `/api/agents/definition?subscription=${enc(p.subscription)}&app=${enc(p.app)}&name=${enc(p.name)}`,
+      { content: p.content },
+    ),
+
+  // Source files (e.g. function_app.py) — read deployed source or portal draft, save draft.
+  getSource: (p: { subscription: string; app: string; resourceGroup: string; path: string }) =>
+    req<SourceFile>(
+      'GET',
+      `/api/source?subscription=${enc(p.subscription)}&app=${enc(p.app)}&resourceGroup=${enc(p.resourceGroup)}&path=${enc(p.path)}`,
+    ),
+  saveSource: (p: { subscription: string; app: string; path: string; content: string }) =>
+    req<{ ok: boolean; source: string }>(
+      'PUT',
+      `/api/source?subscription=${enc(p.subscription)}&app=${enc(p.app)}&path=${enc(p.path)}`,
+      { content: p.content },
     ),
 }

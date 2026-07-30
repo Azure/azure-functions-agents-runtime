@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
@@ -76,6 +76,117 @@ function CopyButton({ text, title }: { text: string; title: string }) {
   )
 }
 
+// Loads a deployed source file (an `.agent.md` or app code) or a saved portal
+// draft, lets the user edit it, and saves edits to the portal working copy.
+// Publishing a draft to the live app is a separate step that isn't wired yet.
+function DraftEditor({
+  queryKey,
+  load,
+  save,
+  fallback,
+}: {
+  queryKey: unknown[]
+  load: () => Promise<{ content: string; source: string }>
+  save: (content: string) => Promise<unknown>
+  fallback: string
+}) {
+  const qc = useQueryClient()
+  const { data, isLoading, error } = useQuery({
+    queryKey,
+    queryFn: load,
+    staleTime: Infinity,
+    refetchOnMount: false,
+    refetchOnReconnect: false,
+  })
+
+  // Reset local edits whenever a fresh copy arrives (initial load, and after a
+  // save invalidates + refetches).
+  const [text, setText] = useState<string | null>(null)
+  useEffect(() => {
+    setText(null)
+  }, [data])
+
+  const saveMutation = useMutation({
+    mutationFn: (content: string) => save(content),
+    onSuccess: () => qc.invalidateQueries({ queryKey }),
+  })
+
+  if (isLoading) return <p className="muted">Loading…</p>
+  if (error) return <p className="muted">Couldn’t load: {(error as Error).message}</p>
+
+  const base = data?.content || fallback
+  const value = text ?? base
+  const dirty = value !== base
+  const source = data?.source ?? 'none'
+  const unreadable = !data?.content
+
+  return (
+    <div>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10 }}>
+        {source === 'draft' ? (
+          <span className="badge amber">
+            <span className="dot" /> Draft (unpublished)
+          </span>
+        ) : source === 'deployed' ? (
+          <span className="badge green">
+            <span className="dot" /> Deployed source
+          </span>
+        ) : (
+          <span className="badge gray">Source not readable</span>
+        )}
+        {dirty && (
+          <span className="muted" style={{ fontSize: 12 }}>
+            · unsaved changes
+          </span>
+        )}
+        {!dirty && saveMutation.isSuccess && (
+          <span className="muted" style={{ fontSize: 12 }}>
+            · saved
+          </span>
+        )}
+        <div style={{ flex: 1 }} />
+        <button
+          className="btn sm"
+          onClick={() => setText(null)}
+          disabled={!dirty || saveMutation.isPending}
+          title="Discard unsaved changes"
+        >
+          Reset
+        </button>
+        <button
+          className="btn sm primary"
+          onClick={() => saveMutation.mutate(value)}
+          disabled={!dirty || saveMutation.isPending}
+        >
+          {saveMutation.isPending ? 'Saving…' : 'Save draft'}
+        </button>
+      </div>
+      {unreadable && (
+        <p className="muted" style={{ fontSize: 12, margin: '0 0 8px' }}>
+          The deployed source couldn’t be read (permission or plan) — start from here; saving stores a
+          portal draft.
+        </p>
+      )}
+      <textarea
+        className="editor"
+        spellCheck={false}
+        value={value}
+        onChange={(e) => setText(e.target.value)}
+        aria-label="Source editor"
+      />
+      {saveMutation.isError && (
+        <p className="muted" style={{ color: 'var(--red)', fontSize: 12 }}>
+          Save failed: {(saveMutation.error as Error).message}
+        </p>
+      )}
+      <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+        Edits are saved to a portal-side working copy. Publishing to the live Function App is a
+        separate step (not yet wired).
+      </p>
+    </div>
+  )
+}
+
 export default function AgentDetailPage() {
   const { subscriptionId, app: appName, name } = useParams<{
     subscriptionId: string
@@ -84,7 +195,8 @@ export default function AgentDetailPage() {
   }>()
   const navigate = useNavigate()
   const { selected, setSelected } = useIdentity()
-  const [tab, setTab] = useState<'definition' | 'endpoints'>('definition')
+  type Sel = { kind: 'agent' } | { kind: 'source'; path: string; label: string } | { kind: 'endpoints' }
+  const [sel, setSel] = useState<Sel>({ kind: 'agent' })
 
   // Deeplink → state: adopt the subscription from the URL so a shared/reloaded
   // detail link restores the exact view even before identity has loaded.
@@ -222,49 +334,164 @@ export default function AgentDetailPage() {
             </div>
           </div>
 
-          <div className="card">
-            <div className="card-head">
-              <div className="tabs">
-                <button
-                  className={'tab' + (tab === 'definition' ? ' active' : '')}
-                  onClick={() => setTab('definition')}
-                >
-                  Definition (.agent.md)
-                </button>
-                <button
-                  className={'tab' + (tab === 'endpoints' ? ' active' : '')}
-                  onClick={() => setTab('endpoints')}
-                  disabled={endpoints.length === 0}
-                >
-                  Endpoints
-                </button>
-              </div>
-              <CopyButton
-                text={tab === 'definition' ? markdown : endpointsText}
-                title="Copy to clipboard"
-              />
-            </div>
+          <div className="components">
+            <aside className="explorer">
+              <div className="group-label">Agent</div>
+              <button
+                className={'node' + (sel.kind === 'agent' ? ' active' : '')}
+                onClick={() => setSel({ kind: 'agent' })}
+              >
+                📄 <span className="mono">{agent.name}.agent.md</span>
+              </button>
 
-            {tab === 'definition' ? (
-              <pre className="code" aria-label="Agent definition">
-                {markdown}
-              </pre>
-            ) : endpoints.length > 0 ? (
-              <div className="endpoint-list">
-                {endpoints.map((e) => (
-                  <div className="endpoint-row" key={e.url}>
-                    <span className={'badge ' + (e.kind === 'GET' ? 'gray' : 'purple')}>
-                      {e.kind}
+              {hostApp && hostApp.supportingFunctions && hostApp.supportingFunctions.length > 0 && (
+                <>
+                  <div className="group-label">Supporting functions</div>
+                  {hostApp.supportingFunctions.map((fn) => (
+                    <button
+                      key={fn.name}
+                      className={
+                        'node' + (sel.kind === 'source' && sel.label === fn.name ? ' active' : '')
+                      }
+                      onClick={() =>
+                        setSel({ kind: 'source', path: 'function_app.py', label: fn.name })
+                      }
+                      title={`${fn.trigger} trigger · defined in function_app.py`}
+                    >
+                      🐍 <span className="mono">{fn.name}</span>
+                      <span className="badge gray" style={{ marginLeft: 'auto' }}>
+                        {fn.trigger}
+                      </span>
+                    </button>
+                  ))}
+                </>
+              )}
+
+              <div className="group-label">App files</div>
+              <button
+                className={
+                  'node' +
+                  (sel.kind === 'source' && sel.label === 'function_app.py' ? ' active' : '')
+                }
+                onClick={() =>
+                  setSel({ kind: 'source', path: 'function_app.py', label: 'function_app.py' })
+                }
+              >
+                🐍 <span className="mono">function_app.py</span>
+              </button>
+
+              {endpoints.length > 0 && (
+                <>
+                  <div className="group-label">Endpoints</div>
+                  <button
+                    className={'node' + (sel.kind === 'endpoints' ? ' active' : '')}
+                    onClick={() => setSel({ kind: 'endpoints' })}
+                  >
+                    🔗 Endpoints
+                    <span className="badge gray" style={{ marginLeft: 'auto' }}>
+                      {endpoints.length}
                     </span>
-                    <span className="cell-title">{e.label}</span>
-                    <code className="endpoint-url">{e.url}</code>
-                    <CopyButton text={e.url} title={`Copy ${e.label} URL`} />
+                  </button>
+                </>
+              )}
+            </aside>
+
+            <section className="component-editor">
+              {sel.kind === 'agent' && (
+                <>
+                  <div className="card-head">
+                    <h3 className="mono" style={{ margin: 0 }}>
+                      {agent.name}.agent.md
+                    </h3>
+                    <span className="badge blue">agent</span>
                   </div>
-                ))}
-              </div>
-            ) : (
-              <p className="muted">This agent does not expose built-in HTTP endpoints.</p>
-            )}
+                  <DraftEditor
+                    key="agent"
+                    queryKey={['agentDefinition', subForQuery, agent.app, agent.name]}
+                    load={() =>
+                      api.getAgentDefinition({
+                        subscription: subForQuery,
+                        app: agent.app,
+                        resourceGroup: agent.resourceGroup,
+                        name: agent.name,
+                      })
+                    }
+                    save={(content) =>
+                      api.saveAgentDefinition({
+                        subscription: subForQuery,
+                        app: agent.app,
+                        name: agent.name,
+                        content,
+                      })
+                    }
+                    fallback={markdown}
+                  />
+                </>
+              )}
+
+              {sel.kind === 'source' && (
+                <>
+                  <div className="card-head">
+                    <h3 className="mono" style={{ margin: 0 }}>
+                      {sel.path}
+                    </h3>
+                    {sel.label !== sel.path && (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        <span className="mono">{sel.label}</span> is defined here
+                      </span>
+                    )}
+                  </div>
+                  <DraftEditor
+                    key={'source:' + sel.path}
+                    queryKey={['source', subForQuery, agent.app, sel.path]}
+                    load={() =>
+                      api.getSource({
+                        subscription: subForQuery,
+                        app: agent.app,
+                        resourceGroup: agent.resourceGroup,
+                        path: sel.path,
+                      })
+                    }
+                    save={(content) =>
+                      api.saveSource({
+                        subscription: subForQuery,
+                        app: agent.app,
+                        path: sel.path,
+                        content,
+                      })
+                    }
+                    fallback=""
+                  />
+                </>
+              )}
+
+              {sel.kind === 'endpoints' && (
+                <>
+                  <div className="card-head">
+                    <h3 style={{ margin: 0 }}>Endpoints</h3>
+                    {endpoints.length > 0 && (
+                      <CopyButton text={endpointsText} title="Copy all URLs" />
+                    )}
+                  </div>
+                  {endpoints.length > 0 ? (
+                    <div className="endpoint-list">
+                      {endpoints.map((e) => (
+                        <div className="endpoint-row" key={e.url}>
+                          <span className={'badge ' + (e.kind === 'GET' ? 'gray' : 'purple')}>
+                            {e.kind}
+                          </span>
+                          <span className="cell-title">{e.label}</span>
+                          <code className="endpoint-url">{e.url}</code>
+                          <CopyButton text={e.url} title={`Copy ${e.label} URL`} />
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="muted">This agent does not expose built-in HTTP endpoints.</p>
+                  )}
+                </>
+              )}
+            </section>
           </div>
         </>
       )}
