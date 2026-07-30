@@ -8,6 +8,8 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Literal
 
+_MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
+
 
 class SandboxTransportError(Exception):
     """Base error for the runtime-owned sandbox transport boundary."""
@@ -34,7 +36,7 @@ class SandboxFileEntry:
     size: int | None
     is_directory: bool
     modified_at: str | None = None
-    mode: str | None = None
+    mode: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,7 +47,7 @@ class SandboxFileStat:
     size: int | None
     is_directory: bool
     modified_at: str | None = None
-    mode: str | None = None
+    mode: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,10 +170,10 @@ class SandboxProvisioningLabels:
     session_id: str
 
     def __post_init__(self) -> None:
-        _require_nonempty_string(self.owner_hash_version, "owner_hash_version")
-        _require_nonempty_string(self.owner_hash, "owner_hash")
-        _require_nonempty_string(self.app_hash, "app_hash")
-        _require_nonempty_string(self.session_id, "session_id")
+        _require_provider_label_value(self.owner_hash_version, "owner_hash_version")
+        _require_provider_label_value(self.owner_hash, "owner_hash")
+        _require_provider_label_value(self.app_hash, "app_hash")
+        _require_provider_label_value(self.session_id, "session_id")
 
     def to_provider_labels(self) -> dict[str, str]:
         """Return only safe, versioned fingerprint labels for provisioning."""
@@ -335,9 +337,19 @@ def _normalize_region(value: str) -> str:
     return value.strip().casefold()
 
 
-def _require_nonempty_string(value: object, field_name: str) -> None:
+def _require_nonempty_string(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SandboxProvisioningError(f"Sandbox {field_name} must be a non-empty string.")
+    return value
+
+
+def _require_provider_label_value(value: object, field_name: str) -> None:
+    label_value = _require_nonempty_string(value, field_name)
+    if len(label_value) > _MAX_PROVIDER_LABEL_VALUE_LENGTH:
+        raise SandboxProvisioningError(
+            f"Sandbox {field_name} must not exceed "
+            f"{_MAX_PROVIDER_LABEL_VALUE_LENGTH} characters."
+        )
 
 
 def _is_controller_credential_key(key: str) -> bool:

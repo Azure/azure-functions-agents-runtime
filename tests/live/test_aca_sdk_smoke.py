@@ -24,6 +24,9 @@ from azure_functions_agents.transport.models import (
     SandboxProvisioningLabels,
 )
 
+_APP_HASH = "a1-" + ("b" * 52)
+_OWNER_HASH = "o1-" + ("a" * 52)
+
 if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
     pytest.skip(
         "Set AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE=1 after human authorization to run live ACA.",
@@ -70,8 +73,8 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             source=_source_from_environment(),
             labels=SandboxProvisioningLabels(
                 owner_hash_version="o1",
-                owner_hash="0" * 64,
-                app_hash="a" * 64,
+                owner_hash=_OWNER_HASH,
+                app_hash=_APP_HASH,
                 session_id=session_id,
             ),
             remaining_setup_budget_seconds=30.0,
@@ -95,8 +98,8 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             protocol_version="p4a-smoke-v1",
             session_id=session_id,
             owner_hash_version="o1",
-            owner_hash="0" * 64,
-            app_hash="a" * 64,
+            owner_hash=_OWNER_HASH,
+            app_hash=_APP_HASH,
             sandbox_group_resource_id=group_binding.resource_id,
             sandbox_id=created.identity.sandbox_id,
             generation=1,

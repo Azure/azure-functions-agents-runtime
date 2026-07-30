@@ -215,6 +215,27 @@ class AcaSandboxAdapter:
                 polling_timeout=request.provisioning_timeout_seconds,
                 polling_interval=request.polling_interval_seconds,
             )
+        except HttpResponseError as exc:
+            status_code = getattr(exc, "status_code", None)
+            if isinstance(status_code, int) and 400 <= status_code < 500:
+                raise
+            await self._cleanup_failed_create(provisioning_attempt_id)
+            raise
+        except asyncio.CancelledError:
+            try:
+                await asyncio.shield(self._cleanup_failed_create(provisioning_attempt_id))
+            except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+                logger.error(
+                    "ACA sandbox create was cancelled before cleanup could be confirmed; "
+                    "provisioning attempt %s requires reconciliation.",
+                    provisioning_attempt_id,
+                )
+            raise
+        except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            await self._cleanup_failed_create(provisioning_attempt_id)
+            raise
+
+        try:
             sdk_client = await poller.result()
             return await self._make_handle(sdk_client)
         except asyncio.CancelledError:
@@ -595,7 +616,7 @@ def _project_file_entry(value: object) -> SandboxFileEntry:
     size = _optional_size_attribute(value, "size", "Sandbox file entry")
     is_directory = _required_bool_attribute(value, "is_directory", "Sandbox file entry")
     modified_at = _optional_string_attribute(value, "modified_at", "Sandbox file entry")
-    mode = _optional_string_attribute(value, "mode", "Sandbox file entry")
+    mode = _optional_mode_attribute(value, "Sandbox file entry")
     return SandboxFileEntry(
         name=name,
         path=path,
@@ -611,7 +632,7 @@ def _project_file_stat(value: object) -> SandboxFileStat:
     size = _optional_size_attribute(value, "size", "Sandbox file stat")
     is_directory = _required_bool_attribute(value, "is_directory", "Sandbox file stat")
     modified_at = _optional_string_attribute(value, "modified_at", "Sandbox file stat")
-    mode = _optional_string_attribute(value, "mode", "Sandbox file stat")
+    mode = _optional_mode_attribute(value, "Sandbox file stat")
     return SandboxFileStat(
         path=path,
         size=size,
@@ -649,6 +670,15 @@ def _optional_string_attribute(value: object, attribute: str, response_name: str
 def _optional_size_attribute(value: object, attribute: str, response_name: str) -> int | None:
     result = getattr(value, attribute, None)
     if result is not None and (not isinstance(result, int) or isinstance(result, bool) or result < 0):
+        raise SandboxProvisioningError(f"{response_name} was invalid.")
+    return result
+
+
+def _optional_mode_attribute(value: object, response_name: str) -> int | None:
+    result = getattr(value, "mode", None)
+    if result is not None and (
+        not isinstance(result, int) or isinstance(result, bool) or result < 0
+    ):
         raise SandboxProvisioningError(f"{response_name} was invalid.")
     return result
 

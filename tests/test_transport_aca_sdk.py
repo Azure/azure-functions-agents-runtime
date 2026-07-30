@@ -5,10 +5,11 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from azure.core.exceptions import ServiceRequestError
+from azure.core.exceptions import HttpResponseError, ServiceRequestError
 
 from azure_functions_agents.transport import aca_sdk
 from azure_functions_agents.transport.manifest import (
@@ -39,6 +40,8 @@ _GROUP_ID = (
     "/subscriptions/sub-123/resourceGroups/rg-agent/"
     "providers/Microsoft.App/sandboxGroups/session-group"
 )
+_APP_HASH = "a1-" + ("b" * 52)
+_OWNER_HASH = "o1-" + ("a" * 52)
 
 
 def _binding(*, region: str = "westus2") -> SandboxGroupBinding:
@@ -51,8 +54,8 @@ def _expected(sandbox_id: str) -> ExpectedSandboxManifestBinding:
         protocol_version="maf-session-v1",
         session_id="session-123",
         owner_hash_version="o1",
-        owner_hash="owner-fingerprint",
-        app_hash="app-fingerprint",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
         sandbox_group_resource_id=_GROUP_ID,
         sandbox_id=sandbox_id,
         generation=1,
@@ -66,8 +69,8 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
         "source": DiskSource("runtime-bootstrap"),
         "labels": SandboxProvisioningLabels(
             owner_hash_version="o1",
-            owner_hash="owner-fingerprint",
-            app_hash="app-fingerprint",
+            owner_hash=_OWNER_HASH,
+            app_hash=_APP_HASH,
             session_id="session-123",
         ),
         "remaining_setup_budget_seconds": 45.0,
@@ -148,8 +151,8 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
         if key != "provisioning_attempt_id"
     } == {
         "owner_hash_version": "o1",
-        "owner_hash": "owner-fingerprint",
-        "app_hash": "app-fingerprint",
+        "owner_hash": _OWNER_HASH,
+        "app_hash": _APP_HASH,
         "session_id": "session-123",
     }
     assert len(call["labels"]["provisioning_attempt_id"]) == 32
@@ -233,6 +236,32 @@ async def test_create_preserves_cancellation_when_cleanup_cannot_find_a_sandbox(
     monkeypatch.setattr(aca_sdk.asyncio, "sleep", no_delay)
 
     with pytest.raises(asyncio.CancelledError):
+        await adapter.create(_request(), persisted_group=_binding())
+
+    assert environment.sandboxes == {}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_preserves_definitive_request_rejection_without_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    rejection = HttpResponseError("request rejected")
+    rejection.status_code = 400
+
+    async def rejected_create(**_: Any) -> None:
+        raise rejection
+
+    async def unexpected_cleanup(_: str) -> None:
+        raise AssertionError("A definitive request rejection cannot have created a sandbox")
+
+    monkeypatch.setattr(environment.group_client, "begin_create_sandbox", rejected_create)
+    monkeypatch.setattr(adapter, "_cleanup_failed_create", unexpected_cleanup)
+
+    with pytest.raises(HttpResponseError, match="request rejected"):
         await adapter.create(_request(), persisted_group=_binding())
 
     assert environment.sandboxes == {}
@@ -504,3 +533,37 @@ def test_create_request_rejects_ports_unsafe_egress_and_controller_credentials()
 def test_create_request_requires_positive_explicit_setup_budget() -> None:
     with pytest.raises(SandboxProvisioningError, match="positive"):
         _request(remaining_setup_budget_seconds=0)
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ["owner_hash_version", "owner_hash", "app_hash", "session_id"],
+)
+def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> None:
+    values = {
+        "owner_hash_version": "o1",
+        "owner_hash": _OWNER_HASH,
+        "app_hash": _APP_HASH,
+        "session_id": "session-123",
+    }
+    values[field_name] = "x" * 64
+
+    with pytest.raises(SandboxProvisioningError, match="63 characters"):
+        SandboxProvisioningLabels(**values)
+
+
+def test_file_projections_accept_live_numeric_posix_mode() -> None:
+    file_info = SimpleNamespace(
+        name="file.bin",
+        path="/tmp/file.bin",
+        size=7,
+        is_directory=False,
+        modified_at=None,
+        mode=0o644,
+    )
+
+    entry = aca_sdk._project_file_entry(file_info)
+    stat = aca_sdk._project_file_stat(file_info)
+
+    assert entry.mode == 0o644
+    assert stat.mode == 0o644
