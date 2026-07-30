@@ -186,21 +186,15 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
-DEFAULT_SESSION_RUNTIME_HARNESS = "maf"
+type SessionRuntimeHarness = Literal["maf"]
+DEFAULT_SESSION_RUNTIME_HARNESS: SessionRuntimeHarness = "maf"
 
 
 def _reject_explicit_null_aca_sandbox(value: Any) -> Any:
-    """Fail closed on an explicitly-null `aca_sandbox`, not just an absent key.
-
-    `aca_sandbox: AcaSandboxConfig | None = None` means Pydantic matches an
-    explicit `None` directly against the union's `None` arm without ever
-    attempting to construct `AcaSandboxConfig` -- so that model's own
-    required-field validation (`sandbox_group_resource_id`) never runs. A
-    bare YAML key (`aca_sandbox:` with nothing after it) parses to exactly
-    this explicit `None`, which would otherwise silently fall back to the
-    in-process default instead of failing startup -- fail-open, not
-    fail-closed. Distinguish that from the key being omitted entirely, which
-    must keep defaulting to `None` with no error.
+    """Fail closed on `aca_sandbox: null` (bare key), distinct from an
+    omitted key: an explicit `None` matches the union's `None` arm directly,
+    skipping `AcaSandboxConfig`'s required-field checks and silently
+    defaulting to in-process (fail-open) instead of failing startup.
     """
     if isinstance(value, dict) and "aca_sandbox" in value and value["aca_sandbox"] is None:
         raise ValueError(
@@ -265,7 +259,7 @@ class SessionRuntimeConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    harness: str = DEFAULT_SESSION_RUNTIME_HARNESS
+    harness: SessionRuntimeHarness = DEFAULT_SESSION_RUNTIME_HARNESS
     aca_sandbox: AcaSandboxConfig | None = None
 
     @model_validator(mode="before")

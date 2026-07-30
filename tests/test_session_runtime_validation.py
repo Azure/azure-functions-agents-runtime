@@ -13,7 +13,7 @@ Fixture-to-row map (see ``docs/frds/0008-aca-sandbox-session-runtime.md``'s
 row text):
 
 * ``17_session_runtime_absent``                         -> no row fires; default (in-process) backend
-* ``18_aca_sandbox_row1_bad_harness``                    -> Row 1  (harness != maf)
+* ``18_aca_sandbox_row1_bad_harness``                    -> Row 1  (harness != maf; schema-level via `Literal["maf"]`, not `validate_session_runtime`)
 * ``19_aca_sandbox_row2_workflows_enabled``               -> Row 2  (workflows.enabled)
 * ``20_aca_sandbox_row3_dynamic_sessions_conflict``        -> Row 3  (Dynamic Sessions code interpreter)
 * ``21_aca_sandbox_row4_non_http_trigger``                 -> Row 4  (non-HTTP trigger)
@@ -119,11 +119,14 @@ def test_session_runtime_absent_defaults_to_in_lang_worker_no_row_fires() -> Non
 
 
 def test_row1_bad_harness_fails_startup() -> None:
+    """Row 1: enforced by the `Literal["maf"]` schema type, not
+    `validate_session_runtime` -- Pydantic rejects any other value first.
+    """
     with pytest.raises(ValueError, match=r"harness") as exc_info:
         create_function_app(FIXTURES_ROOT / "18_aca_sandbox_row1_bad_harness")
     message = str(exc_info.value)
+    assert "session_runtime.harness" in message
     assert "maf" in message
-    assert "custom-harness" in message
 
 
 def test_row5_explicit_null_aca_sandbox_fails_startup() -> None:

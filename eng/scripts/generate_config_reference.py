@@ -126,7 +126,7 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
 
     # Remove module prefixes (schema., etc.)
     type_str = re.sub(r'\b[a-z_]+\.', '', type_str)  # Remove all module prefixes
-    
+
     # Clean up any remaining artifacts like trailing quotes and parentheses
     type_str = re.sub(r"['\",]+\s*is_class=True\)", "", type_str)
     type_str = type_str.replace("'", "").replace('"', '')
@@ -140,6 +140,18 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
     type_str = type_str.replace("list[string]", "string[]")
     type_str = type_str.replace("dict[str, Any]", "object")
     type_str = type_str.replace("list[str]", "string[]")
+
+    # Literal-backed scalar type aliases (PEP 695 `type X = Literal[...]`)
+    # keep their alias name under introspection; render as the underlying
+    # JSON type instead -- the Description column documents the allowed
+    # literal value(s). Runs after the "str" -> "string" simplification
+    # above so the substituted word isn't re-matched by it.
+    literal_scalar_aliases = {
+        "SessionRuntimeHarness": "string",
+    }
+    for alias_name, rendered in literal_scalar_aliases.items():
+        if alias_name in type_str:
+            type_str = type_str.replace(alias_name, rendered)
 
     # Handle Union types shown as X | Y
     if " | " in type_str:

@@ -11,7 +11,7 @@ from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger as _logger
 
-from .schema import DEFAULT_SESSION_RUNTIME_HARNESS, EndpointAuthConfig, GlobalConfig, ResolvedAgent
+from .schema import EndpointAuthConfig, GlobalConfig, ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -235,21 +235,10 @@ def auto_delete_backstop_violated(
     reconciler_cadence_seconds: int = _RECONCILER_CADENCE_SECONDS_DEFAULT,
     grace_seconds: int = _AUTO_DELETE_GRACE_SECONDS_DEFAULT,
 ) -> bool:
-    """Row 13's pure formula: does ``reclaim_idle`` leave the reconciler no
-    margin before the ACA platform's own auto-delete backstop deletes a
-    session out from under the runtime? True when::
-
-        reclaim_idle_seconds > auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
-
-    Inclusive: fails only on strict ``>``, matching the FRD's row 13 wording.
-
-    Not wired into :func:`validate_session_runtime` yet -- the ACA SDK only
-    exposes ``AutoDeletePolicy.delete_interval_seconds`` live, per Sandbox
-    Group, so there is no static value to check without the SDK dependency
-    (a later phase). Row 13's "always a hard fail" is met today by the
-    unconditional capability gate at the end of ``validate_session_runtime``;
-    this function implements the formula now so it's ready to wire against a
-    live value later.
+    """Row 13: True if `reclaim_idle` leaves no margin before the ACA
+    platform's own auto-delete backstop. Not yet wired into
+    `validate_session_runtime` -- needs a live SDK value (a later phase);
+    row 13's hard-fail is met today by the unconditional capability gate.
     """
     return reclaim_idle_seconds > (
         auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
@@ -411,10 +400,11 @@ def validate_session_runtime(
     in-process backend with no behavior change; none of the matrix rows
     below can fire in that case. Configuring the ``aca_sandbox`` block is
     itself what selects the ACA Sandbox execution backend, so every row
-    below other than the harness check is conditioned on
-    ``session_runtime.aca_sandbox`` being present. Every row raises a plain
-    ``ValueError``, matching this module's existing convention (see
-    ``validate_resolved_agent``, ``validate_subagent_references``).
+    below is conditioned on ``session_runtime.aca_sandbox`` being present
+    (row 1's ``harness`` check is schema-enforced via ``Literal["maf"]``,
+    before this function ever runs). Every row raises a plain ``ValueError``,
+    matching this module's existing convention (see ``validate_resolved_agent``,
+    ``validate_subagent_references``).
 
     ``aca_sandbox`` is not implemented yet (see ``execution/unavailable.py``):
     once all other rows pass, this function still unconditionally raises a
@@ -430,16 +420,6 @@ def validate_session_runtime(
             "(in-process) execution."
         )
         return
-
-    # Row 1 (owning rule: 0008.7 #34/#36): harness describes agent-execution
-    # semantics, not the physical execution backend, so it is checked
-    # whenever `session_runtime` is present at all -- not conditioned on
-    # `aca_sandbox`.
-    if session_runtime.harness != DEFAULT_SESSION_RUNTIME_HARNESS:
-        raise _session_runtime_error(
-            "session_runtime.harness",
-            f"Only `{DEFAULT_SESSION_RUNTIME_HARNESS}` is supported (got `{session_runtime.harness}`)",
-        )
 
     aca_sandbox = session_runtime.aca_sandbox
     if aca_sandbox is None:
