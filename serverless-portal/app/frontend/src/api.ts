@@ -78,6 +78,14 @@ export interface DeployResult {
   message: string
   files: string[]
   url?: string
+  portalUrl?: string
+}
+
+export interface DeployStarted {
+  jobId: string
+  status: 'running'
+  files: string[]
+  portalUrl?: string
 }
 
 export type DeployTarget =
@@ -168,24 +176,19 @@ export const api = {
       { content: p.content },
     ),
 
-  // Create/deploy an agent into an existing or new Function App. Provisioning +
-  // remote build can take minutes, so this starts a background job and polls it.
-  deployAgent: async (p: {
+  // Start creating/deploying an agent app; returns a job id to poll. Provisioning
+  // + remote build run in the background so the user can watch in the portal.
+  startDeploy: (p: {
     subscription: string
     agent: { fileName: string; content: string }
     target: DeployTarget
-  }): Promise<DeployResult> => {
-    const started = await req<{ jobId: string; status: string; files: string[] }>('POST', '/api/deploy', p)
-    const deadline = Date.now() + 15 * 60 * 1000
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 4000))
-      const state = await req<DeployResult>('GET', `/api/deploy/${enc(started.jobId)}`)
-      if (state.status !== 'running') return state
-    }
-    return {
-      status: 'error',
-      message: 'Deploy timed out after 15 minutes. Check the app in the Azure portal.',
-      files: started.files ?? [],
-    }
-  },
+  }) => req<DeployStarted>('POST', '/api/deploy', p),
+
+  // Start redeploying an existing app from its own current source with the
+  // portal's saved edits overlaid (safe for multi-agent apps).
+  startRedeploy: (p: { subscription: string; resourceGroup: string; app: string }) =>
+    req<DeployStarted>('POST', '/api/redeploy', p),
+
+  // Poll a deploy/redeploy job's status.
+  getDeployStatus: (jobId: string) => req<DeployResult>('GET', `/api/deploy/${enc(jobId)}`),
 }

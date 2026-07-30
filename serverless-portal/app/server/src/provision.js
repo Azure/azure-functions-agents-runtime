@@ -193,6 +193,7 @@ export async function provisionFlexApp(token, opts) {
     foundryEndpoint = '',
     foundryModel = '',
     pythonVersion = '3.13',
+    deploymentName = `portal-deploy-${Date.now()}`,
   } = opts
 
   await ensureResourceGroup(token, subscriptionId, resourceGroup, region)
@@ -211,7 +212,6 @@ export async function provisionFlexApp(token, opts) {
     foundryModel,
   })
 
-  const deploymentName = `portal-deploy-${Date.now()}`.slice(0, 64)
   const url = `${ARM}/subscriptions/${subscriptionId}/resourcegroups/${encodeURIComponent(resourceGroup)}/providers/Microsoft.Resources/deployments/${deploymentName}?api-version=2021-04-01`
 
   await arm(token, url, { method: 'PUT', body: { properties: { mode: 'Incremental', template } } })
