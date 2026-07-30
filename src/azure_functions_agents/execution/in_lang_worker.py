@@ -1,4 +1,4 @@
-"""In-process implementation of the provider-neutral execution lifecycle."""
+"""Language-worker implementation of the provider-neutral execution lifecycle."""
 
 from __future__ import annotations
 
@@ -41,7 +41,7 @@ class _RunnerModule(Protocol):
 
 
 @dataclass
-class _LocalRun:
+class _LanguageWorkerRun:
     request: StartRunRequest
     session_id: str
     status: RunStatus
@@ -51,8 +51,8 @@ class _LocalRun:
     next_sequence: int = 1
 
 
-class LocalExecutionBackend:
-    """Execute one bound agent in-process through the lifecycle seam."""
+class LanguageWorkerExecutionBackend:
+    """Execute one bound agent in the language worker process through the lifecycle seam."""
 
     def __init__(
         self,
@@ -66,7 +66,7 @@ class LocalExecutionBackend:
         self._binding = binding
         self._stream_events = stream_events
         self._event_retention = event_retention
-        self._runs: dict[str, _LocalRun] = {}
+        self._runs: dict[str, _LanguageWorkerRun] = {}
         self._condition = asyncio.Condition()
 
     async def start_run(self, request: StartRunRequest) -> RunHandle:
@@ -80,7 +80,7 @@ class LocalExecutionBackend:
             last_sequence=0,
             result_available=False,
         )
-        run = _LocalRun(request=request, session_id=session_id, status=status, events=[])
+        run = _LanguageWorkerRun(request=request, session_id=session_id, status=status, events=[])
         async with self._condition:
             self._runs[run_id] = run
             task = asyncio.create_task(self._execute_run(run))
@@ -133,7 +133,7 @@ class LocalExecutionBackend:
             if terminal:
                 return
 
-    async def _execute_run(self, run: _LocalRun) -> None:
+    async def _execute_run(self, run: _LanguageWorkerRun) -> None:
         async with self._condition:
             run.status = replace(run.status, state="running")
             self._condition.notify_all()
@@ -188,7 +188,7 @@ class LocalExecutionBackend:
         finally:
             await self._record_terminal_status(run, "abandoned")
 
-    async def _execute_standard(self, run: _LocalRun) -> None:
+    async def _execute_standard(self, run: _LanguageWorkerRun) -> None:
         runner_module = self._load_runner_module()
         agent_result = await runner_module.run_agent(
             run.request.prompt,
@@ -216,7 +216,7 @@ class LocalExecutionBackend:
             ),
         )
 
-    async def _execute_stream(self, run: _LocalRun) -> None:
+    async def _execute_stream(self, run: _LanguageWorkerRun) -> None:
         runner_module = self._load_runner_module()
         saw_terminal = False
         stream_error: RunError | None = None
@@ -255,7 +255,7 @@ class LocalExecutionBackend:
 
     async def _append_event(
         self,
-        run: _LocalRun,
+        run: _LanguageWorkerRun,
         event_type: str,
         data: dict[str, object],
     ) -> None:
@@ -265,7 +265,7 @@ class LocalExecutionBackend:
 
     def _append_event_locked(
         self,
-        run: _LocalRun,
+        run: _LanguageWorkerRun,
         event_type: str,
         data: dict[str, object],
     ) -> None:
@@ -281,7 +281,7 @@ class LocalExecutionBackend:
             del run.events[: len(run.events) - self._event_retention]
         run.status = replace(run.status, last_sequence=event.sequence)
 
-    async def _record_success(self, run: _LocalRun, result: RunResult | None = None) -> None:
+    async def _record_success(self, run: _LanguageWorkerRun, result: RunResult | None = None) -> None:
         async with self._condition:
             run.status = RunStatus(
                 run_id=run.status.run_id,
@@ -295,7 +295,7 @@ class LocalExecutionBackend:
 
     async def _record_failure(
         self,
-        run: _LocalRun,
+        run: _LanguageWorkerRun,
         *,
         state: RunState,
         code: str,
@@ -317,7 +317,7 @@ class LocalExecutionBackend:
             )
             self._condition.notify_all()
 
-    def _ensure_task_terminal(self, run: _LocalRun, task: asyncio.Future[None]) -> None:
+    def _ensure_task_terminal(self, run: _LanguageWorkerRun, task: asyncio.Future[None]) -> None:
         if task.cancelled():
             state: RunState = "canceled"
         else:
@@ -331,7 +331,7 @@ class LocalExecutionBackend:
             state = "abandoned"
         run.terminalizer_task = asyncio.create_task(self._record_terminal_status(run, state))
 
-    async def _record_terminal_status(self, run: _LocalRun, state: RunState) -> None:
+    async def _record_terminal_status(self, run: _LanguageWorkerRun, state: RunState) -> None:
         async with self._condition:
             if run.status.state in _TERMINAL_STATES:
                 return
@@ -354,14 +354,14 @@ class LocalExecutionBackend:
             )
             self._condition.notify_all()
 
-    def _require_run(self, context: RunContext) -> _LocalRun:
+    def _require_run(self, context: RunContext) -> _LanguageWorkerRun:
         run = self._runs.get(context.run_id)
         if run is None or run.session_id != context.session_id:
             raise ValueError("unknown run context")
         return run
 
     @staticmethod
-    def _assert_cursor_available(run: _LocalRun, after_sequence: int) -> None:
+    def _assert_cursor_available(run: _LanguageWorkerRun, after_sequence: int) -> None:
         if not run.events or after_sequence == 0:
             return
         earliest = run.events[0].sequence

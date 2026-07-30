@@ -1,0 +1,9 @@
+model: gpt-4o
+timeout: 300
+session_runtime:
+  harness: maf
+  aca_sandbox:
+    sandbox_group_resource_id: "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/rg-example/providers/Microsoft.App/sandboxGroups/example-sandbox-group"
+    retention:
+      auto_suspend_idle: 300
+      reclaim_idle: 3600

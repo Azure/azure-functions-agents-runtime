@@ -13,7 +13,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Any, get_args, get_origin
+from typing import Any, get_origin
 
 # Add src to path for imports - import schema module directly to avoid package side effects
 repo_root = Path(__file__).parent.parent.parent
@@ -24,6 +24,7 @@ sys.path.insert(0, str(schema_module_path))
 import importlib.util
 spec = importlib.util.spec_from_file_location("schema", schema_module_path / "schema.py")
 schema = importlib.util.module_from_spec(spec)
+sys.modules["schema"] = schema
 spec.loader.exec_module(schema)
 
 from pydantic import BaseModel
@@ -42,6 +43,9 @@ ToolsFilter = schema.ToolsFilter
 TriggerSpec = schema.TriggerSpec
 TRIGGER_TYPES = schema.TRIGGER_TYPES
 WebRequestConfig = schema.WebRequestConfig
+SessionRuntimeConfig = schema.SessionRuntimeConfig
+AcaSandboxConfig = schema.AcaSandboxConfig
+RetentionConfig = schema.RetentionConfig
 
 # Extract description and default value dictionaries
 GLOBAL_CONFIG_DESCRIPTIONS = schema.GLOBAL_CONFIG_DESCRIPTIONS
@@ -58,11 +62,17 @@ MCP_FILTER_DESCRIPTIONS = schema.MCP_FILTER_DESCRIPTIONS
 SKILLS_FILTER_DESCRIPTIONS = schema.SKILLS_FILTER_DESCRIPTIONS
 AGENT_TOOLS_FILTER_DESCRIPTIONS = schema.AGENT_TOOLS_FILTER_DESCRIPTIONS
 WEB_REQUEST_DESCRIPTIONS = schema.WEB_REQUEST_DESCRIPTIONS
+SESSION_RUNTIME_DESCRIPTIONS = schema.SESSION_RUNTIME_DESCRIPTIONS
+SESSION_RUNTIME_DEFAULTS = schema.SESSION_RUNTIME_DEFAULTS
+ACA_SANDBOX_DESCRIPTIONS = schema.ACA_SANDBOX_DESCRIPTIONS
+ACA_SANDBOX_DEFAULTS = schema.ACA_SANDBOX_DEFAULTS
+RETENTION_DESCRIPTIONS = schema.RETENTION_DESCRIPTIONS
 
 
 def format_type(field_info: FieldInfo, field_name: str) -> str:
     """Format field type annotation as a readable string."""
     annotation = field_info.annotation
+    import re
 
     # Handle Union types (e.g., str | None, bool | object)
     origin = get_origin(annotation)
@@ -74,7 +84,6 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
     type_str = str(annotation)
 
     # Clean up ForwardRef patterns early
-    import re
     type_str = re.sub(r"ForwardRef\('([^']+)'[^)]*\)", r"\1", type_str)
     
     # Clean up common patterns
@@ -95,6 +104,9 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
         "SystemToolsConfig",
         "SystemToolsAgentOverride",
         "TriggerSpec",
+        "SessionRuntimeConfig",
+        "AcaSandboxConfig",
+        "RetentionConfig",
     ]
     for class_name in model_class_names:
         if class_name in type_str:
@@ -114,7 +126,7 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
 
     # Remove module prefixes (schema., etc.)
     type_str = re.sub(r'\b[a-z_]+\.', '', type_str)  # Remove all module prefixes
-    
+
     # Clean up any remaining artifacts like trailing quotes and parentheses
     type_str = re.sub(r"['\",]+\s*is_class=True\)", "", type_str)
     type_str = type_str.replace("'", "").replace('"', '')
@@ -128,6 +140,18 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
     type_str = type_str.replace("list[string]", "string[]")
     type_str = type_str.replace("dict[str, Any]", "object")
     type_str = type_str.replace("list[str]", "string[]")
+
+    # Literal-backed scalar type aliases (PEP 695 `type X = Literal[...]`)
+    # keep their alias name under introspection; render as the underlying
+    # JSON type instead -- the Description column documents the allowed
+    # literal value(s). Runs after the "str" -> "string" simplification
+    # above so the substituted word isn't re-matched by it.
+    literal_scalar_aliases = {
+        "SessionRuntimeHarness": "string",
+    }
+    for alias_name, rendered in literal_scalar_aliases.items():
+        if alias_name in type_str:
+            type_str = type_str.replace(alias_name, rendered)
 
     # Handle Union types shown as X | Y
     if " | " in type_str:
@@ -247,6 +271,7 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
     "http_auth": "App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`.",
+    "session_runtime": "Session execution backend selection. [Details](#global-session_runtime)",
 }
 
 GLOBAL_CONFIG_DEFAULTS = {
@@ -255,6 +280,7 @@ GLOBAL_CONFIG_DEFAULTS = {
     "timeout": "`900`",
     "tools": "`{}`",
     "http_auth": "`function` (per-agent default)",
+    "session_runtime": "`{}`",
 }
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS = {
@@ -362,6 +388,12 @@ def generate_markdown() -> str:
                                       custom_defaults={"allowed_hosts": "`null`"}))
     lines.extend(["", "### Global: `tools`", ""])
     lines.extend(generate_model_table(ToolsFilter, descriptions=TOOLS_FILTER_DESCRIPTIONS))
+    lines.extend(["", "### Global: `session_runtime`", ""])
+    lines.extend(generate_model_table(SessionRuntimeConfig, descriptions=SESSION_RUNTIME_DESCRIPTIONS, custom_defaults=SESSION_RUNTIME_DEFAULTS))
+    lines.extend(["", "### Global: `session_runtime.aca_sandbox`", ""])
+    lines.extend(generate_model_table(AcaSandboxConfig, descriptions=ACA_SANDBOX_DESCRIPTIONS, custom_defaults=ACA_SANDBOX_DEFAULTS))
+    lines.extend(["", "### Global: `session_runtime.aca_sandbox.retention`", ""])
+    lines.extend(generate_model_table(RetentionConfig, descriptions=RETENTION_DESCRIPTIONS))
 
     lines.extend([
         "",

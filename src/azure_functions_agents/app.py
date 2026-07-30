@@ -16,7 +16,11 @@ from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
 from .config.schema import ResolvedAgent
-from .config.validation import validate_resolved_agent, validate_subagent_references
+from .config.validation import (
+    validate_resolved_agent,
+    validate_session_runtime,
+    validate_subagent_references,
+)
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
@@ -135,6 +139,12 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
         for spec in agent_specs
     ]
+
+    # FRD 0008: enforce the `session_runtime` startup validation matrix before
+    # any other cross-agent validation/registration runs. A no-op (returns
+    # immediately) unless `session_runtime` is configured at all; configuring
+    # `aca_sandbox` always fails here (capability gate), never at request time.
+    validate_session_runtime(global_config, resolved_agents)
 
     # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---
     # Must run before any other cross-agent validation: `validate_subagent_references`

@@ -186,6 +186,88 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
+type SessionRuntimeHarness = Literal["maf"]
+DEFAULT_SESSION_RUNTIME_HARNESS: SessionRuntimeHarness = "maf"
+
+
+def _reject_explicit_null_aca_sandbox(value: Any) -> Any:
+    """Fail closed on `aca_sandbox: null` (bare key), distinct from an
+    omitted key: an explicit `None` matches the union's `None` arm directly,
+    skipping `AcaSandboxConfig`'s required-field checks and silently
+    defaulting to in-process (fail-open) instead of failing startup.
+    """
+    if isinstance(value, dict) and "aca_sandbox" in value and value["aca_sandbox"] is None:
+        raise ValueError(
+            "session_runtime.aca_sandbox: must not be explicitly `null`. Omit "
+            "the `aca_sandbox` key entirely to use the in-process default, or "
+            "provide a block with `sandbox_group_resource_id` to select the "
+            "ACA Sandbox backend. See docs/frds/0008-aca-sandbox-session-runtime.md."
+        )
+    return value
+
+
+class RetentionConfig(BaseModel):
+    """Idle/reclaim retention policy for ``aca_sandbox`` session state.
+
+    Both fields are required together. ``reclaim_idle`` is only meaningful as
+    a value relative to ``auto_suspend_idle`` (it must exceed it), so a
+    partial block authoring only one of the two is rejected rather than
+    silently paired with an implicit default for the other.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    auto_suspend_idle: int
+    reclaim_idle: int
+
+
+class AcaSandboxConfig(BaseModel):
+    """Reference to a pre-provisioned, customer-owned ACA Sandbox Group.
+
+    The runtime never creates a Sandbox Group on the customer's behalf;
+    ``sandbox_group_resource_id`` must point at one that already exists.
+    Configuring this block is itself what selects the ACA Sandbox execution
+    backend for all agent sessions (FRD 0008); the block's presence is the
+    discriminant.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    sandbox_group_resource_id: str
+    retention: RetentionConfig | None = None
+
+    @field_validator("sandbox_group_resource_id")
+    @classmethod
+    def _validate_sandbox_group_resource_id(cls, value: str) -> str:
+        trimmed = value.strip()
+        if not trimmed:
+            raise ValueError("sandbox_group_resource_id must be non-empty")
+        return trimmed
+
+
+class SessionRuntimeConfig(BaseModel):
+    """Global session-execution-backend selection (FRD 0008).
+
+    Absence of this entire block is the default and means agent sessions
+    execute in-process, with no behavior change versus the runtime that
+    existed before FRD 0008. There is no explicit backend-selector field:
+    configuring the ``aca_sandbox`` block is itself what selects the ACA
+    Sandbox execution backend; its absence selects the in-process default.
+    This is app-wide configuration authored only in ``agents.config.yaml``;
+    it is never a per-agent front-matter field.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    harness: SessionRuntimeHarness = DEFAULT_SESSION_RUNTIME_HARNESS
+    aca_sandbox: AcaSandboxConfig | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _check_explicit_null_aca_sandbox(cls, value: Any) -> Any:
+        return _reject_explicit_null_aca_sandbox(value)
+
+
 class GlobalConfig(BaseModel):
     """Top-level agents.config.yaml schema."""
 
@@ -202,6 +284,16 @@ class GlobalConfig(BaseModel):
             "agent's built-in HTTP endpoints. A per-agent builtin_endpoints.http_auth "
             "overrides it. Applies only to HTTP endpoints and does not affect MCP. "
             "Modes: function (API key, default), admin (master key), anonymous, entra (Entra ID)."
+        ),
+    )
+    session_runtime: SessionRuntimeConfig | None = Field(
+        default=None,
+        description=(
+            "Session execution backend selection (FRD 0008). Omitting this block "
+            "entirely is the default and executes agent sessions in-process, with "
+            "no behavior change. Configure `aca_sandbox` to isolate each agent "
+            "session in a pre-provisioned Azure Container Apps Sandbox Group; its "
+            "presence selects that backend."
         ),
     )
 
@@ -341,6 +433,7 @@ GLOBAL_CONFIG_DESCRIPTIONS: dict[str, str] = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
+    "session_runtime": "Session execution backend selection. [Details](#global-session_runtime)",
 }
 
 GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
@@ -348,6 +441,48 @@ GLOBAL_CONFIG_DEFAULTS: dict[str, str] = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
+    "session_runtime": "`{}`",
+}
+
+SESSION_RUNTIME_DESCRIPTIONS: dict[str, str] = {
+    "harness": "Agent execution harness. Only `maf` (Microsoft Agent Framework) is supported.",
+    "aca_sandbox": (
+        "Reference to the pre-provisioned ACA Sandbox Group. Configuring this "
+        "block is itself what selects the ACA Sandbox execution backend for "
+        "all agent sessions; its absence selects the default in-process "
+        "backend. [Details](#global-session_runtimeaca_sandbox)"
+    ),
+}
+
+SESSION_RUNTIME_DEFAULTS: dict[str, str] = {
+    "harness": f'`"{DEFAULT_SESSION_RUNTIME_HARNESS}"`',
+    "aca_sandbox": "`null`",
+}
+
+ACA_SANDBOX_DESCRIPTIONS: dict[str, str] = {
+    "sandbox_group_resource_id": (
+        "Azure resource ID of a pre-provisioned Sandbox Group. The runtime never "
+        "creates one; this must reference an existing, customer-owned Sandbox Group."
+    ),
+    "retention": (
+        "Idle/reclaim retention policy for ACA Sandbox sessions. "
+        "[Details](#global-session_runtimeaca_sandboxretention)"
+    ),
+}
+
+ACA_SANDBOX_DEFAULTS: dict[str, str] = {
+    "retention": "`null`",
+}
+
+RETENTION_DESCRIPTIONS: dict[str, str] = {
+    "auto_suspend_idle": (
+        "Idle seconds before a session is auto-suspended. Must be one of 60, 120, "
+        "300, 600, 1800, 3600."
+    ),
+    "reclaim_idle": (
+        "Idle seconds before a suspended session's state is reclaimed. Must be "
+        "positive and strictly greater than `auto_suspend_idle`."
+    ),
 }
 
 SYSTEM_TOOLS_CONFIG_DESCRIPTIONS: dict[str, str] = {

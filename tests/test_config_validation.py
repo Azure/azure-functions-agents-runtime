@@ -12,6 +12,7 @@ from azure_functions_agents.config.schema import (
     TriggerSpec,
 )
 from azure_functions_agents.config.validation import (
+    auto_delete_backstop_violated,
     validate_resolved_agent,
     validate_subagent_references,
 )
@@ -422,3 +423,81 @@ def test_validate_subagent_references_rejects_duplicate_reference() -> None:
     assert "field `subagents`" in message
     assert "Duplicate reference" in message
     assert "billing-specialist" in message
+
+
+# --- auto_delete_backstop_violated() (FRD 0008 Row 13's pure formula, P2) ---
+#
+# Not wired live in this phase (see the function's docstring): the ACA SDK's
+# `AutoDeletePolicy.delete_interval_seconds` is only readable per-Sandbox-Group
+# at runtime, so there is no static config value to check it against yet.
+# Row 13's "always a hard fail" requirement is satisfied unconditionally by
+# the capability gate instead. These tests cover the formula itself so it is
+# correct and ready to be wired against a live SDK value in a later phase.
+
+
+def test_auto_delete_backstop_violated_true_when_reclaim_idle_too_close() -> None:
+    """1 hour auto-delete, default 1h cadence + 5min grace leaves zero margin --
+    any positive reclaim_idle violates the backstop."""
+    assert auto_delete_backstop_violated(
+        reclaim_idle_seconds=1,
+        auto_delete_seconds=3600,
+    )
+
+
+def test_auto_delete_backstop_violated_false_with_ample_margin() -> None:
+    """24 hour auto-delete leaves a huge margin over the 1h/5min defaults."""
+    assert not auto_delete_backstop_violated(
+        reclaim_idle_seconds=3600,
+        auto_delete_seconds=86400,
+    )
+
+
+def test_auto_delete_backstop_violated_boundary_is_inclusive_of_equality() -> None:
+    """Exactly at the boundary (`reclaim_idle == auto_delete - cadence - grace`)
+    must NOT violate -- the FRD's row 13 wording fails only on strict `>`."""
+    auto_delete_seconds = 7200
+    cadence = 3600
+    grace = 300
+    boundary = auto_delete_seconds - cadence - grace
+    assert not auto_delete_backstop_violated(
+        reclaim_idle_seconds=boundary,
+        auto_delete_seconds=auto_delete_seconds,
+        reconciler_cadence_seconds=cadence,
+        grace_seconds=grace,
+    )
+    assert auto_delete_backstop_violated(
+        reclaim_idle_seconds=boundary + 1,
+        auto_delete_seconds=auto_delete_seconds,
+        reconciler_cadence_seconds=cadence,
+        grace_seconds=grace,
+    )
+
+
+def test_auto_delete_backstop_violated_respects_custom_cadence_and_grace() -> None:
+    """Custom (non-default) cadence/grace values are honored, not ignored."""
+    assert not auto_delete_backstop_violated(
+        reclaim_idle_seconds=100,
+        auto_delete_seconds=200,
+        reconciler_cadence_seconds=50,
+        grace_seconds=50,
+    )
+    assert auto_delete_backstop_violated(
+        reclaim_idle_seconds=101,
+        auto_delete_seconds=200,
+        reconciler_cadence_seconds=50,
+        grace_seconds=50,
+    )
+
+
+def test_auto_delete_backstop_violated_defaults_match_frd_documented_values() -> None:
+    """Defaults are a 1 hour reconciler cadence and a 5 minute grace period."""
+    with_defaults = auto_delete_backstop_violated(
+        reclaim_idle_seconds=1000, auto_delete_seconds=10000
+    )
+    with_explicit_defaults = auto_delete_backstop_violated(
+        reclaim_idle_seconds=1000,
+        auto_delete_seconds=10000,
+        reconciler_cadence_seconds=3600,
+        grace_seconds=300,
+    )
+    assert with_defaults == with_explicit_defaults
