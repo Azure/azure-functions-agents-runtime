@@ -18,6 +18,28 @@ function formatCachedAt(ms: number): string {
   return `${d.toLocaleString()} (${rel})`
 }
 
+// Shorten a supporting function name for display, e.g.
+// `agent_main_builtin_chatstream` → `chatstream`. Falls back to the raw name.
+function shortSupportingLabel(agentName: string, fn: string): string {
+  const builtinPrefix = `agent_${agentName}_builtin_`
+  if (fn.startsWith(builtinPrefix)) return fn.slice(builtinPrefix.length)
+  const marker = '_builtin_'
+  const idx = fn.indexOf(marker)
+  if (fn.startsWith('agent_') && idx !== -1) return fn.slice(idx + marker.length)
+  return fn
+}
+
+// Summarise functions by trigger type, e.g. [http, connector, http] →
+// "2 http, 1 connector". First-seen trigger order is preserved.
+function summarizeByTrigger(fns: { trigger: string }[]): string {
+  const counts = new Map<string, number>()
+  for (const fn of fns) {
+    const key = fn.trigger || 'other'
+    counts.set(key, (counts.get(key) ?? 0) + 1)
+  }
+  return [...counts.entries()].map(([trigger, n]) => `${n} ${trigger}`).join(', ')
+}
+
 export default function AgentsPage() {
   const {
     subscriptions,
@@ -80,6 +102,11 @@ export default function AgentsPage() {
 
   const error = queryError ? (queryError as Error).message : null
   const agents = data?.agents ?? []
+  // App-level supporting (non-agent) functions, keyed by Function App name.
+  const supportingByApp = useMemo(
+    () => new Map((data?.apps ?? []).map((app) => [app.name, app.supportingFunctions ?? []])),
+    [data],
+  )
   const scanning = !!selected && !data && !error
   const subName = subscriptions.find((s) => s.id === selected)?.name ?? 'the subscription'
 
@@ -141,11 +168,11 @@ export default function AgentsPage() {
           <thead>
             <tr>
               <th>Agent</th>
+              <th>Supporting functions</th>
               <th>Function App</th>
               <th>Resource group</th>
-              <th>Provider</th>
               <th>Trigger</th>
-              <th>Endpoints</th>
+              <th>Built-in endpoints</th>
             </tr>
           </thead>
           <tbody>
@@ -192,27 +219,51 @@ export default function AgentsPage() {
                     </div>
                   )}
                 </td>
-                <td className="mono">{a.app}</td>
-                <td className="muted">{a.resourceGroup}</td>
                 <td>
-                  {a.provider ? (
-                    <span className="badge gray">{a.provider}</span>
+                  {(supportingByApp.get(a.app) ?? []).length ? (
+                    <span
+                      className="badge gray"
+                      title="App-level functions that aren't agents (details on the agent page)"
+                    >
+                      {summarizeByTrigger(supportingByApp.get(a.app) ?? [])}
+                    </span>
                   ) : (
                     <span className="muted">—</span>
                   )}
                 </td>
+                <td className="mono">{a.app}</td>
+                <td className="muted">{a.resourceGroup}</td>
                 <td>
-                  <span className="badge blue">{a.trigger || 'http'}</span>
-                </td>
-                <td>
-                  {a.builtinEndpoints ? (
-                    <span className="badge gray">built-in</span>
-                  ) : a.routes && a.routes.length > 0 ? (
-                    <span className="badge gray">
-                      {a.routes.length} route{a.routes.length === 1 ? '' : 's'}
+                  {a.trigger === 'none' ? (
+                    <span
+                      className="badge gray"
+                      title="Defined in a .agent.md with no trigger or built-in endpoint"
+                    >
+                      no trigger
                     </span>
                   ) : (
-                    <span className="muted">—</span>
+                    <span className="badge blue">{a.trigger || 'http'}</span>
+                  )}
+                </td>
+                <td>
+                  {a.supportingFunctions && a.supportingFunctions.length > 0 ? (
+                    <span className="pill-row">
+                      <span
+                        className="badge blue"
+                        title={`${a.supportingFunctions.length} supporting function${
+                          a.supportingFunctions.length === 1 ? '' : 's'
+                        }`}
+                      >
+                        {a.supportingFunctions.length}
+                      </span>
+                      {a.supportingFunctions.map((fn) => (
+                        <span key={fn} className="badge gray mono" title={fn}>
+                          {shortSupportingLabel(a.name, fn)}
+                        </span>
+                      ))}
+                    </span>
+                  ) : (
+                    <span className="muted">0</span>
                   )}
                 </td>
               </tr>
