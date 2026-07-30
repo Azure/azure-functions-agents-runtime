@@ -168,10 +168,13 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 Agent files can be placed at the app root or in an `agents/` folder:
 ```
 my-app/
-├── main.agent.md           # Top-level (is_main=true)
+├── agent.md                 # Bare single-agent alias → slug "main" (is_main=true)
+│                            # Alternatives: main.agent.md → slug "main", CLAUDE.md → slug "main"
+│                            # (agent.md, CLAUDE.md, and main.agent.md are all aliases;
+│                            #  only one may be present in the same app)
 ├── agents/                  # Optional folder for organization
 │   ├── chat.agent.md
-│   └── report.agent.md
+│   └── report.claude.md     # *.claude.md is equivalent to *.agent.md — prefix becomes slug
 ├── tools/
 └── skills/
 ```
@@ -271,6 +274,11 @@ Agent instructions in markdown...
 
 - **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
 - **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name, endpoint slug, and the agent's global identity (its slug — also used for `delegate_<slug>` tool names, see [Multi-agent delegation](#multi-agent-delegation-subagents) above). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+
+> **Flexible filename conventions:** Beyond `*.agent.md`, the runtime also supports:
+> - **`agent.md`** (any casing: `Agent.md`, `AGENT.MD`) and **`CLAUDE.md`** (any casing: `Claude.md`, `claude.md`) — bare aliases for `main.agent.md` that produce slug `main` and `is_main=True`. `agent.md`, `CLAUDE.md`, and `main.agent.md` all produce the same slug so at most one may be present in the same app.
+> - **`*.claude.md`** — e.g. `summarizer.claude.md` is equivalent to `summarizer.agent.md`; the prefix becomes the slug.
+> - **Case-insensitive suffix matching** — `.agent.md` and `.claude.md` suffixes are matched case-insensitively (`Report.AGENT.md` is valid but collides with `report.agent.md`).
 
 > **⚠️ Breaking change**: Earlier releases silently auto-suffixed (`_2`, `_3`, ...) when two agent files
 > sanitized to the same name. **Slugs are now required to be globally unique across the whole app.** A
@@ -535,6 +543,8 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`daily-tech-news-email`](samples/daily-tech-news-email) — timer-triggered agent that scrapes news and emails a digest
 - [`outlook-reply-agent`](samples/outlook-reply-agent) — connector-triggered agent that drafts replies to incoming Office 365 Outlook email
 - [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
+- [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
+- [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 
 ## Deployment Notes
 

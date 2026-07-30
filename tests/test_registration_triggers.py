@@ -32,6 +32,7 @@ class FakeFunctionApp:
     def __init__(self, *, function_name_error: Exception | None = None) -> None:
         self.function_names: list[str] = []
         self.trigger_calls: list[tuple[str, dict[str, Any]]] = []
+        self.durable_client_inputs: list[tuple[Any, str]] = []
         self.function_name_error = function_name_error
 
     def function_name(self, *, name: str) -> Any:
@@ -68,6 +69,13 @@ class FakeFunctionApp:
     def route(self, **kwargs: Any) -> Any:
         def decorator(handler: Any) -> Any:
             self.trigger_calls.append(("route", kwargs))
+            return handler
+
+        return decorator
+
+    def durable_client_input(self, *, client_name: str) -> Any:
+        def decorator(handler: Any) -> Any:
+            self.durable_client_inputs.append((handler, client_name))
             return handler
 
         return decorator
@@ -140,6 +148,7 @@ def test_register_agent_uses_source_filename_for_function_name(
     register_agent(app, resolved, AgentCapabilities())
 
     assert app.function_names == ["simple"]
+    assert app.durable_client_inputs == []
 
 
 def test_register_agent_sanitizes_source_filename(
@@ -487,7 +496,15 @@ def test_register_agent_accepts_nested_auth_object_with_entra_allowlists(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    def _capture(resolved: Any, capabilities: Any, catalog: Any = None, *, auth: Any) -> Any:
+    def _capture(
+        resolved: Any,
+        capabilities: Any,
+        catalog: Any = None,
+        *,
+        auth: Any,
+        workflows_enabled: bool = False,
+        workflow_system_addendum: str | None = None,
+    ) -> Any:
         captured["auth"] = auth
         return _stub_handler
 
@@ -621,7 +638,7 @@ def test_register_agent_dispatches_connector_trigger_to_builtin_registration(
     builtin_calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         "azure_functions_agents.registration.triggers._register_builtin_agent",
-        lambda *args: builtin_calls.append(args),
+        lambda *args, **kwargs: builtin_calls.append(args),
     )
 
     register_agent(app, resolved, capabilities)
@@ -697,7 +714,7 @@ def test_register_agent_registers_non_http_trigger_on_main_agent(
     builtin_calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         "azure_functions_agents.registration.triggers._register_builtin_agent",
-        lambda *args: builtin_calls.append(args),
+        lambda *args, **kwargs: builtin_calls.append(args),
     )
 
     register_agent(app, resolved, capabilities)
@@ -726,7 +743,7 @@ def test_register_agent_registers_http_trigger_on_main_agent(
     http_calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         "azure_functions_agents.registration.triggers._register_http_agent",
-        lambda *args: http_calls.append(args),
+        lambda *args, **kwargs: http_calls.append(args),
     )
 
     capabilities = AgentCapabilities()
@@ -757,7 +774,7 @@ def test_register_agent_dispatches_non_connector_trigger_types_to_builtin_regist
     builtin_calls: list[tuple[Any, ...]] = []
     monkeypatch.setattr(
         "azure_functions_agents.registration.triggers._register_builtin_agent",
-        lambda *args: builtin_calls.append(args),
+        lambda *args, **kwargs: builtin_calls.append(args),
     )
 
     register_agent(app, resolved, capabilities)
@@ -819,3 +836,38 @@ def test_register_agent_does_not_double_substitute_trigger_args(
             },
         )
     ]
+
+
+def test_register_workflow_timer_adds_durable_client_without_changing_trigger(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    resolved = _resolved_agent(
+        trigger=TriggerSpec(type="timer_trigger", args={"schedule": "*/5 * * * *"}),
+        is_main=True,
+    )
+    app = FakeFunctionApp()
+    handler = object()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.triggers.make_agent_handler",
+        lambda *args, **kwargs: handler,
+    )
+
+    register_agent(
+        app,
+        resolved,
+        AgentCapabilities(),
+        workflows_enabled=True,
+        workflow_system_addendum="trigger workflow guidance",
+    )
+
+    assert app.durable_client_inputs == [(handler, "client")]
+    assert app.trigger_calls == [
+        (
+            "timer_trigger",
+            {
+                "schedule": "0 */5 * * * *",
+                "arg_name": "trigger_data",
+            },
+        )
+    ]
+    assert app.function_names == ["test_registration_triggers"]

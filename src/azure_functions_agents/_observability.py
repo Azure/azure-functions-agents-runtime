@@ -104,6 +104,7 @@ class ResolvedObservability:
 
 _MAF_SENSITIVE_ENV = "ENABLE_SENSITIVE_DATA"
 _CONNECTION_ENV = "APPLICATIONINSIGHTS_CONNECTION_STRING"
+_AAD_AUTH_STRING_ENV = "APPLICATIONINSIGHTS_AUTHENTICATION_STRING"
 
 _CONTENT_ATTR_MAX_CHARS = 2048
 
@@ -242,8 +243,15 @@ def _configure_azure_monitor(connection_string: str) -> None:
         # host.json telemetryMode exports only *host* telemetry, not the runtime's worker spans. The
         # caller detects that no provider became active and emits an actionable warning.
         return
+    kwargs: dict[str, Any] = {"connection_string": connection_string}
+    if runtime_env_value(_AAD_AUTH_STRING_ENV):
+        # Unlike the other exporters, Live Metrics (QuickPulse) doesn't resolve AAD auth from this
+        # env var, so it 401s repeatedly when the App Insights resource requires AAD. Disable it
+        # here — this only drops the real-time Portal view, not telemetry export. Remove once
+        # fixed upstream: https://github.com/Azure/azure-sdk-for-python/issues/48251
+        kwargs["enable_live_metrics"] = False
     try:
-        configure_azure_monitor(connection_string=connection_string)
+        configure_azure_monitor(**kwargs)
     except Exception as exc:  # pragma: no cover - defensive
         logger.warning("Could not configure the Azure Monitor exporter: %s", exc)
 
