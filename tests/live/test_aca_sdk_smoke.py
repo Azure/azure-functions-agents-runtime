@@ -14,7 +14,7 @@ from azure_functions_agents.transport.manifest import (
     SESSION_MANIFEST_PATH,
     ExpectedSandboxManifestBinding,
 )
-from azure_functions_agents.transport.models import (
+from azure_functions_agents.transport.transport_models import (
     DiskIdSource,
     DiskSource,
     PersistedSandboxBinding,
@@ -46,10 +46,23 @@ def _source_from_environment() -> DiskSource | DiskIdSource | PresetSource:
     kind, value = selected[0]
     assert value is not None
     if kind == "disk":
-        return DiskSource(value)
+        return DiskSource.create(value)
     if kind == "disk_id":
-        return DiskIdSource(value)
-    return PresetSource(value)
+        return DiskIdSource.create(value)
+    return PresetSource.create(value)
+
+
+async def _force_delete_by_id(adapter: AcaSandboxAdapter, sandbox_id: str) -> None:
+    """Reconcile a stopped-but-unresumed sandbox directly by ID.
+
+    Used only from this opt-in smoke test's ``finally`` block, for the one
+    window where neither a ``created`` nor a ``resumed`` handle exists (the
+    prior handle was closed after ``stop()``, and ``resume()`` itself then
+    failed before yielding a new one).
+    """
+
+    poller = await adapter._group_client.begin_delete_sandbox(sandbox_id)
+    await poller.result()
 
 
 @pytest.mark.live_aca
@@ -63,15 +76,16 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
     adapter = await AcaSandboxAdapter.open(group_resource_id)
     created = None
     resumed = None
+    sandbox_id: str | None = None
     deleted = False
     try:
-        group_binding = SandboxGroupBinding(
+        group_binding = SandboxGroupBinding.create(
             resource_id=adapter.group.resource_id,
             region=adapter.group.region,
         )
-        request = SandboxCreateRequest(
+        request = SandboxCreateRequest.create(
             source=_source_from_environment(),
-            labels=SandboxProvisioningLabels(
+            labels=SandboxProvisioningLabels.create(
                 owner_hash_version="o1",
                 owner_hash=_OWNER_HASH,
                 app_hash=_APP_HASH,
@@ -81,6 +95,10 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             environment={"P4A_SMOKE": "1"},
         )
         created = await adapter.create(request, persisted_group=group_binding)
+        # Captured immediately so `finally` can always reconcile this sandbox,
+        # even across the stop()/close()/resume() window below where neither
+        # `created` nor `resumed` is set.
+        sandbox_id = created.identity.sandbox_id
 
         root = f"/tmp/{session_id}"
         path = f"{root}/file.bin"
@@ -93,7 +111,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
         assert await created.read_file(path) == b"p4a-direct-file"
         await created.delete_file(path)
 
-        expected = ExpectedSandboxManifestBinding(
+        expected = ExpectedSandboxManifestBinding.create(
             manifest_version=1,
             protocol_version="p4a-smoke-v1",
             session_id=session_id,
@@ -101,7 +119,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             owner_hash=_OWNER_HASH,
             app_hash=_APP_HASH,
             sandbox_group_resource_id=group_binding.resource_id,
-            sandbox_id=created.identity.sandbox_id,
+            sandbox_id=sandbox_id,
             generation=1,
             digest_kind="smoke",
             digest="sha256:" + "b" * 64,
@@ -120,10 +138,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
         created = None
 
         resumed = await adapter.resume(
-            PersistedSandboxBinding(
-                sandbox_id=expected.sandbox_id,
-                group=group_binding,
-            ),
+            PersistedSandboxBinding.create(sandbox_id=sandbox_id, group=group_binding),
             expected,
             readiness_timeout_seconds=30,
         )
@@ -139,4 +154,6 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             if not deleted:
                 await created.delete()
             await created.close()
+        elif sandbox_id is not None and not deleted:
+            await _force_delete_by_id(adapter, sandbox_id)
         await adapter.close()

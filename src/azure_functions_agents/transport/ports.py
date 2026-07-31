@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .models import SandboxExecResult, SandboxFileEntry, SandboxFileStat
+from .transport_models import SandboxExecResult, SandboxFileEntry, SandboxFileStat
 
 
 @runtime_checkable

@@ -1,24 +1,25 @@
 """The sole production adapter for the optional ACA Sandbox preview SDK.
 
 Every preview-SDK symbol is deliberately confined to this module. Runtime code
-outside this adapter sees only ``transport.models`` projections and the narrow
-file/process Protocols.
+outside this adapter sees only ``transport.transport_models`` projections and
+the narrow file/process Protocols.
 """
 
 from __future__ import annotations
 
 import asyncio
-import inspect
 import math
 import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from importlib import import_module
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import aiohttp
+from azure.core.credentials_async import AsyncTokenCredential
 from azure.core.exceptions import AzureError, HttpResponseError, ServiceRequestError
+from azure.core.polling import AsyncLROPoller
 
 from azure_functions_agents._credential import build_async_credential
 from azure_functions_agents._logger import logger
@@ -29,7 +30,8 @@ from .manifest import (
     parse_sandbox_manifest_binding,
     verify_sandbox_manifest,
 )
-from .models import (
+from .ports import SandboxFileTransport, SandboxProcessTransport
+from .transport_models import (
     AcaSandboxDependencyError,
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
@@ -45,10 +47,18 @@ from .models import (
     parse_sandbox_group_resource_id,
     source_to_provider_kwargs,
 )
-from .ports import SandboxFileTransport, SandboxProcessTransport
 
-_ARM_SCOPE = "https://management.azure.com/.default"
+if TYPE_CHECKING:
+    # The optional preview SDK is imported for typing only. Every runtime use
+    # goes through ``_load_sdk_factories()``'s lazy ``import_module()`` below,
+    # so the default in-language-worker runtime never depends on this import.
+    from azure.containerapps.sandbox import EgressPolicy, ExecResult, FileInfo
+    from azure.containerapps.sandbox.aio import SandboxClient, SandboxGroupClient
+
+_ARM_HOST = "https://management.azure.com"
+_ARM_SCOPE = f"{_ARM_HOST}/.default"
 _ARM_API_VERSION = "2026-02-01-preview"
+_ARM_REQUEST_TIMEOUT_SECONDS = 30
 _PROVISIONING_ATTEMPT_LABEL = "provisioning_attempt_id"
 _CONTROL_OPERATION_TIMEOUT_SECONDS = 30
 _CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
@@ -56,6 +66,11 @@ _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
 _FAILED_CREATE_LOOKUP_DELAY_SECONDS = 1.0
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.5
 _RETRYABLE_MANIFEST_STATUS_CODES = frozenset({404, 409, 423, 425, 429, 500, 502, 503, 504})
+_RECONCILIATION_ERRORS = (AzureError, TimeoutError, RuntimeError, ValueError)
+
+# A module-level indirection so tests can patch just this adapter's retry
+# delays instead of monkeypatching the process-wide ``asyncio`` module.
+_sleep = asyncio.sleep
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,9 +78,9 @@ class SdkFactories:
     """SDK constructors injected only at this adapter boundary for tests."""
 
     endpoint_for_region: Callable[[str], str]
-    sandbox_group_client: Callable[..., Any]
-    sandbox_client: Callable[..., Any]
-    egress_policy: Callable[..., Any]
+    sandbox_group_client: Callable[..., SandboxGroupClient]
+    sandbox_client: Callable[..., SandboxClient]
+    egress_policy: Callable[..., EgressPolicy]
 
 
 def _load_sdk_factories() -> SdkFactories:
@@ -78,6 +93,10 @@ def _load_sdk_factories() -> SdkFactories:
         raise AcaSandboxDependencyError(
             "ACA Sandbox support requires the aca_sandbox optional dependency."
         ) from None
+    # The optional SDK is loaded dynamically by name so the default runtime
+    # carries no import-time dependency on it. This is the one necessary
+    # boundary cast from an opaque ``ModuleType`` into this adapter's typed
+    # factory bundle; every symbol pulled out of it below is a real SDK type.
     sdk = cast(Any, sdk_module)
     async_sdk = cast(Any, async_sdk_module)
     return SdkFactories(
@@ -89,33 +108,47 @@ def _load_sdk_factories() -> SdkFactories:
 
 
 _SDK_FACTORIES: Callable[[], SdkFactories] = _load_sdk_factories
-_CREDENTIAL_FACTORY: Callable[[], Any] = build_async_credential
+_CREDENTIAL_FACTORY: Callable[[], AsyncTokenCredential] = build_async_credential
 
 
-async def _read_arm_group(credential: Any, resource_id: str) -> Mapping[str, object]:
+async def _read_arm_group(
+    credential: AsyncTokenCredential, resource_id: str
+) -> Mapping[str, object]:
     """Resolve the customer-owned group identity and region under controller identity."""
 
     token = await credential.get_token(_ARM_SCOPE)
-    access_token = getattr(token, "token", None)
-    if not isinstance(access_token, str) or not access_token:
+    if not token.token:
         raise SandboxGroupBindingError("Controller credential returned no ARM access token.")
 
-    async with aiohttp.ClientSession() as session, session.get(
-        f"https://management.azure.com{resource_id}",
-        params={"api-version": _ARM_API_VERSION},
-        headers={"Authorization": f"Bearer {access_token}"},
-    ) as response:
-        if response.status != 200:
-            raise SandboxGroupBindingError(
-                "Configured Sandbox Group could not be resolved under the controller credential."
-            )
-        payload = await response.json(content_type=None)
+    timeout = aiohttp.ClientTimeout(total=_ARM_REQUEST_TIMEOUT_SECONDS)
+    try:
+        async with (
+            aiohttp.ClientSession(timeout=timeout) as session,
+            session.get(
+                f"{_ARM_HOST}{resource_id}",
+                params={"api-version": _ARM_API_VERSION},
+                headers={"Authorization": f"Bearer {token.token}"},
+            ) as response,
+        ):
+            if response.status != 200:
+                raise SandboxGroupBindingError(
+                    "Configured Sandbox Group could not be resolved under the "
+                    "controller credential."
+                )
+            payload = await response.json(content_type=None)
+    except (aiohttp.ClientError, TimeoutError, ValueError) as exc:
+        raise SandboxGroupBindingError(
+            "Configured Sandbox Group ARM lookup failed due to a transport or decode error."
+        ) from exc
+
     if not isinstance(payload, dict):
         raise SandboxGroupBindingError("Configured Sandbox Group returned an invalid ARM response.")
     return cast(Mapping[str, object], payload)
 
 
-_ARM_GROUP_READER: Callable[[Any, str], Awaitable[Mapping[str, object]]] = _read_arm_group
+_ARM_GROUP_READER: Callable[[AsyncTokenCredential, str], Awaitable[Mapping[str, object]]] = (
+    _read_arm_group
+)
 
 
 class AcaSandboxAdapter:
@@ -125,8 +158,8 @@ class AcaSandboxAdapter:
         self,
         *,
         group: SandboxGroupIdentity,
-        credential: Any,
-        group_client: Any,
+        credential: AsyncTokenCredential,
+        group_client: SandboxGroupClient,
         factories: SdkFactories,
     ) -> None:
         self._group = group
@@ -153,7 +186,7 @@ class AcaSandboxAdapter:
         configured = parse_sandbox_group_resource_id(configured_group_resource_id)
         factories = _SDK_FACTORIES()
         credential = _CREDENTIAL_FACTORY()
-        group_client: Any | None = None
+        group_client: SandboxGroupClient | None = None
         succeeded = False
         try:
             arm_group = await _ARM_GROUP_READER(credential, configured.resource_id)
@@ -183,10 +216,7 @@ class AcaSandboxAdapter:
                 await _close_resource(credential)
 
     async def create(
-        self,
-        request: SandboxCreateRequest,
-        *,
-        persisted_group: SandboxGroupBinding,
+        self, request: SandboxCreateRequest, *, persisted_group: SandboxGroupBinding
     ) -> AcaSandboxHandle:
         """Create exactly one session sandbox under the bound customer group."""
 
@@ -198,9 +228,32 @@ class AcaSandboxAdapter:
             **request.labels.to_provider_labels(),
             _PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id,
         }
+        poller = await self._begin_create_sandbox(
+            request,
+            labels=labels,
+            egress=egress,
+            provisioning_attempt_id=provisioning_attempt_id,
+        )
+        return await self._await_create_result(poller, provisioning_attempt_id)
+
+    async def _begin_create_sandbox(
+        self,
+        request: SandboxCreateRequest,
+        *,
+        labels: dict[str, str],
+        egress: EgressPolicy,
+        provisioning_attempt_id: str,
+    ) -> AsyncLROPoller[SandboxClient]:
+        """Start the create call, reconciling any partial create on failure."""
+
+        # source_to_provider_kwargs() always yields exactly one of
+        # disk/disk_id/preset (never e.g. connections/volumes); typing this
+        # merge as dict[str, Any] keeps that single-key projection from being
+        # checked against every unrelated str-typed keyword on the signature.
+        source_kwargs: dict[str, Any] = source_to_provider_kwargs(request.source)
         try:
-            poller = await self._group_client.begin_create_sandbox(
-                **source_to_provider_kwargs(request.source),
+            poller: AsyncLROPoller[SandboxClient] = await self._group_client.begin_create_sandbox(
+                **source_kwargs,
                 cpu=request.cpu,
                 memory=request.memory,
                 auto_suspend_seconds=request.auto_suspend_seconds,
@@ -212,45 +265,58 @@ class AcaSandboxAdapter:
                 entrypoint=list(request.entrypoint),
                 cmd=list(request.cmd),
                 skip_egress_proxy=False,
-                polling_timeout=request.provisioning_timeout_seconds,
+                # The SDK's ``polling_timeout: int`` annotation is narrower than
+                # its implementation, which only ever adds this value to a
+                # monotonic clock reading (see ``_polling.py``); round our
+                # fractional budget up so we never under-deliver it.
+                polling_timeout=math.ceil(request.provisioning_timeout_seconds),
                 polling_interval=request.polling_interval_seconds,
             )
         except HttpResponseError as exc:
-            status_code = getattr(exc, "status_code", None)
-            if isinstance(status_code, int) and 400 <= status_code < 500:
+            if _is_definitive_client_rejection(exc):
                 raise
             await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         except asyncio.CancelledError:
-            try:
-                await asyncio.shield(self._cleanup_failed_create(provisioning_attempt_id))
-            except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
-                logger.error(
-                    "ACA sandbox create was cancelled before cleanup could be confirmed; "
-                    "provisioning attempt %s requires reconciliation.",
-                    provisioning_attempt_id,
-                )
+            await self._cleanup_after_cancelled_create(provisioning_attempt_id)
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
             await self._cleanup_failed_create(provisioning_attempt_id)
             raise
+        return poller
+
+    async def _await_create_result(
+        self, poller: AsyncLROPoller[SandboxClient], provisioning_attempt_id: str
+    ) -> AcaSandboxHandle:
+        """Await the poller, reconciling any partial create on failure."""
 
         try:
-            sdk_client = await poller.result()
-            return await self._make_handle(sdk_client)
+            sdk_client: SandboxClient = await poller.result()
         except asyncio.CancelledError:
-            try:
-                await asyncio.shield(self._cleanup_failed_create(provisioning_attempt_id))
-            except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
-                logger.error(
-                    "ACA sandbox create was cancelled before cleanup could be confirmed; "
-                    "provisioning attempt %s requires reconciliation.",
-                    provisioning_attempt_id,
-                )
+            await self._cleanup_after_cancelled_create(provisioning_attempt_id)
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
             await self._cleanup_failed_create(provisioning_attempt_id)
             raise
+        return await self._make_handle(sdk_client)
+
+    async def _cleanup_after_cancelled_create(self, provisioning_attempt_id: str) -> None:
+        """Best-effort reconciliation for a create cancelled mid-flight.
+
+        Shielded so the cancellation itself is never masked by cleanup work: a
+        cleanup failure here is logged (with traceback, for operator
+        reconciliation) rather than raised, so the caller's bare ``raise``
+        always re-raises the original ``CancelledError``.
+        """
+
+        try:
+            await asyncio.shield(self._cleanup_failed_create(provisioning_attempt_id))
+        except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            logger.exception(
+                "ACA sandbox create was cancelled before cleanup could be confirmed; "
+                "provisioning attempt %s requires reconciliation.",
+                provisioning_attempt_id,
+            )
 
     async def attach(
         self,
@@ -287,7 +353,13 @@ class AcaSandboxAdapter:
             "readiness_timeout_seconds",
         )
         handle = await self._attach_handle(persisted, expected)
-        await handle.resume()
+        resumed = False
+        try:
+            await handle.resume()
+            resumed = True
+        finally:
+            if not resumed:
+                await handle.close()
         await self._verify_manifest_handshake(
             handle,
             expected,
@@ -333,12 +405,9 @@ class AcaSandboxAdapter:
         return await self._make_handle(sdk_client, expected_sandbox_id=persisted.sandbox_id)
 
     async def _make_handle(
-        self, sdk_client: Any, *, expected_sandbox_id: str | None = None
+        self, sdk_client: SandboxClient, *, expected_sandbox_id: str | None = None
     ) -> AcaSandboxHandle:
-        sandbox_id = getattr(sdk_client, "sandbox_id", None)
-        if not isinstance(sandbox_id, str) or not sandbox_id:
-            await _close_resource(sdk_client)
-            raise SandboxProvisioningError("Live Sandbox handle did not provide a sandbox ID.")
+        sandbox_id = sdk_client.sandbox_id
         if expected_sandbox_id is not None and sandbox_id != expected_sandbox_id:
             await _close_resource(sdk_client)
             raise SandboxGroupBindingError(
@@ -346,7 +415,7 @@ class AcaSandboxAdapter:
             )
         return AcaSandboxHandle(
             sdk_client=sdk_client,
-            identity=ProvisionedSandboxIdentity(
+            identity=ProvisionedSandboxIdentity.create(
                 sandbox_id=sandbox_id,
                 group_resource_id=self._group.resource_id,
                 region=self._group.region,
@@ -362,10 +431,6 @@ class AcaSandboxAdapter:
     ) -> None:
         verified = False
         try:
-            _validate_positive_finite_seconds(
-                readiness_timeout_seconds,
-                "readiness_timeout_seconds",
-            )
             manifest_bytes = await _read_manifest_when_ready(
                 handle,
                 readiness_timeout_seconds=readiness_timeout_seconds,
@@ -378,27 +443,51 @@ class AcaSandboxAdapter:
                 await handle.close()
 
     async def _cleanup_failed_create(self, provisioning_attempt_id: str) -> None:
-        labels = {_PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id}
-        sandbox_ids: list[str] = []
-        for attempt in range(_FAILED_CREATE_LOOKUP_ATTEMPTS):
-            sandbox_ids = []
-            async for sandbox in self._group_client.list_sandboxes(labels=labels):
-                sandbox_id = getattr(sandbox, "id", None)
-                if not isinstance(sandbox_id, str) or not sandbox_id:
-                    raise SandboxProvisioningError(
-                        "Failed sandbox creation returned an invalid cleanup identity."
-                    )
-                sandbox_ids.append(sandbox_id)
-            if sandbox_ids:
-                break
-            if attempt + 1 < _FAILED_CREATE_LOOKUP_ATTEMPTS:
-                await asyncio.sleep(_FAILED_CREATE_LOOKUP_DELAY_SECONDS)
+        """Delete any sandbox created by a failed create attempt, by its private label.
 
-        if not sandbox_ids:
+        A successful list that finds no matches confirms nothing was created,
+        so this returns normally and lets the caller's original failure
+        propagate unmasked. Only a list/delete call that itself fails raises,
+        because then reconciliation could not be confirmed either way.
+        """
+
+        try:
+            sandbox_ids = await self._find_failed_create_sandboxes(provisioning_attempt_id)
+        except _RECONCILIATION_ERRORS as exc:
             raise SandboxProvisioningError(
                 "Failed sandbox creation could not be reconciled for cleanup."
-            )
+            ) from exc
 
+        if not sandbox_ids:
+            logger.info(
+                "No sandbox found for cancelled/failed provisioning attempt %s; "
+                "nothing to clean up.",
+                provisioning_attempt_id,
+            )
+            return
+
+        try:
+            await self._delete_reconciled_sandboxes(sandbox_ids)
+        except _RECONCILIATION_ERRORS as exc:
+            raise SandboxProvisioningError(
+                "Failed sandbox creation could not be reconciled for cleanup."
+            ) from exc
+
+    async def _find_failed_create_sandboxes(self, provisioning_attempt_id: str) -> list[str]:
+        """List, with bounded retries, the sandbox(es) tagged by one create attempt."""
+
+        labels = {_PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id}
+        for attempt in range(_FAILED_CREATE_LOOKUP_ATTEMPTS):
+            sandbox_ids = [
+                sandbox.id async for sandbox in self._group_client.list_sandboxes(labels=labels)
+            ]
+            if sandbox_ids:
+                return sandbox_ids
+            if attempt + 1 < _FAILED_CREATE_LOOKUP_ATTEMPTS:
+                await _sleep(_FAILED_CREATE_LOOKUP_DELAY_SECONDS)
+        return []
+
+    async def _delete_reconciled_sandboxes(self, sandbox_ids: list[str]) -> None:
         for sandbox_id in sandbox_ids:
             poller = await self._group_client.begin_delete_sandbox(
                 sandbox_id,
@@ -415,7 +504,7 @@ class AcaSandboxAdapter:
 class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
     """A live individual sandbox with direct file and separate process operations."""
 
-    def __init__(self, *, sdk_client: Any, identity: ProvisionedSandboxIdentity) -> None:
+    def __init__(self, *, sdk_client: SandboxClient, identity: ProvisionedSandboxIdentity) -> None:
         self._sdk_client = sdk_client
         self._identity = identity
         self._closed = False
@@ -429,10 +518,7 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
     async def list_files(self, path: str) -> tuple[SandboxFileEntry, ...]:
         self._ensure_open()
         listing = await self._sdk_client.list_files(path)
-        entries = getattr(listing, "entries", None)
-        if not isinstance(entries, list):
-            raise SandboxProvisioningError("Sandbox file listing response was invalid.")
-        return tuple(_project_file_entry(entry) for entry in entries)
+        return tuple(_project_file_entry(entry) for entry in listing.entries)
 
     async def stat_file(self, path: str) -> SandboxFileStat:
         self._ensure_open()
@@ -441,15 +527,11 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
 
     async def read_file(self, path: str) -> bytes:
         self._ensure_open()
-        content = await self._sdk_client.read_file(path)
-        if not isinstance(content, bytes):
-            raise SandboxProvisioningError("Sandbox file read response was not bytes.")
+        content: bytes = await self._sdk_client.read_file(path)
         return content
 
     async def write_file(self, path: str, content: bytes, *, create_dirs: bool = False) -> None:
         self._ensure_open()
-        if not isinstance(content, bytes):
-            raise TypeError("Sandbox file content must be bytes.")
         await self._sdk_client.write_file(path, content, create_dirs=create_dirs)
 
     async def delete_file(self, path: str) -> None:
@@ -464,19 +546,21 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         self, command: str, *, timeout_seconds: float | None = None
     ) -> SandboxExecResult:
         self._ensure_open()
-        if not isinstance(command, str) or not command:
+        if not command:
             raise ValueError("Sandbox process command must be a non-empty string.")
-        if timeout_seconds is not None:
-            if timeout_seconds <= 0:
-                raise ValueError("Sandbox process timeout_seconds must be positive.")
-            try:
-                async with asyncio.timeout(timeout_seconds):
-                    result = await self._sdk_client.exec(command)
-            except TimeoutError:
-                raise SandboxProvisioningError("Sandbox process execution timed out.") from None
-        else:
-            result = await self._sdk_client.exec(command)
+        if timeout_seconds is not None and timeout_seconds <= 0:
+            raise ValueError("Sandbox process timeout_seconds must be positive.")
+        result = await self._exec_with_timeout(command, timeout_seconds)
         return _project_exec_result(result)
+
+    async def _exec_with_timeout(self, command: str, timeout_seconds: float | None) -> ExecResult:
+        if timeout_seconds is None:
+            return await self._sdk_client.exec(command)
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                return await self._sdk_client.exec(command)
+        except TimeoutError:
+            raise SandboxProvisioningError("Sandbox process execution timed out.") from None
 
     async def stop(self) -> None:
         """Stop this individual sandbox; the group remains customer-owned."""
@@ -520,6 +604,9 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
 def _resolve_group_identity(
     configured_resource_id: str, arm_group: Mapping[str, object]
 ) -> SandboxGroupIdentity:
+    # ``arm_group`` is a raw ARM REST JSON response, not an SDK type — these
+    # isinstance checks parse genuinely untrusted wire data, the same
+    # category as the sandbox manifest handshake (see ``manifest.py``).
     arm_resource_id = arm_group.get("id")
     arm_location = arm_group.get("location")
     if not isinstance(arm_resource_id, str) or not isinstance(arm_location, str):
@@ -542,9 +629,7 @@ def _resolve_group_identity(
     )
 
 
-def _verify_group_binding(
-    persisted: SandboxGroupBinding, resolved: SandboxGroupIdentity
-) -> None:
+def _verify_group_binding(persisted: SandboxGroupBinding, resolved: SandboxGroupIdentity) -> None:
     if persisted.resource_id != resolved.resource_id:
         raise SandboxGroupBindingError(
             "Persisted Sandbox Group does not match the configured ARM resource identity."
@@ -555,7 +640,7 @@ def _verify_group_binding(
         )
 
 
-def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy) -> Any:
+def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy) -> EgressPolicy:
     """Create only an explicit Deny + inspected SDK policy."""
 
     if policy.default_action != "Deny" or policy.traffic_inspection not in {"Full", "Partial"}:
@@ -564,6 +649,13 @@ def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy)
         default_action="Deny",
         traffic_inspection=policy.traffic_inspection,
     )
+
+
+def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
+    """A 4xx create rejection is definitive: the request never created a sandbox."""
+
+    status_code = exc.status_code
+    return status_code is not None and 400 <= status_code < 500
 
 
 async def _read_manifest_when_ready(
@@ -576,115 +668,83 @@ async def _read_manifest_when_ready(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise SandboxProvisioningError("Sandbox manifest readiness timed out.")
-        try:
-            async with asyncio.timeout(remaining):
-                return await handle.read_file(SESSION_MANIFEST_PATH)
-        except ServiceRequestError:
-            pass
-        except HttpResponseError as exc:
-            if getattr(exc, "status_code", None) not in _RETRYABLE_MANIFEST_STATUS_CODES:
-                raise
-        except TimeoutError:
-            raise SandboxProvisioningError("Sandbox manifest readiness timed out.") from None
+        manifest_bytes = await _try_read_manifest(handle, remaining)
+        if manifest_bytes is not None:
+            return manifest_bytes
 
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise SandboxProvisioningError("Sandbox manifest readiness timed out.")
-        await asyncio.sleep(min(_MANIFEST_RETRY_INTERVAL_SECONDS, remaining))
+        await _sleep(min(_MANIFEST_RETRY_INTERVAL_SECONDS, remaining))
+
+
+async def _try_read_manifest(handle: AcaSandboxHandle, timeout_seconds: float) -> bytes | None:
+    """Attempt one direct manifest read; return ``None`` only for retryable failures."""
+
+    try:
+        async with asyncio.timeout(timeout_seconds):
+            return await handle.read_file(SESSION_MANIFEST_PATH)
+    except ServiceRequestError:
+        return None
+    except HttpResponseError as exc:
+        if exc.status_code not in _RETRYABLE_MANIFEST_STATUS_CODES:
+            raise
+        return None
+    except TimeoutError:
+        raise SandboxProvisioningError("Sandbox manifest readiness timed out.") from None
 
 
 def _validate_positive_finite_seconds(value: float, field_name: str) -> None:
-    if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise SandboxProvisioningError(f"Sandbox {field_name} must be a number.")
     if not math.isfinite(value) or value <= 0:
-        raise SandboxProvisioningError(
-            f"Sandbox {field_name} must be positive and finite."
-        )
+        raise SandboxProvisioningError(f"Sandbox {field_name} must be positive and finite.")
 
 
-async def _close_resource(resource: object) -> None:
-    close = getattr(resource, "close", None)
-    if callable(close):
-        result = close()
-        if inspect.isawaitable(result):
-            await cast(Awaitable[object], result)
+class _AsyncCloseable(Protocol):
+    """The minimal shape shared by the credential and every SDK client we hold."""
+
+    async def close(self) -> None: ...
 
 
-def _project_file_entry(value: object) -> SandboxFileEntry:
-    name = _required_string_attribute(value, "name", "Sandbox file entry")
-    path = _required_string_attribute(value, "path", "Sandbox file entry")
-    size = _optional_size_attribute(value, "size", "Sandbox file entry")
-    is_directory = _required_bool_attribute(value, "is_directory", "Sandbox file entry")
-    modified_at = _optional_string_attribute(value, "modified_at", "Sandbox file entry")
-    mode = _optional_mode_attribute(value, "Sandbox file entry")
+async def _close_resource(resource: _AsyncCloseable) -> None:
+    await resource.close()
+
+
+def _project_file_entry(entry: FileInfo) -> SandboxFileEntry:
     return SandboxFileEntry(
-        name=name,
-        path=path,
-        size=size,
-        is_directory=is_directory,
-        modified_at=modified_at,
-        mode=mode,
+        name=entry.name,
+        path=entry.path,
+        size=entry.size,
+        is_directory=entry.is_directory,
+        modified_at=entry.modified_at,
+        mode=_sdk_file_mode(entry),
     )
 
 
-def _project_file_stat(value: object) -> SandboxFileStat:
-    path = _required_string_attribute(value, "path", "Sandbox file stat")
-    size = _optional_size_attribute(value, "size", "Sandbox file stat")
-    is_directory = _required_bool_attribute(value, "is_directory", "Sandbox file stat")
-    modified_at = _optional_string_attribute(value, "modified_at", "Sandbox file stat")
-    mode = _optional_mode_attribute(value, "Sandbox file stat")
+def _project_file_stat(entry: FileInfo) -> SandboxFileStat:
     return SandboxFileStat(
-        path=path,
-        size=size,
-        is_directory=is_directory,
-        modified_at=modified_at,
-        mode=mode,
+        path=entry.path,
+        size=entry.size,
+        is_directory=entry.is_directory,
+        modified_at=entry.modified_at,
+        mode=_sdk_file_mode(entry),
     )
 
 
-def _project_exec_result(value: object) -> SandboxExecResult:
-    exit_code = getattr(value, "exit_code", None)
-    stdout = getattr(value, "stdout", None)
-    stderr = getattr(value, "stderr", None)
-    if not isinstance(exit_code, int) or isinstance(exit_code, bool):
-        raise SandboxProvisioningError("Sandbox process response had an invalid exit code.")
-    if not isinstance(stdout, str) or not isinstance(stderr, str):
-        raise SandboxProvisioningError("Sandbox process response had invalid output.")
-    return SandboxExecResult(exit_code=exit_code, stdout=stdout, stderr=stderr)
+def _sdk_file_mode(entry: FileInfo) -> int | None:
+    """Read ``FileInfo.mode`` as the POSIX int the service actually sends.
+
+    SDK annotation defect (``azure-containerapps-sandbox==0.1.0b4``):
+    ``FileInfo.mode`` is typed ``str | None``, but ``FileInfo._from_dict``
+    does a verbatim JSON passthrough (``mode=d.get("mode")``) with no
+    coercion, so the real runtime value is whatever the wire sends. A
+    human-authorized live run against real ACA observed ``mode=420`` (an int,
+    POSIX ``0o644``) — the stub is wrong and this ``int | None`` modeling is
+    correct. This is the one deliberate, narrowly-scoped cast permitted at an
+    SDK boundary in this module. See FRD 0008 Decision #107.
+    """
+
+    return cast("int | None", entry.mode)
 
 
-def _required_string_attribute(value: object, attribute: str, response_name: str) -> str:
-    result = getattr(value, attribute, None)
-    if not isinstance(result, str) or not result:
-        raise SandboxProvisioningError(f"{response_name} was invalid.")
-    return result
-
-
-def _optional_string_attribute(value: object, attribute: str, response_name: str) -> str | None:
-    result = getattr(value, attribute, None)
-    if result is not None and not isinstance(result, str):
-        raise SandboxProvisioningError(f"{response_name} was invalid.")
-    return result
-
-
-def _optional_size_attribute(value: object, attribute: str, response_name: str) -> int | None:
-    result = getattr(value, attribute, None)
-    if result is not None and (not isinstance(result, int) or isinstance(result, bool) or result < 0):
-        raise SandboxProvisioningError(f"{response_name} was invalid.")
-    return result
-
-
-def _optional_mode_attribute(value: object, response_name: str) -> int | None:
-    result = getattr(value, "mode", None)
-    if result is not None and (
-        not isinstance(result, int) or isinstance(result, bool) or result < 0
-    ):
-        raise SandboxProvisioningError(f"{response_name} was invalid.")
-    return result
-
-
-def _required_bool_attribute(value: object, attribute: str, response_name: str) -> bool:
-    result = getattr(value, attribute, None)
-    if not isinstance(result, bool):
-        raise SandboxProvisioningError(f"{response_name} was invalid.")
-    return result
+def _project_exec_result(result: ExecResult) -> SandboxExecResult:
+    return SandboxExecResult(exit_code=result.exit_code, stdout=result.stdout, stderr=result.stderr)

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from azure_functions_agents.transport.models import (
+from azure_functions_agents.transport.transport_models import (
     SandboxExecResult,
     SandboxFileEntry,
     SandboxFileStat,

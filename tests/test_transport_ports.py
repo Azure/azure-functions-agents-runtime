@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import pytest
 
-from azure_functions_agents.transport.models import SandboxExecResult
 from azure_functions_agents.transport.ports import SandboxFileTransport, SandboxProcessTransport
+from azure_functions_agents.transport.transport_models import SandboxExecResult
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
 

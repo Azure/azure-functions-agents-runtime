@@ -8,6 +8,7 @@ from dataclasses import asdict
 from types import SimpleNamespace
 from typing import Any
 
+import aiohttp
 import pytest
 from azure.core.exceptions import HttpResponseError, ServiceRequestError
 
@@ -17,7 +18,7 @@ from azure_functions_agents.transport.manifest import (
     ExpectedSandboxManifestBinding,
     SandboxManifestMismatchError,
 )
-from azure_functions_agents.transport.models import (
+from azure_functions_agents.transport.transport_models import (
     AcaSandboxDependencyError,
     DiskIdSource,
     DiskSource,
@@ -45,11 +46,11 @@ _OWNER_HASH = "o1-" + ("a" * 52)
 
 
 def _binding(*, region: str = "westus2") -> SandboxGroupBinding:
-    return SandboxGroupBinding(resource_id=_GROUP_ID, region=region)
+    return SandboxGroupBinding.create(resource_id=_GROUP_ID, region=region)
 
 
 def _expected(sandbox_id: str) -> ExpectedSandboxManifestBinding:
-    return ExpectedSandboxManifestBinding(
+    return ExpectedSandboxManifestBinding.create(
         manifest_version=1,
         protocol_version="maf-session-v1",
         session_id="session-123",
@@ -66,8 +67,8 @@ def _expected(sandbox_id: str) -> ExpectedSandboxManifestBinding:
 
 def _request(**overrides: Any) -> SandboxCreateRequest:
     values: dict[str, Any] = {
-        "source": DiskSource("runtime-bootstrap"),
-        "labels": SandboxProvisioningLabels(
+        "source": DiskSource.create("runtime-bootstrap"),
+        "labels": SandboxProvisioningLabels.create(
             owner_hash_version="o1",
             owner_hash=_OWNER_HASH,
             app_hash=_APP_HASH,
@@ -77,13 +78,13 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
         "environment": {"HARNESS_MODE": "test"},
         "entrypoint": ("python",),
         "cmd": ("-m", "harness"),
-        "egress_policy": SandboxEgressPolicy(
+        "egress_policy": SandboxEgressPolicy.create(
             default_action="Deny",
             traffic_inspection="Partial",
         ),
     }
     values.update(overrides)
-    return SandboxCreateRequest(**values)
+    return SandboxCreateRequest.create(**values)
 
 
 def _install_fake_adapter_boundary(
@@ -125,6 +126,36 @@ async def test_open_resolves_customer_group_and_constructs_one_data_plane_client
 
     assert environment.group_client.closed
     assert credential.closed
+
+
+@pytest.mark.asyncio
+async def test_read_arm_group_uses_an_explicit_timeout_and_translates_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_read_arm_group`` must bound its outbound call and never leak raw aiohttp errors."""
+
+    session_kwargs: dict[str, Any] = {}
+
+    class _FailingSession:
+        def __init__(self, **kwargs: Any) -> None:
+            session_kwargs.update(kwargs)
+
+        async def __aenter__(self) -> _FailingSession:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: Any, **kwargs: Any) -> Any:
+            raise aiohttp.ClientConnectionError("connection refused")
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", _FailingSession)
+    credential = FakeCredential()
+
+    with pytest.raises(SandboxGroupBindingError, match="transport or decode error"):
+        await aca_sdk._read_arm_group(credential, "/subscriptions/sub-123/resourceGroups/rg-agent")
+
+    assert isinstance(session_kwargs.get("timeout"), aiohttp.ClientTimeout)
 
 
 @pytest.mark.asyncio
@@ -173,9 +204,9 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
 @pytest.mark.parametrize(
     ("source", "source_key"),
     [
-        (DiskSource("runtime-bootstrap"), "disk"),
-        (DiskIdSource("disk-id"), "disk_id"),
-        (PresetSource("copilot"), "preset"),
+        (DiskSource.create("runtime-bootstrap"), "disk"),
+        (DiskIdSource.create("disk-id"), "disk_id"),
+        (PresetSource.create("copilot"), "preset"),
     ],
 )
 async def test_create_accepts_each_single_explicit_source_and_forwards_remaining_budget(
@@ -195,7 +226,9 @@ async def test_create_accepts_each_single_explicit_source_and_forwards_remaining
     call = environment.group_client.create_calls[0]
     source_keys = {"disk", "disk_id", "preset"}
     assert {key for key in call if key in source_keys} == {source_key}
-    assert call["polling_timeout"] == 12.5
+    # The real SDK's polling_timeout is int-typed; the adapter rounds the
+    # fractional budget up to the next whole second (never under-delivers it).
+    assert call["polling_timeout"] == 13
 
     await handle.close()
     await adapter.close()
@@ -233,7 +266,7 @@ async def test_create_preserves_cancellation_when_cleanup_cannot_find_a_sandbox(
         return None
 
     monkeypatch.setattr(environment.group_client, "begin_create_sandbox", cancelled_create)
-    monkeypatch.setattr(aca_sdk.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(aca_sdk, "_sleep", no_delay)
 
     with pytest.raises(asyncio.CancelledError):
         await adapter.create(_request(), persisted_group=_binding())
@@ -265,6 +298,68 @@ async def test_create_preserves_definitive_request_rejection_without_cleanup(
         await adapter.create(_request(), persisted_group=_binding())
 
     assert environment.sandboxes == {}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_preserves_original_error_when_cleanup_confirms_nothing_was_created(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A successful cleanup list that finds no sandbox must not mask the real failure.
+
+    Regression test for the pre-acceptance masking bug: a non-HTTP
+    ``AzureError`` (the request never reached the service) used to be
+    replaced by ``_cleanup_failed_create``'s own reconciliation error once
+    its bounded list retries confirmed nothing existed to delete.
+    """
+
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    async def unreachable_create(**_: Any) -> None:
+        raise ServiceRequestError("network unreachable before create was accepted")
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(environment.group_client, "begin_create_sandbox", unreachable_create)
+    monkeypatch.setattr(aca_sdk, "_sleep", no_delay)
+
+    with pytest.raises(ServiceRequestError, match="network unreachable"):
+        await adapter.create(_request(), persisted_group=_binding())
+
+    assert environment.sandboxes == {}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_raises_reconciliation_error_when_cleanup_list_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A cleanup list call that itself fails cannot confirm anything either way.
+
+    Unlike a successful-but-empty list (previous test), this case genuinely
+    cannot tell whether a sandbox was created, so the explicit reconciliation
+    error is the correct, fail-closed signal to surface.
+    """
+
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    async def unreachable_create(**_: Any) -> None:
+        raise ServiceRequestError("network unreachable before create was accepted")
+
+    def failing_list_sandboxes(**_: Any) -> None:
+        raise ServiceRequestError("cleanup list call itself failed")
+
+    monkeypatch.setattr(environment.group_client, "begin_create_sandbox", unreachable_create)
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", failing_list_sandboxes)
+
+    with pytest.raises(SandboxProvisioningError, match="could not be reconciled"):
+        await adapter.create(_request(), persisted_group=_binding())
+
     await adapter.close()
 
 
@@ -317,7 +412,7 @@ async def test_attach_uses_direct_manifest_read_before_any_advisory_state(
     adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
 
     handle = await adapter.attach(
-        PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
+        PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
         expected,
         readiness_timeout_seconds=1,
     )
@@ -342,7 +437,7 @@ async def test_resume_requires_manifest_handshake_after_resume(
     adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
 
     handle = await adapter.resume(
-        PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
+        PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
         expected,
         readiness_timeout_seconds=1,
     )
@@ -351,6 +446,40 @@ async def test_resume_requires_manifest_handshake_after_resume(
 
     await handle.delete()
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_resume_closes_handle_when_the_resume_call_itself_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failing ``resume()`` call must not leak the handle or its SDK client.
+
+    Regression test: every sibling path (``open()``, a persisted-ID mismatch
+    in ``_make_handle``, and ``_verify_manifest_handshake``'s ``finally``)
+    already closes correctly on failure; ``resume()`` was the one asymmetric
+    path that attached a handle and then leaked it if ``resume()`` raised.
+    """
+
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+
+    async def failing_resume() -> None:
+        raise ServiceRequestError("resume rejected")
+
+    monkeypatch.setattr(sandbox, "resume", failing_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(ServiceRequestError, match="resume rejected"):
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert sandbox.closed
     await adapter.close()
 
 
@@ -368,11 +497,11 @@ async def test_resume_retries_direct_manifest_until_nonblocking_resume_is_ready(
     async def no_delay(_: float) -> None:
         return None
 
-    monkeypatch.setattr(aca_sdk.asyncio, "sleep", no_delay)
+    monkeypatch.setattr(aca_sdk, "_sleep", no_delay)
     adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
 
     handle = await adapter.resume(
-        PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
+        PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
         expected,
         readiness_timeout_seconds=1,
     )
@@ -397,7 +526,7 @@ async def test_readiness_timeout_is_validated_before_constructing_a_handle(
     sandbox = environment.add_sandbox("persisted-1")
     expected = _expected(sandbox.sandbox_id)
     adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
-    persisted = PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding())
+    persisted = PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding())
 
     with pytest.raises(SandboxProvisioningError, match="readiness_timeout_seconds"):
         if operation == "attach":
@@ -424,7 +553,7 @@ async def test_attach_closes_suspect_handle_on_forged_digest(
 
     with pytest.raises(SandboxManifestMismatchError, match="digest"):
         await adapter.attach(
-            PersistedSandboxBinding(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
             expected,
             readiness_timeout_seconds=1,
         )
@@ -484,7 +613,7 @@ async def test_attach_rejects_a_live_handle_repointed_from_the_persisted_sandbox
 
     with pytest.raises(SandboxGroupBindingError, match="Live Sandbox handle ID"):
         await adapter.attach(
-            PersistedSandboxBinding(sandbox_id="persisted-1", group=_binding()),
+            PersistedSandboxBinding.create(sandbox_id="persisted-1", group=_binding()),
             expected,
             readiness_timeout_seconds=1,
         )
@@ -521,7 +650,9 @@ def test_create_request_rejects_ports_unsafe_egress_and_controller_credentials()
         _request(ports=("tcp/80",))
 
     with pytest.raises(SandboxProvisioningError, match="egress"):
-        _request(egress_policy=SandboxEgressPolicy(default_action="Allow"))  # type: ignore[arg-type]
+        _request(
+            egress_policy=SandboxEgressPolicy.create(default_action="Allow")  # type: ignore[arg-type]
+        )
 
     with pytest.raises(SandboxProvisioningError, match="credentials"):
         _request(environment={"AZURE_CLIENT_SECRET": "not-allowed"})
@@ -549,10 +680,14 @@ def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> No
     values[field_name] = "x" * 64
 
     with pytest.raises(SandboxProvisioningError, match="63 characters"):
-        SandboxProvisioningLabels(**values)
+        SandboxProvisioningLabels.create(**values)
 
 
 def test_file_projections_accept_live_numeric_posix_mode() -> None:
+    # Reproduce the SDK's own annotation defect (FileInfo.mode is typed
+    # str | None, but the wire actually sends an int) with a duck-typed
+    # stand-in shaped like the real FileInfo response, without importing the
+    # optional preview SDK from a test module (see test_transport_import_graph).
     file_info = SimpleNamespace(
         name="file.bin",
         path="/tmp/file.bin",

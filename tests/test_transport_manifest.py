@@ -13,7 +13,7 @@ from azure_functions_agents.transport.manifest import (
     parse_sandbox_manifest_binding,
     verify_sandbox_manifest,
 )
-from azure_functions_agents.transport.models import ProvisionedSandboxIdentity
+from azure_functions_agents.transport.transport_models import ProvisionedSandboxIdentity
 
 _GROUP = (
     "/subscriptions/sub-123/resourceGroups/rg-agent/"
@@ -22,7 +22,7 @@ _GROUP = (
 
 
 def _expected() -> ExpectedSandboxManifestBinding:
-    return ExpectedSandboxManifestBinding(
+    return ExpectedSandboxManifestBinding.create(
         manifest_version=1,
         protocol_version="maf-session-v1",
         session_id="session-123",
@@ -42,7 +42,7 @@ def _observed_payload(expected: ExpectedSandboxManifestBinding) -> bytes:
 
 
 def _live_identity(expected: ExpectedSandboxManifestBinding) -> ProvisionedSandboxIdentity:
-    return ProvisionedSandboxIdentity(
+    return ProvisionedSandboxIdentity.create(
         sandbox_id=expected.sandbox_id,
         group_resource_id=expected.sandbox_group_resource_id,
         region="westus2",
@@ -108,7 +108,7 @@ def test_manifest_verifier_rejects_each_routing_critical_forgery(
 def test_manifest_verifier_rejects_repointed_live_sandbox_even_if_manifest_matches() -> None:
     expected = _expected()
     observed = parse_sandbox_manifest_binding(_observed_payload(expected))
-    repointed_live = ProvisionedSandboxIdentity(
+    repointed_live = ProvisionedSandboxIdentity.create(
         sandbox_id="repointed-sandbox",
         group_resource_id=expected.sandbox_group_resource_id,
         region="westus2",
@@ -123,7 +123,7 @@ def test_manifest_verifier_rejects_repointed_live_sandbox_even_if_manifest_match
 def test_manifest_verifier_rejects_repointed_live_group_even_if_manifest_matches() -> None:
     expected = _expected()
     observed = parse_sandbox_manifest_binding(_observed_payload(expected))
-    repointed_live = ProvisionedSandboxIdentity(
+    repointed_live = ProvisionedSandboxIdentity.create(
         sandbox_id=expected.sandbox_id,
         group_resource_id=(
             "/subscriptions/sub-123/resourceGroups/rg-agent/providers/Microsoft.App/"

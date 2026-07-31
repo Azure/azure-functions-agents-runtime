@@ -82,73 +82,99 @@ class SandboxGroupIdentity:
 
 @dataclass(frozen=True, slots=True)
 class SandboxGroupBinding:
-    """The persisted group and region binding for one session."""
+    """The persisted group and region binding for one session.
+
+    Construct with :meth:`create` so values are normalized once.
+    """
 
     resource_id: str
     region: str
 
-    def __post_init__(self) -> None:
-        object.__setattr__(self, "resource_id", normalize_sandbox_group_resource_id(self.resource_id))
-        object.__setattr__(self, "region", _normalize_region(self.region))
+    @classmethod
+    def create(cls, resource_id: str, region: str) -> SandboxGroupBinding:
+        return cls(
+            resource_id=normalize_sandbox_group_resource_id(resource_id),
+            region=_normalize_region(region),
+        )
 
 
 @dataclass(frozen=True, slots=True)
 class PersistedSandboxBinding:
-    """The persisted location of a session sandbox after a Functions recycle."""
+    """The persisted location of a session sandbox after a Functions recycle.
+
+    Construct with :meth:`create` so values are validated once.
+    """
 
     sandbox_id: str
     group: SandboxGroupBinding
 
-    def __post_init__(self) -> None:
-        _require_nonempty_string(self.sandbox_id, "sandbox_id")
+    @classmethod
+    def create(cls, sandbox_id: str, group: SandboxGroupBinding) -> PersistedSandboxBinding:
+        return cls(sandbox_id=_require_nonempty_string(sandbox_id, "sandbox_id"), group=group)
 
 
 @dataclass(frozen=True, slots=True)
 class ProvisionedSandboxIdentity:
-    """Live sandbox identity returned by a provider handle."""
+    """Live sandbox identity returned by a provider handle.
+
+    Construct with :meth:`create` so values are validated and normalized once.
+    """
 
     sandbox_id: str
     group_resource_id: str
     region: str
 
-    def __post_init__(self) -> None:
-        _require_nonempty_string(self.sandbox_id, "sandbox_id")
-        object.__setattr__(
-            self,
-            "group_resource_id",
-            normalize_sandbox_group_resource_id(self.group_resource_id),
+    @classmethod
+    def create(
+        cls, sandbox_id: str, group_resource_id: str, region: str
+    ) -> ProvisionedSandboxIdentity:
+        return cls(
+            sandbox_id=_require_nonempty_string(sandbox_id, "sandbox_id"),
+            group_resource_id=normalize_sandbox_group_resource_id(group_resource_id),
+            region=_normalize_region(region),
         )
-        object.__setattr__(self, "region", _normalize_region(self.region))
 
 
 @dataclass(frozen=True, slots=True)
 class DiskSource:
-    """Use one explicit public disk image name."""
+    """Use one explicit public disk image name.
+
+    Construct with :meth:`create` so values are validated once.
+    """
 
     disk: str
 
-    def __post_init__(self) -> None:
-        _require_nonempty_string(self.disk, "disk")
+    @classmethod
+    def create(cls, disk: str) -> DiskSource:
+        return cls(disk=_require_nonempty_string(disk, "disk"))
 
 
 @dataclass(frozen=True, slots=True)
 class DiskIdSource:
-    """Use one explicit customer-managed disk image identifier."""
+    """Use one explicit customer-managed disk image identifier.
+
+    Construct with :meth:`create` so values are validated once.
+    """
 
     disk_id: str
 
-    def __post_init__(self) -> None:
-        _require_nonempty_string(self.disk_id, "disk_id")
+    @classmethod
+    def create(cls, disk_id: str) -> DiskIdSource:
+        return cls(disk_id=_require_nonempty_string(disk_id, "disk_id"))
 
 
 @dataclass(frozen=True, slots=True)
 class PresetSource:
-    """Use one explicit provider preset."""
+    """Use one explicit provider preset.
+
+    Construct with :meth:`create` so values are validated once.
+    """
 
     preset: str
 
-    def __post_init__(self) -> None:
-        _require_nonempty_string(self.preset, "preset")
+    @classmethod
+    def create(cls, preset: str) -> PresetSource:
+        return cls(preset=_require_nonempty_string(preset, "preset"))
 
 
 type SandboxCreateSource = DiskSource | DiskIdSource | PresetSource
@@ -161,7 +187,8 @@ class SandboxProvisioningLabels:
     """The only controller labels that may reach a session sandbox.
 
     Values are opaque inputs from the controller. This model deliberately does
-    not derive or canonicalize the owner or app fingerprints.
+    not derive or canonicalize the owner or app fingerprints. Construct with
+    :meth:`create` so values are validated once.
     """
 
     owner_hash_version: str
@@ -169,11 +196,18 @@ class SandboxProvisioningLabels:
     app_hash: str
     session_id: str
 
-    def __post_init__(self) -> None:
-        _require_provider_label_value(self.owner_hash_version, "owner_hash_version")
-        _require_provider_label_value(self.owner_hash, "owner_hash")
-        _require_provider_label_value(self.app_hash, "app_hash")
-        _require_provider_label_value(self.session_id, "session_id")
+    @classmethod
+    def create(
+        cls, owner_hash_version: str, owner_hash: str, app_hash: str, session_id: str
+    ) -> SandboxProvisioningLabels:
+        return cls(
+            owner_hash_version=_require_provider_label_value(
+                owner_hash_version, "owner_hash_version"
+            ),
+            owner_hash=_require_provider_label_value(owner_hash, "owner_hash"),
+            app_hash=_require_provider_label_value(app_hash, "app_hash"),
+            session_id=_require_provider_label_value(session_id, "session_id"),
+        )
 
     def to_provider_labels(self) -> dict[str, str]:
         """Return only safe, versioned fingerprint labels for provisioning."""
@@ -188,23 +222,35 @@ class SandboxProvisioningLabels:
 
 @dataclass(frozen=True, slots=True)
 class SandboxEgressPolicy:
-    """A safe egress-policy request accepted by the P4a adapter."""
+    """A safe egress-policy request accepted by the P4a adapter.
+
+    Construct with :meth:`create` so values are validated once.
+    """
 
     default_action: Literal["Deny"] = "Deny"
     traffic_inspection: SandboxEgressInspection = "Full"
 
-    def __post_init__(self) -> None:
-        if self.default_action != "Deny":
+    @classmethod
+    def create(
+        cls,
+        default_action: Literal["Deny"] = "Deny",
+        traffic_inspection: SandboxEgressInspection = "Full",
+    ) -> SandboxEgressPolicy:
+        if default_action != "Deny":
             raise SandboxProvisioningError("Sandbox egress default_action must be Deny.")
-        if self.traffic_inspection not in {"Full", "Partial"}:
+        if traffic_inspection not in {"Full", "Partial"}:
             raise SandboxProvisioningError(
                 "Sandbox egress traffic_inspection must be Full or Partial."
             )
+        return cls(default_action=default_action, traffic_inspection=traffic_inspection)
 
 
 @dataclass(frozen=True, slots=True)
 class SandboxCreateRequest:
-    """A fail-closed request to create one individual session sandbox."""
+    """A fail-closed request to create one individual session sandbox.
+
+    Construct with :meth:`create` so values are validated once.
+    """
 
     source: SandboxCreateSource
     labels: SandboxProvisioningLabels
@@ -216,51 +262,71 @@ class SandboxCreateRequest:
     environment: Mapping[str, str] = field(default_factory=dict)
     entrypoint: tuple[str, ...] = ()
     cmd: tuple[str, ...] = ()
-    egress_policy: SandboxEgressPolicy = field(default_factory=SandboxEgressPolicy)
+    egress_policy: SandboxEgressPolicy = field(default_factory=SandboxEgressPolicy.create)
     ports: tuple[object, ...] = ()
     skip_egress_proxy: bool = False
     polling_interval_seconds: int = 3
 
-    def __post_init__(self) -> None:
-        if not isinstance(self.source, (DiskSource, DiskIdSource, PresetSource)):
+    @classmethod
+    def create(
+        cls,
+        source: SandboxCreateSource,
+        labels: SandboxProvisioningLabels,
+        remaining_setup_budget_seconds: float,
+        cpu: str = "1000m",
+        memory: str = "2048Mi",
+        auto_suspend_seconds: int = 300,
+        auto_suspend_mode: SandboxAutoSuspendMode = "Disk",
+        environment: Mapping[str, str] | None = None,
+        entrypoint: tuple[str, ...] = (),
+        cmd: tuple[str, ...] = (),
+        egress_policy: SandboxEgressPolicy | None = None,
+        ports: tuple[object, ...] = (),
+        skip_egress_proxy: bool = False,
+        polling_interval_seconds: int = 3,
+    ) -> SandboxCreateRequest:
+        if not isinstance(source, (DiskSource, DiskIdSource, PresetSource)):
             raise SandboxProvisioningError(
                 "Sandbox source must be exactly one of disk, disk_id, or preset."
             )
-        _require_nonempty_string(self.cpu, "cpu")
-        _require_nonempty_string(self.memory, "memory")
-        if self.auto_suspend_seconds <= 0:
+        _require_nonempty_string(cpu, "cpu")
+        _require_nonempty_string(memory, "memory")
+        if auto_suspend_seconds <= 0:
             raise SandboxProvisioningError("Sandbox auto_suspend_seconds must be positive.")
-        if self.auto_suspend_mode not in {"Memory", "Disk"}:
-            raise SandboxProvisioningError(
-                "Sandbox auto_suspend_mode must be Memory or Disk."
-            )
-        if self.ports:
+        if auto_suspend_mode not in {"Memory", "Disk"}:
+            raise SandboxProvisioningError("Sandbox auto_suspend_mode must be Memory or Disk.")
+        if ports:
             raise SandboxProvisioningError("Session sandboxes must not expose inbound ports.")
-        if self.skip_egress_proxy is not False:
+        if skip_egress_proxy is not False:
             raise SandboxProvisioningError("Session sandboxes must not bypass the egress proxy.")
         if (
-            not math.isfinite(self.remaining_setup_budget_seconds)
-            or self.remaining_setup_budget_seconds <= 0
+            not math.isfinite(remaining_setup_budget_seconds)
+            or remaining_setup_budget_seconds <= 0
         ):
             raise SandboxProvisioningError(
                 "Sandbox remaining_setup_budget_seconds must be positive and finite."
             )
-        if self.polling_interval_seconds <= 0:
+        if polling_interval_seconds <= 0:
             raise SandboxProvisioningError("Sandbox polling_interval_seconds must be positive.")
-
-        environment = dict(self.environment)
-        for key, value in environment.items():
-            _require_nonempty_string(key, "environment key")
-            if not isinstance(value, str):
-                raise SandboxProvisioningError("Sandbox environment values must be strings.")
-            if _is_controller_credential_key(key):
-                raise SandboxProvisioningError(
-                    "Sandbox environment must not contain Azure or state credentials."
-                )
-        object.__setattr__(self, "environment", MappingProxyType(environment))
-
-        for command_part in (*self.entrypoint, *self.cmd):
+        for command_part in (*entrypoint, *cmd):
             _require_nonempty_string(command_part, "entrypoint or cmd item")
+
+        return cls(
+            source=source,
+            labels=labels,
+            remaining_setup_budget_seconds=remaining_setup_budget_seconds,
+            cpu=cpu,
+            memory=memory,
+            auto_suspend_seconds=auto_suspend_seconds,
+            auto_suspend_mode=auto_suspend_mode,
+            environment=_validate_create_environment(environment or {}),
+            entrypoint=entrypoint,
+            cmd=cmd,
+            egress_policy=egress_policy if egress_policy is not None else SandboxEgressPolicy.create(),
+            ports=ports,
+            skip_egress_proxy=skip_egress_proxy,
+            polling_interval_seconds=polling_interval_seconds,
+        )
 
     @property
     def provisioning_timeout_seconds(self) -> float:
@@ -343,13 +409,14 @@ def _require_nonempty_string(value: object, field_name: str) -> str:
     return value
 
 
-def _require_provider_label_value(value: object, field_name: str) -> None:
+def _require_provider_label_value(value: object, field_name: str) -> str:
     label_value = _require_nonempty_string(value, field_name)
     if len(label_value) > _MAX_PROVIDER_LABEL_VALUE_LENGTH:
         raise SandboxProvisioningError(
             f"Sandbox {field_name} must not exceed "
             f"{_MAX_PROVIDER_LABEL_VALUE_LENGTH} characters."
         )
+    return label_value
 
 
 def _is_controller_credential_key(key: str) -> bool:
@@ -359,3 +426,19 @@ def _is_controller_credential_key(key: str) -> bool:
         or "CONNECTION_STRING" in normalized
         or normalized.endswith(("_ACCOUNT_KEY", "_SAS_TOKEN"))
     )
+
+
+def _validate_create_environment(environment: Mapping[str, str]) -> Mapping[str, str]:
+    """Reject non-string values and Azure/state credential-shaped keys, then freeze."""
+
+    validated: dict[str, str] = {}
+    for key, value in environment.items():
+        _require_nonempty_string(key, "environment key")
+        if not isinstance(value, str):
+            raise SandboxProvisioningError("Sandbox environment values must be strings.")
+        if _is_controller_credential_key(key):
+            raise SandboxProvisioningError(
+                "Sandbox environment must not contain Azure or state credentials."
+            )
+        validated[key] = value
+    return MappingProxyType(validated)
