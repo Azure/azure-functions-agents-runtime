@@ -22,6 +22,8 @@ The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENT
 2. Copy [`_template.md`](_template.md) to `docs/frds/<NNNN>-<slug>.md`
    (e.g. `0001-agents-folder-indexing.md`).
 3. Fill every section; keep the Decisions log up to date as choices are made.
+   Keep its rows short — it is an index of choices, not an essay. See
+   [`_template.md`](_template.md) §5 for the row format and length budget.
 4. Run the **architecture review** (AGENTS.md phase 2). Record human sign-off and
    set `status: Finalized` before implementing.
 
