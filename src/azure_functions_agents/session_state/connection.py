@@ -28,7 +28,7 @@ from __future__ import annotations
 import asyncio
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
@@ -49,14 +49,20 @@ _AZURE_CLIENT_ID_ENV = "AZURE_CLIENT_ID"
 
 @dataclass(frozen=True, slots=True)
 class TableConnectionSettings:
-    """Resolved, non-secret-shaped description of how to reach Azure Tables.
+    """Resolved description of how to reach Azure Tables.
 
     ``connection_string`` and ``table_service_uri`` are mutually exclusive;
     exactly one is set (connection string wins when both are configured,
     matching :mod:`azure_functions_agents._blob_history`'s precedence).
+
+    ``connection_string`` embeds the storage account key when present, so it
+    is excluded from ``repr()`` (``field(repr=False)``) -- callers must never
+    log or interpolate this object directly; cache keys and log/error
+    messages use only the non-secret ``s1-`` fingerprint (see
+    :func:`compute_state_store_fingerprint`).
     """
 
-    connection_string: str | None
+    connection_string: str | None = field(repr=False)
     table_service_uri: str | None
     client_id: str | None
 
@@ -152,7 +158,8 @@ def compute_state_store_fingerprint(service_client: TableServiceClient) -> str:
     Same account with a rotated key/credential yields the same fingerprint
     (the key/credential never enters the hashed bytes); a different account
     or endpoint always differs. Uses the same delimiter-safe canonical framing
-    as the ``a1``/``o1`` identity hashes for consistency (Decision 97).
+    as the ``a1``/``o1`` identity hashes for consistency (Decision 89), then
+    the same label-safe base32 encoding as those tokens (Decisions 106/113).
     """
     import hashlib
 

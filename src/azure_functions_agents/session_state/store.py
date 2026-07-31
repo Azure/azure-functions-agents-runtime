@@ -8,7 +8,7 @@ module is the async I/O layer that reads and writes
 :class:`~.session_models.DurableIdempotencyRecord` rows against a real Azure
 Table (or Azurite).
 
-Scope boundary (Decision 91/97/102): this module owns Table I/O, ETag/CAS,
+Scope boundary (Decisions 91/116/118): this module owns Table I/O, ETag/CAS,
 one-active-run admission, idempotency dedup, terminal adoption, and
 tombstoning. It does **not** verify a live sandbox manifest, bind a region or
 storage epoch, or implement reaper/reconciliation policy -- see
@@ -380,6 +380,15 @@ class AzureTableSessionStateStore:
                 f"session {session_id!r} already has an active run",
                 active_run_id=current_session.record.active_run_id,
             )
+        # Admission is never a backing rebind: the freshly re-read stored
+        # generation and the caller's target generation must match exactly,
+        # or this is a rollback attempt (typed GenerationConflictError), not
+        # a silent overwrite -- mirroring update_session/tombstone_session.
+        _validate_generation_or_raise(
+            current_session.record.generation,
+            records.session.generation,
+            backing_rebind=False,
+        )
 
         operations: list[_TransactionOp] = [
             _update_op(records.session, etag=current_session.etag),
@@ -392,6 +401,23 @@ class AzureTableSessionStateStore:
             results = await self._table_client.submit_transaction(operations)
         except TableTransactionError as exc:
             if exc.index == 0:
+                # The session-update op lost its ETag CAS. This is very
+                # often the SAME race that would otherwise show up as an
+                # index-2 idempotency-row collision: whichever op Azure
+                # Table reports first in an EGT is index 0, and a
+                # concurrent winning admission's session-update always
+                # invalidates our ETag before its idempotency-row create
+                # would independently conflict with ours. So a same-key/
+                # same-payload race must be replay-checked here too, not
+                # just at index 2, or the loser gets a spurious active-run
+                # conflict instead of the idempotent replay the contract
+                # promises.
+                if records.idempotency is not None:
+                    raced = await self._try_replay_idempotency(
+                        partition, session_id, records.idempotency
+                    )
+                    if raced is not None:
+                        return raced
                 reread = await self.get_session(partition, session_id)
                 if reread.record.active_run_id is not None:
                     raise ActiveRunConflictError(

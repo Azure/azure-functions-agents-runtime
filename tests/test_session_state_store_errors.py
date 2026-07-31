@@ -460,6 +460,68 @@ async def test_admit_run_transaction_race_reports_winner_run_id() -> None:
 
 
 @pytest.mark.asyncio
+async def test_admit_run_index0_race_with_matching_idempotency_replays_winner() -> None:
+    """Same key + same payload race that lands on the index-0 session-CAS
+    failure (not index-2) must still replay the winner, not raise
+    ``ActiveRunConflictError``. In a real EGT, whichever op Azure Table
+    reports first is index 0; a winning admission's session-update always
+    invalidates a concurrent loser's ETag before its idempotency-row create
+    would independently conflict, so this race reliably lands on index 0 --
+    not the narrower index-2 window covered by
+    ``test_admit_run_idempotency_row_collision_during_transaction_replays_winner``.
+    """
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="ready", active_run_id=None))
+
+    shared_hash = _fake_sha256("shared-payload")
+    winner_run = _run(run_id="winner-run")
+    winner_idem = _idempotency(request_hash=shared_hash, run_id="winner-run")
+    await fake.create_entity(winner_run.to_table_entity())
+    await fake.create_entity(winner_idem.to_table_entity())
+
+    key = (_partition().partition_key, "session:session-1")
+    fake._entities[key]["active_run_id"] = "winner-run"
+    fake._entities[key]["status"] = "running"
+    fake.transaction_failure = (0, _http_error(412, "UpdateConditionNotSatisfied"))
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="loser-run"),
+        _run(run_id="loser-run"),
+        _idempotency(request_hash=shared_hash, run_id="loser-run"),
+    )
+    outcome = await store.admit_run(records)
+
+    assert outcome.replayed is True
+    assert outcome.run.run_id == "winner-run"
+
+
+@pytest.mark.asyncio
+async def test_admit_run_rejects_generation_rollback() -> None:
+    """A caller admitting against a session generation lower than what is
+    currently stored must get a typed ``GenerationConflictError``, not a
+    silent overwrite -- admission is never a backing rebind, so the stored
+    and target generations must match exactly (mirrors
+    ``update_session``/``tombstone_session``'s rollback protection).
+    """
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="ready", active_run_id=None, generation=2))
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="run-1", generation=1),
+        _run(run_id="run-1", generation=1),
+        None,
+    )
+    with pytest.raises(GenerationConflictError):
+        await store.admit_run(records)
+
+    stored = await store.get_session(_partition(), "session-1")
+    assert stored.record.active_run_id is None
+    assert stored.record.generation == 2
+
+
+@pytest.mark.asyncio
 async def test_admit_run_idempotency_row_collision_during_transaction_replays_winner() -> None:
     """Covers the ``exc.index == 2`` branch: the idempotency-row CREATE op
     collides *inside* the transaction even though the upfront pre-check
