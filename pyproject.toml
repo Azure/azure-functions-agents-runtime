@@ -41,6 +41,15 @@ aca_sandbox = [
 monitor = [
     "azure-monitor-opentelemetry==1.8.8",
 ]
+# ACA Sandbox session runtime (FRD 0008) — optional. Install
+# `azurefunctions-agents-runtime[aca_sandbox]` to enable `session_runtime.aca_sandbox`.
+# P3b adds azure-data-tables for the Table-backed session state store; a future
+# phase (P4a) adds the pinned preview ACA Sandbox SDK to this same extra. The
+# in-lang-worker default backend never imports this extra (session_state lazily
+# imports azure.data.tables only inside functions -- see connection.py/store.py).
+aca_sandbox = [
+    "azure-data-tables>=12.7.0,<13",
+]
 dev = [
     "ruff>=0.15.22,<1",
     "mypy>=2.1.0,<3",
@@ -53,6 +62,9 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
+    # Bring the [aca_sandbox] extra into dev so mypy/pytest can exercise session_state's Table store
+    # (P3b) and its real-Azurite tests without a separate install step.
+    "azurefunctions-agents-runtime[aca_sandbox]",
     # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
     # every sample against the editable repo install (no per-sample requirements.txt install).
     # daily-azure-report:

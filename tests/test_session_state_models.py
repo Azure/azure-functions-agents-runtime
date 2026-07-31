@@ -27,9 +27,7 @@ from azure_functions_agents.session_state import (
 _NOW = datetime(2026, 7, 30, 16, 0, tzinfo=UTC)
 _SESSION_ID = "session-1"
 _RUN_ID = "run-1"
-_STATE_FINGERPRINT = (
-    "s1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-)
+_STATE_FINGERPRINT = "s1-" + "a" * 52
 
 
 def _partition(*, site_name: str = "agent-app") -> OwnerPartition:

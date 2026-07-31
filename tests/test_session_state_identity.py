@@ -23,6 +23,7 @@ from azure_functions_agents.session_state import (
     TriggerBindingPrincipal,
     compute_app_hash,
     compute_owner_hash,
+    encode_label_safe_digest,
     frame_canonical_components,
     hash_idempotency_key,
     idempotency_row_key,
@@ -43,16 +44,12 @@ from azure_functions_agents.session_state import (
 _SUBSCRIPTION_ID = "11111111-2222-3333-4444-555555555555"
 _TENANT_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
 _OBJECT_ID = "01234567-89ab-cdef-0123-456789abcdef"
-_PRODUCTION_APP_HASH = (
-    "a1-2b828269fbc64b418b473a69c0007d49a00e11fb4adc99dbdc246a7907105b24"
-)
+_PRODUCTION_APP_HASH = "a1-fobie2p3yzfudc2hhju4aad5jgqa4ep3jlojtw64ervhsbyqlmsa"
 _PRODUCTION_FUNCTION_OWNER_HASH = (
-    "o1-e40e6b66bc51427ea4b4d71105c99e9306b8ca2820b86624555537e42ff87495"
+    "o1-2myszkcnhrzvc7vxa5oxiovsulgnnnavmqlfj4eqhidpt5f37dyq"
 )
-_PRODUCTION_ENTRA_OWNER_HASH = (
-    "o1-10e7d2b8ad8d4ab6e9b0bd68b9885770d4b743ed86c12ee66f393d7462648590"
-)
-_SLOT_APP_HASH = "a1-121be65a0768e3f3a8493ed8a466e7bcbb4d7c193356a3a3fcca7cf3630d2762"
+_PRODUCTION_ENTRA_OWNER_HASH = "o1-khn3vq2zdimdmfqr4irkfjktac3oolcnyyhmaj5riymswzzvabuq"
+_SLOT_APP_HASH = "a1-cin6mwqhndr7hkcjh3mkizxhxs5u27azgnlkhi74zj6pgyyne5ra"
 
 
 def _app(*, slot_name: str | None = None) -> AppIdentity:
@@ -118,7 +115,7 @@ def test_canonical_framing_is_ordered_delimiter_safe_and_unicode_normalized() ->
 def test_owner_hash_verifies_under_stored_historical_version_without_migration() -> None:
     owner = FunctionAppOwnerContext.create(_app(), "main")
     legacy_bytes = frame_canonical_components(("function_app", "o0", "legacy"))
-    expected = f"o0-{hashlib.sha256(legacy_bytes).hexdigest()}"
+    expected = f"o0-{encode_label_safe_digest(hashlib.sha256(legacy_bytes).digest())}"
     canonicalizers = {
         "o0": lambda _owner: legacy_bytes,
         "o1": OWNER_CANONICALIZERS["o1"],
@@ -137,7 +134,7 @@ def test_owner_hash_verifies_under_stored_historical_version_without_migration()
 def test_app_hash_verifies_under_stored_historical_version_without_migration() -> None:
     app = _app()
     legacy_bytes = frame_canonical_components(("app", "a0", "legacy"))
-    expected = f"a0-{hashlib.sha256(legacy_bytes).hexdigest()}"
+    expected = f"a0-{encode_label_safe_digest(hashlib.sha256(legacy_bytes).digest())}"
     canonicalizers = {
         "a0": lambda _app_identity: legacy_bytes,
         "a1": APP_CANONICALIZERS["a1"],
