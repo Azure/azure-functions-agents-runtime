@@ -39,6 +39,7 @@ import { SubscriptionClient } from '@azure/arm-resources-subscriptions'
 import { WebSiteManagementClient } from '@azure/arm-appservice'
 import { ContainerClient, StorageSharedKeyCredential } from '@azure/storage-blob'
 import yauzl from 'yauzl'
+import { randomUUID } from 'node:crypto'
 
 const AGENT_PROVIDER_SETTING = 'AZURE_FUNCTIONS_AGENTS_PROVIDER'
 
@@ -916,6 +917,202 @@ export async function openAgentChatStream(host, agentSlug, prompt, { key = '', s
   const err = new Error(`Agent chatstream endpoint not reachable (${lastErr}).`)
   err.status = 502
   throw err
+}
+
+// ---------------------------------------------------------------------------
+// Microsoft Foundry (Azure AI Services) — discovery for the create flow, and
+// model-powered generation of an agent's instructions. All via ARM (the
+// caller's token); the model call uses the account key fetched with listKeys,
+// so no extra token scope is needed.
+// ---------------------------------------------------------------------------
+
+const CS_ACCOUNTS_API = '2023-05-01'
+const CS_DEPLOYMENTS_API = '2024-10-01'
+const CS_PROJECTS_API = '2025-10-01-preview'
+const OPENAI_CHAT_API = '2024-10-21'
+
+async function armJson(accessToken, url, { method = 'GET', body, timeoutMs = 15000 } = {}) {
+  try {
+    const res = await fetch(`https://management.azure.com${url}`, {
+      method,
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        ...(body ? { 'Content-Type': 'application/json' } : {}),
+      },
+      body: body ? JSON.stringify(body) : undefined,
+      signal: AbortSignal.timeout(timeoutMs),
+    })
+    return { ok: res.ok, status: res.status, json: await res.json().catch(() => null) }
+  } catch {
+    return { ok: false, status: 0, json: null }
+  }
+}
+
+/**
+ * Discover Microsoft Foundry (Azure AI Services / OpenAI) accounts in a
+ * subscription, with their chat model deployments and projects, so the create
+ * flow can offer a picker.
+ */
+export async function discoverFoundry(accessToken, subscriptionId) {
+  const listed = await armJson(
+    accessToken,
+    `/subscriptions/${subscriptionId}/providers/Microsoft.CognitiveServices/accounts?api-version=${CS_ACCOUNTS_API}`,
+    { timeoutMs: 20000 },
+  )
+  const raw = (listed.json?.value ?? []).filter((a) => {
+    const kind = String(a?.kind ?? '')
+    return kind === 'AIServices' || kind === 'OpenAI'
+  })
+
+  const accounts = await mapLimit(raw, 8, async (acc) => {
+    const name = acc.name
+    const resourceGroup = parseResourceGroup(acc.id)
+    const endpoints = acc.properties?.endpoints ?? {}
+    const foundryEndpoint = endpoints['AI Foundry API'] || ''
+    const openaiEndpoint =
+      endpoints['OpenAI Language Model Instance API'] || acc.properties?.endpoint || ''
+
+    const [deps, projs] = await Promise.all([
+      armJson(
+        accessToken,
+        `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${name}/deployments?api-version=${CS_DEPLOYMENTS_API}`,
+      ),
+      foundryEndpoint
+        ? armJson(
+            accessToken,
+            `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${name}/projects?api-version=${CS_PROJECTS_API}`,
+          )
+        : Promise.resolve({ json: { value: [] } }),
+    ])
+
+    const models = (deps.json?.value ?? [])
+      .map((d) => ({ deployment: d.name, model: d.properties?.model?.name ?? d.name }))
+      .filter((m) => !/embedding|whisper|dall-?e|tts|sora|moderation|transcribe/i.test(m.model))
+      .sort((a, b) => a.deployment.localeCompare(b.deployment))
+
+    const projects = (projs.json?.value ?? [])
+      .map((p) => {
+        const short = String(p.name ?? '').split('/').pop() ?? p.name
+        return { name: short, endpoint: `${foundryEndpoint}api/projects/${short}` }
+      })
+      .sort((a, b) => a.name.localeCompare(b.name))
+
+    return { name, resourceGroup, location: acc.location ?? '', kind: acc.kind ?? '', foundryEndpoint, openaiEndpoint, projects, models }
+  })
+
+  accounts.sort((a, b) => a.name.localeCompare(b.name))
+  return { subscriptionId, accounts }
+}
+
+// Fetch a Cognitive Services account data-plane key via ARM listKeys.
+async function foundryAccountKey(accessToken, subscriptionId, resourceGroup, account) {
+  const res = await armJson(
+    accessToken,
+    `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${account}/listKeys?api-version=${CS_ACCOUNTS_API}`,
+    { method: 'POST' },
+  )
+  return res.json?.key1 || res.json?.key2 || ''
+}
+
+/**
+ * Generate an agent's instructions (the `.agent.md` body) by calling the chosen
+ * Foundry chat model. Key-auth via the account key (no extra token scope).
+ */
+export async function generateAgentInstructions(accessToken, subscriptionId, opts) {
+  const { resourceGroup, account, openaiEndpoint, model, name, description } = opts
+  if (!openaiEndpoint || !model || !account || !resourceGroup) {
+    throw Object.assign(new Error('A Foundry account, model, and endpoint are required.'), { status: 400 })
+  }
+  const key = await foundryAccountKey(accessToken, subscriptionId, resourceGroup, account)
+  if (!key) throw Object.assign(new Error('Could not read the Foundry account key (permission?).'), { status: 502 })
+
+  const base = openaiEndpoint.endsWith('/') ? openaiEndpoint : `${openaiEndpoint}/`
+  const url = `${base}openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=${OPENAI_CHAT_API}`
+  const system =
+    'You are an expert at writing system-prompt instructions for AI agents. Given an agent name and a short ' +
+    "description of what it should do, write clear, effective instructions used verbatim as the agent's system " +
+    'prompt. Describe the role, expected behavior, inputs and outputs, tone, and any constraints. Output ONLY ' +
+    'the instructions as plain Markdown prose — no YAML front matter, no code fences, no "Instructions" heading.'
+  const user = `Agent name: ${name || '(unnamed)'}\nWhat it should do: ${description || '(no description provided)'}`
+
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: { 'api-key': key, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
+    signal: AbortSignal.timeout(60000),
+  })
+  const text = await res.text()
+  if (!res.ok) {
+    let detail = `${res.status} ${res.statusText}`
+    try {
+      detail = JSON.parse(text)?.error?.message || detail
+    } catch {
+      /* raw */
+    }
+    throw Object.assign(new Error(`Generation failed: ${String(detail).slice(0, 300)}`), { status: res.status })
+  }
+  let content = ''
+  try {
+    content = JSON.parse(text)?.choices?.[0]?.message?.content ?? ''
+  } catch {
+    /* leave empty */
+  }
+  content = content.replace(/^\s*```[a-z]*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
+  return { content }
+}
+
+// List the resource groups in a subscription (name + location), for the create
+// flow's "existing resource group" picker.
+export async function listResourceGroups(accessToken, subscriptionId) {
+  const res = await armJson(
+    accessToken,
+    `/subscriptions/${subscriptionId}/resourcegroups?api-version=2021-04-01`,
+    { timeoutMs: 15000 },
+  )
+  const resourceGroups = (res.json?.value ?? [])
+    .map((g) => ({ name: g.name, location: g.location ?? '' }))
+    .sort((a, b) => a.name.localeCompare(b.name))
+  return { subscriptionId, resourceGroups }
+}
+
+// Roles a Foundry account's callers need (matches the reference infra).
+const COGNITIVE_SERVICES_USER_ROLE = 'a97b65f3-24c7-4388-baec-2e87135dc908'
+const COGNITIVE_SERVICES_OPENAI_USER_ROLE = '5e0bd9bd-7b93-4f28-af87-19fc36ad61bd'
+
+// Grant a principal (a deployed app's managed identity) the roles needed to call
+// a Foundry account's models. Works cross-subscription. Idempotent: an existing
+// assignment counts as granted.
+export async function grantFoundryAccess(accessToken, { subscriptionId, resourceGroup, account, principalId }) {
+  if (!subscriptionId || !resourceGroup || !account || !principalId) {
+    throw Object.assign(new Error('subscription, resourceGroup, account, and principalId are required.'), {
+      status: 400,
+    })
+  }
+  const scope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${account}`
+  const roles = [
+    { name: 'Cognitive Services User', id: COGNITIVE_SERVICES_USER_ROLE },
+    { name: 'Cognitive Services OpenAI User', id: COGNITIVE_SERVICES_OPENAI_USER_ROLE },
+  ]
+  const granted = []
+  const failed = []
+  for (const role of roles) {
+    const url = `${scope}/providers/Microsoft.Authorization/roleAssignments/${randomUUID()}?api-version=2022-04-01`
+    const body = {
+      properties: {
+        roleDefinitionId: `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${role.id}`,
+        principalId,
+        principalType: 'ServicePrincipal',
+      },
+    }
+    const res = await armJson(accessToken, url, { method: 'PUT', body, timeoutMs: 20000 })
+    const code = String(res.json?.error?.code ?? '')
+    if (res.ok || res.status === 409 || /RoleAssignmentExists/i.test(code)) {
+      granted.push(role.name)
+    } else {
+      failed.push({ role: role.name, error: res.json?.error?.message || `status ${res.status}` })
+    }
+  }
+  return { granted, failed, scope }
 }
 
 // Resolve the authoritative set of agent slugs from the deployed `*.agent.md`

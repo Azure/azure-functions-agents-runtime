@@ -454,14 +454,11 @@ async function runDeployJob(id, token, ctx) {
 
     await pushFilesToSite(id, token, site, await readDirFiles(dir))
 
-    const foundryNote =
-      target.kind === 'new' && principalId
-        ? ` Grant the app identity (principalId ${principalId}) access to your Foundry project for live model calls.`
-        : ''
     setJob(id, {
       status: 'deployed',
-      message: `Deployed "${fileName}" to ${appName}.${foundryNote}`,
+      message: `Deployed "${fileName}" to ${appName}.`,
       url: `https://${site.defaultHostName}`,
+      ...(target.kind === 'new' && principalId ? { principalId } : {}),
     })
   } catch (err) {
     setJob(id, { status: 'error', message: String(err?.message ?? err) })
@@ -561,6 +558,7 @@ app.get(
       files: job.files ?? [],
       ...(job.url ? { url: job.url } : {}),
       ...(job.portalUrl ? { portalUrl: job.portalUrl } : {}),
+      ...(job.principalId ? { principalId: job.principalId } : {}),
     })
   }),
 )
@@ -681,6 +679,101 @@ app.post(
       }
     } finally {
       res.end()
+    }
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// Microsoft Foundry — discover models for the create flow, and generate an
+// agent's instructions with the chosen model.
+// ---------------------------------------------------------------------------
+
+app.get(
+  '/api/foundry',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const ref = String(req.query.subscription ?? '').trim()
+    let subscriptionId = azure.DEFAULT_SUBSCRIPTION_ID
+    if (ref) {
+      try {
+        subscriptionId = await azure.resolveSubscriptionId(token, ref)
+      } catch (err) {
+        if (err instanceof azure.SubscriptionNotFoundError) throw new HttpError(404, err.message)
+        throw err
+      }
+    }
+    res.json(await azure.discoverFoundry(token, subscriptionId))
+  }),
+)
+
+app.post(
+  '/api/generate-agent-md',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const foundry = req.body?.foundry ?? {}
+    const name = String(req.body?.name ?? '').trim()
+    const description = String(req.body?.description ?? '').trim()
+    if (!name && !description) throw new HttpError(400, 'Provide a name or description to generate from.')
+    try {
+      res.json(
+        await azure.generateAgentInstructions(token, subscription, {
+          resourceGroup: String(foundry.resourceGroup ?? ''),
+          account: String(foundry.account ?? ''),
+          openaiEndpoint: String(foundry.openaiEndpoint ?? ''),
+          model: String(foundry.model ?? ''),
+          name,
+          description,
+        }),
+      )
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
+// Resource groups in a subscription, for the create flow's RG picker.
+app.get(
+  '/api/resource-groups',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const ref = String(req.query.subscription ?? '').trim()
+    let subscriptionId = azure.DEFAULT_SUBSCRIPTION_ID
+    if (ref) {
+      try {
+        subscriptionId = await azure.resolveSubscriptionId(token, ref)
+      } catch (err) {
+        if (err instanceof azure.SubscriptionNotFoundError) throw new HttpError(404, err.message)
+        throw err
+      }
+    }
+    res.json(await azure.listResourceGroups(token, subscriptionId))
+  }),
+)
+
+// Grant a deployed app's identity access to a Foundry account (works cross-sub).
+app.post(
+  '/api/foundry/grant-access',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim()
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const account = String(req.body?.account ?? '').trim()
+    const principalId = String(req.body?.principalId ?? '').trim()
+    if (!subscription || !resourceGroup || !account || !principalId) {
+      throw new HttpError(400, 'subscription, resourceGroup, account, and principalId are required.')
+    }
+    try {
+      res.json(
+        await azure.grantFoundryAccess(token, {
+          subscriptionId: subscription,
+          resourceGroup,
+          account,
+          principalId,
+        }),
+      )
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
     }
   }),
 )
