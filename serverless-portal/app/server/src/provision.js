@@ -68,13 +68,15 @@ function storageAccountName(appName) {
 // Build the lean Flex Consumption ARM template. Storage auth uses a connection
 // string (no managed identity / RBAC needed to deploy); the app carries a
 // system-assigned identity so the caller can later grant it access to Foundry.
-function flexTemplate({ appName, storageName, planName, containerName, region, pythonVersion, foundryEndpoint, foundryModel }) {
+function flexTemplate({ appName, storageName, planName, containerName, workspaceName, insightsName, region, pythonVersion, foundryEndpoint, foundryModel }) {
   // Inner (unbracketed) resourceId expressions for nesting inside other ARM
   // expressions; wrap in `[ ]` only where an expression stands on its own.
   const storageIdE = `resourceId('Microsoft.Storage/storageAccounts', '${storageName}')`
   const containerIdE = `resourceId('Microsoft.Storage/storageAccounts/blobServices/containers', '${storageName}', 'default', '${containerName}')`
   const planIdE = `resourceId('Microsoft.Web/serverfarms', '${planName}')`
   const siteIdE = `resourceId('Microsoft.Web/sites', '${appName}')`
+  const workspaceIdE = `resourceId('Microsoft.OperationalInsights/workspaces', '${workspaceName}')`
+  const insightsIdE = `resourceId('Microsoft.Insights/components', '${insightsName}')`
   const connStr = `[format('DefaultEndpointsProtocol=https;AccountName={0};AccountKey={1};EndpointSuffix=core.windows.net', '${storageName}', listKeys(${storageIdE}, '2023-01-01').keys[0].value)]`
   const blobBase = `reference(${storageIdE}, '2023-01-01').primaryEndpoints.blob`
 
@@ -82,6 +84,10 @@ function flexTemplate({ appName, storageName, planName, containerName, region, p
     { name: 'AzureWebJobsStorage', value: connStr },
     { name: 'DEPLOYMENT_STORAGE_CONNECTION_STRING', value: connStr },
     { name: 'AZURE_FUNCTIONS_AGENTS_PROVIDER', value: 'foundry' },
+    {
+      name: 'APPLICATIONINSIGHTS_CONNECTION_STRING',
+      value: `[reference(${insightsIdE}, '2020-02-02').ConnectionString]`,
+    },
   ]
   if (foundryEndpoint) appSettings.push({ name: 'FOUNDRY_PROJECT_ENDPOINT', value: foundryEndpoint })
   if (foundryModel) appSettings.push({ name: 'FOUNDRY_MODEL', value: foundryModel })
@@ -111,6 +117,28 @@ function flexTemplate({ appName, storageName, planName, containerName, region, p
         properties: { publicAccess: 'None' },
       },
       {
+        type: 'Microsoft.OperationalInsights/workspaces',
+        apiVersion: '2023-09-01',
+        name: workspaceName,
+        location: region,
+        properties: {
+          sku: { name: 'PerGB2018' },
+          retentionInDays: 30,
+        },
+      },
+      {
+        type: 'Microsoft.Insights/components',
+        apiVersion: '2020-02-02',
+        name: insightsName,
+        location: region,
+        kind: 'web',
+        dependsOn: [`[${workspaceIdE}]`],
+        properties: {
+          Application_Type: 'web',
+          WorkspaceResourceId: `[${workspaceIdE}]`,
+        },
+      },
+      {
         type: 'Microsoft.Web/serverfarms',
         apiVersion: '2023-12-01',
         name: planName,
@@ -126,7 +154,7 @@ function flexTemplate({ appName, storageName, planName, containerName, region, p
         location: region,
         kind: 'functionapp,linux',
         identity: { type: 'SystemAssigned' },
-        dependsOn: [`[${planIdE}]`, `[${storageIdE}]`, `[${containerIdE}]`],
+        dependsOn: [`[${planIdE}]`, `[${storageIdE}]`, `[${containerIdE}]`, `[${insightsIdE}]`],
         properties: {
           serverFarmId: `[${planIdE}]`,
           httpsOnly: true,
@@ -182,7 +210,7 @@ async function deploymentError(token, subscriptionId, resourceGroup, deploymentN
 
 /**
  * Provision a new Flex Consumption agent app and wait for it to be ready.
- * @returns {Promise<{defaultHostName: string, principalId: string, storageName: string}>}
+ * @returns {Promise<{defaultHostName: string, principalId: string, storageName: string, appInsightsName: string}>}
  */
 export async function provisionFlexApp(token, opts) {
   const {
@@ -201,11 +229,15 @@ export async function provisionFlexApp(token, opts) {
   const storageName = storageAccountName(appName)
   const planName = `${appName}-plan`.slice(0, 40)
   const containerName = 'app-package'
+  const insightsName = appName
+  const workspaceName = `${appName}-logs`.slice(0, 63)
   const template = flexTemplate({
     appName,
     storageName,
     planName,
     containerName,
+    workspaceName,
+    insightsName,
     region,
     pythonVersion,
     foundryEndpoint,
@@ -227,6 +259,7 @@ export async function provisionFlexApp(token, opts) {
         defaultHostName: outputs.defaultHostName?.value || `${appName}.azurewebsites.net`,
         principalId: outputs.principalId?.value || '',
         storageName,
+        appInsightsName: insightsName,
       }
     }
     if (state === 'Failed' || state === 'Canceled') {

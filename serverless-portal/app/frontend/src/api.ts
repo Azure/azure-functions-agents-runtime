@@ -80,6 +80,8 @@ export interface DeployResult {
   url?: string
   portalUrl?: string
   principalId?: string
+  insightsUrl?: string
+  grantOutcome?: 'granted' | 'partial' | 'failed'
 }
 
 export interface DeployStarted {
@@ -142,6 +144,7 @@ export type DeployTarget =
       region: string
       foundryEndpoint: string
       foundryModel: string
+      foundryAccount?: { subscription: string; resourceGroup: string; account: string }
     }
 
 // Error carrying the HTTP status so React Query's retry guard can skip 4xx.

@@ -307,6 +307,17 @@ export default function CreateAgentPage() {
             region: draft.newApp.region,
             foundryEndpoint: draft.foundryEndpoint,
             foundryModel: draft.foundryModel,
+            // In pick mode we know the Foundry account, so the backend can
+            // auto-grant the new app's identity access to it.
+            ...(draft.foundryMode === 'pick' && draft.foundryAccount
+              ? {
+                  foundryAccount: {
+                    subscription: foundrySub,
+                    resourceGroup: draft.foundryResourceGroup,
+                    account: draft.foundryAccount,
+                  },
+                }
+              : {}),
           }
     deployJob.deploy({ subscription: targetSub, agent: { fileName, content: previewMd }, target })
   }

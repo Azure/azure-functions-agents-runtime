@@ -182,7 +182,21 @@ export function DeploymentStatus({
           </a>
         </div>
       )}
-      {phase === 'deployed' && result?.principalId && grant?.account && (
+      {phase === 'deployed' && result?.insightsUrl && (
+        <div style={{ marginTop: 6 }}>
+          Telemetry:{' '}
+          <a href={result.insightsUrl} target="_blank" rel="noreferrer">
+            View in Application Insights ↗
+          </a>
+        </div>
+      )}
+      {phase === 'deployed' && result?.grantOutcome === 'granted' && (
+        <div className="muted" style={{ marginTop: 8, fontSize: 12 }}>
+          ✓ Granted the app’s identity access to Foundry{grant?.account ? ` (${grant.account})` : ''}. Role
+          changes can take a couple of minutes to take effect.
+        </div>
+      )}
+      {phase === 'deployed' && result?.grantOutcome !== 'granted' && result?.principalId && grant?.account && (
         <GrantAccess grant={grant} principalId={result.principalId} />
       )}
       {result?.files && result.files.length > 0 && (
