@@ -26,6 +26,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Preview ACA Sandbox transport. Kept optional so the default in-language-worker
+# runtime has no preview-SDK dependency edge.
+aca_sandbox = [
+    "azure-containerapps-sandbox==0.1.0b4",
+]
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
 # only when another OpenTelemetry provider is already active (e.g. the Functions worker) and exports
@@ -82,6 +87,16 @@ select = [
     "SIM",
     "RUF",
     "N",
+    # try/except hygiene; see AGENTS.md "Code conventions".
+    "TRY002",
+    "TRY201",
+    "TRY203",
+    "TRY301",
+    "TRY400",
+    # Terse docstrings; see AGENTS.md "Code conventions".
+    "D200",
+    "D210",
+    "D419",
 ]
 ignore = [
     "E501",
@@ -89,6 +104,8 @@ ignore = [
 
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["N802", "N803"]
+# Pre-existing findings this PR does not otherwise touch.
+"src/azure_functions_agents/runner.py" = ["TRY301"]
 
 [tool.ruff.lint.isort]
 known-first-party = ["azure_functions_agents"]
@@ -107,6 +124,20 @@ exclude = ["build", "dist", "samples"]
 [[tool.mypy.overrides]]
 module = "azure_functions_agents.*"
 strict = true
+
+# The preview ACA Sandbox SDK is an optional extra (see pyproject.toml
+# [project.optional-dependencies].aca_sandbox) that this repo's default dev/CI
+# environment does not install (`pip install -e .[dev]` only). aca_sdk.py's
+# TYPE_CHECKING-only import of it resolves to real, fully-checked types in a
+# dev environment that *has* the extra installed (e.g. while working on this
+# transport adapter); ignore_missing_imports lets the same annotations
+# degrade to Any, rather than failing mypy, in an environment that doesn't.
+[[tool.mypy.overrides]]
+module = [
+    "azure.containerapps.sandbox",
+    "azure.containerapps.sandbox.*",
+]
+ignore_missing_imports = true
 
 [[tool.mypy.overrides]]
 module = [
@@ -141,4 +172,5 @@ warn_required_dynamic_aliases = true
 addopts = "-m 'not e2e'"
 markers = [
     "e2e: end-to-end tests that boot sample apps with `func start` (require func + Azurite).",
+    "live_aca: credential-gated ACA Sandbox smoke tests; skipped unless explicitly enabled.",
 ]

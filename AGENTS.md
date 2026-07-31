@@ -121,6 +121,22 @@ the Decisions log is durable history. Start from
    | - | -------- | ------------------ | ------ | ---------- | ---- |
    | 1 | …        | A / B / C          | B      | Human / Agent | … |
 
+   **Keep rows short — the log is an index, not an essay.** Target ≤ ~350
+   characters per row; treat ~500 as the hard ceiling. `Decision` is a short
+   noun phrase, `Options considered` is `A / B / C`, and `Choice` is the
+   decision plus the one fact that justifies it. A long log is one nobody
+   reads, which defeats the point of keeping it.
+
+   If a decision genuinely needs more, the detail belongs in the design
+   section the decision governs — not in the table cell. Do not restate what
+   the code, AGENTS.md, or `docs/architecture.md` already says; a decision
+   records *what was chosen and why*, not how it was implemented.
+
+   Numbers are positional, not stable — parallel phases and rebases renumber
+   them (this FRD's decisions 89–98 became 97–106 on one rebase). So never
+   cite a decision number from code; cross-references *within* the FRD are
+   fine, and revised decisions annotate the row they narrow.
+
 6. **Test plan** — new/changed tests; fixtures under
    `tests/fixtures/config_scenarios/` when config behavior changes.
 7. **Docs impact** — which `docs/*` and `README.md` sections change.
@@ -136,11 +152,73 @@ Grounded in `pyproject.toml` and current code:
   `pydantic.mypy` plugin).
 - **Type aliases use PEP 695:** `type Foo = Bar` (not `Foo: TypeAlias = Bar`);
   ruff `UP040` enforces this. See `src/azure_functions_agents/discovery/mcp.py`.
-- **Ruff** rules: `E,F,I,B,UP,SIM,RUF,N`; line-length 100 (`E501` ignored).
-  Imports sorted via ruff isort; first-party = `azure_functions_agents`.
+- **Ruff** rules: `E,F,I,B,UP,SIM,RUF,N`, plus a small, evidence-based `TRY`
+  subset (`TRY002,TRY201,TRY203,TRY301,TRY400`) and `D200,D210,D419`;
+  line-length 100 (`E501` ignored). Imports sorted via ruff isort;
+  first-party = `azure_functions_agents`.
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
+- **Parse external documents with a strict Pydantic model**, not hand-rolled
+  `isinstance`/`cast` chains. This applies wherever an outside document is
+  parsed into a shape we own — config files, durable rows read back from
+  storage, auth headers, the sandbox session manifest. Three rules:
+  - `model_config = ConfigDict(strict=True, extra=...)`. Without `strict`,
+    Pydantic coerces `"123"` → `123`, which quietly defeats the type check.
+    Use `extra="forbid"` unless another component legitimately owns extra
+    sections, in which case `extra="ignore"`.
+  - **Decode with `json.loads(..., object_pairs_hook=...)` that rejects
+    duplicate keys, then `model_validate(obj)`** — do *not* use
+    `model_validate_json`. Both `json.loads` and Pydantic's JSON parser
+    silently keep the *last* duplicate, so one document can mean two things to
+    two readers.
+  - **Never surface `ValidationError`** across a trust boundary — its message
+    embeds the offending values. Catch it and raise the module's own error;
+    use `err["loc"]` if you need field names.
+
+  See `transport/manifest.py` for the worked example. Not everything that
+  looks similar qualifies: runtime type *dispatch* over third-party objects
+  (`registration/_trigger_serialization.py`, `execution/compat.py`) and
+  *user-authored* schemas validated with `jsonschema`
+  (`registration/_handlers.py`) are correct as they are.
+- **No defensive `getattr`/`isinstance`/`cast`/`Any` against an already-typed
+  source** (SDK responses, our own dataclasses). Import/type the boundary
+  properly instead and read fields directly; delete the runtime re-validation.
+  Parsing untrusted external input is *not* an exception to this — it is a
+  different job, done with a strict model per the rule above.
+- **Frozen dataclasses validate via a classmethod `create()` factory**, never
+  `__post_init__` + `object.__setattr__`. See `session_state/models.py`
+  or `transport/transport_models.py` for the pattern: a module-level
+  `_validate_*`/`_normalize_*` helper does the work, `create()` calls it then
+  constructs with `cls(...)`.
+- **No nested try/except.** Flatten into single-level helper functions with
+  early returns instead of a `try` inside another `try`'s body or handler.
+- **Module names must be globally unique and intent-revealing** — no two
+  modules named bare `models.py`, `utils.py`, etc. (`transport/transport_models.py`
+  follows this; `session_state/models.py` is a known pending rename owned by
+  whichever phase touches that module next — don't rename it as a drive-by).
+  Tests mirror source module names (`tests/test_<module>.py`; see §6).
+- **Use the module constant, never re-inline the literal it represents**
+  (URLs, API versions, paths). If you find yourself typing the same literal
+  twice, promote it to a constant next to the ones already there.
+- **Docstrings and comments are terse by default.** Ruff enforces the
+  mechanical part (`D200`, `D210`, `D419`); these are the judgement rules:
+  - One line when the name and signature already explain it. Do not restate
+    the signature, and do not add a docstring that says nothing.
+  - Multi-line only for a non-obvious contract, invariant, or gotcha, and then
+    a summary line plus **at most ~4 more lines**.
+  - If the explanation needs more than that, it is a *decision*, not a
+    docstring — record it in the FRD Decisions log and keep the docstring to
+    the durable technical fact.
+  - Comments say **why**, not what. Never narrate the next line.
+  - **No feature bookkeeping in code** — no phase labels (`P3a`, `P4a`, …), PR
+    numbers, or `FRD 0008 Decision #107` citations in comments, docstrings, or
+    test assertion messages. They mean nothing outside the feature that
+    invented them, and decision numbers are *renumbered on rebase*, so the
+    citation silently rots. State the durable technical reason instead; `git
+    blame` and PR history carry the provenance.
+  - Config files (`pyproject.toml`, CI YAML) get a short pointer, never a
+    rationale essay — that also belongs in the FRD.
 - **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored
   (one-time warning). Do not reintroduce runtime branching.
 - **Logging** goes through the shared `azure_functions_agents._logger.logger`.

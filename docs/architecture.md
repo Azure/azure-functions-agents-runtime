@@ -35,6 +35,9 @@ A few boundaries are worth calling out explicitly:
 - **Composition is two-pass and side-effect-free until pass 2.** `app.py`'s composition root builds the app-wide identity-slug index, fails fast on collisions, validates every `subagents:` reference, and freezes each agent's `ResolvedAgent` + `AgentCapabilities` into an immutable `AgentCatalog` — none of this touches the `FunctionApp` object. Only pass 2 (trigger/endpoint registration) mutates it (FRD 0007 §4.2).
 - **Registration is Azure-specific.** This is the first stage that knows about `azure.functions.FunctionApp`, decorators, routes, and trigger bindings.
 - **Execution is deferred.** The runner is not part of startup registration; it is called later by handler closures when an HTTP route or trigger actually fires.
+- **ACA transport is also deferred.** P4a's optional `transport/aca_sdk.py` is constructed only
+  by a future execution backend at request/lifecycle time, never by discovery, config translation,
+  or registration. The current startup gate still rejects `aca_sandbox` until P5a owns that wiring.
 
 ## 3. Module map
 
@@ -64,6 +67,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/execution/*` | Backend-neutral run-lifecycle seam (FRD 0008) that registration binds into: `backend.py` defines the `AgentExecutionBackend` Protocol plus request/status/event dataclasses; `binding.py`/`compat.py` adapt registration's per-agent config and legacy call shape into that seam; `in_lang_worker.py` is the `in_lang_worker` implementation, wrapping `runner.py`; `factory.py` selects a backend by whether `session_runtime.aca_sandbox` is configured; `unavailable.py` is the fail-closed `aca_sandbox` placeholder — reached only as defense in depth, since `config/validation.py:validate_session_runtime()` already rejects `aca_sandbox` at startup. | `create_execution_backend()`, `AgentExecutionBackend`, `LanguageWorkerExecutionBackend`, `UnavailableBackend` |
+| `azure_functions_agents/transport/*` | Deferred P4a controller-to-sandbox boundary. `transport_models.py` and `ports.py` own provider-neutral file/process projections; `manifest.py` strictly verifies controller-authoritative row inputs against a direct data-plane manifest; `aca_sdk.py` is the sole optional-preview SDK adapter for one customer-owned Sandbox Group. It creates/deletes individual session sandboxes only and is deliberately not wired to `AgentExecutionBackend` until P5a. | `SandboxFileTransport`, `SandboxProcessTransport`, `verify_sandbox_manifest()`, `AcaSandboxAdapter` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools from the `AgentCatalog` for agents that declare `subagents` (FRD 0007). | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool registry, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()` |
@@ -79,6 +83,7 @@ A few boundaries are worth calling out explicitly:
 - `registration/` answers **"which Azure Functions surfaces should exist for this agent?"**
 - `system_tools/` answers **"which runtime-provided tools can be attached on demand?"**
 - `execution/` answers **"once registration hands off a request, which backend actually runs it?"** — `in_lang_worker` today; `aca_sandbox` is a recognized-but-unavailable placeholder gated shut at startup, not at this seam (FRD 0008).
+- `transport/` answers **"how can a future ACA execution backend operate one live sandbox safely?"** — P4a exposes exactly six direct file operations plus separate process control, validates the customer-owned group and a live manifest binding, and keeps the optional preview SDK confined to one adapter. It is not an execution backend and does not alter the startup gate.
 - `runner.py` and `client_manager.py` answer **"once invoked, how does an agent call the model and its tools — including any specialist it delegates to?"**
 - `_observability.py` (cross-cutting) answers **"what did the run do, and is a failure the app's, runtime's, platform's, or a delegated specialist's fault?"**
 

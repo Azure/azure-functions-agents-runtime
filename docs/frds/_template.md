@@ -60,6 +60,20 @@ branch: <user>/<slug>
 
 > Append-only. Record every non-trivial choice and **who** made it. This is the
 > durable record that makes the FRD worth committing.
+>
+> **Keep it an index, not an essay.** Target ≤ ~350 characters per row (~500
+> hard ceiling): `Decision` is a short noun phrase, `Options considered` is
+> `A / B / C`, and `Choice` is the decision plus the one fact that justifies
+> it. Record *what* was chosen and *why*, never *how* it was implemented — do
+> not restate what the code, `AGENTS.md`, or `docs/architecture.md` says. If a
+> decision needs more, put the detail in the design section it governs.
+>
+> To revise a decision, append a new row that annotates the one it narrows
+> (e.g. "narrows #12"); never rewrite or delete a row.
+>
+> Numbers are positional, not stable — parallel phases and rebases renumber
+> them. Cross-reference them *within* this FRD only; never cite a decision
+> number from code or comments.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
