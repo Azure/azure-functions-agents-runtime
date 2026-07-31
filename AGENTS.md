@@ -144,97 +144,14 @@ the Decisions log is durable history. Start from
 
 ---
 
-## 5. Code conventions
+## 5. Engineering convention homes
 
-Grounded in `pyproject.toml` and current code:
-
-- **Python ≥ 3.13.** Strict typing everywhere in `src/` (`mypy --strict`,
-  `pydantic.mypy` plugin).
-- **Type aliases use PEP 695:** `type Foo = Bar` (not `Foo: TypeAlias = Bar`);
-  ruff `UP040` enforces this. See `src/azure_functions_agents/discovery/mcp.py`.
-- **Ruff** rules: `E,F,I,B,UP,SIM,RUF,N`, plus a small, evidence-based `TRY`
-  subset (`TRY002,TRY201,TRY203,TRY301,TRY400`) and `D200,D210,D419`;
-  line-length 100 (`E501` ignored). Imports sorted via ruff isort;
-  first-party = `azure_functions_agents`.
-- **Pydantic v2** for all config models (`config/schema.py`). When a field +
-  validator is shared across provider/sub-models, declare it once on the common
-  base class rather than duplicating per subclass.
-- **Parse external documents with a strict Pydantic model**, not hand-rolled
-  `isinstance`/`cast` chains. This applies wherever an outside document is
-  parsed into a shape we own — config files, durable rows read back from
-  storage, auth headers, the sandbox session manifest. Three rules:
-  - `model_config = ConfigDict(strict=True, extra=...)`. Without `strict`,
-    Pydantic coerces `"123"` → `123`, which quietly defeats the type check.
-    Use `extra="forbid"` unless another component legitimately owns extra
-    sections, in which case `extra="ignore"`.
-  - **Decode with `json.loads(..., object_pairs_hook=...)` that rejects
-    duplicate keys, then `model_validate(obj)`** — do *not* use
-    `model_validate_json`. Both `json.loads` and Pydantic's JSON parser
-    silently keep the *last* duplicate, so one document can mean two things to
-    two readers.
-  - **Never surface `ValidationError`** across a trust boundary — its message
-    embeds the offending values. Catch it and raise the module's own error;
-    use `err["loc"]` if you need field names.
-
-  See `transport/manifest.py` for the worked example. Not everything that
-  looks similar qualifies: runtime type *dispatch* over third-party objects
-  (`registration/_trigger_serialization.py`, `execution/compat.py`) and
-  *user-authored* schemas validated with `jsonschema`
-  (`registration/_handlers.py`) are correct as they are.
-- **No defensive `getattr`/`isinstance`/`cast`/`Any` against an already-typed
-  source** (SDK responses, our own dataclasses). Import/type the boundary
-  properly instead and read fields directly; delete the runtime re-validation.
-  Parsing untrusted external input is *not* an exception to this — it is a
-  different job, done with a strict model per the rule above.
-- **Frozen dataclasses validate via a classmethod `create()` factory**, never
-  `__post_init__` + `object.__setattr__`. See `session_state/session_models.py`
-  or `transport/transport_models.py` for the pattern: a module-level
-  `_validate_*`/`_normalize_*` helper does the work, `create()` calls it then
-  constructs with `cls(...)`.
-- **Avoid deep nesting of control flow** — `if`/`for`/`while`/`try` nested
-  inside each other beyond one level. This covers a `try` inside another
-  `try`'s body or handler, an `if` chain nested inside an `except` handler,
-  and an `if` nested inside another `if` inside a loop body alike. Flatten
-  into single-level guard clauses, early returns/continues, or an extracted
-  module-level function/private method instead (see
-  `session_state/store.py`'s `_resolve_admission_conflict` and
-  `_require_matching_terminal_outcome` for the pattern applied to both an
-  `except` handler and a loop body). Ruff's `PLR1702` (too-many-nested-blocks)
-  and `C901` (complexity) would catch this automatically, but both have
-  pre-existing repo-wide violations outside any one phase's scope to fix,
-  so this stays a reviewed, written convention rather than a lint gate.
-- **Module names must be globally unique and intent-revealing** — no two
-  modules named bare `models.py`, `utils.py`, etc. (`session_state/session_models.py`
-  and `transport/transport_models.py` both follow this).
-  Tests mirror source module names (`tests/test_<module>.py`; see §6).
-- **Use the module constant, never re-inline the literal it represents**
-  (URLs, API versions, paths). If you find yourself typing the same literal
-  twice, promote it to a constant next to the ones already there.
-- **Docstrings and comments are terse by default.** Ruff enforces the
-  mechanical part (`D200`, `D210`, `D419`); these are the judgement rules:
-  - One line when the name and signature already explain it. Do not restate
-    the signature, and do not add a docstring that says nothing.
-  - Multi-line only for a non-obvious contract, invariant, or gotcha, and then
-    a summary line plus **at most ~4 more lines**.
-  - If the explanation needs more than that, it is a *decision*, not a
-    docstring — record it in the FRD Decisions log and keep the docstring to
-    the durable technical fact.
-  - Comments say **why**, not what. Never narrate the next line.
-  - **No feature bookkeeping in code** — no phase labels (`P3a`, `P4a`, …), PR
-    numbers, or `FRD 0008 Decision #107` citations in comments, docstrings, or
-    test assertion messages. They mean nothing outside the feature that
-    invented them, and decision numbers are *renumbered on rebase*, so the
-    citation silently rots. State the durable technical reason instead; `git
-    blame` and PR history carry the provenance.
-  - Config files (`pyproject.toml`, CI YAML) get a short pointer, never a
-    rationale essay — that also belongs in the FRD.
-- **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored
-  (one-time warning). Do not reintroduce runtime branching.
-- **Logging** goes through the shared `azure_functions_agents._logger.logger`.
-- **Respect the pipeline boundaries** (architecture.md §2): discovery is
-  read-only; registration is the only Azure-aware stage; the runner executes
-  lazily. Don't re-parse YAML/front matter in registration — trust
-  `ResolvedAgent` / `AgentCapabilities`.
+`AGENTS.md` governs process. Python source semantics are path-scoped in
+[`.github/instructions/python.instructions.md`](.github/instructions/python.instructions.md).
+Repo-wide enforceable rules live in `pyproject.toml`; executable structural
+guards live in `tests/test_convention_guards.py`. Keep these homes aligned when a
+new convention is added: prefer lint, then a clean-baseline guard, then a
+scoped instruction for rules that require engineering judgment.
 
 ---
 

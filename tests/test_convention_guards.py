@@ -1,0 +1,260 @@
+"""Executable guards for repository-wide Python conventions."""
+
+from __future__ import annotations
+
+import ast
+import io
+import re
+import tokenize
+from collections import defaultdict
+from collections.abc import Iterable
+from pathlib import Path
+
+_PROVENANCE_PATTERNS = (
+    ("decision citation", re.compile(r"\bDecisions?\s*#?\s*\d+\b", re.IGNORECASE)),
+    ("pull request citation", re.compile(r"\b(?:PR|pull request)\s*#?\s*\d+\b", re.IGNORECASE)),
+    (
+        "phase label",
+        re.compile(
+            r"\bP\d+[a-z]\b|\bFRD\s*\d{4}\b[^\n]{0,80}\bP\d+\b|"
+            r"\bP\d+\b(?=\s*(?:extension|implementation|phase|:))",
+        ),
+    ),
+)
+
+
+def _repository_root() -> Path:
+    return Path(__file__).resolve().parents[1]
+
+
+def _python_files(root: Path) -> list[Path]:
+    return sorted(root.rglob("*.py"))
+
+
+def _frozen_dataclass_has_post_init(tree: ast.AST) -> list[int]:
+    findings: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef) or not _is_explicitly_frozen_dataclass(node):
+            continue
+        findings.extend(
+            member.lineno
+            for member in node.body
+            if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and member.name == "__post_init__"
+        )
+    return findings
+
+
+def _is_explicitly_frozen_dataclass(node: ast.ClassDef) -> bool:
+    for decorator in node.decorator_list:
+        if not isinstance(decorator, ast.Call) or not _is_dataclass_decorator(decorator.func):
+            continue
+        for keyword in decorator.keywords:
+            if (
+                keyword.arg == "frozen"
+                and isinstance(keyword.value, ast.Constant)
+                and keyword.value.value is True
+            ):
+                return True
+    return False
+
+
+def _is_dataclass_decorator(node: ast.expr) -> bool:
+    if isinstance(node, ast.Name):
+        return node.id == "dataclass"
+    if not isinstance(node, ast.Attribute) or node.attr != "dataclass":
+        return False
+    return isinstance(node.value, ast.Name) and node.value.id == "dataclasses"
+
+
+def _module_name_collisions(paths: Iterable[Path], root: Path) -> dict[str, list[str]]:
+    by_name: defaultdict[str, list[str]] = defaultdict(list)
+    for path in paths:
+        if path.name != "__init__.py":
+            by_name[path.name].append(str(path.relative_to(root)))
+    return {name: entries for name, entries in by_name.items() if len(entries) > 1}
+
+
+def _provenance_violations(source: str, tree: ast.AST) -> list[str]:
+    violations = _comment_violations(source)
+    violations.extend(_docstring_violations(tree))
+    violations.extend(_assert_message_violations(tree))
+    return violations
+
+
+def _comment_violations(source: str) -> list[str]:
+    violations: list[str] = []
+    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    for token in tokens:
+        if token.type == tokenize.COMMENT:
+            violations.extend(_matches(token.string, f"comment:{token.start[0]}"))
+    return violations
+
+
+def _docstring_violations(tree: ast.AST) -> list[str]:
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        docstring = ast.get_docstring(node, clean=False)
+        if docstring is not None:
+            violations.extend(_matches(docstring, f"docstring:{node.body[0].lineno}"))
+    return violations
+
+
+def _assert_message_violations(tree: ast.AST) -> list[str]:
+    violations: list[str] = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assert) and node.msg is not None:
+            for text in _literal_texts(node.msg):
+                violations.extend(_matches(text, f"assertion:{node.lineno}"))
+    return violations
+
+
+def _literal_texts(node: ast.AST) -> list[str]:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return [node.value]
+    if isinstance(node, ast.JoinedStr):
+        return [_joined_string_text(node)]
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_texts(node.left)
+        right = _literal_texts(node.right)
+        if len(left) == 1 and len(right) == 1:
+            return [left[0] + right[0]]
+    return []
+
+
+def _joined_string_text(node: ast.JoinedStr) -> str:
+    return "".join(
+        value.value
+        if isinstance(value, ast.Constant) and isinstance(value.value, str)
+        else _formatted_value_text(value)
+        for value in node.values
+    )
+
+
+def _formatted_value_text(node: ast.AST) -> str:
+    if not isinstance(node, ast.FormattedValue):
+        return "0"
+    texts = _literal_texts(node.value)
+    return texts[0] if len(texts) == 1 else "0"
+
+
+def _matches(text: str, location: str) -> list[str]:
+    return [
+        f"{location}: {name}"
+        for name, pattern in _PROVENANCE_PATTERNS
+        if pattern.search(text)
+    ]
+
+
+def _repository_provenance_findings(paths: Iterable[Path], root: Path) -> list[str]:
+    findings: list[str] = []
+    for path in paths:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+        findings.extend(
+            f"{path.relative_to(root)} {violation}"
+            for violation in _provenance_violations(source, tree)
+        )
+    return findings
+
+
+def test_frozen_dataclass_guard_detects_direct_post_init_only() -> None:
+    frozen_tree = ast.parse(
+        """
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class Frozen:
+    def __post_init__(self) -> None:
+        pass
+"""
+    )
+    mutable_tree = ast.parse(
+        """
+from dataclasses import dataclass
+
+@dataclass
+class Mutable:
+    def __post_init__(self) -> None:
+        pass
+"""
+    )
+
+    assert _frozen_dataclass_has_post_init(frozen_tree) == [6]
+    assert _frozen_dataclass_has_post_init(mutable_tree) == []
+
+
+def test_provenance_guard_detects_only_governed_text_locations() -> None:
+    source = '''
+# PR #42
+def example() -> None:
+    """FRD 0008 Decision #107."""
+    assert False, "P4a"
+
+message = "Decision #12"
+'''
+    tree = ast.parse(source)
+
+    assert _provenance_violations(source, tree) == [
+        "comment:2: pull request citation",
+        "docstring:4: decision citation",
+        "assertion:5: phase label",
+    ]
+
+
+def test_provenance_guard_detects_dynamic_assertion_messages() -> None:
+    source = '''
+def example(number: int) -> None:
+    assert False, f"FRD {number:04d} Decision #{number}"
+'''
+    tree = ast.parse(source)
+
+    assert _provenance_violations(source, tree) == ["assertion:3: decision citation"]
+
+
+def test_provenance_guard_detects_static_f_string_expressions() -> None:
+    source = '''
+def example() -> None:
+    assert False, f"{'Decision #12'}"
+'''
+    tree = ast.parse(source)
+
+    assert _provenance_violations(source, tree) == ["assertion:3: decision citation"]
+
+
+def test_source_has_no_frozen_dataclass_post_init() -> None:
+    root = _repository_root()
+    findings = [
+        f"{path.relative_to(root)}:{line}"
+        for path in _python_files(root / "src")
+        for line in _frozen_dataclass_has_post_init(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        )
+    ]
+
+    assert not findings, "\n".join(findings)
+
+
+def test_source_module_basenames_are_unique() -> None:
+    root = _repository_root()
+    collisions = _module_name_collisions(_python_files(root / "src"), root / "src")
+
+    assert not collisions, "\n".join(
+        f"{name}: {', '.join(paths)}" for name, paths in sorted(collisions.items())
+    )
+
+
+def test_source_and_tests_have_no_feature_bookkeeping() -> None:
+    root = _repository_root()
+    excluded = Path(__file__).resolve()
+    paths = [
+        path
+        for directory in (root / "src", root / "tests")
+        for path in _python_files(directory)
+        if path != excluded
+    ]
+    findings = _repository_provenance_findings(paths, root)
+
+    assert not findings, "\n".join(findings)

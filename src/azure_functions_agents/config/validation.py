@@ -53,7 +53,7 @@ def validate_resolved_agent(
     ``is_referenced_as_subagent`` relaxes the trigger/``builtin_endpoints``
     requirement below: an agent reachable only as another agent's
     delegation target (via that agent's ``subagents:``) doesn't need its
-    own external entry point (Decision #18).
+    own external entry point.
     """
     source_file = resolved.source_file or "<unknown>"
 
@@ -268,7 +268,7 @@ def _validate_platform_capability() -> None:
 
 
 def _validate_agent_workflows_disabled(resolved: ResolvedAgent) -> None:
-    """Row 2: Dynamic Workflows are incompatible with ``aca_sandbox`` (Decision 36).
+    """Row 2: Dynamic Workflows are incompatible with ``aca_sandbox``.
 
     Mirrors ``app.py``'s own workflows-requested scoping: only the main
     agent's ``workflows.enabled`` is ever honored there (a non-main agent's
@@ -467,9 +467,9 @@ def validate_session_runtime(
         # Satisfied unconditionally by the capability gate below.
 
     # Rows 6 and 7 (session state storage auth-mode / dedicated-account
-    # checks) are removed -- see Decisions #86/#87. Session state always
-    # reuses `AzureWebJobsStorage`, in every environment, with no dedicated
-    # account and no Shared-Key gate at this layer.
+    # checks) are removed. Session state always reuses `AzureWebJobsStorage`,
+    # in every environment, with no dedicated account and no Shared-Key gate
+    # at this layer.
 
     # Rows 2, 3, 4, 8: per-agent checks.
     for resolved in resolved_agents:

@@ -180,7 +180,7 @@ def summarize_findings(args: Dict[str, Any]) -> Dict[str, Any]:
     ``args["metrics"] = "${fetch_metrics.result}"``,
     ``args["deploys"] = "${fetch_deploys.result}"``.
 
-    The template substitutor in :mod:`azure_functions_agents.workflows.schema`
+    The template substitutor in :mod:`azure_functions_agents.workflows.workflow_schema`
     only preserves native types for **full-string** ``${...}`` references —
     embedding a ref inside a larger string (e.g. ``"logs: ${fetch_logs.result}"``)
     JSON-stringifies the value. That would fall through ``dict.get(...)``

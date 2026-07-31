@@ -33,7 +33,7 @@ from .context import (
     session_owns_workflow,
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
-from .schema import PlanValidationError, plan_to_activity_inputs, validate_plan
+from .workflow_schema import PlanValidationError, plan_to_activity_inputs, validate_plan
 
 MAX_ACTIVE_WORKFLOWS_PER_SESSION = 10
 MAX_WORKFLOW_STATUS_RESULTS = 25

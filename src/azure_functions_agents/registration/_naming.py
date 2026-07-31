@@ -16,8 +16,8 @@ __all__ = [
 def _allocate_unique_name(base_name: str, registered_names: set[str]) -> str:
     """Reserve ``base_name`` in ``registered_names`` or raise if already taken.
 
-    Fails fast on collision (Decision #17) rather than silently
-    auto-suffixing, since slugs are prompt-visible identity (function name,
+    Fails fast on collision rather than silently auto-suffixing, since slugs
+    are prompt-visible identity (function name,
     endpoint route, and ``delegate_<slug>`` tool name all derive from them).
     """
     if base_name not in registered_names:

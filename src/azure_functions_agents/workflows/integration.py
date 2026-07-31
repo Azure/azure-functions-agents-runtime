@@ -29,7 +29,7 @@ from azure_functions_agents._logger import logger
 
 from . import registry
 from .engine import register_workflows
-from .tools import build_workflow_tools
+from .workflow_tools import build_workflow_tools
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
 # other key is rejected at app start so typos (``enabld``, ``allow_tools``)

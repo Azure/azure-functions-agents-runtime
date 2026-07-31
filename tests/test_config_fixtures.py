@@ -610,7 +610,7 @@ def test_multi_agent_delegation_fixture() -> None:
 
     # Shipping has no trigger and no builtin_endpoints: on its own this is an
     # error, but once it is known to be referenced as a subagent the
-    # requirement relaxes (FRD 0007 Decision #18).
+    # requirement relaxes.
     with pytest.raises(ValueError, match="field `trigger`"):
         validate_resolved_agent(shipping, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(
@@ -671,8 +671,8 @@ def test_no_subagent_regression_fixture() -> None:
     validate_subagent_references(resource_summary, known_slugs=known_slugs)
 
     # Every agent here is independently runnable (trigger or builtin_endpoints)
-    # and none of them are referenced as a subagent, so none of them need (or
-    # get) the FRD 0007 Decision #18 endpoint-less relaxation.
+    # and none of them are referenced as a subagent, so none need the
+    # endpoint-less relaxation.
     validate_resolved_agent(main, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(nightly_report, discovered_mcp_names=[], discovered_skills=[])
     validate_resolved_agent(resource_summary, discovered_mcp_names=[], discovered_skills=[])

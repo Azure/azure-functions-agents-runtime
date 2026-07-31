@@ -342,7 +342,7 @@ def test_validate_resolved_agent_warns_on_tool_exclude(
 
 def test_validate_resolved_agent_relaxes_trigger_requirement_when_referenced_as_subagent() -> None:
     """An agent reachable only as another agent's delegation target does not need its own
-    trigger/builtin_endpoints (FRD 0007 Decision #18)."""
+    trigger/builtin_endpoints."""
     resolved = _make_resolved(trigger=None, builtin_endpoints=BuiltinEndpointsConfig())
 
     validate_resolved_agent(
@@ -425,7 +425,7 @@ def test_validate_subagent_references_rejects_duplicate_reference() -> None:
     assert "billing-specialist" in message
 
 
-# --- auto_delete_backstop_violated() (FRD 0008 Row 13's pure formula, P2) ---
+# --- auto_delete_backstop_violated() (FRD 0008 Row 13's pure formula) ----------
 #
 # Not wired live in this phase (see the function's docstring): the ACA SDK's
 # `AutoDeletePolicy.delete_interval_seconds` is only readable per-Sandbox-Group

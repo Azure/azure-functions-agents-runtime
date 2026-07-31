@@ -1,4 +1,4 @@
-"""Startup-validation tests for FRD 0008's ``session_runtime`` config surface (P2).
+"""Startup-validation tests for the ``session_runtime`` config surface.
 
 Each test below drives ``create_function_app()`` against a static fixture
 folder under ``fixtures/config_scenarios/`` (17-30, with gaps at 22 and 28 --
@@ -37,12 +37,12 @@ row text):
 **Gaps at 22, 23, 24, and 28 (former Row 5 / Row 6 / Row 7 / Row 11 fixtures):**
 these fixture numbers are retired for two different reasons.
 
-Row 5 and Row 11 (22 and 28): the ``provider`` field's removal (Decision #84)
-eliminated the fixture *scenario* each of these exercised, so their fixtures
-and dedicated tests were deleted outright instead of repurposed -- but for
-different underlying reasons. Only Row 11's *requirement* is itself gone
-(structurally unrepresentable); Row 5's requirement remains fully active and
-enforced, just no longer through a dedicated ``validate_session_runtime``
+Row 5 and Row 11 (22 and 28): the ``provider`` field's removal eliminated the
+fixture *scenario* each of these exercised, so their fixtures and dedicated
+tests were deleted outright instead of repurposed -- but for different
+underlying reasons. Only Row 11's *requirement* is itself gone (structurally
+unrepresentable); Row 5's requirement remains fully active and enforced, just
+no longer through a dedicated ``validate_session_runtime``
 fixture (see ``docs/architecture.md``'s "10 of the FRD's original 13 rows
 still active" framing):
 
@@ -77,18 +77,18 @@ still active" framing):
     ``test_global_config_session_runtime_rejects_explicit_null_aca_sandbox``).
 * Row 11 ("``retention`` set but provider != aca_sandbox") required
   authoring ``retention`` as a sibling of ``aca_sandbox`` while some other
-  provider was active. ``retention`` moved onto ``AcaSandboxConfig`` (Decision
-  #84), so it can no longer be authored anywhere except nested inside
+  provider was active. ``retention`` belongs on ``AcaSandboxConfig``, so it
+  can no longer be authored anywhere except nested inside
   ``aca_sandbox`` -- the fixture's ``session_runtime: {retention: {...}}``
   (no ``aca_sandbox:`` block) now just fails Pydantic's ``extra="forbid"``
   on the unknown ``retention`` key (see
   ``test_config_schema.py::test_session_runtime_config_rejects_retention_as_sibling_of_aca_sandbox``).
 
-Row 6 and Row 7 (23 and 24): Decisions #86/#87 removed the dedicated
-state-storage-account and Shared-Key-disallowed checks entirely. Session
-state now always reuses ``AzureWebJobsStorage``, in every environment, with
-no dedicated-account concept and no auth-mode gate at the config-validation
-layer. ``_validate_state_storage_auth_mode`` and
+Row 6 and Row 7 (23 and 24): the dedicated state-storage-account and
+Shared-Key-disallowed checks are removed entirely. Session state now always
+reuses ``AzureWebJobsStorage``, in every environment, with no dedicated-account
+concept and no auth-mode gate at the config-validation layer.
+``_validate_state_storage_auth_mode`` and
 ``_validate_state_storage_dedicated_account`` were removed from
 ``config/validation.py`` along with their call sites, fixtures, and tests; no
 test setup for either row is needed anywhere in this file any more.

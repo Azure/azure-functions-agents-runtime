@@ -1,4 +1,4 @@
-"""Tests for the fail-closed ``aca_sandbox`` execution backend (FRD 0008, P2).
+"""Tests for the fail-closed ``aca_sandbox`` execution backend.
 
 ``UnavailableBackend`` is defense in depth: application startup
 (``config.validation.validate_session_runtime``) is expected to reject an
@@ -50,7 +50,7 @@ def test_aca_sandbox_execution_provider_constant() -> None:
 def test_factory_resolves_aca_sandbox_to_unavailable_backend() -> None:
     """The factory recognizes ``aca_sandbox`` but fails closed immediately.
 
-    This is the P2 extension to ``create_execution_backend``: unlike an
+    This extends ``create_execution_backend``: unlike an
     unrecognized provider string (which raises a plain ``ValueError``,
     covered in ``test_execution_in_lang_worker.py``), ``aca_sandbox`` is a *known*
     provider that resolves to :class:`UnavailableBackend`, which raises

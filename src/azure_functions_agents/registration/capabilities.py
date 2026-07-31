@@ -141,9 +141,9 @@ def validate_subagent_tool_names(resolved: ResolvedAgent, capabilities: AgentCap
     """Fail fast when a ``delegate_<slug>`` tool name would collide.
 
     Collisions between two different specialists' own ``delegate_<slug>``
-    names are structurally impossible (agent slugs are globally unique —
-    FRD 0007 §5 Decision #17), so this only needs to check the auto-derived
-    name against the coordinator's *own* other tools.
+    names are structurally impossible because agent slugs are globally unique,
+    so this only needs to check the auto-derived name against the coordinator's
+    *own* other tools.
     """
     if not resolved.subagents:
         return

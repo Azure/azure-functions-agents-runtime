@@ -260,8 +260,8 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 # inside the coordinator's normal ``agent.run()`` tool-calling loop — no
 # ``HandoffBuilder``, no HITL (out of scope for v1; see FRD 0007 §2).
 #
-# Delegation is single-level (Decision #6): a specialist built here is always
-# built in the *delegated* execution role (:func:`_build_delegated_agent`),
+# Delegation is single-level: a specialist built here is always built in the
+# *delegated* execution role (:func:`_build_delegated_agent`),
 # which never reads ``resolved.subagents`` and therefore can never itself gain
 # ``delegate_*`` tools. This is a structural guarantee, not a runtime depth
 # counter — there is no code path through which a delegated agent's own
@@ -273,8 +273,8 @@ class _DelegateErrorTracker:
 
     Shared by every delegate tool for one coordinator run;
     ``AgentResult.delegate_error_count`` reads :attr:`count` when the run
-    completes. Only recovered failures count — a propagated cancellation
-    never reaches ``record_error`` (Decision #12).
+    completes. Only recovered failures count — a propagated cancellation never
+    reaches ``record_error``.
     """
 
     __slots__ = ("count",)
@@ -305,7 +305,7 @@ def _build_role_agent(
 ) -> Agent[Any]:
     """Assemble the final tool list + context providers and build the MAF ``Agent``.
 
-    Shared tail for both execution roles (Decisions #13/#15):
+    Shared tail for both execution roles:
 
     * ``direct`` — a coordinator or any agent invoked through its own
       trigger/endpoint. Gets a real ``history_provider`` and, if it declares
@@ -328,7 +328,7 @@ def _build_role_agent(
         resolved_tools.extend(web_request_tools)
 
     if workflow_enabled:
-        from .workflows.tools import build_workflow_tools
+        from .workflows.workflow_tools import build_workflow_tools
 
         resolved_tools.extend(
             build_workflow_tools(
@@ -377,7 +377,7 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
     per-request sandbox or main-only Dynamic-Workflow tools (naturally
     absent — never passed to :func:`_build_role_agent`, not stripped).
     ``resolved.subagents`` is deliberately never read — the structural
-    enforcement of single-level delegation (Decision #6).
+    enforcement of single-level delegation.
     """
     client_manager = get_client_manager()
     chat_client = client_manager.build_chat_client(resolved.model)
@@ -407,8 +407,7 @@ def _sanitize_delegate_failure(slug: str, exc: BaseException) -> str:
 
     Deliberately generic and class-independent — never varies by exception
     type, so the coordinator's model learns nothing about the specialist's
-    internals from wording alone. Real exception detail goes only to
-    telemetry (Decision #12).
+    internals from wording alone. Real exception detail goes only to telemetry.
     """
     return (
         f"The '{slug}' specialist could not complete this task. "
@@ -423,7 +422,7 @@ async def _finalize_maf_stream(stream: Any, exc: BaseException) -> None:
     OTel span, flushing usage) on success/ordinary-exception, never on
     cancellation — so this force-runs them so spans close deterministically
     instead of via GC. Used by ``run_agent_stream`` only; the non-streaming
-    delegate path doesn't need it (FRD 0007 §5 Decision #20). Known gap: one
+    delegate path doesn't need it. Known gap: one
     chat-level span MAF never exposes externally can only close via GC — no
     workaround exists. Defensive throughout: safe if ``stream`` is ``None``.
     """
@@ -506,8 +505,8 @@ def _build_delegate_tool(
     """Build one ``delegate_<slug>`` ``FunctionTool`` for the reference ``ref``.
 
     A hand-written ``@tool(schema=...)`` function tool (not MAF's
-    ``BaseAgent.as_tool()`` — see FRD 0007 §5 Decision #20): the handler
-    builds a fresh specialist :class:`agent_framework.Agent` per call and
+    ``BaseAgent.as_tool()``): the handler builds a fresh specialist
+    :class:`agent_framework.Agent` per call and
     awaits its plain, non-streaming ``run(task)`` directly, so no lock,
     monkeypatch, or stream capture is needed.
     """
@@ -533,9 +532,8 @@ def _build_delegate_tool(
         span.set_attribute("af.delegate.task_bytes", len(task_text))
         span.set_content("af.delegate.task", task_text)
 
-        # effective_timeout = min(specialist, coordinator remaining) per
-        # Decision #12. Checked before building the specialist `Agent` at
-        # all — a run that can never be attempted shouldn't be built either.
+        # Check the effective timeout before building the specialist `Agent` —
+        # a run that can never be attempted should not be built either.
         remaining = max(0.0, coordinator_deadline - loop.time())
         effective_timeout = min(specialist_timeout, remaining)
         if effective_timeout <= 0:
@@ -550,9 +548,9 @@ def _build_delegate_tool(
             specialist_agent = _build_delegated_agent(resolved, capabilities)
             response = await asyncio.wait_for(specialist_agent.run(task_text), timeout=effective_timeout)
         except asyncio.CancelledError:
-            # Parent/request cancellation — never a recoverable delegate
-            # error (Decision #12), but still a dispatched call, so it's
-            # counted in the call metric (not the error metric) before
+            # Parent/request cancellation is never a recoverable delegate
+            # error, but is still a dispatched call, so it is counted in the
+            # call metric (not the error metric) before
             # re-raising to propagate and abort the run.
             record_delegate_call(error=False)
             span.set_attribute("af.delegate.outcome", "cancelled")
@@ -589,7 +587,7 @@ async def build_subagent_tools(
     once here — reusing the process-wide ``ClientManager`` but never a
     cached agent instance. MAF's ``Agent.run()`` self-mutates, so per-call
     construction is required; it also means concurrent calls to the same
-    specialist need no lock (Decision #20).
+    specialist need no lock.
 
     Returns ``(tools, tracker)``; ``tracker`` counts recoverable delegate
     failures (see :class:`_DelegateErrorTracker`).
@@ -837,8 +835,8 @@ async def run_agent(
     timeout = timeout if timeout is not None else DEFAULT_TIMEOUT
     # Computed before building the agent so a delegate tool's adapter can cap
     # its own specialist timeout at "however much of *this* run's budget is
-    # left" (FRD 0007 Decision #12: "effective timeout = min(specialist,
-    # coordinator remaining)"). `loop` is reused below (M1) to bound the
+    # left" because the effective timeout is the minimum of specialist and
+    # coordinator remaining time. `loop` is reused below (M1) to bound the
     # session-lock wait itself by this same absolute deadline.
     loop = asyncio.get_running_loop()
     coordinator_deadline = loop.time() + timeout

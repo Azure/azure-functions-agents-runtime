@@ -366,8 +366,10 @@ def test_compose_derives_slug_from_source_file_stem() -> None:
 
 
 def test_compose_slug_matches_function_name_derivation() -> None:
-    """The slug must equal exactly what `_naming.py`'s function-name allocator would compute
-    for the same source file — this equivalence is load-bearing for FRD 0007 Decision #17."""
+    """The slug must equal what `_naming.py`'s function-name allocator computes.
+
+    This equivalence is load-bearing for the same source file.
+    """
     from azure_functions_agents._slug import _function_name_from_source
 
     spec = AgentSpec(
