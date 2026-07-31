@@ -876,6 +876,48 @@ export async function callAgentChat(host, agentSlug, prompt, { key = '', session
   throw err
 }
 
+// Open a deployed agent's streaming chat endpoint (`POST agents/<slug>/chatstream`,
+// SSE). Tries the default route prefix then `api`. Returns the raw upstream
+// Response so the caller can pipe `response.body` straight through. `signal`
+// lets the caller abort when the browser disconnects.
+export async function openAgentChatStream(host, agentSlug, prompt, { key = '', sessionId = '', signal } = {}) {
+  const slug = encodeURIComponent(agentSlug)
+  const paths = [`agents/${slug}/chatstream`, `api/agents/${slug}/chatstream`]
+  const headers = { 'Content-Type': 'application/json', Accept: 'text/event-stream' }
+  if (key) headers['x-functions-key'] = key
+  if (sessionId) headers['x-ms-session-id'] = sessionId
+
+  let lastErr = 'no route matched'
+  for (const p of paths) {
+    let res
+    try {
+      res = await fetch(`https://${host}/${p}`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ prompt }),
+        signal,
+      })
+    } catch (e) {
+      lastErr = String(e?.message ?? e)
+      continue
+    }
+    if (res.status === 404) {
+      lastErr = `404 at /${p}`
+      continue
+    }
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '')
+      const err = new Error(text?.slice(0, 500) || `${res.status} ${res.statusText}`)
+      err.status = res.status
+      throw err
+    }
+    return res
+  }
+  const err = new Error(`Agent chatstream endpoint not reachable (${lastErr}).`)
+  err.status = 502
+  throw err
+}
+
 // Resolve the authoritative set of agent slugs from the deployed `*.agent.md`
 // files. Prefers Kudu VFS; on Flex Consumption reads the deployment package.
 // `ok` is true only when a source returned the complete file list, so callers

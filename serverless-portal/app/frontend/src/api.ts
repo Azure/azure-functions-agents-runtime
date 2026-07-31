@@ -207,4 +207,38 @@ export const api = {
     prompt: string
     sessionId?: string
   }) => req<AgentChatResult>('POST', '/api/agent/chat', p),
+
+  // Open the agent's streaming chat (SSE) via the backend proxy. Returns the
+  // raw Response; the caller reads response.body for `data: {json}` events.
+  agentChatStream: async (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    agent: string
+    prompt: string
+    sessionId?: string
+  }): Promise<Response> => {
+    const token = await acquireArmToken()
+    const res = await fetch('/api/agent/chatstream', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${token}`,
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      },
+      body: JSON.stringify(p),
+    })
+    if (!res.ok || !res.body) {
+      const text = await res.text().catch(() => '')
+      let detail = `HTTP ${res.status}`
+      try {
+        const j = JSON.parse(text)
+        if (typeof j?.detail === 'string') detail = j.detail
+      } catch {
+        if (text) detail = text
+      }
+      throw new ApiError(detail, res.status)
+    }
+    return res
+  },
 }
