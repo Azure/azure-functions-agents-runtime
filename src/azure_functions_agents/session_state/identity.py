@@ -11,7 +11,7 @@ from uuid import UUID, uuid4
 
 from .._session_id import SESSION_ID_PATTERN
 from ._label_encoding import encode_label_safe_digest
-from .models import (
+from .session_models import (
     AppIdentity,
     EntraPrincipal,
     EntraUserOwnerContext,

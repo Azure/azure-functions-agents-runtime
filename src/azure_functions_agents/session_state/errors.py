@@ -1,8 +1,8 @@
 """Typed, fail-closed errors for the P3b Table-backed session state store.
 
-These are distinct from :class:`~.models.SessionStateContractError` (P3a's
-pure shape/contract validation). Store errors describe *operational* outcomes
-of talking to Azure Table Storage: configuration problems, optimistic
+These are distinct from :class:`~.session_models.SessionStateContractError`
+(P3a's pure shape/contract validation). Store errors describe *operational*
+outcomes of talking to Azure Table Storage: configuration problems, optimistic
 concurrency losses, admission/idempotency conflicts, and service
 unavailability. A corrupt stored entity that fails P3a's contract validation
 is re-raised here as :class:`CorruptEntityError` so store callers never need
@@ -117,7 +117,7 @@ class CorruptEntityError(SessionStateStoreError):
 
     Never coerced into a default/empty result -- a corrupt row is a fail-closed
     condition surfaced to the caller, chained from the underlying
-    :class:`~.models.SessionStateContractError`.
+    :class:`~.session_models.SessionStateContractError`.
     """
 
 

@@ -34,7 +34,7 @@ from urllib.parse import urlsplit
 
 from .errors import StateStoreConfigurationError
 from .identity import frame_canonical_components
-from .models import STATE_STORE_FINGERPRINT_VERSION, validate_state_store_fingerprint
+from .session_models import STATE_STORE_FINGERPRINT_VERSION, validate_state_store_fingerprint
 
 if TYPE_CHECKING:
     from azure.data.tables.aio import TableServiceClient

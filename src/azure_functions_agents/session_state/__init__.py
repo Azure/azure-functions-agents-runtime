@@ -61,7 +61,7 @@ from .identity import (
     verify_app_hash,
     verify_owner_hash,
 )
-from .models import (
+from .session_models import (
     MAX_SNAPSHOT_IDS,
     MAX_SNAPSHOT_IDS_SERIALIZED_BYTES,
     ROW_SCHEMA_VERSION,

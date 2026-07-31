@@ -2,9 +2,10 @@
 
 Implements the P3b portion of FRD 0008: Table connection/settings resolution
 lives in :mod:`.connection`, pure identity/row contracts in :mod:`.identity`
-and :mod:`.models`; this module is the async I/O layer that reads and writes
-:class:`~.models.DurableSessionRecord`, :class:`~.models.DurableRunRecord`,
-and :class:`~.models.DurableIdempotencyRecord` rows against a real Azure
+and :mod:`.session_models`; this module is the async I/O layer that reads and
+writes :class:`~.session_models.DurableSessionRecord`,
+:class:`~.session_models.DurableRunRecord`, and
+:class:`~.session_models.DurableIdempotencyRecord` rows against a real Azure
 Table (or Azurite).
 
 Scope boundary (Decision 91/97): this module owns Table I/O, ETag/CAS,
@@ -38,7 +39,7 @@ from .errors import (
     TerminalStateConflictError,
 )
 from .identity import run_row_key, session_row_key
-from .models import (
+from .session_models import (
     SESSION_STATUSES_REQUIRING_ACTIVE_RUN,
     TABLE_NAME,
     TERMINAL_RUN_STATUSES,
@@ -57,7 +58,8 @@ if TYPE_CHECKING:
 
 # Run statuses that are terminal (never transition further). Kept local to the
 # store because "terminal" is an I/O-layer concept (adoption/slot release).
-# Re-exported from models.py so the literal status set is defined exactly once.
+# Re-exported from session_models.py so the literal status set is defined
+# exactly once.
 _TERMINAL_RUN_STATUSES = TERMINAL_RUN_STATUSES
 
 # The only two session statuses under which `active_run_id` may be set.
@@ -538,9 +540,8 @@ class AzureTableSessionStateStore:
                 query_filter=filter_expression,
                 results_per_page=top,
             ).by_page(continuation_token=decoded_token)  # type: ignore[arg-type]
-            try:
-                page = await pager.__anext__()
-            except StopAsyncIteration:
+            page = await _fetch_first_page_or_none(pager)
+            if page is None:
                 return TableEntityPage(entities=(), continuation_token=None)
             entities = tuple([entity async for entity in page])
         except HttpResponseError as exc:
@@ -602,6 +603,19 @@ class AzureTableSessionStateStore:
 # ---------------------------------------------------------------------------
 # Module-level helpers
 # ---------------------------------------------------------------------------
+
+
+async def _fetch_first_page_or_none(pager: Any) -> Any | None:
+    """Return the pager's first page, or ``None`` when it has no pages left.
+
+    Isolates the ``StopAsyncIteration`` handling in its own single-level
+    try/except so the caller's ``HttpResponseError`` handling never nests a
+    try inside a try.
+    """
+    try:
+        return await pager.__anext__()
+    except StopAsyncIteration:
+        return None
 
 
 def _if_not_modified() -> Any:

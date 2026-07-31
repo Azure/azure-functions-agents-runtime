@@ -51,8 +51,8 @@ def test_importing_the_store_and_connection_modules_never_imports_azure_data_tab
 
 
 def test_importing_registration_auth_never_imports_azure_data_tables() -> None:
-    # registration/_auth.py imports session_state.models directly (P3a's
-    # dormant owner-context seam); confirm that path also stays lazy.
+    # registration/_auth.py imports session_state.session_models directly
+    # (P3a's dormant owner-context seam); confirm that path also stays lazy.
     _run_and_check_not_imported("import azure_functions_agents.registration._auth")
 
 
