@@ -60,6 +60,7 @@ if TYPE_CHECKING:
     from azure.core import MatchConditions
     from azure.core.exceptions import HttpResponseError
     from azure.data.tables import TableEntity as SdkTableEntity
+    from azure.data.tables import TableTransactionError
     from azure.data.tables.aio import TableClient, TableServiceClient
 
 # One Table entity-group-transaction operation: a verb ("create"/"update")
@@ -401,45 +402,7 @@ class AzureTableSessionStateStore:
         try:
             results = await self._table_client.submit_transaction(operations)
         except TableTransactionError as exc:
-            if exc.index == 0:
-                # Lost the session ETag CAS -- but a same-key/same-payload
-                # race also lands here (not index 2), since a winner's
-                # commit invalidates our ETag before its idempotency row
-                # could conflict. Check idempotency before treating this
-                # as an active-run conflict.
-                if records.idempotency is not None:
-                    raced = await self._try_replay_idempotency(
-                        partition, session_id, records.idempotency
-                    )
-                    if raced is not None:
-                        return raced
-                reread = await self.get_session(partition, session_id)
-                if reread.record.active_run_id is not None:
-                    raise ActiveRunConflictError(
-                        f"session {session_id!r} already has an active run",
-                        active_run_id=reread.record.active_run_id,
-                    ) from exc
-                raise ConcurrencyConflictError(
-                    f"session {session_id!r} changed concurrently during admission"
-                ) from exc
-            if exc.index == 1:
-                raise RowAlreadyExistsError(f"run {records.run.run_id!r} already exists") from exc
-            if records.idempotency is not None and exc.index == 2:
-                raced = await self._try_replay_idempotency(
-                    partition, session_id, records.idempotency
-                )
-                if raced is not None:
-                    return raced
-                # The transaction reported an idempotency-row conflict, but a
-                # consistent re-read found no such row -- we cannot identify
-                # which run "won", so surface a retryable concurrency
-                # conflict rather than fabricating existing_run_id from our
-                # own new run.
-                raise ConcurrencyConflictError(
-                    f"idempotency row for session {session_id!r} reported a "
-                    "write conflict but could not be re-read; retry the admission"
-                ) from exc
-            raise _map_http_error(exc, context="admit_run") from exc
+            return await self._resolve_admission_conflict(exc, partition, session_id, records)
         except HttpResponseError as exc:
             raise _map_http_error(exc, context="admit_run") from exc
 
@@ -449,6 +412,51 @@ class AzureTableSessionStateStore:
             session_etag=_etag_from_write_result(results[0]),
             replayed=False,
         )
+
+    async def _resolve_admission_conflict(
+        self,
+        exc: TableTransactionError,
+        partition: OwnerPartition,
+        session_id: str,
+        records: AdmissionRecords,
+    ) -> AdmissionOutcome:
+        """Map a failed admission transaction to a replay or a typed conflict.
+
+        Index 1 (run row) always means the run already exists. Index 0
+        (session ETag) and index 2 (idempotency row) share one idempotency
+        replay check: a same-key/same-payload race commonly lands on index 0
+        too, since a winner's commit invalidates our session ETag before its
+        idempotency row could independently conflict with ours.
+        """
+        if exc.index == 1:
+            raise RowAlreadyExistsError(f"run {records.run.run_id!r} already exists") from exc
+        if exc.index not in (0, 2):
+            raise _map_http_error(exc, context="admit_run") from exc
+
+        if records.idempotency is not None:
+            raced = await self._try_replay_idempotency(partition, session_id, records.idempotency)
+            if raced is not None:
+                return raced
+
+        if exc.index == 2:
+            # The transaction reported an idempotency-row conflict, but a
+            # consistent re-read found no such row -- we cannot identify
+            # which run "won", so surface a retryable concurrency conflict
+            # rather than fabricating existing_run_id from our own new run.
+            raise ConcurrencyConflictError(
+                f"idempotency row for session {session_id!r} reported a "
+                "write conflict but could not be re-read; retry the admission"
+            ) from exc
+
+        reread = await self.get_session(partition, session_id)
+        if reread.record.active_run_id is not None:
+            raise ActiveRunConflictError(
+                f"session {session_id!r} already has an active run",
+                active_run_id=reread.record.active_run_id,
+            ) from exc
+        raise ConcurrencyConflictError(
+            f"session {session_id!r} changed concurrently during admission"
+        ) from exc
 
     async def _try_replay_idempotency(
         self,
@@ -492,15 +500,7 @@ class AzureTableSessionStateStore:
         for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
             current_run = await self.get_run(partition, session_id, run_id)
             if current_run.record.status in _TERMINAL_RUN_STATUSES:
-                if (
-                    current_run.record.status != terminal_run.status
-                    or current_run.record.result_available != terminal_run.result_available
-                ):
-                    raise TerminalStateConflictError(
-                        f"run {run_id!r} is already terminal as "
-                        f"{current_run.record.status!r}; cannot re-adopt as "
-                        f"{terminal_run.status!r}"
-                    )
+                _require_matching_terminal_outcome(current_run.record, terminal_run, run_id)
                 return AdoptionOutcome(
                     run=current_run.record, run_etag=current_run.etag, slot_released=False
                 )
@@ -709,6 +709,26 @@ def _release_active_run(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
+    )
+
+
+def _require_matching_terminal_outcome(
+    current: DurableRunRecord, terminal_run: DurableRunRecord, run_id: str
+) -> None:
+    """Raise if a run already terminal has a different status/result than requested.
+
+    A no-op when the outcome matches, so re-adopting the same terminal
+    result stays idempotent for callers.
+    """
+    if (
+        current.status == terminal_run.status
+        and current.result_available == terminal_run.result_available
+    ):
+        return
+    raise TerminalStateConflictError(
+        f"run {run_id!r} is already terminal as "
+        f"{current.status!r}; cannot re-adopt as "
+        f"{terminal_run.status!r}"
     )
 
 
