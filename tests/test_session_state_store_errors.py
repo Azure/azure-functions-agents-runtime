@@ -436,23 +436,36 @@ async def test_admit_run_raises_active_run_conflict_when_already_active() -> Non
 
 @pytest.mark.asyncio
 async def test_admit_run_transaction_race_reports_winner_run_id() -> None:
+    """A concurrent winner fully committing between our pre-flight read and
+    our own transaction submission must be observed on the post-failure
+    re-read and reported as ``ActiveRunConflictError`` naming the winner --
+    not because the pre-flight read already saw it (that would just
+    duplicate ``test_admit_run_raises_active_run_conflict_when_already_active``
+    without ever reaching ``submit_transaction``/the index-0 handler at all).
+    """
     fake = _FakeTableClient()
     store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
     await store.create_session(_session(status="ready", active_run_id=None))
 
+    key = (_partition().partition_key, "session:session-1")
+    real_submit = fake.submit_transaction
+
+    async def _commit_winner_then_fail(operations: Any) -> Any:
+        # The winner's own transaction fully commits in the narrow window
+        # between our pre-flight read (already done above, saw no active
+        # run) and our own submission -- then our stale-ETag op fails with
+        # a 412-style conflict at index 0, exactly as real Azure Table
+        # would report a lost race.
+        fake._entities[key]["active_run_id"] = "winner-run"
+        fake._entities[key]["status"] = "running"
+        return await real_submit(operations)
+
+    fake.submit_transaction = _commit_winner_then_fail  # type: ignore[method-assign]
+    fake.transaction_failure = (0, _http_error(412, "UpdateConditionNotSatisfied"))
+
     records = AdmissionRecords.create(
         _session(status="running", active_run_id="loser-run"), _run(run_id="loser-run"), None
     )
-
-    # Simulate: between our pre-flight read and our transaction submission,
-    # another controller won the race and admitted "winner-run" -- force the
-    # session-update op (index 0) to fail with a stale-ETag-style conflict,
-    # and pre-seed the row so the store's post-failure re-read observes the
-    # winner, exactly as a real Table service would after a lost race.
-    fake.transaction_failure = (0, _http_error(412, "UpdateConditionNotSatisfied"))
-    key = (_partition().partition_key, "session:session-1")
-    fake._entities[key]["active_run_id"] = "winner-run"
-    fake._entities[key]["status"] = "running"
 
     with pytest.raises(ActiveRunConflictError) as excinfo:
         await store.admit_run(records)
@@ -469,20 +482,33 @@ async def test_admit_run_index0_race_with_matching_idempotency_replays_winner() 
     would independently conflict, so this race reliably lands on index 0 --
     not the narrower index-2 window covered by
     ``test_admit_run_idempotency_row_collision_during_transaction_replays_winner``.
+
+    The winner's run/idempotency rows and the session's ``active_run_id``
+    only appear *inside* the wrapped ``submit_transaction`` -- i.e. strictly
+    after our own pre-flight idempotency check and session read (both of
+    which must see nothing yet, or the race would be caught earlier and
+    this handler would never run) -- so this genuinely drives execution
+    into the index-0 handler's own idempotency re-check, not the upfront
+    one.
     """
     fake = _FakeTableClient()
     store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
     await store.create_session(_session(status="ready", active_run_id=None))
 
     shared_hash = _fake_sha256("shared-payload")
-    winner_run = _run(run_id="winner-run")
-    winner_idem = _idempotency(request_hash=shared_hash, run_id="winner-run")
-    await fake.create_entity(winner_run.to_table_entity())
-    await fake.create_entity(winner_idem.to_table_entity())
-
     key = (_partition().partition_key, "session:session-1")
-    fake._entities[key]["active_run_id"] = "winner-run"
-    fake._entities[key]["status"] = "running"
+    real_submit = fake.submit_transaction
+
+    async def _commit_winner_then_fail(operations: Any) -> Any:
+        winner_run = _run(run_id="winner-run")
+        winner_idem = _idempotency(request_hash=shared_hash, run_id="winner-run")
+        await fake.create_entity(winner_run.to_table_entity())
+        await fake.create_entity(winner_idem.to_table_entity())
+        fake._entities[key]["active_run_id"] = "winner-run"
+        fake._entities[key]["status"] = "running"
+        return await real_submit(operations)
+
+    fake.submit_transaction = _commit_winner_then_fail  # type: ignore[method-assign]
     fake.transaction_failure = (0, _http_error(412, "UpdateConditionNotSatisfied"))
 
     records = AdmissionRecords.create(
@@ -494,6 +520,41 @@ async def test_admit_run_index0_race_with_matching_idempotency_replays_winner() 
 
     assert outcome.replayed is True
     assert outcome.run.run_id == "winner-run"
+
+
+@pytest.mark.asyncio
+async def test_admit_run_index0_race_with_no_active_run_and_no_idempotency_is_retryable() -> None:
+    """Index-0 (stale session ETag) with no idempotency key configured and
+    a re-read that still shows no active run -- e.g. an unrelated
+    concurrent write changed the session's ETag without setting
+    ``active_run_id`` -- must surface a retryable ``ConcurrencyConflictError``,
+    not silently succeed or misreport an active-run conflict that doesn't
+    exist.
+    """
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="ready", active_run_id=None))
+
+    key = (_partition().partition_key, "session:session-1")
+    real_submit = fake.submit_transaction
+
+    async def _unrelated_write_then_fail(operations: Any) -> Any:
+        # Some other concurrent write (not an admission) bumps this row's
+        # ETag without touching active_run_id -- e.g. a no-op
+        # update_session -- so our own stale-ETag op still fails at
+        # index 0, but the re-read finds no winner to report.
+        fake._entities[key] = dict(fake._entities[key])
+        fake._etags[key] = "etag-unrelated-write"
+        return await real_submit(operations)
+
+    fake.submit_transaction = _unrelated_write_then_fail  # type: ignore[method-assign]
+    fake.transaction_failure = (0, _http_error(412, "UpdateConditionNotSatisfied"))
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="run-1"), _run(run_id="run-1"), None
+    )
+    with pytest.raises(ConcurrencyConflictError):
+        await store.admit_run(records)
 
 
 @pytest.mark.asyncio
