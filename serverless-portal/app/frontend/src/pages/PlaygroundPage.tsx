@@ -9,34 +9,70 @@ const enc = encodeURIComponent
 
 type ChatMessage =
   | { role: 'user'; content: string }
-  | { role: 'assistant'; content: string; toolCalls: Record<string, unknown>[] }
-  | { role: 'error'; content: string }
+  | { role: 'assistant'; content: string; isError?: boolean }
+
+type SpanKind = 'model' | 'tool' | 'mcp'
+interface TraceSpan {
+  id: string
+  kind: SpanKind
+  name: string
+  args?: unknown
+  result?: unknown
+  startMs: number
+  endMs?: number
+  status: 'running' | 'done' | 'error'
+}
 
 function initials(name: string): string {
   const p = name.trim().split(/\s+/).filter(Boolean)
   return ((p[0]?.[0] ?? '?') + (p[1]?.[0] ?? '')).toUpperCase()
 }
 
-// Render a tool call from the chat response inline in the transcript. The shape
-// varies by provider, so read common keys and fall back to a JSON dump.
-function ToolCall({ call }: { call: Record<string, unknown> }) {
-  const name =
-    (typeof call.name === 'string' && call.name) ||
-    (typeof call.tool === 'string' && call.tool) ||
-    'tool'
-  const args = call.arguments ?? call.args ?? call.input
-  let detail = ''
-  if (args !== undefined) {
-    try {
-      detail = typeof args === 'string' ? args : JSON.stringify(args, null, 2)
-    } catch {
-      detail = String(args)
-    }
+function fmt(v: unknown): string {
+  if (v == null) return ''
+  if (typeof v === 'string') return v
+  try {
+    return JSON.stringify(v, null, 2)
+  } catch {
+    return String(v)
   }
+}
+
+function TraceSpanRow({ span }: { span: TraceSpan }) {
+  const [open, setOpen] = useState(false)
+  const hasDetail = span.args !== undefined || span.result !== undefined
+  const dur =
+    span.endMs != null ? `${Math.max(0, span.endMs - span.startMs)} ms` : span.status === 'running' ? '…' : ''
   return (
-    <div className="toolcall">
-      <span className="t">▶ {name}</span>
-      {detail && <pre>{detail}</pre>}
+    <div className={'span ' + span.status}>
+      <button
+        type="button"
+        className="span-head"
+        onClick={() => hasDetail && setOpen((o) => !o)}
+        disabled={!hasDetail}
+        title={hasDetail ? 'Show details' : undefined}
+      >
+        <span className={'span-kind k-' + span.kind}>{span.kind}</span>
+        <span className="span-name mono">{span.name}</span>
+        <span className={'span-dot ' + span.status} />
+        <span className="span-dur">{dur}</span>
+      </button>
+      {open && hasDetail && (
+        <div className="span-detail">
+          {span.args !== undefined && (
+            <>
+              <div className="span-lbl">arguments</div>
+              <pre>{fmt(span.args)}</pre>
+            </>
+          )}
+          {span.result !== undefined && (
+            <>
+              <div className="span-lbl">result</div>
+              <pre>{fmt(span.result)}</pre>
+            </>
+          )}
+        </div>
+      )}
     </div>
   )
 }
@@ -93,40 +129,205 @@ export default function PlaygroundPage() {
   const [input, setInput] = useState('')
   const [sessionId, setSessionId] = useState('')
   const [sending, setSending] = useState(false)
+  const [stream, setStream] = useState(true)
+  const [trace, setTrace] = useState<TraceSpan[]>([])
   const threadRef = useRef<HTMLDivElement>(null)
 
-  // Switching agents starts a fresh conversation.
+  // Switching agents starts a fresh conversation + trace.
   useEffect(() => {
     setMessages([])
     setSessionId('')
+    setTrace([])
   }, [selectedKey])
 
   useEffect(() => {
     threadRef.current?.scrollTo({ top: threadRef.current.scrollHeight })
-  }, [messages, sending])
+  }, [messages, sending, trace])
+
+  // Patch the most recent assistant message (the one being streamed into).
+  const patchAssistant = (patch: Partial<Extract<ChatMessage, { role: 'assistant' }>>) => {
+    setMessages((m) => {
+      const copy = [...m]
+      for (let i = copy.length - 1; i >= 0; i--) {
+        if (copy[i].role === 'assistant') {
+          copy[i] = { ...(copy[i] as Extract<ChatMessage, { role: 'assistant' }>), ...patch }
+          break
+        }
+      }
+      return copy
+    })
+  }
+
+  const runStreaming = async (text: string, a: LiveAgent) => {
+    const t0 = performance.now()
+    const now = () => Math.round(performance.now() - t0)
+    setTrace([{ id: 'model', kind: 'model', name: a.provider || 'model', startMs: 0, status: 'running' }])
+
+    const upsertSpan = (id: string, patch: Partial<TraceSpan>) => {
+      setTrace((prev) => {
+        const i = prev.findIndex((s) => s.id === id)
+        if (i === -1) {
+          return [
+            ...prev,
+            {
+              id,
+              kind: patch.kind ?? 'tool',
+              name: patch.name ?? id,
+              startMs: patch.startMs ?? now(),
+              status: 'running',
+              ...patch,
+            },
+          ]
+        }
+        const copy = [...prev]
+        copy[i] = { ...copy[i], ...patch }
+        return copy
+      })
+    }
+    const finishModel = () =>
+      setTrace((prev) =>
+        prev.map((s) => (s.id === 'model' && s.status === 'running' ? { ...s, endMs: now(), status: 'done' } : s)),
+      )
+
+    let streamText = ''
+    const handle = (evt: Record<string, unknown>) => {
+      switch (evt.type) {
+        case 'session':
+          if (typeof evt.session_id === 'string' && evt.session_id) setSessionId(evt.session_id)
+          break
+        case 'delta':
+        case 'message':
+          if (typeof evt.content === 'string' && evt.content) {
+            streamText = evt.type === 'message' ? evt.content : streamText + evt.content
+            patchAssistant({ content: streamText })
+          }
+          break
+        case 'tool_start': {
+          const name = String(evt.tool_name || 'tool')
+          const id = String(evt.tool_call_id || evt.event_id || `${name}-${now()}`)
+          upsertSpan(id, {
+            kind: /mcp/i.test(name) ? 'mcp' : 'tool',
+            name,
+            args: evt.arguments,
+            startMs: now(),
+            status: 'running',
+          })
+          break
+        }
+        case 'tool_end': {
+          const id = String(evt.tool_call_id || evt.event_id || '')
+          if (id)
+            upsertSpan(id, {
+              result: evt.result,
+              endMs: now(),
+              status: 'done',
+              name: String(evt.tool_name || '') || undefined,
+            })
+          break
+        }
+        case 'error':
+          finishModel()
+          patchAssistant({
+            content: (streamText ? streamText + '\n\n' : '') + '⚠ ' + String(evt.content || 'Agent error'),
+            isError: true,
+          })
+          break
+        case 'done':
+          finishModel()
+          break
+      }
+    }
+
+    const res = await api.agentChatStream({
+      subscription: subForQuery,
+      resourceGroup: a.resourceGroup,
+      app: a.app,
+      agent: a.name,
+      prompt: text,
+      sessionId: sessionId || undefined,
+    })
+    const reader = res.body!.getReader()
+    const decoder = new TextDecoder()
+    let buffer = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      buffer += decoder.decode(value, { stream: true })
+      let idx: number
+      while ((idx = buffer.indexOf('\n\n')) >= 0) {
+        const frame = buffer.slice(0, idx)
+        buffer = buffer.slice(idx + 2)
+        for (const ln of frame.split('\n')) {
+          const s = ln.replace(/^\s+/, '')
+          if (!s.startsWith('data:')) continue
+          const json = s.slice(5).trim()
+          if (!json) continue
+          try {
+            handle(JSON.parse(json))
+          } catch {
+            /* ignore a partial/non-JSON frame */
+          }
+        }
+      }
+    }
+    finishModel()
+    if (!streamText) patchAssistant({ content: '(no textual response)' })
+  }
+
+  const runOnce = async (text: string, a: LiveAgent) => {
+    setTrace([])
+    const r = await api.agentChat({
+      subscription: subForQuery,
+      resourceGroup: a.resourceGroup,
+      app: a.app,
+      agent: a.name,
+      prompt: text,
+      sessionId: sessionId || undefined,
+    })
+    if (r.sessionId) setSessionId(r.sessionId)
+    patchAssistant({ content: r.response || '(no textual response)' })
+    setTrace(
+      r.toolCalls.map((c, i) => {
+        const rec = c as Record<string, unknown>
+        const name = String(rec.tool_name ?? 'tool')
+        return {
+          id: String(rec.tool_call_id ?? i),
+          kind: /mcp/i.test(name) ? 'mcp' : 'tool',
+          name,
+          args: rec.arguments,
+          result: rec.result,
+          startMs: 0,
+          status: 'done' as const,
+        }
+      }),
+    )
+  }
 
   const send = async () => {
     const text = input.trim()
     if (!text || !agent || sending) return
     setInput('')
-    setMessages((m) => [...m, { role: 'user', content: text }])
+    setMessages((m) => [...m, { role: 'user', content: text }, { role: 'assistant', content: '' }])
     setSending(true)
     try {
-      const r = await api.agentChat({
-        subscription: subForQuery,
-        resourceGroup: agent.resourceGroup,
-        app: agent.app,
-        agent: agent.name,
-        prompt: text,
-        sessionId: sessionId || undefined,
-      })
-      if (r.sessionId) setSessionId(r.sessionId)
-      setMessages((m) => [...m, { role: 'assistant', content: r.response, toolCalls: r.toolCalls }])
+      if (stream) await runStreaming(text, agent)
+      else await runOnce(text, agent)
     } catch (e) {
-      setMessages((m) => [...m, { role: 'error', content: (e as Error).message }])
+      patchAssistant({ content: (e as Error).message, isError: true })
+      setTrace((prev) => prev.map((s) => (s.status === 'running' ? { ...s, status: 'error' } : s)))
     } finally {
       setSending(false)
     }
+  }
+
+  const clearAll = () => {
+    setMessages([])
+    setTrace([])
+  }
+  const newSession = () => {
+    setMessages([])
+    setTrace([])
+    setSessionId('')
   }
 
   const you = initials(identity?.user?.name || identity?.user?.username || 'You')
@@ -156,12 +357,14 @@ export default function PlaygroundPage() {
             </option>
           ))}
         </select>
-        <label
-          className="badge gray"
-          style={{ cursor: 'not-allowed', opacity: 0.7 }}
-          title="Streaming (SSE) is coming soon"
-        >
-          <input type="checkbox" disabled style={{ width: 'auto', marginRight: 6 }} /> Stream (soon)
+        <label className="badge gray" style={{ cursor: 'pointer' }} title="Stream tokens + live trace">
+          <input
+            type="checkbox"
+            checked={stream}
+            onChange={(e) => setStream(e.target.checked)}
+            style={{ width: 'auto', marginRight: 6 }}
+          />
+          Stream
         </label>
         {sessionId && (
           <span className="badge blue">
@@ -174,17 +377,10 @@ export default function PlaygroundPage() {
             Open agent
           </Link>
         )}
-        <button
-          className="btn sm"
-          onClick={() => {
-            setMessages([])
-            setSessionId('')
-          }}
-          disabled={sending}
-        >
+        <button className="btn sm" onClick={newSession} disabled={sending}>
           ＋ New session
         </button>
-        <button className="btn sm" onClick={() => setMessages([])} disabled={sending || !messages.length}>
+        <button className="btn sm" onClick={clearAll} disabled={sending || !messages.length}>
           Clear
         </button>
       </div>
@@ -214,30 +410,19 @@ export default function PlaygroundPage() {
                     <div className="av user">{you}</div>
                     <div className="bubble">{m.content}</div>
                   </div>
-                ) : m.role === 'assistant' ? (
-                  <div className="msg bot" key={i}>
-                    <div className="av bot">✦</div>
-                    <div>
-                      {m.toolCalls?.map((c, j) => (
-                        <ToolCall call={c} key={j} />
-                      ))}
-                      <div className="bubble">{m.content || '(no textual response)'}</div>
-                    </div>
-                  </div>
                 ) : (
                   <div className="msg bot" key={i}>
-                    <div className="av err">!</div>
-                    <div className="bubble err">{m.content}</div>
+                    <div className={'av ' + (m.isError ? 'err' : 'bot')}>{m.isError ? '!' : '✦'}</div>
+                    <div className={'bubble' + (m.isError ? ' err' : '')}>
+                      {m.content ||
+                        (sending && i === messages.length - 1 ? (
+                          <span style={{ color: 'var(--text-muted)' }}>Thinking…</span>
+                        ) : (
+                          ''
+                        ))}
+                    </div>
                   </div>
                 ),
-              )}
-              {sending && (
-                <div className="msg bot">
-                  <div className="av bot">✦</div>
-                  <div className="bubble" style={{ color: 'var(--text-muted)' }}>
-                    Thinking…
-                  </div>
-                </div>
               )}
             </div>
             <div className="composer">
@@ -267,26 +452,39 @@ export default function PlaygroundPage() {
           <aside className="card trace-panel">
             <div className="card-head">
               <h3 style={{ margin: 0 }}>Live trace</h3>
-              <span className="badge amber">soon</span>
+              {trace.length > 0 && (
+                <span className="badge gray">
+                  {trace.length} span{trace.length > 1 ? 's' : ''}
+                </span>
+              )}
             </div>
-            <div className="trace-empty">
-              <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
-                Execution traces — model calls, tool &amp; MCP invocations, and timings — will stream here as
-                the agent runs, once trace integration is enabled.
-              </p>
-              <p className="muted" style={{ fontSize: 12, marginBottom: 0 }}>
-                For now, any tool calls returned by the chat endpoint are shown inline in the transcript.
-              </p>
-            </div>
+            {trace.length === 0 ? (
+              <div className="trace-empty">
+                <p className="muted" style={{ fontSize: 13, marginTop: 0, marginBottom: 0 }}>
+                  {stream
+                    ? 'Model, tool, and MCP spans stream here as the agent runs. Click a span for its arguments and result.'
+                    : 'Turn on Stream to see live execution spans and timings.'}
+                </p>
+              </div>
+            ) : (
+              <div className="trace">
+                {trace.map((s) => (
+                  <TraceSpanRow key={s.id} span={s} />
+                ))}
+              </div>
+            )}
           </aside>
         </div>
       )}
 
       {agent && (
         <p className="hint">
-          Calls <span className="mono">POST /agents/{agent.name}/chat</span> on{' '}
-          <span className="mono">{agent.app}</span>, proxied via the portal (no key handling in the
-          browser).
+          Calls{' '}
+          <span className="mono">
+            POST /agents/{agent.name}/{stream ? 'chatstream' : 'chat'}
+          </span>{' '}
+          on <span className="mono">{agent.app}</span>, proxied via the portal. Tool &amp; MCP calls appear
+          in the live trace.
         </p>
       )}
 

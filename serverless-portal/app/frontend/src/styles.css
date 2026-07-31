@@ -197,3 +197,29 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .trace-panel { position: sticky; top: 12px; }
 .trace-empty { border: 1px dashed var(--border); border-radius: 8px; padding: 14px;
   background: var(--surface-2); margin-top: 8px; }
+.trace { display: flex; flex-direction: column; gap: 6px; margin-top: 8px; }
+.span { border: 1px solid var(--border); border-radius: 7px; overflow: hidden; background: var(--surface); }
+.span.running { border-color: #cfe3f7; }
+.span-head { display: flex; align-items: center; gap: 8px; width: 100%; text-align: left; border: 0;
+  background: transparent; padding: 8px 10px; cursor: pointer; font-family: inherit; font-size: 12.5px;
+  color: var(--text); }
+.span-head:disabled { cursor: default; }
+.span-head:hover:not(:disabled) { background: var(--surface-2); }
+.span-kind { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; font-weight: 700;
+  padding: 2px 6px; border-radius: 4px; color: #fff; flex: 0 0 auto; }
+.k-model { background: var(--purple); }
+.k-tool { background: #2b7fc0; }
+.k-mcp { background: #197a56; }
+.span-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.span-dot { width: 8px; height: 8px; border-radius: 50%; flex: 0 0 8px; background: var(--text-faint); }
+.span-dot.running { background: #e0a53f; animation: pulse 1s infinite; }
+.span-dot.done { background: #2e9e5b; }
+.span-dot.error { background: var(--red); }
+.span-dur { font-variant-numeric: tabular-nums; color: var(--text-muted); font-size: 11.5px;
+  min-width: 46px; text-align: right; }
+.span-detail { border-top: 1px solid var(--border); padding: 8px 10px; background: var(--surface-2); }
+.span-lbl { font-size: 10px; text-transform: uppercase; letter-spacing: .4px; color: var(--text-faint);
+  font-weight: 700; margin: 4px 0 2px; }
+.span-detail pre { margin: 0; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px;
+  white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; color: var(--text); }
+@keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }

@@ -621,6 +621,70 @@ app.post(
   }),
 )
 
+// Stream a chat with a deployed agent (SSE), proxied so the browser needs no
+// key and makes no cross-origin call. Emits the runtime's own event vocabulary
+// (session/delta/tool_start/tool_end/done/error) unchanged.
+app.post(
+  '/api/agent/chatstream',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const appName = String(req.body?.app ?? '').trim()
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const agentName = String(req.body?.agent ?? '').trim()
+    const prompt = req.body?.prompt
+    const sessionId = String(req.body?.sessionId ?? '').trim()
+    if (!appName || !resourceGroup || !agentName) {
+      throw new HttpError(400, 'app, resourceGroup, and agent are required.')
+    }
+    if (typeof prompt !== 'string' || !prompt.trim()) {
+      throw new HttpError(400, 'A non-empty prompt is required.')
+    }
+
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    if (!site) throw new HttpError(404, `Function App "${appName}" was not found.`)
+    if (!site.defaultHostName) throw new HttpError(502, 'The app has no host name.')
+    const key = await azure.functionHostKey(token, subscription, resourceGroup, appName)
+
+    const controller = new AbortController()
+    req.on('close', () => controller.abort())
+
+    // Opening the upstream may fail (bad route, upstream error) before any SSE
+    // is sent — surface that as a normal JSON error the client checks first.
+    let upstream
+    try {
+      upstream = await azure.openAgentChatStream(site.defaultHostName, agentName, prompt.trim(), {
+        key,
+        sessionId,
+        signal: controller.signal,
+      })
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+
+    res.setHeader('Content-Type', 'text/event-stream')
+    res.setHeader('Cache-Control', 'no-cache, no-transform')
+    res.setHeader('Connection', 'keep-alive')
+    res.setHeader('X-Accel-Buffering', 'no')
+    res.flushHeaders?.()
+
+    const reader = upstream.body.getReader()
+    try {
+      for (;;) {
+        const { done, value } = await reader.read()
+        if (done) break
+        res.write(Buffer.from(value))
+      }
+    } catch {
+      if (!controller.signal.aborted) {
+        res.write(`data: ${JSON.stringify({ type: 'error', content: 'Stream interrupted.' })}\n\n`)
+      }
+    } finally {
+      res.end()
+    }
+  }),
+)
+
 // Any unmatched /api/* path is a 404 JSON (never the SPA shell).
 app.use('/api', (_req, res) => res.status(404).json({ detail: 'Not found' }))
 
