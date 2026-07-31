@@ -28,15 +28,10 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
   Source tests mirror the module name as `tests/test_<module>.py`.
 - Use a module constant rather than repeating a named URL, API version, or path.
 
-## Durable documentation and runtime boundaries
+## Documentation and logging
 
 - Keep docstrings and comments terse. Explain a durable contract or reason, not
   the next line of code or feature/PR history. Do not cite phase labels, PR
   numbers, or mutable FRD decision numbers in source comments, docstrings, or
   assertion messages.
-- MAF is the only runtime. The legacy `runtime:` frontmatter field remains a
-  one-time-warning compatibility input, never a runtime branch.
 - Use the shared `azure_functions_agents._logger.logger`.
-- Preserve pipeline boundaries: discovery is read-only, registration is the
-  only Azure-aware stage, and execution is lazy. Registration trusts
-  `ResolvedAgent` and `AgentCapabilities` rather than reparsing authoring input.
