@@ -136,11 +136,33 @@ Grounded in `pyproject.toml` and current code:
   `pydantic.mypy` plugin).
 - **Type aliases use PEP 695:** `type Foo = Bar` (not `Foo: TypeAlias = Bar`);
   ruff `UP040` enforces this. See `src/azure_functions_agents/discovery/mcp.py`.
-- **Ruff** rules: `E,F,I,B,UP,SIM,RUF,N`; line-length 100 (`E501` ignored).
-  Imports sorted via ruff isort; first-party = `azure_functions_agents`.
+- **Ruff** rules: `E,F,I,B,UP,SIM,RUF,N`, plus a small, evidence-based `TRY`
+  subset (`TRY002,TRY201,TRY203,TRY301,TRY400`); line-length 100 (`E501`
+  ignored). Imports sorted via ruff isort; first-party = `azure_functions_agents`.
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
+- **No defensive `getattr`/`isinstance`/`cast`/`Any` against an already-typed
+  source** (SDK responses, our own dataclasses). Import/type the boundary
+  properly instead and read fields directly; delete the runtime re-validation.
+  Exception: parsing genuinely untrusted external input (e.g. the ACA sandbox's
+  session manifest in `transport/manifest.py`) is parsing, not defensive
+  coding — keep that validation strict.
+- **Frozen dataclasses validate via a classmethod `create()` factory**, never
+  `__post_init__` + `object.__setattr__`. See `session_state/models.py`
+  or `transport/transport_models.py` for the pattern: a module-level
+  `_validate_*`/`_normalize_*` helper does the work, `create()` calls it then
+  constructs with `cls(...)`.
+- **No nested try/except.** Flatten into single-level helper functions with
+  early returns instead of a `try` inside another `try`'s body or handler.
+- **Module names must be globally unique and intent-revealing** — no two
+  modules named bare `models.py`, `utils.py`, etc. (`transport/transport_models.py`
+  follows this; `session_state/models.py` is a known pending rename owned by
+  whichever phase touches that module next — don't rename it as a drive-by).
+  Tests mirror source module names (`tests/test_<module>.py`; see §6).
+- **Use the module constant, never re-inline the literal it represents**
+  (URLs, API versions, paths). If you find yourself typing the same literal
+  twice, promote it to a constant next to the ones already there.
 - **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored
   (one-time warning). Do not reintroduce runtime branching.
 - **Logging** goes through the shared `azure_functions_agents._logger.logger`.
