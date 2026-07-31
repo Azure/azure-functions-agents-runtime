@@ -98,13 +98,13 @@ select = [
     "SIM",
     "RUF",
     "N",
-    # try/except hygiene; see AGENTS.md "Code conventions".
+    # Try/except hygiene; see .github/instructions/python.instructions.md.
     "TRY002",
     "TRY201",
     "TRY203",
     "TRY301",
     "TRY400",
-    # Terse docstrings; see AGENTS.md "Code conventions".
+    # Docstring guidance; see .github/instructions/python.instructions.md.
     "D200",
     "D210",
     "D419",

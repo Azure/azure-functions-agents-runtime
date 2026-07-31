@@ -19,7 +19,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
-from azure_functions_agents.workflows import context, engine, integration, registry, schema, tools
+from azure_functions_agents.workflows import context, engine, integration, registry
+from azure_functions_agents.workflows import workflow_schema as schema
+from azure_functions_agents.workflows import workflow_tools as tools
 
 
 @pytest.fixture(autouse=True)

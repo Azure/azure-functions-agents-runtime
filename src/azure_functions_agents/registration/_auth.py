@@ -245,8 +245,8 @@ def resolve_owner_principal(
 ) -> OwnerPrincipal | AuthError:
     """Resolve a typed owner input without changing existing endpoint enforcement.
 
-    This seam is intentionally not wired into request execution in P3a. Functions
-    host key modes resolve to an app marker without reading a key or key name.
+    This seam is intentionally not wired into request execution. Functions host
+    key modes resolve to an app marker without reading a key or key name.
     Entra mode reuses the already-authorized Easy Auth principal but additionally
     requires stable ``tid`` and immutable ``oid`` claims for durable ownership.
     """

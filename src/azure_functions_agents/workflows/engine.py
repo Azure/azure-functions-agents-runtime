@@ -30,7 +30,7 @@ import azure.functions as func
 from azure_functions_agents._logger import logger
 
 from . import registry
-from .schema import (
+from .workflow_schema import (
     ECHO_TOOL_NAME,
     MAX_PARALLELISM,
     MAX_WAIT_DURATION,

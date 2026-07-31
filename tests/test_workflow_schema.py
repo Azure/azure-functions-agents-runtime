@@ -18,7 +18,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from azure_functions_agents.workflows.schema import (
+from azure_functions_agents.workflows.workflow_schema import (
     ECHO_TOOL_NAME,
     MAX_NODES,
     MAX_WAIT_DURATION,
@@ -29,7 +29,7 @@ from azure_functions_agents.workflows.schema import (
     plan_to_activity_inputs,
     resolve_template_value,
 )
-from azure_functions_agents.workflows.schema import validate_plan as _validate_plan
+from azure_functions_agents.workflows.workflow_schema import validate_plan as _validate_plan
 
 # Schema tests use the internal echo tool; the production allowlist is
 # computed at app start by ``build_workflow_integration``. Wrap once so
@@ -795,4 +795,3 @@ def test_rejects_non_string_task_id():
     raw = _plan({"id": 42, "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}})
     with pytest.raises(PlanValidationError):
         validate_plan(raw)
-

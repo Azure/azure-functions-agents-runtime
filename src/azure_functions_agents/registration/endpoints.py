@@ -531,7 +531,7 @@ def _register_workflow_status_endpoints(
     base_function_name: str,
     auth: EndpointAuthConfig,
 ) -> None:
-    from ..workflows.tools import (
+    from ..workflows.workflow_tools import (
         fetch_session_workflow_status,
         fetch_session_workflows,
     )

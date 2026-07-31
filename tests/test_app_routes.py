@@ -7,7 +7,7 @@ import pytest
 
 from azure_functions_agents import app as app_module
 from azure_functions_agents.workflows import context as workflow_context
-from azure_functions_agents.workflows import tools as workflow_tools
+from azure_functions_agents.workflows import workflow_tools
 
 
 def _write_agent(

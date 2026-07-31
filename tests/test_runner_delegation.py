@@ -1,22 +1,21 @@
-"""Tests for chat-time sub-agent delegation (FRD 0007 v1).
+"""Tests for chat-time sub-agent delegation.
 
 Covers the pieces added to :mod:`azure_functions_agents.runner` for
 delegation: the ``direct``/``delegated`` execution-role split
 (``_build_role_agent`` / ``_build_delegated_agent``), single-level
-structural enforcement (Decision #6), ``build_subagent_tools``'s guard
-clauses, the ``delegate_<slug>`` tool's failure/cancellation split
-(Decision #12), per-call specialist construction giving cross-specialist
-AND same-specialist parallelism with no shared-instance lock (Decision #14,
-revised), and delegation observability enrichment (Decision #19, §4.12).
+structural enforcement, ``build_subagent_tools``'s guard clauses, the
+``delegate_<slug>`` tool's failure/cancellation split, per-call specialist
+construction giving cross-specialist AND same-specialist parallelism with no
+shared-instance lock, and delegation observability enrichment.
 
 Fake specialist harness
 ------------------------
 
-The ``delegate_<slug>`` tool built by :func:`runner._build_delegate_tool`
-is a hand-written ``@tool(schema=...)`` function tool (FRD 0007 §5
-Decision #20) whose handler calls ``await specialist_agent.run(task)`` —
-plain, non-streaming ``agent_framework.Agent`` usage, never MAF's
-``BaseAgent.as_tool()``. So a usable fake specialist only needs an
+The ``delegate_<slug>`` tool built by :func:`runner._build_delegate_tool` is a
+hand-written ``@tool(schema=...)`` function tool whose handler calls
+``await specialist_agent.run(task)`` — plain, non-streaming
+``agent_framework.Agent`` usage, never MAF's ``BaseAgent.as_tool()``. So a
+usable fake specialist only needs an
 ``async def run(self, task, **kwargs)`` returning an object with a
 ``.text`` attribute (mirroring ``agent_framework.AgentResponse.text``) —
 no ``BaseAgent`` subclassing, streaming, or ``get_final_response()``
@@ -267,7 +266,7 @@ def test_delegate_error_tracker_starts_at_zero_and_increments() -> None:
 
 
 def test_sanitize_delegate_failure_includes_slug_but_not_type_or_raw_detail() -> None:
-    """The model-facing message must be class-independent (FRD 0007 Decision #12).
+    """The model-facing message must be class-independent.
 
     Neither the raw exception detail NOR ``type(exc).__name__`` may leak
     into the string returned to the coordinator's model context — only the
@@ -322,7 +321,7 @@ def test_build_role_agent_delegated_role_has_only_its_own_tools() -> None:
 
     # Own static tools are present; per-request sandbox and main-only
     # Dynamic-Workflow tools are naturally absent (never passed), and there
-    # are no delegate_* tools (delegate_tools=None) — Decisions #13/#15/#6.
+    # are no delegate_* tools (delegate_tools=None).
     assert _tool_names(agent) == {"own_user_tool", "own_mcp_tool"}
     assert agent.context_providers == []
 
@@ -383,7 +382,7 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
 
     agent = runner._build_delegated_agent(resolved, AgentCapabilities())
 
-    # Structural proof of single-level delegation (Decision #6): even though
+    # Structural proof of single-level delegation: even though
     # `resolved.subagents` is non-empty, _build_delegated_agent's signature
     # never accepts a catalog at all, so it has no way to build delegate_*
     # tools for "billing" regardless of what it declares.
@@ -393,7 +392,7 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
 def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and_skills_not_coordinators(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """"Runs as itself" (FRD 0007 §5 Decisions #13/#15) — a deeper, end-to-end check.
+    """"Runs as itself" — a deeper, end-to-end check.
 
     ``test_build_delegated_agent_never_wires_its_own_declared_subagents``
     above proves the *no-subagents-leak* half of "runs as itself". It does
@@ -494,14 +493,14 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """End-to-end (not just ``_build_delegated_agent`` in isolation): proves
-    single-level structural enforcement (Decision #6) holds through the real
+    single-level structural enforcement holds through the real
     ``build_subagent_tools`` -> ``_build_delegate_tool`` -> handler ->
     ``_build_delegated_agent`` chain, including an actual specialist call —
     not merely that the tool was *built*.
 
-    Since each call now builds its specialist ``Agent`` fresh, INSIDE the
-    handler, rather than at tool-build time (FRD 0007 §5 Decision #20),
-    ``_build_delegated_agent`` is not called at all until the tool is
+    Since each call builds its specialist ``Agent`` fresh inside the handler,
+    rather than at tool-build time, ``_build_delegated_agent`` is not called
+    at all until the tool is
     actually invoked — this test calls it via ``_RunnableFakeClientManager``
     so the specialist's ``run()`` genuinely succeeds end to end.
     """
@@ -586,7 +585,7 @@ async def test_build_subagent_tools_raises_on_unknown_reference() -> None:
 
 # ---------------------------------------------------------------------------
 # Adapter behavior: success / failure / timeout / effective-timeout /
-# cancellation (Decision #12)
+# cancellation
 # ---------------------------------------------------------------------------
 
 
@@ -818,8 +817,8 @@ async def test_delegate_adapter_propagates_cancellation_recording_a_call_but_not
     with pytest.raises(asyncio.CancelledError):
         await task
 
-    # Parent/request cancellation propagates + aborts (Decision #12) — it is
-    # never mistaken for a recoverable specialist failure, so the
+    # Parent/request cancellation propagates and aborts. It is never mistaken
+    # for a recoverable specialist failure, so the
     # *error* tracker/counter stay at zero.
     assert tracker.count == 0
     # S1: a cancelled call was still genuinely dispatched to the specialist,
@@ -835,9 +834,8 @@ async def test_delegate_adapter_propagates_cancellation_recording_a_call_but_not
 
 
 # ---------------------------------------------------------------------------
-# Concurrency (Decision #14, revised): each call builds its own specialist
-# instance, so same-specialist AND cross-specialist calls both run in
-# parallel — no shared-instance lock.
+# Each call builds its own specialist instance, so same-specialist AND
+# cross-specialist calls both run in parallel — no shared-instance lock.
 # ---------------------------------------------------------------------------
 
 
@@ -845,7 +843,7 @@ async def test_delegate_adapter_propagates_cancellation_recording_a_call_but_not
 async def test_delegate_adapter_concurrent_calls_to_same_specialist_run_on_independent_instances_in_parallel(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """FRD 0007 §5 Decision #20 (revised #14): no per-specialist lock.
+    """There is no per-specialist lock.
 
     Because ``_build_delegate_tool``'s handler builds a FRESH specialist
     ``Agent`` on every call (:func:`runner._build_delegated_agent`), two
@@ -1014,7 +1012,7 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
 
 
 # ---------------------------------------------------------------------------
-# Real MAF `Agent` instrumentation (FRD 0007 §5 Decision #19) — B2
+# Real MAF `Agent` instrumentation — B2
 # ---------------------------------------------------------------------------
 #
 # Every other test in this module that inspects delegate telemetry uses
@@ -1170,7 +1168,7 @@ async def test_real_maf_agent_run_raises_on_expanded_mcp_function_collision() ->
 
 
 # ---------------------------------------------------------------------------
-# Real MAF span finalization on timeout/cancellation (FRD 0007 §5 Decision #20)
+# Real MAF span finalization on timeout/cancellation
 # ---------------------------------------------------------------------------
 #
 # `_FakeSpecialistAgent` (used by every other test in this module) never
@@ -1278,8 +1276,7 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_specialist_time
     streaming design, the handler makes no explicit finalize call for this to
     happen: a non-streaming ``agent.run()``'s OTel spans are opened with an
     ordinary ``with``/context-manager, which closes deterministically on any
-    exception — ``asyncio.CancelledError`` included (see STEP 1 verification,
-    FRD 0007 §5 Decision #20).
+    exception — ``asyncio.CancelledError`` included.
     """
     exporter = _install_maf_tracer(monkeypatch)
     span = _install_span_capture(monkeypatch)
@@ -1330,8 +1327,8 @@ async def test_delegate_handler_finalizes_real_maf_agent_span_on_outer_cancellat
     closes deterministically from the ``except asyncio.CancelledError``
     branch too, not only the ``TimeoutError`` branch, with no explicit
     finalize call needed either way. Cancellation is never a recoverable
-    delegate *failure* (Decision #12), so the error tracker/counter must NOT
-    record anything — but the call itself (genuinely dispatched before being
+    delegate *failure*, so the error tracker/counter must NOT record anything
+    — but the call itself (genuinely dispatched before being
     cancelled) IS still recorded as a call (S1).
     """
     exporter = _install_maf_tracer(monkeypatch)
@@ -1431,8 +1428,7 @@ async def test_delegate_adapter_preserves_inner_timeout_error_instance_in_teleme
     """A ``TimeoutError`` the specialist's OWN code raises internally (not a
     ``wait_for`` expiry) must still be recorded as the exact exception
     object, and produces the same recoverable ``outcome=timeout`` result as
-    a genuine deadline expiry — both are specialist-side timeouts either way
-    (P1: the two cases are no longer classified differently).
+    a genuine deadline expiry — both are specialist-side timeouts either way.
     """
     span = _install_span_capture(monkeypatch)
     calls = _install_counter_capture(monkeypatch)

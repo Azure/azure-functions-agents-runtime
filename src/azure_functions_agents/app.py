@@ -67,8 +67,8 @@ def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
 
     A slug (sanitized file stem) doubles as the function name, the
     ``/agents/<slug>/`` route, and the ``delegate_<slug>`` tool name, so a
-    collision is a hard startup error (Decision #17), not the old silent
-    auto-suffix behavior. Must run first (two-pass composition, pass 1) so
+    collision is a hard startup error, not the old silent auto-suffix behavior.
+    Must run first (two-pass composition, pass 1) so
     ``known_slugs`` can be handed to ``validate_subagent_references``.
     """
     sources_by_slug: dict[str, list[str]] = {}

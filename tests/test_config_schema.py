@@ -185,7 +185,7 @@ def test_subagent_ref_rejects_empty_agent() -> None:
 
 @pytest.mark.parametrize("forbidden_field", ["id", "tool_name"])
 def test_subagent_ref_extra_forbidden(forbidden_field: str) -> None:
-    """No `id` or `tool_name` override field exists — identity is the slug only (FRD 0007 §5 Decision #16)."""
+    """No `id` or `tool_name` override field exists — identity is the slug only."""
     with pytest.raises(ValidationError):
         SubagentRef.model_validate({"agent": "billing-specialist", forbidden_field: "x"})
 
@@ -220,7 +220,7 @@ def test_agent_spec_subagents_defaults_to_none() -> None:
     assert spec.subagents is None
 
 
-# --- session_runtime / aca_sandbox / retention (FRD 0008, P2) --------------
+# --- session_runtime / aca_sandbox / retention --------------------------------
 
 
 def test_global_config_session_runtime_defaults_to_none() -> None:
@@ -255,10 +255,9 @@ def test_aca_sandbox_config_rejects_empty_sandbox_group_resource_id() -> None:
 
 def test_aca_sandbox_config_rejects_missing_sandbox_group_resource_id() -> None:
     """FRD Row 5 remains fully enforced -- ``sandbox_group_resource_id`` is a
-    required Pydantic field on ``AcaSandboxConfig`` independent of the
-    presence-based backend selection removed by Decision #84, so an
-    ``aca_sandbox`` block that omits it entirely (not just a blank string)
-    must still fail at the schema level."""
+    required Pydantic field on ``AcaSandboxConfig`` independent of backend
+    selection, so an ``aca_sandbox`` block that omits it entirely (not just a
+    blank string) must still fail at the schema level."""
     with pytest.raises(ValidationError, match="sandbox_group_resource_id"):
         AcaSandboxConfig.model_validate({})
 
@@ -367,18 +366,17 @@ def test_global_config_session_runtime_rejects_explicit_null_aca_sandbox() -> No
 
 
 def test_session_runtime_config_rejects_provider_field() -> None:
-    """`provider` was removed entirely (Decision #84) -- presence of the
-    `aca_sandbox` block is now the sole backend discriminant, so an
-    author-supplied `provider` key is rejected the same as any other unknown
-    field (`extra="forbid"`)."""
+    """`provider` was removed entirely -- presence of the `aca_sandbox` block
+    is now the sole backend discriminant, so an author-supplied `provider` key
+    is rejected the same as any other unknown field (`extra="forbid"`)."""
     with pytest.raises(ValidationError):
         SessionRuntimeConfig.model_validate({"provider": "aca_sandbox"})
 
 
 def test_session_runtime_config_rejects_retention_as_sibling_of_aca_sandbox() -> None:
-    """`retention` moved onto `AcaSandboxConfig` (Decision #84) -- authoring
-    it as a sibling of `aca_sandbox` under `session_runtime` (its pre-move
-    location) is rejected, not silently ignored."""
+    """`retention` belongs on `AcaSandboxConfig` -- authoring it as a sibling
+    of `aca_sandbox` under `session_runtime` is rejected, not silently
+    ignored."""
     with pytest.raises(ValidationError):
         SessionRuntimeConfig.model_validate(
             {

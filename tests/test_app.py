@@ -49,7 +49,7 @@ def test_create_function_app_fails_fast_on_duplicate_function_names(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,
 ) -> None:
-    """Same-slug collisions fail fast at composition time (FRD 0007 Decision #17)."""
+    """Same-slug collisions fail fast at composition time."""
     _write_agent(
         tmp_path,
         "daily-report.agent.md",
@@ -138,7 +138,7 @@ def test_create_function_app_fails_fast_on_duplicate_slug_across_root_and_agents
     tmp_path: Path,
 ) -> None:
     """Same-stem collisions fail fast even when one file is at the root and the
-    other lives in the agents/ subfolder (FRD 0007 Decision #17)."""
+    other lives in the agents/ subfolder."""
     (tmp_path / "agents").mkdir()
     _write_agent(
         tmp_path,
@@ -180,9 +180,11 @@ def test_create_function_app_fails_fast_on_duplicate_slug_across_root_and_agents
 def test_create_function_app_registers_distinct_slugs_without_collision(
     tmp_path: Path,
 ) -> None:
-    """Regression: genuinely distinct slugs (no subagents involved) continue to
-    register exactly as before the app-wide fail-fast slug-uniqueness check was
-    added (FRD 0007 Decision #17) — the check must be a no-op for the happy path."""
+    """Regression: genuinely distinct slugs continue to register unchanged.
+
+    The app-wide fail-fast slug-uniqueness check must be a no-op for the happy
+    path.
+    """
     _write_agent(
         tmp_path,
         "report-alpha.agent.md",
@@ -312,7 +314,7 @@ def test_create_function_app_accepts_endpoint_less_specialist_referenced_only_vi
     """An internal-only specialist (no trigger, no builtin_endpoints) must be
     accepted end-to-end when it is reachable solely through another agent's
     ``subagents:`` — and must register *zero* external entry points of its
-    own (FRD 0007 Decision #18).
+    own.
 
     ``test_multi_agent_delegation_fixture`` in test_config_fixtures.py
     already covers this fixture at the loader/validation layer by calling
@@ -670,4 +672,3 @@ class TestStructuredIndexingLog:
         assert any(
             "agent_capabilities_registered" in record.getMessage() for record in caplog.records
         )
-

@@ -557,7 +557,7 @@ def record_delegate_call(*, error: bool) -> None:
 
     ``error`` covers a specialist run that failed, raised, or exceeded the
     effective delegation timeout — any outcome the adapter sanitized into a
-    recoverable error string for the coordinator (FRD 0007 Decision #12). It
+    recoverable error string for the coordinator. It
     does not cover parent/request cancellation, which propagates instead of
     being recorded as a delegate error.
     """
