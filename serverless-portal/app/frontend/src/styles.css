@@ -166,6 +166,14 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .check { display: block; margin-bottom: 8px; font-size: 13.5px; cursor: pointer; }
 .check input { width: auto; margin-right: 4px; }
 
+/* Create-agent wizard steps */
+.steps { display: flex; align-items: center; gap: 10px; margin: 0 0 16px; }
+.steps .step { font-size: 13px; font-weight: 600; color: var(--text-faint); padding: 4px 12px;
+  border-radius: 999px; background: var(--surface-2); border: 1px solid var(--border); }
+.steps .step.active { color: var(--brand-dark); background: var(--brand-soft); border-color: #cfe3f7; }
+.steps .step.done { color: var(--text-muted); }
+.steps .step-sep { color: var(--text-faint); }
+
 /* Playground — agent chat + (future) live trace */
 .playground { display: grid; grid-template-columns: 1fr 320px; gap: 16px; align-items: start; }
 @media (max-width: 1000px) { .playground { grid-template-columns: 1fr; } }

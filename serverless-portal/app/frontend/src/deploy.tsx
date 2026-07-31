@@ -74,16 +74,84 @@ export function useDeployJob() {
   return { phase, result, portalUrl, message, deploy, redeploy }
 }
 
+function GrantAccess({
+  grant,
+  principalId,
+}: {
+  grant: { subscription: string; resourceGroup: string; account: string; tenantId?: string }
+  principalId: string
+}) {
+  const [state, setState] = useState<'idle' | 'granting' | 'done' | 'error'>('idle')
+  const [detail, setDetail] = useState('')
+
+  const run = async () => {
+    setState('granting')
+    setDetail('')
+    try {
+      const r = await api.grantFoundryAccess({
+        subscription: grant.subscription,
+        resourceGroup: grant.resourceGroup,
+        account: grant.account,
+        principalId,
+      })
+      if (r.granted.length) {
+        setState('done')
+        setDetail(r.granted.join(', '))
+      } else {
+        setState('error')
+        setDetail(r.failed.map((f) => `${f.role}: ${f.error}`).join('; ') || 'no roles granted')
+      }
+    } catch (e) {
+      setState('error')
+      setDetail((e as Error).message)
+    }
+  }
+
+  const accountId = `/subscriptions/${grant.subscription}/resourceGroups/${grant.resourceGroup}/providers/Microsoft.CognitiveServices/accounts/${grant.account}`
+  const iamUrl = `https://portal.azure.com/#${grant.tenantId ? `@${grant.tenantId}` : ''}/resource${accountId}/users`
+
+  return (
+    <div style={{ marginTop: 8 }}>
+      <div className="muted" style={{ fontSize: 12, marginBottom: 4 }}>
+        The app’s identity needs access to Foundry <span className="mono">{grant.account}</span> to call the
+        model.
+      </div>
+      <button
+        className="btn sm primary"
+        onClick={() => void run()}
+        disabled={state === 'granting' || state === 'done'}
+      >
+        {state === 'granting' ? 'Granting…' : state === 'done' ? '✓ Access granted' : '🔑 Grant access'}
+      </button>{' '}
+      <a href={iamUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
+        or grant in the portal ↗
+      </a>
+      {state === 'done' && detail && (
+        <span className="muted" style={{ fontSize: 12, marginLeft: 8 }}>
+          Granted: {detail}
+        </span>
+      )}
+      {state === 'error' && (
+        <div className="muted" style={{ color: 'var(--red)', fontSize: 12, marginTop: 4 }}>
+          Grant failed: {detail}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function DeploymentStatus({
   phase,
   result,
   portalUrl,
   message,
+  grant,
 }: {
   phase: DeployPhase
   result: DeployResult | null
   portalUrl?: string
   message?: string
+  grant?: { subscription: string; resourceGroup: string; account: string; tenantId?: string }
 }) {
   if (phase === 'idle') return null
   return (
@@ -113,6 +181,9 @@ export function DeploymentStatus({
             {result.url}
           </a>
         </div>
+      )}
+      {phase === 'deployed' && result?.principalId && grant?.account && (
+        <GrantAccess grant={grant} principalId={result.principalId} />
       )}
       {result?.files && result.files.length > 0 && (
         <div style={{ marginTop: 6 }}>

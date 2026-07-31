@@ -79,6 +79,7 @@ export interface DeployResult {
   files: string[]
   url?: string
   portalUrl?: string
+  principalId?: string
 }
 
 export interface DeployStarted {
@@ -92,6 +93,44 @@ export interface AgentChatResult {
   sessionId: string
   response: string
   toolCalls: Record<string, unknown>[]
+}
+
+export interface FoundryModel {
+  deployment: string
+  model: string
+}
+export interface FoundryProject {
+  name: string
+  endpoint: string
+}
+export interface FoundryAccount {
+  name: string
+  resourceGroup: string
+  location: string
+  kind: string
+  foundryEndpoint: string
+  openaiEndpoint: string
+  projects: FoundryProject[]
+  models: FoundryModel[]
+}
+export interface FoundryDiscovery {
+  subscriptionId: string
+  accounts: FoundryAccount[]
+}
+
+export interface ResourceGroup {
+  name: string
+  location: string
+}
+export interface ResourceGroupList {
+  subscriptionId: string
+  resourceGroups: ResourceGroup[]
+}
+
+export interface GrantResult {
+  granted: string[]
+  failed: { role: string; error: string }[]
+  scope: string
 }
 
 export type DeployTarget =
@@ -241,4 +280,33 @@ export const api = {
     }
     return res
   },
+
+  // Microsoft Foundry: list accounts/models for the create flow, and generate
+  // an agent's instructions with the chosen model.
+  listFoundry: (subscription?: string) =>
+    req<FoundryDiscovery>(
+      'GET',
+      subscription ? `/api/foundry?subscription=${enc(subscription)}` : '/api/foundry',
+    ),
+  generateAgentMd: (p: {
+    subscription: string
+    name: string
+    description: string
+    foundry: { resourceGroup: string; account: string; openaiEndpoint: string; model: string }
+  }) => req<{ content: string }>('POST', '/api/generate-agent-md', p),
+
+  // Resource groups in a subscription (for the create flow's RG picker).
+  listResourceGroups: (subscription?: string) =>
+    req<ResourceGroupList>(
+      'GET',
+      subscription ? `/api/resource-groups?subscription=${enc(subscription)}` : '/api/resource-groups',
+    ),
+
+  // Grant a deployed app's identity access to a Foundry account (cross-sub OK).
+  grantFoundryAccess: (p: {
+    subscription: string
+    resourceGroup: string
+    account: string
+    principalId: string
+  }) => req<GrantResult>('POST', '/api/foundry/grant-access', p),
 }
