@@ -31,11 +31,8 @@ class SandboxManifestMismatchError(Exception):
 class ExpectedSandboxManifestBinding:
     """Opaque, authoritative P3/P4b inputs that P4a must only compare.
 
-    These values are already-typed controller state (durable session rows,
-    P4b digests); ``create`` only normalizes the one field — the Sandbox
-    Group resource ID — that must be canonicalized to compare correctly
-    against the live-parsed manifest and SDK identity below. Construct with
-    :meth:`create` rather than the raw constructor.
+    Already-typed controller state; ``create`` normalizes only the Sandbox
+    Group resource ID so it compares correctly against the live manifest.
     """
 
     manifest_version: int

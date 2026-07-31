@@ -93,6 +93,10 @@ select = [
     "TRY203",
     "TRY301",
     "TRY400",
+    # Terse docstrings; see AGENTS.md "Code conventions".
+    "D200",
+    "D210",
+    "D419",
 ]
 ignore = [
     "E501",

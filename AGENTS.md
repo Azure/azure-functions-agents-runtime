@@ -137,8 +137,9 @@ Grounded in `pyproject.toml` and current code:
 - **Type aliases use PEP 695:** `type Foo = Bar` (not `Foo: TypeAlias = Bar`);
   ruff `UP040` enforces this. See `src/azure_functions_agents/discovery/mcp.py`.
 - **Ruff** rules: `E,F,I,B,UP,SIM,RUF,N`, plus a small, evidence-based `TRY`
-  subset (`TRY002,TRY201,TRY203,TRY301,TRY400`); line-length 100 (`E501`
-  ignored). Imports sorted via ruff isort; first-party = `azure_functions_agents`.
+  subset (`TRY002,TRY201,TRY203,TRY301,TRY400`) and `D200,D210,D419`;
+  line-length 100 (`E501` ignored). Imports sorted via ruff isort;
+  first-party = `azure_functions_agents`.
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
@@ -163,6 +164,18 @@ Grounded in `pyproject.toml` and current code:
 - **Use the module constant, never re-inline the literal it represents**
   (URLs, API versions, paths). If you find yourself typing the same literal
   twice, promote it to a constant next to the ones already there.
+- **Docstrings and comments are terse by default.** Ruff enforces the
+  mechanical part (`D200`, `D210`, `D419`); these are the judgement rules:
+  - One line when the name and signature already explain it. Do not restate
+    the signature, and do not add a docstring that says nothing.
+  - Multi-line only for a non-obvious contract, invariant, or gotcha, and then
+    a summary line plus **at most ~4 more lines**.
+  - If the explanation needs more than that, it is a *decision*, not a
+    docstring — put it in the FRD Decisions log and reference it by number
+    (e.g. `_sdk_file_mode` in `transport/aca_sdk.py` cites FRD 0008 #107).
+  - Comments say **why**, not what. Never narrate the next line.
+  - Config files (`pyproject.toml`, CI YAML) get a short pointer, never a
+    rationale essay — that also belongs in the FRD.
 - **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored
   (one-time warning). Do not reintroduce runtime branching.
 - **Logging** goes through the shared `azure_functions_agents._logger.logger`.

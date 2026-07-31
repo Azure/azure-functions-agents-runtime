@@ -303,10 +303,8 @@ class AcaSandboxAdapter:
     async def _cleanup_after_cancelled_create(self, provisioning_attempt_id: str) -> None:
         """Best-effort reconciliation for a create cancelled mid-flight.
 
-        Shielded so the cancellation itself is never masked by cleanup work: a
-        cleanup failure here is logged (with traceback, for operator
-        reconciliation) rather than raised, so the caller's bare ``raise``
-        always re-raises the original ``CancelledError``.
+        Shielded and log-only so a cleanup failure never masks the caller's
+        original ``CancelledError``.
         """
 
         try:
@@ -733,14 +731,9 @@ def _project_file_stat(entry: FileInfo) -> SandboxFileStat:
 def _sdk_file_mode(entry: FileInfo) -> int | None:
     """Read ``FileInfo.mode`` as the POSIX int the service actually sends.
 
-    SDK annotation defect (``azure-containerapps-sandbox==0.1.0b4``):
-    ``FileInfo.mode`` is typed ``str | None``, but ``FileInfo._from_dict``
-    does a verbatim JSON passthrough (``mode=d.get("mode")``) with no
-    coercion, so the real runtime value is whatever the wire sends. A
-    human-authorized live run against real ACA observed ``mode=420`` (an int,
-    POSIX ``0o644``) — the stub is wrong and this ``int | None`` modeling is
-    correct. This is the one deliberate, narrowly-scoped cast permitted at an
-    SDK boundary in this module. See FRD 0008 Decision #107.
+    The pinned SDK's ``str | None`` annotation is wrong — ``_from_dict`` passes
+    the wire value through uncoerced and live ACA sends an int. This is the one
+    permitted SDK-boundary cast here; see FRD 0008 Decision #107.
     """
 
     return cast("int | None", entry.mode)
