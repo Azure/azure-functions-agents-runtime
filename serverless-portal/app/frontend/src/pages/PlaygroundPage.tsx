@@ -190,6 +190,7 @@ export default function PlaygroundPage() {
       )
 
     let streamText = ''
+    let sawError = false
     const handle = (evt: Record<string, unknown>) => {
       switch (evt.type) {
         case 'session':
@@ -225,13 +226,19 @@ export default function PlaygroundPage() {
             })
           break
         }
-        case 'error':
+        case 'error': {
           finishModel()
+          sawError = true
+          const raw = String(evt.content || 'Agent error')
+          const hint = /403|permission/i.test(raw)
+            ? '\n\nThe app’s identity may not have access to the Foundry model. Use “Grant access” on the deploy result, or assign it the Cognitive Services User role on the Foundry account.'
+            : ''
           patchAssistant({
-            content: (streamText ? streamText + '\n\n' : '') + '⚠ ' + String(evt.content || 'Agent error'),
+            content: (streamText ? streamText + '\n\n' : '') + '⚠ ' + raw + hint,
             isError: true,
           })
           break
+        }
         case 'done':
           finishModel()
           break
@@ -271,7 +278,7 @@ export default function PlaygroundPage() {
       }
     }
     finishModel()
-    if (!streamText) patchAssistant({ content: '(no textual response)' })
+    if (!streamText && !sawError) patchAssistant({ content: '(no textual response)' })
   }
 
   const runOnce = async (text: string, a: LiveAgent) => {

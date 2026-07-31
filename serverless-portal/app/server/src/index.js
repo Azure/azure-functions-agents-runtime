@@ -365,6 +365,9 @@ function portalDeploymentUrl(tenantId, subscription, resourceGroup, deploymentNa
 function portalAppDeploymentCenterUrl(tenantId, subscription, resourceGroup, appName) {
   return `${portalRoot(tenantId)}/resource/subscriptions/${subscription}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}/vstscd`
 }
+function portalResourceUrl(tenantId, subscription, resourceGroup, provider, name) {
+  return `${portalRoot(tenantId)}/resource/subscriptions/${subscription}/resourceGroups/${resourceGroup}/providers/${provider}/${name}/overview`
+}
 
 // Best-effort tenant id from the forwarded token, for portal links.
 function tenantFromToken(token) {
@@ -432,11 +435,11 @@ async function pushFilesToSite(id, token, site, files) {
 // Provision (for a new app) then push the source with a remote build, updating
 // the job as each stage completes. Runs detached from the HTTP request.
 async function runDeployJob(id, token, ctx) {
-  const { subscription, resourceGroup, appName, target, dir, deploymentName, fileName } = ctx
+  const { subscription, resourceGroup, appName, target, dir, deploymentName, fileName, tenantId } = ctx
   try {
     if (target.kind === 'new') {
       setJob(id, { message: 'Provisioning Azure resources…' })
-      await provision.provisionFlexApp(token, {
+      const provisioned = await provision.provisionFlexApp(token, {
         subscriptionId: subscription,
         resourceGroup,
         appName,
@@ -445,12 +448,46 @@ async function runDeployJob(id, token, ctx) {
         foundryModel: target.foundryModel,
         deploymentName,
       })
+      if (provisioned?.appInsightsName) {
+        setJob(id, {
+          insightsUrl: portalResourceUrl(
+            tenantId,
+            subscription,
+            resourceGroup,
+            'Microsoft.Insights/components',
+            provisioned.appInsightsName,
+          ),
+        })
+      }
     }
 
     setJob(id, { message: 'Resolving Function App…' })
     const site = await azure.getSite(token, subscription, resourceGroup, appName)
     if (!site) throw new Error(`Function App "${appName}" was not found in "${resourceGroup}".`)
     const principalId = site.identity?.principalId || ''
+
+    // Auto-grant the new app's identity access to the Foundry account, so a
+    // portal-created agent can call its model without a manual RBAC step. Done
+    // before the (slow) source build so role propagation overlaps with it.
+    // Best-effort: if the caller lacks roleAssignments/write the client falls
+    // back to the manual "Grant access" control.
+    let grantOutcome
+    const fa = target.kind === 'new' ? target.foundryAccount : null
+    if (principalId && fa && fa.subscription && fa.resourceGroup && fa.account) {
+      setJob(id, { message: 'Granting the app access to Foundry…' })
+      try {
+        const r = await azure.grantFoundryAccess(token, {
+          subscriptionId: fa.subscription,
+          resourceGroup: fa.resourceGroup,
+          account: fa.account,
+          principalId,
+        })
+        grantOutcome = r.granted?.length ? (r.failed?.length ? 'partial' : 'granted') : 'failed'
+      } catch {
+        grantOutcome = 'failed'
+      }
+      setJob(id, { grantOutcome })
+    }
 
     await pushFilesToSite(id, token, site, await readDirFiles(dir))
 
@@ -459,6 +496,7 @@ async function runDeployJob(id, token, ctx) {
       message: `Deployed "${fileName}" to ${appName}.`,
       url: `https://${site.defaultHostName}`,
       ...(target.kind === 'new' && principalId ? { principalId } : {}),
+      ...(grantOutcome ? { grantOutcome } : {}),
     })
   } catch (err) {
     setJob(id, { status: 'error', message: String(err?.message ?? err) })
@@ -539,7 +577,7 @@ app.post(
         ? portalDeploymentUrl(tenantId, subscription, resourceGroup, deploymentName)
         : portalAppDeploymentCenterUrl(tenantId, subscription, resourceGroup, appName)
     setJob(jobId, { status: 'running', message: 'Starting…', files, url: null, portalUrl })
-    runDeployJob(jobId, token, { subscription, resourceGroup, appName, target, dir, deploymentName, fileName })
+    runDeployJob(jobId, token, { subscription, resourceGroup, appName, target, dir, deploymentName, fileName, tenantId })
 
     res.status(202).json({ jobId, status: 'running', files, portalUrl })
   }),
@@ -559,6 +597,8 @@ app.get(
       ...(job.url ? { url: job.url } : {}),
       ...(job.portalUrl ? { portalUrl: job.portalUrl } : {}),
       ...(job.principalId ? { principalId: job.principalId } : {}),
+      ...(job.insightsUrl ? { insightsUrl: job.insightsUrl } : {}),
+      ...(job.grantOutcome ? { grantOutcome: job.grantOutcome } : {}),
     })
   }),
 )
