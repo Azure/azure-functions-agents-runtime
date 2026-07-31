@@ -10,7 +10,8 @@ from types import MappingProxyType
 from uuid import UUID, uuid4
 
 from .._session_id import SESSION_ID_PATTERN
-from .models import (
+from ._label_encoding import encode_label_safe_digest
+from .session_models import (
     AppIdentity,
     EntraPrincipal,
     EntraUserOwnerContext,
@@ -148,7 +149,8 @@ def compute_app_hash(
     canonicalizers: Mapping[str, AppCanonicalizer] = APP_CANONICALIZERS,
 ) -> str:
     canonical = _canonicalizer_for_app(version, canonicalizers)(app_identity)
-    return f"{version}-{hashlib.sha256(canonical).hexdigest()}"
+    digest = hashlib.sha256(canonical).digest()
+    return f"{version}-{encode_label_safe_digest(digest)}"
 
 
 def compute_owner_hash(
@@ -158,7 +160,8 @@ def compute_owner_hash(
     canonicalizers: Mapping[str, OwnerCanonicalizer] = OWNER_CANONICALIZERS,
 ) -> str:
     canonical = _canonicalizer_for_owner(version, canonicalizers)(owner)
-    return f"{version}-{hashlib.sha256(canonical).hexdigest()}"
+    digest = hashlib.sha256(canonical).digest()
+    return f"{version}-{encode_label_safe_digest(digest)}"
 
 
 def verify_app_hash(

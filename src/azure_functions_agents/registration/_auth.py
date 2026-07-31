@@ -36,7 +36,7 @@ import azure.functions as func
 
 from ..config import EndpointAuthConfig, EntraAuthConfig
 from ..config.env import runtime_env_value
-from ..session_state.models import (
+from ..session_state.session_models import (
     EntraPrincipal,
     FunctionAppPrincipal,
     OwnerPrincipal,

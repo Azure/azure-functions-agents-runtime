@@ -187,16 +187,25 @@ Grounded in `pyproject.toml` and current code:
   Parsing untrusted external input is *not* an exception to this — it is a
   different job, done with a strict model per the rule above.
 - **Frozen dataclasses validate via a classmethod `create()` factory**, never
-  `__post_init__` + `object.__setattr__`. See `session_state/models.py`
+  `__post_init__` + `object.__setattr__`. See `session_state/session_models.py`
   or `transport/transport_models.py` for the pattern: a module-level
   `_validate_*`/`_normalize_*` helper does the work, `create()` calls it then
   constructs with `cls(...)`.
-- **No nested try/except.** Flatten into single-level helper functions with
-  early returns instead of a `try` inside another `try`'s body or handler.
+- **Avoid deep nesting of control flow** — `if`/`for`/`while`/`try` nested
+  inside each other beyond one level. This covers a `try` inside another
+  `try`'s body or handler, an `if` chain nested inside an `except` handler,
+  and an `if` nested inside another `if` inside a loop body alike. Flatten
+  into single-level guard clauses, early returns/continues, or an extracted
+  module-level function/private method instead (see
+  `session_state/store.py`'s `_resolve_admission_conflict` and
+  `_require_matching_terminal_outcome` for the pattern applied to both an
+  `except` handler and a loop body). Ruff's `PLR1702` (too-many-nested-blocks)
+  and `C901` (complexity) would catch this automatically, but both have
+  pre-existing repo-wide violations outside any one phase's scope to fix,
+  so this stays a reviewed, written convention rather than a lint gate.
 - **Module names must be globally unique and intent-revealing** — no two
-  modules named bare `models.py`, `utils.py`, etc. (`transport/transport_models.py`
-  follows this; `session_state/models.py` is a known pending rename owned by
-  whichever phase touches that module next — don't rename it as a drive-by).
+  modules named bare `models.py`, `utils.py`, etc. (`session_state/session_models.py`
+  and `transport/transport_models.py` both follow this).
   Tests mirror source module names (`tests/test_<module>.py`; see §6).
 - **Use the module constant, never re-inline the literal it represents**
   (URLs, API versions, paths). If you find yourself typing the same literal

@@ -26,10 +26,15 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-# Preview ACA Sandbox transport. Kept optional so the default in-language-worker
-# runtime has no preview-SDK dependency edge.
+# ACA Sandbox session runtime (FRD 0008) — optional. Install
+# `azurefunctions-agents-runtime[aca_sandbox]` to enable `session_runtime.aca_sandbox`.
+# Bundles the pinned preview ACA Sandbox transport SDK and azure-data-tables
+# for the Table-backed session state store. Kept optional so the default
+# in-lang-worker runtime has no preview-SDK/Table-SDK dependency edge (session_state
+# lazily imports azure.data.tables only inside functions -- see connection.py/store.py).
 aca_sandbox = [
     "azure-containerapps-sandbox==0.1.0b4",
+    "azure-data-tables>=12.7.0,<13",
 ]
 # Azure Monitor exporter — optional. Install `azurefunctions-agents-runtime[monitor]` to export the
 # runtime's OpenTelemetry spans/metrics to Application Insights. Without it the runtime emits spans
@@ -53,6 +58,12 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
+    # Bring azure-data-tables into dev directly (not via the [aca_sandbox] extra) so
+    # mypy/pytest can exercise session_state's Table store and its real-Azurite
+    # tests without a separate install step. Deliberately does NOT pull in the
+    # preview azure-containerapps-sandbox SDK that also lives in [aca_sandbox] --
+    # that SDK stays out of the default dev/CI install (see the mypy override below).
+    "azure-data-tables>=12.7.0,<13",
     # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
     # every sample against the editable repo install (no per-sample requirements.txt install).
     # daily-azure-report:
