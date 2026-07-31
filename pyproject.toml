@@ -87,53 +87,20 @@ select = [
     "SIM",
     "RUF",
     "N",
-    # Narrow, evidence-based additions from the P4a transport review (see
-    # AGENTS.md "Code conventions" for the human-readable rules these back).
-    # Each of these four passes cleanly repo-wide with zero pre-existing
-    # violations, so they were added outright rather than scoped.
-    "TRY002",  # raise-vanilla-class: never raise bare Exception/BaseException;
-               # this codebase always raises a specific, typed exception.
-    "TRY201",  # verbose-raise: re-raise a just-caught exception with a bare
-               # `raise`, not `raise exc`, so the traceback is never truncated.
-    "TRY203",  # useless-try-except: a try/except that only immediately
-               # re-raises with no other effect should not exist.
-    "TRY301",  # raise-within-try (candidate for extraction): directly targets
-               # the "abstract raise to an inner function" review feedback
-               # that motivated flattening aca_sdk.py's nested try/except.
-               # Two pre-existing hits in runner.py are scoped below rather
-               # than mass-refactored (out of scope for this PR).
-    "TRY400",  # error-instead-of-exception: use logger.exception() (keeps the
-               # traceback) instead of logger.error() inside an except block.
+    # try/except hygiene; see AGENTS.md "Code conventions".
+    "TRY002",
+    "TRY201",
+    "TRY203",
+    "TRY301",
+    "TRY400",
 ]
 ignore = [
     "E501",
 ]
 
-# TRY003 (raise-vanilla-args) and TRY004 (type-check-without-type-error) were
-# evaluated and rejected: TRY003 flags ~269 pre-existing call sites across the
-# repo (including the session_state factory pattern this PR's Theme B mirrors)
-# and fights the established "raise a typed exception with a descriptive
-# f-string message" idiom; TRY004 flags 7 pre-existing call sites where we
-# deliberately raise a domain-specific exception (e.g. SandboxProvisioningError)
-# instead of a generic TypeError, which is the correct design, not a defect.
-# Enabling either would force a repo-wide style change unrelated to this PR.
-# ANN401 (dynamically-typed-expression `Any`), PLR1702 (too-many-nested-blocks,
-# preview-only), and C901 (mccabe complexity) were also evaluated and rejected:
-# ANN401 flags 460 pre-existing `Any` usages outside transport/; PLR1702
-# requires repo-wide `preview = true`, which surfaces 126 unrelated new
-# findings across already-stable rule categories just from enabling preview
-# mode; C901 flags 15 pre-existing complex functions, 14 of them in actively
-# maintained files outside this PR's scope (app.py, runner.py, workflows/*,
-# discovery/*, registration/*, system_tools/*). None of these can pass
-# cleanly without a repo-wide refactor this PR does not own, so the
-# corresponding conventions are captured in AGENTS.md instead of lint.
-
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["N802", "N803"]
-# Pre-existing TRY301 findings outside this PR's scope; see the TRY301
-# justification above. Not "legacy" in the deprecated sense — just code this
-# PR does not otherwise touch — so the ignore is scoped to this one file
-# rather than dropping the rule.
+# Pre-existing findings this PR does not otherwise touch.
 "src/azure_functions_agents/runner.py" = ["TRY301"]
 
 [tool.ruff.lint.isort]
