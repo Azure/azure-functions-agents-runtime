@@ -1,12 +1,12 @@
-"""Typed, fail-closed errors for the P3b Table-backed session state store.
+"""Typed, fail-closed errors for the Table-backed session state store.
 
-These are distinct from :class:`~.session_models.SessionStateContractError`
-(P3a's pure shape/contract validation). Store errors describe *operational*
-outcomes of talking to Azure Table Storage: configuration problems, optimistic
-concurrency losses, admission/idempotency conflicts, and service
-unavailability. A corrupt stored entity that fails P3a's contract validation
-is re-raised here as :class:`CorruptEntityError` so store callers never need
-to catch :class:`SessionStateContractError` directly.
+These are distinct from :class:`~.session_models.SessionStateContractError`,
+which performs pure shape/contract validation. Store errors describe
+*operational* outcomes of talking to Azure Table Storage: configuration
+problems, optimistic concurrency losses, admission/idempotency conflicts, and
+service unavailability. A corrupt stored entity that fails that contract
+validation is re-raised here as :class:`CorruptEntityError` so store callers
+never need to catch :class:`SessionStateContractError` directly.
 
 Every error in this module is intentionally narrow and carries only the
 non-secret context a caller needs to react correctly (e.g. the current
@@ -18,7 +18,7 @@ from __future__ import annotations
 
 
 class SessionStateStoreError(Exception):
-    """Base class for all P3b session-state store errors."""
+    """Base class for all session-state store errors."""
 
 
 class StateStoreConfigurationError(SessionStateStoreError):
@@ -113,7 +113,7 @@ class TerminalStateConflictError(SessionStateStoreError):
 
 
 class CorruptEntityError(SessionStateStoreError):
-    """A stored entity failed P3a's typed validation when read back.
+    """A stored entity failed typed validation when read back.
 
     Never coerced into a default/empty result -- a corrupt row is a fail-closed
     condition surfaced to the caller, chained from the underlying

@@ -563,6 +563,33 @@ async def test_admit_run_idempotency_row_collision_during_transaction_conflicts_
 
 
 @pytest.mark.asyncio
+async def test_admit_run_idempotency_row_collision_not_found_on_reread_is_retryable() -> None:
+    """Same ``exc.index == 2`` shape, but the re-check (unpatched, real) finds
+    NO idempotency row at all -- an inconsistent state where the transaction
+    claimed a collision yet a consistent re-read shows nothing. There is no
+    "existing run" to report here, so this must raise
+    :class:`ConcurrencyConflictError` (retryable) rather than fabricate an
+    :class:`IdempotencyConflictError` pointing at the caller's own new run id.
+    """
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="ready", active_run_id=None))
+
+    # No winner run/idempotency row is ever created in `fake` -- the upfront
+    # pre-check and the post-failure re-check both genuinely find nothing.
+    fake.transaction_failure = (2, _http_error(409, "EntityAlreadyExists"))
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="loser-run"),
+        _run(run_id="loser-run"),
+        _idempotency(request_hash=_fake_sha256("payload"), run_id="loser-run"),
+    )
+
+    with pytest.raises(ConcurrencyConflictError):
+        await store.admit_run(records)
+
+
+@pytest.mark.asyncio
 async def test_admit_run_replays_same_key_same_payload() -> None:
     fake = _FakeTableClient()
     store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]

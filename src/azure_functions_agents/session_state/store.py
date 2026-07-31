@@ -1,17 +1,18 @@
 """Azure Table-backed session state store: CRUD, ETag/CAS, and admission EGT.
 
-Implements the P3b portion of FRD 0008: Table connection/settings resolution
-lives in :mod:`.connection`, pure identity/row contracts in :mod:`.identity`
-and :mod:`.session_models`; this module is the async I/O layer that reads and
-writes :class:`~.session_models.DurableSessionRecord`,
+Table connection/settings resolution lives in :mod:`.connection`, pure
+identity/row contracts in :mod:`.identity` and :mod:`.session_models`; this
+module is the async I/O layer that reads and writes
+:class:`~.session_models.DurableSessionRecord`,
 :class:`~.session_models.DurableRunRecord`, and
 :class:`~.session_models.DurableIdempotencyRecord` rows against a real Azure
 Table (or Azurite).
 
-Scope boundary (Decision 91/97): this module owns Table I/O, ETag/CAS,
+Scope boundary (Decision 91/97/102): this module owns Table I/O, ETag/CAS,
 one-active-run admission, idempotency dedup, terminal adoption, and
 tombstoning. It does **not** verify a live sandbox manifest, bind a region or
-storage epoch, or implement reaper/reconciliation policy -- those are P3c/P3d.
+storage epoch, or implement reaper/reconciliation policy -- see
+``docs/architecture.md`` for which later stage owns each of those.
 
 The Azure Tables SDK is imported lazily (inside functions/methods, never at
 module import time) so importing this module never requires the
@@ -23,6 +24,7 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
 
 from .errors import (
@@ -50,11 +52,20 @@ from .session_models import (
     IdempotencyRowKey,
     OwnerPartition,
     SessionStateContractError,
+    TableEntity,
     validate_generation_transition,
 )
 
 if TYPE_CHECKING:
+    from azure.core import MatchConditions
+    from azure.core.exceptions import HttpResponseError
     from azure.data.tables.aio import TableClient, TableServiceClient
+
+# One Table entity-group-transaction operation: a verb ("create"/"update")
+# paired with the entity dict and, for updates, the SDK's conditional-write
+# kwargs. Mirrors `TableClient.submit_transaction`'s own declared operations
+# signature (verified against the installed `azure-data-tables` stub).
+type _TransactionOp = tuple[str, TableEntity] | tuple[str, TableEntity, Mapping[str, Any]]
 
 # Run statuses that are terminal (never transition further). Kept local to the
 # store because "terminal" is an I/O-layer concept (adoption/slot release).
@@ -64,8 +75,8 @@ _TERMINAL_RUN_STATUSES = TERMINAL_RUN_STATUSES
 
 # The only two session statuses under which `active_run_id` may be set.
 # Releasing the slot always transitions to "ready" -- the idle-but-alive
-# state -- because P3a's model forbids any status outside this pair from
-# carrying an active_run_id.
+# state -- because the session model forbids any status outside this pair
+# from carrying an active_run_id.
 _STATUSES_OWNING_ACTIVE_RUN = SESSION_STATUSES_REQUIRING_ACTIVE_RUN
 
 _MAX_ADOPTION_ATTEMPTS = 5
@@ -201,7 +212,7 @@ class SessionStateStore(Protocol):
         previous: DurableSessionRecord,
         etag: str,
         tombstone_reason: str,
-        updated_at: Any,
+        updated_at: datetime,
     ) -> str:
         """Conditionally tombstone a session, preserving its historical fields."""
 
@@ -284,7 +295,7 @@ class AzureTableSessionStateStore:
         previous: DurableSessionRecord,
         etag: str,
         tombstone_reason: str,
-        updated_at: Any,
+        updated_at: datetime,
     ) -> str:
         tombstoned = DurableSessionRecord.create(
             owner_partition=previous.owner_partition,
@@ -370,7 +381,7 @@ class AzureTableSessionStateStore:
                 active_run_id=current_session.record.active_run_id,
             )
 
-        operations: list[Any] = [
+        operations: list[_TransactionOp] = [
             _update_op(records.session, etag=current_session.etag),
             _create_op(records.run),
         ]
@@ -398,9 +409,14 @@ class AzureTableSessionStateStore:
                 )
                 if raced is not None:
                     return raced
-                raise IdempotencyConflictError(
-                    "idempotency key already used with a different payload",
-                    existing_run_id=records.run.run_id,
+                # The transaction reported an idempotency-row conflict, but a
+                # consistent re-read found no such row -- we cannot identify
+                # which run "won", so surface a retryable concurrency
+                # conflict rather than fabricating existing_run_id from our
+                # own new run.
+                raise ConcurrencyConflictError(
+                    f"idempotency row for session {session_id!r} reported a "
+                    "write conflict but could not be re-read; retry the admission"
                 ) from exc
             raise _map_http_error(exc, context="admit_run") from exc
         except HttpResponseError as exc:
@@ -496,7 +512,7 @@ class AzureTableSessionStateStore:
             released_session = _release_active_run(
                 session_read.record, updated_at=terminal_run.updated_at
             )
-            operations: list[Any] = [
+            operations: list[_TransactionOp] = [
                 _update_op(terminal_run, etag=current_run.etag),
                 _update_op(released_session, etag=session_read.etag),
             ]
@@ -618,19 +634,21 @@ async def _fetch_first_page_or_none(pager: Any) -> Any | None:
         return None
 
 
-def _if_not_modified() -> Any:
+def _if_not_modified() -> MatchConditions:
     from azure.core import MatchConditions
 
     return MatchConditions.IfNotModified
 
 
-def _create_op(record: DurableSessionRecord | DurableRunRecord | DurableIdempotencyRecord) -> Any:
+def _create_op(
+    record: DurableSessionRecord | DurableRunRecord | DurableIdempotencyRecord,
+) -> _TransactionOp:
     return ("create", record.to_table_entity())
 
 
 def _update_op(
     record: DurableSessionRecord | DurableRunRecord | DurableIdempotencyRecord, *, etag: str
-) -> Any:
+) -> _TransactionOp:
     from azure.data.tables import UpdateMode
 
     return (
@@ -640,10 +658,12 @@ def _update_op(
     )
 
 
-def _release_active_run(session: DurableSessionRecord, *, updated_at: Any) -> DurableSessionRecord:
+def _release_active_run(
+    session: DurableSessionRecord, *, updated_at: datetime
+) -> DurableSessionRecord:
     """Build the released-slot session record after a terminal run is adopted.
 
-    Always targets ``status="ready"`` because P3a's model only allows
+    Always targets ``status="ready"`` because the session model only allows
     ``active_run_id`` to be set while status is ``running`` or ``canceling``
     (:data:`_STATUSES_OWNING_ACTIVE_RUN`) -- those are the only two "from"
     states this helper is ever called with.
@@ -706,7 +726,14 @@ def _etag_from_write_result(result: Mapping[str, object]) -> str:
     return etag
 
 
-def _etag_from_entity(entity: Any) -> str:
+def _etag_from_entity(entity: Mapping[str, object]) -> str:
+    # `entity` is untrusted external Table data -- the same `Mapping[str,
+    # object]` boundary type `session_models.py`'s `from_table_entity`
+    # methods use for raw rows. The real SDK's `TableEntity.metadata` is a
+    # genuine property, but `getattr` stays deliberately defensive here
+    # because callers may also pass the lightweight `_FakeEntity` test double
+    # (see `tests/test_session_state_store_errors.py`), which duck-types the
+    # same shape without subclassing the SDK type.
     metadata = getattr(entity, "metadata", None)
     etag = metadata.get("etag") if isinstance(metadata, Mapping) else None
     if not isinstance(etag, str) or not etag:
@@ -714,8 +741,13 @@ def _etag_from_entity(entity: Any) -> str:
     return etag
 
 
-def _map_http_error(exc: Any, *, context: str) -> SessionStateStoreError:
-    status_code = getattr(exc, "status_code", None)
+def _map_http_error(exc: HttpResponseError, *, context: str) -> SessionStateStoreError:
+    status_code = exc.status_code
+    # `error_code` is not a statically declared attribute of
+    # `HttpResponseError` -- Azure's pipeline attaches it dynamically from
+    # the `x-ms-error-code` response header, so `getattr` is the correct,
+    # narrow way to read it (matches the test fixtures in
+    # `tests/test_session_state_store_errors.py`, which set it the same way).
     error_code = getattr(exc, "error_code", None)
     return StateStoreUnavailableError(
         f"Table service call failed ({context}): status={status_code} error_code={error_code}",

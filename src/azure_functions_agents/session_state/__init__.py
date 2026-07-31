@@ -1,8 +1,9 @@
-"""Pure identity, key, and durable-row contracts for ACA session state.
+"""Session identity, durable-row contracts, and the Azure Table-backed store.
 
-P3b adds the Table-backed store layer on top of P3a's pure contracts:
-:mod:`.connection` (AzureWebJobsStorage resolution + state-store fingerprint),
-:mod:`.errors` (typed store errors), and :mod:`.store` (async CRUD/CAS/EGT).
+Combines pure identity/serialization contracts (:mod:`.identity`,
+:mod:`.session_models`) with the async I/O layer built on top of them:
+``AzureWebJobsStorage`` resolution (:mod:`.connection`), typed store errors
+(:mod:`.errors`), and CRUD/CAS/EGT against Azure Table Storage (:mod:`.store`).
 """
 
 from ._label_encoding import (

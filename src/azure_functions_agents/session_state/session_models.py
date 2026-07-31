@@ -101,10 +101,10 @@ _STATUSES_FORBIDDING_ACTIVE_RUN: frozenset[str] = frozenset(
     }
 )
 
-# Public aliases for the session/run status invariants above. P3b's store
+# Public aliases for the session/run status invariants above. The store
 # layer (see `store.py`) needs these when deciding how a terminal run
 # adoption may transition the owning session's status, without duplicating
-# the literal status sets P3a already defines and validates against.
+# the literal status sets this module already defines and validates against.
 SESSION_STATUSES_REQUIRING_ACTIVE_RUN = _STATUSES_REQUIRING_ACTIVE_RUN
 SESSION_STATUSES_FORBIDDING_ACTIVE_RUN = _STATUSES_FORBIDDING_ACTIVE_RUN
 TERMINAL_RUN_STATUSES: frozenset[str] = frozenset(
@@ -113,7 +113,7 @@ TERMINAL_RUN_STATUSES: frozenset[str] = frozenset(
 
 
 class SessionStateContractError(ValueError):
-    """Raised when identity or durable-row data violates the P3a contract."""
+    """Raised when identity or durable-row data violates the session-state contract."""
 
 
 def _normalize_guid(value: str, field_name: str) -> str:
@@ -261,7 +261,7 @@ def validate_generation_transition(
 def validate_state_store_fingerprint(value: str) -> str:
     """Validate the credential-free ``s1-<52 lower-case base32>`` fingerprint shape.
 
-    This only validates shape (P3a contract). P3b computes the fingerprint from
+    This only validates shape. The fingerprint itself is computed from
     normalized, non-secret ``AzureWebJobsStorage`` Table account/endpoint
     identity (see :mod:`azure_functions_agents.session_state.connection`).
     """
@@ -337,7 +337,7 @@ class FunctionAppPrincipal:
 
 @dataclass(frozen=True, slots=True)
 class TriggerBindingPrincipal:
-    """Reserved owner input for FRD 0009; unsupported in P3a."""
+    """Reserved owner input for FRD 0009; not yet supported."""
 
 
 type OwnerPrincipal = EntraPrincipal | FunctionAppPrincipal | TriggerBindingPrincipal
@@ -396,7 +396,7 @@ class FunctionAppOwnerContext:
 
 @dataclass(frozen=True, slots=True, repr=False)
 class TriggerBindingOwnerContext:
-    """Reserved owner-context discriminator; it cannot be resolved or hashed in P3a."""
+    """Reserved owner-context discriminator; it cannot currently be resolved or hashed."""
 
     app_identity: AppIdentity
     agent_slug: str
@@ -529,7 +529,7 @@ type DurableRowKey = SessionRowKey | RunRowKey | IdempotencyRowKey
 
 
 def parse_row_key(value: str) -> DurableRowKey:
-    """Parse a P3a durable row key without accepting ambiguous extra components."""
+    """Parse a durable row key without accepting ambiguous extra components."""
     parts = value.split(":")
     if len(parts) == 2 and parts[0] == "session":
         return SessionRowKey.create(parts[1])
@@ -559,7 +559,7 @@ def encode_snapshot_ids(snapshot_ids: Sequence[str]) -> str:
 
 
 def decode_snapshot_ids(value: str) -> tuple[str, ...]:
-    """Decode only the canonical bounded JSON representation written by P3a."""
+    """Decode only the canonical bounded JSON representation produced by :func:`encode_snapshot_ids`."""
     try:
         decoded: object = json.loads(value)
     except json.JSONDecodeError as exc:
@@ -915,7 +915,7 @@ class DurableIdempotencyRecord:
 
 @dataclass(frozen=True, slots=True)
 class AdmissionRecords:
-    """Rows that a future P3b admission writes in one owner-partition EGT."""
+    """Rows that one admission writes together in a single owner-partition EGT."""
 
     session: DurableSessionRecord
     run: DurableRunRecord
