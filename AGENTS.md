@@ -159,12 +159,33 @@ Grounded in `pyproject.toml` and current code:
 - **Pydantic v2** for all config models (`config/schema.py`). When a field +
   validator is shared across provider/sub-models, declare it once on the common
   base class rather than duplicating per subclass.
+- **Parse external documents with a strict Pydantic model**, not hand-rolled
+  `isinstance`/`cast` chains. This applies wherever an outside document is
+  parsed into a shape we own — config files, durable rows read back from
+  storage, auth headers, the sandbox session manifest. Three rules:
+  - `model_config = ConfigDict(strict=True, extra=...)`. Without `strict`,
+    Pydantic coerces `"123"` → `123`, which quietly defeats the type check.
+    Use `extra="forbid"` unless another component legitimately owns extra
+    sections, in which case `extra="ignore"`.
+  - **Decode with `json.loads(..., object_pairs_hook=...)` that rejects
+    duplicate keys, then `model_validate(obj)`** — do *not* use
+    `model_validate_json`. Both `json.loads` and Pydantic's JSON parser
+    silently keep the *last* duplicate, so one document can mean two things to
+    two readers.
+  - **Never surface `ValidationError`** across a trust boundary — its message
+    embeds the offending values. Catch it and raise the module's own error;
+    use `err["loc"]` if you need field names.
+
+  See `transport/manifest.py` for the worked example. Not everything that
+  looks similar qualifies: runtime type *dispatch* over third-party objects
+  (`registration/_trigger_serialization.py`, `execution/compat.py`) and
+  *user-authored* schemas validated with `jsonschema`
+  (`registration/_handlers.py`) are correct as they are.
 - **No defensive `getattr`/`isinstance`/`cast`/`Any` against an already-typed
   source** (SDK responses, our own dataclasses). Import/type the boundary
   properly instead and read fields directly; delete the runtime re-validation.
-  Exception: parsing genuinely untrusted external input (e.g. the ACA sandbox's
-  session manifest in `transport/manifest.py`) is parsing, not defensive
-  coding — keep that validation strict.
+  Parsing untrusted external input is *not* an exception to this — it is a
+  different job, done with a strict model per the rule above.
 - **Frozen dataclasses validate via a classmethod `create()` factory**, never
   `__post_init__` + `object.__setattr__`. See `session_state/models.py`
   or `transport/transport_models.py` for the pattern: a module-level

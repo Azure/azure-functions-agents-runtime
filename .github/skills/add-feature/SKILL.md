@@ -101,6 +101,11 @@ the section that rots first, because every phase appends and nobody prunes.
      provenance.
    - **Terse docstrings** — one line when the signature already explains it;
      multi-line only for a non-obvious contract, and then ≤ ~4 extra lines.
+   - **Parse external documents with a strict Pydantic model** (`strict=True`),
+     decoding via `json.loads(..., object_pairs_hook=...)` to reject duplicate
+     keys, and never letting `ValidationError` cross a trust boundary. See
+     `AGENTS.md` §5 — this replaces hand-rolled `isinstance`/`cast` chains
+     wherever an outside document becomes a shape we own.
    - **Don't reach into another phase's modules.** If a change you want (a
      rename, a shared helper) lives in code another in-flight phase owns, ask
      that phase to make it rather than doing it as a drive-by — it will collide
