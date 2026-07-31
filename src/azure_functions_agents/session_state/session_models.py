@@ -78,7 +78,7 @@ _RUN_STATUSES: frozenset[str] = frozenset(
 # Label-safe (base32) app/owner hash: e.g. "a1-<52 lower-case base32 chars>". ACA
 # Sandbox labels reject values over 63 characters, so this is the ONE canonical
 # shape used everywhere -- Table partition keys, manifests, paths, and ACA labels
-# alike (no hex/base32 dual representation; see Decisions 106/113).
+# alike (no hex/base32 dual representation).
 _HASH_PATTERN = re.compile(rf"^[ao][1-9][0-9]*-{LABEL_SAFE_PAYLOAD_GROUP}$")
 _OWNER_VERSION_PATTERN = re.compile(r"^o[1-9][0-9]*$")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")

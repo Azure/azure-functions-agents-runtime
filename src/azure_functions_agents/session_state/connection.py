@@ -1,10 +1,10 @@
 """``AzureWebJobsStorage`` Table connection resolution and state-store fingerprint.
 
 Session state always reuses the Function App's own ``AzureWebJobsStorage``
-account (Decision #86) -- there is no dedicated/alternate state-account
-setting. This module resolves a usable Azure Table connection from it and
-derives ``compute_state_store_fingerprint``'s non-secret ``s1-<52 base32>``
-identity token, following the same precedence and caching shape as
+account -- there is no dedicated/alternate state-account setting. This module
+resolves a usable Azure Table connection from it and derives
+``compute_state_store_fingerprint``'s non-secret ``s1-<52 base32>`` identity
+token, following the same precedence and caching shape as
 :mod:`azure_functions_agents._blob_history`:
 
 * ``AzureWebJobsStorage`` -- connection string (local dev, Azurite, or a real
@@ -97,7 +97,7 @@ def resolve_table_connection_settings(
         "Session state requires AzureWebJobsStorage (connection string) or "
         f"{_TABLE_SERVICE_URI_ENV} (identity-based) to be configured; neither "
         "was found. Session state has no dedicated-account or in-memory "
-        "fallback (Decision #86)."
+        "fallback."
     )
 
 
@@ -158,8 +158,8 @@ def compute_state_store_fingerprint(service_client: TableServiceClient) -> str:
     Same account with a rotated key/credential yields the same fingerprint
     (the key/credential never enters the hashed bytes); a different account
     or endpoint always differs. Uses the same delimiter-safe canonical framing
-    as the ``a1``/``o1`` identity hashes for consistency (Decision 89), then
-    the same label-safe base32 encoding as those tokens (Decisions 106/113).
+    and label-safe base32 encoding as the ``a1``/``o1`` identity hashes, for
+    consistency.
     """
     import hashlib
 

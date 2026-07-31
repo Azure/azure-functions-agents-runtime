@@ -1,4 +1,4 @@
-"""Real Azurite Table-service tests for P3b's session state store.
+"""Real Azurite Table-service tests for the session state store.
 
 Unlike ``tests/test_session_state_store_errors.py`` (a fast, deterministic
 fake-backed suite), these tests exercise the ACTUAL optimistic-concurrency
@@ -79,7 +79,7 @@ _BAD_KEY_CONNECTION_STRING = (
 
 
 def _unique_table_name() -> str:
-    return f"P3bTest{uuid4().hex[:20]}"
+    return f"SessionStateTest{uuid4().hex[:20]}"
 
 
 def _new_table_client(table_name: str, *, connection_string: str = DEV_CONNECTION_STRING):  # type: ignore[no-untyped-def]

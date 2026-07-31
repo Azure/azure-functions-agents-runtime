@@ -8,11 +8,11 @@ module is the async I/O layer that reads and writes
 :class:`~.session_models.DurableIdempotencyRecord` rows against a real Azure
 Table (or Azurite).
 
-Scope boundary (Decisions 91/116/118): this module owns Table I/O, ETag/CAS,
-one-active-run admission, idempotency dedup, terminal adoption, and
-tombstoning. It does **not** verify a live sandbox manifest, bind a region or
-storage epoch, or implement reaper/reconciliation policy -- see
-``docs/architecture.md`` for which later stage owns each of those.
+Scope boundary: this module owns Table I/O, ETag/CAS, one-active-run
+admission, idempotency dedup, terminal adoption, and tombstoning. It does
+**not** verify a live sandbox manifest, bind a region or storage epoch, or
+implement reaper/reconciliation policy -- see ``docs/architecture.md`` for
+which later stage owns each of those.
 
 The Azure Tables SDK is imported lazily (inside functions/methods, never at
 module import time) so importing this module never requires the
@@ -59,6 +59,7 @@ from .session_models import (
 if TYPE_CHECKING:
     from azure.core import MatchConditions
     from azure.core.exceptions import HttpResponseError
+    from azure.data.tables import TableEntity as SdkTableEntity
     from azure.data.tables.aio import TableClient, TableServiceClient
 
 # One Table entity-group-transaction operation: a verb ("create"/"update")
@@ -401,17 +402,11 @@ class AzureTableSessionStateStore:
             results = await self._table_client.submit_transaction(operations)
         except TableTransactionError as exc:
             if exc.index == 0:
-                # The session-update op lost its ETag CAS. This is very
-                # often the SAME race that would otherwise show up as an
-                # index-2 idempotency-row collision: whichever op Azure
-                # Table reports first in an EGT is index 0, and a
-                # concurrent winning admission's session-update always
-                # invalidates our ETag before its idempotency-row create
-                # would independently conflict with ours. So a same-key/
-                # same-payload race must be replay-checked here too, not
-                # just at index 2, or the loser gets a spurious active-run
-                # conflict instead of the idempotent replay the contract
-                # promises.
+                # Lost the session ETag CAS -- but a same-key/same-payload
+                # race also lands here (not index 2), since a winner's
+                # commit invalidates our ETag before its idempotency row
+                # could conflict. Check idempotency before treating this
+                # as an active-run conflict.
                 if records.idempotency is not None:
                     raced = await self._try_replay_idempotency(
                         partition, session_id, records.idempotency
@@ -595,7 +590,7 @@ class AzureTableSessionStateStore:
 
     async def _get_entity(
         self, owner_partition: OwnerPartition, row_key: str
-    ) -> Mapping[str, object]:
+    ) -> SdkTableEntity:
         from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
 
         try:
@@ -752,16 +747,8 @@ def _etag_from_write_result(result: Mapping[str, object]) -> str:
     return etag
 
 
-def _etag_from_entity(entity: Mapping[str, object]) -> str:
-    # `entity` is untrusted external Table data -- the same `Mapping[str,
-    # object]` boundary type `session_models.py`'s `from_table_entity`
-    # methods use for raw rows. The real SDK's `TableEntity.metadata` is a
-    # genuine property, but `getattr` stays deliberately defensive here
-    # because callers may also pass the lightweight `_FakeEntity` test double
-    # (see `tests/test_session_state_store_errors.py`), which duck-types the
-    # same shape without subclassing the SDK type.
-    metadata = getattr(entity, "metadata", None)
-    etag = metadata.get("etag") if isinstance(metadata, Mapping) else None
+def _etag_from_entity(entity: SdkTableEntity) -> str:
+    etag = entity.metadata.get("etag")
     if not isinstance(etag, str) or not etag:
         raise StateStoreUnavailableError("Table entity response did not include an ETag")
     return etag
@@ -769,11 +756,11 @@ def _etag_from_entity(entity: Mapping[str, object]) -> str:
 
 def _map_http_error(exc: HttpResponseError, *, context: str) -> SessionStateStoreError:
     status_code = exc.status_code
-    # `error_code` is not a statically declared attribute of
-    # `HttpResponseError` -- Azure's pipeline attaches it dynamically from
-    # the `x-ms-error-code` response header, so `getattr` is the correct,
-    # narrow way to read it (matches the test fixtures in
-    # `tests/test_session_state_store_errors.py`, which set it the same way).
+    # azure-data-tables' error decoder (_error._decode_error) builds the
+    # exception via `error_type(message=..., response=...)` and only attaches
+    # `error_code` as a plain attribute afterward -- it is never passed
+    # through `__init__` or declared on `HttpResponseError`, so `getattr` is
+    # the correct way to read it.
     error_code = getattr(exc, "error_code", None)
     return StateStoreUnavailableError(
         f"Table service call failed ({context}): status={status_code} error_code={error_code}",
