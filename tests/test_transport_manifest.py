@@ -145,6 +145,9 @@ def test_manifest_verifier_rejects_repointed_live_group_even_if_manifest_matches
         b"[]",
         b'{"session_id": "partial"}',
         json.dumps({**asdict(_expected()), "generation": "4"}).encode("utf-8"),
+        json.dumps({**asdict(_expected()), "generation": True}).encode("utf-8"),
+        json.dumps({**asdict(_expected()), "generation": -1}).encode("utf-8"),
+        json.dumps({**asdict(_expected()), "session_id": ""}).encode("utf-8"),
         json.dumps(
             {
                 **asdict(_expected()),

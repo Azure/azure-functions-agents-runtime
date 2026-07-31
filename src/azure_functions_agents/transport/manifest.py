@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Annotated, Any
+
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from .transport_models import (
     ProvisionedSandboxIdentity,
@@ -12,6 +14,9 @@ from .transport_models import (
     SandboxProvisioningError,
     normalize_sandbox_group_resource_id,
 )
+
+type _ManifestText = Annotated[str, StringConstraints(min_length=1)]
+type _ManifestCount = Annotated[int, Field(ge=0)]
 
 # Wire contract: the harness writes its manifest at exactly this path inside
 # every sandbox, so both sides must agree on this literal string.
@@ -80,72 +85,54 @@ class ExpectedSandboxManifestBinding:
         )
 
 
-@dataclass(frozen=True, slots=True)
-class ObservedSandboxManifestBinding:
-    """A strictly parsed, untrusted binding read from the sandbox data plane."""
+class ObservedSandboxManifestBinding(BaseModel):
+    """A strictly parsed, untrusted binding read from the sandbox data plane.
 
-    manifest_version: int
-    protocol_version: str
-    session_id: str
-    owner_hash_version: str
-    owner_hash: str
-    app_hash: str
-    sandbox_group_resource_id: str
-    sandbox_id: str
-    generation: int
-    digest_kind: str
-    digest: str
+    ``strict`` blocks type coercion so a manifest cannot pass a string where an
+    int is required; ``extra="ignore"`` lets the harness own additional manifest
+    sections without this layer claiming their schema.
+    """
 
+    model_config = ConfigDict(strict=True, extra="ignore", frozen=True)
 
-_REQUIRED_MANIFEST_KEYS = frozenset(
-    {
-        "manifest_version",
-        "protocol_version",
-        "session_id",
-        "owner_hash_version",
-        "owner_hash",
-        "app_hash",
-        "sandbox_group_resource_id",
-        "sandbox_id",
-        "generation",
-        "digest_kind",
-        "digest",
-    }
-)
+    manifest_version: _ManifestCount
+    protocol_version: _ManifestText
+    session_id: _ManifestText
+    owner_hash_version: _ManifestText
+    owner_hash: _ManifestText
+    app_hash: _ManifestText
+    sandbox_group_resource_id: _ManifestText
+    sandbox_id: _ManifestText
+    generation: _ManifestCount
+    digest_kind: _ManifestText
+    digest: _ManifestText
 
 
 def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManifestBinding:
     """Parse only the binding fields this layer requires, not the whole manifest.
 
     ``payload`` is untrusted data read from inside the sandbox — the
-    forgery/repointing detection surface — so every field below is parsed
-    and validated, not merely type-narrowed. Any parsing or validation
-    failure collapses to one redacted :class:`SandboxManifestMismatchError`.
+    forgery/repointing detection surface. Duplicate keys are rejected before
+    validation because both ``json.loads`` and Pydantic's own JSON parser
+    silently keep the last value, which lets one document mean two things.
+    Every failure collapses to one redacted :class:`SandboxManifestMismatchError`.
     """
 
     try:
         raw = payload.decode("utf-8") if isinstance(payload, bytes) else payload
         decoded = json.loads(raw, object_pairs_hook=_manifest_object)
-        if not isinstance(decoded, dict) or not _REQUIRED_MANIFEST_KEYS.issubset(decoded):
-            raise SandboxManifestMismatchError(frozenset({"manifest"}))
-        return ObservedSandboxManifestBinding(
-            manifest_version=_parsed_integer(decoded, "manifest_version"),
-            protocol_version=_parsed_string(decoded, "protocol_version"),
-            session_id=_parsed_string(decoded, "session_id"),
-            owner_hash_version=_parsed_string(decoded, "owner_hash_version"),
-            owner_hash=_parsed_string(decoded, "owner_hash"),
-            app_hash=_parsed_string(decoded, "app_hash"),
-            sandbox_group_resource_id=normalize_sandbox_group_resource_id(
-                _parsed_string(decoded, "sandbox_group_resource_id")
-            ),
-            sandbox_id=_parsed_string(decoded, "sandbox_id"),
-            generation=_parsed_integer(decoded, "generation"),
-            digest_kind=_parsed_string(decoded, "digest_kind"),
-            digest=_parsed_string(decoded, "digest"),
+        observed = ObservedSandboxManifestBinding.model_validate(decoded)
+        return observed.model_copy(
+            update={
+                "sandbox_group_resource_id": normalize_sandbox_group_resource_id(
+                    observed.sandbox_group_resource_id
+                )
+            }
         )
     except (
         UnicodeDecodeError,
         json.JSONDecodeError,
+        ValidationError,
         TypeError,
         ValueError,
         _DuplicateManifestKeyError,
@@ -192,28 +179,6 @@ def verify_sandbox_manifest(
 
     if mismatches:
         raise SandboxManifestMismatchError(frozenset(mismatches))
-
-
-def _parsed_integer(payload: dict[str, Any], field_name: str) -> int:
-    value = payload[field_name]
-    _validate_integer(value, field_name)
-    return cast(int, value)
-
-
-def _parsed_string(payload: dict[str, Any], field_name: str) -> str:
-    value = payload[field_name]
-    _validate_string(value, field_name)
-    return cast(str, value)
-
-
-def _validate_integer(value: object, field_name: str) -> None:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError(f"{field_name} must be a non-negative integer.")
-
-
-def _validate_string(value: object, field_name: str) -> None:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{field_name} must be a non-empty string.")
 
 
 class _DuplicateManifestKeyError(ValueError):
