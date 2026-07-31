@@ -222,7 +222,7 @@ class SandboxProvisioningLabels:
 
 @dataclass(frozen=True, slots=True)
 class SandboxEgressPolicy:
-    """A safe egress-policy request accepted by the P4a adapter.
+    """A safe egress-policy request accepted by the sandbox adapter.
 
     Construct with :meth:`create` so values are validated once.
     """
@@ -336,7 +336,7 @@ class SandboxCreateRequest:
 
 
 def parse_sandbox_group_resource_id(value: str) -> SandboxGroupResourceId:
-    """Strictly parse the only ARM resource identity P4a is allowed to target."""
+    """Strictly parse the only ARM resource identity this layer may target."""
 
     if not isinstance(value, str):
         raise SandboxGroupBindingError("Sandbox Group resource ID must be a string.")

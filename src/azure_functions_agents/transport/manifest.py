@@ -13,8 +13,8 @@ from .transport_models import (
     normalize_sandbox_group_resource_id,
 )
 
-# Wire contract shared with the P4b/P5 harness (FRD 0008 Decision #108): the
-# harness writes its manifest at exactly this path inside every sandbox.
+# Wire contract: the harness writes its manifest at exactly this path inside
+# every sandbox, so both sides must agree on this literal string.
 SESSION_MANIFEST_PATH = "/var/lib/azurefunctions-agents-runtime/session/manifest.json"
 
 
@@ -29,7 +29,7 @@ class SandboxManifestMismatchError(Exception):
 
 @dataclass(frozen=True, slots=True)
 class ExpectedSandboxManifestBinding:
-    """Opaque, authoritative P3/P4b inputs that P4a must only compare.
+    """Opaque, authoritative controller inputs that this layer only compares.
 
     Already-typed controller state; ``create`` normalizes only the Sandbox
     Group resource ID so it compares correctly against the live manifest.
@@ -115,7 +115,7 @@ _REQUIRED_MANIFEST_KEYS = frozenset(
 
 
 def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManifestBinding:
-    """Parse P4a's required binding fields without owning the full harness manifest.
+    """Parse only the binding fields this layer requires, not the whole manifest.
 
     ``payload`` is untrusted data read from inside the sandbox — the
     forgery/repointing detection surface — so every field below is parsed

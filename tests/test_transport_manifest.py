@@ -1,4 +1,4 @@
-"""Security-focused tests for the P4a state-row/live-manifest handshake."""
+"""Security-focused tests for the state-row/live-manifest handshake."""
 
 from __future__ import annotations
 

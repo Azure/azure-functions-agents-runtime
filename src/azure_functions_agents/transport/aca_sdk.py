@@ -733,7 +733,7 @@ def _sdk_file_mode(entry: FileInfo) -> int | None:
 
     The pinned SDK's ``str | None`` annotation is wrong — ``_from_dict`` passes
     the wire value through uncoerced and live ACA sends an int. This is the one
-    permitted SDK-boundary cast here; see FRD 0008 Decision #107.
+    permitted SDK-boundary cast here.
     """
 
     return cast("int | None", entry.mode)

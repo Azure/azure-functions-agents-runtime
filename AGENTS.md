@@ -121,6 +121,22 @@ the Decisions log is durable history. Start from
    | - | -------- | ------------------ | ------ | ---------- | ---- |
    | 1 | …        | A / B / C          | B      | Human / Agent | … |
 
+   **Keep rows short — the log is an index, not an essay.** Target ≤ ~350
+   characters per row; treat ~500 as the hard ceiling. `Decision` is a short
+   noun phrase, `Options considered` is `A / B / C`, and `Choice` is the
+   decision plus the one fact that justifies it. A long log is one nobody
+   reads, which defeats the point of keeping it.
+
+   If a decision genuinely needs more, the detail belongs in the design
+   section the decision governs — not in the table cell. Do not restate what
+   the code, AGENTS.md, or `docs/architecture.md` already says; a decision
+   records *what was chosen and why*, not how it was implemented.
+
+   Numbers are positional, not stable — parallel phases and rebases renumber
+   them (this FRD's decisions 89–98 became 97–106 on one rebase). So never
+   cite a decision number from code; cross-references *within* the FRD are
+   fine, and revised decisions annotate the row they narrow.
+
 6. **Test plan** — new/changed tests; fixtures under
    `tests/fixtures/config_scenarios/` when config behavior changes.
 7. **Docs impact** — which `docs/*` and `README.md` sections change.
@@ -171,9 +187,15 @@ Grounded in `pyproject.toml` and current code:
   - Multi-line only for a non-obvious contract, invariant, or gotcha, and then
     a summary line plus **at most ~4 more lines**.
   - If the explanation needs more than that, it is a *decision*, not a
-    docstring — put it in the FRD Decisions log and reference it by number
-    (e.g. `_sdk_file_mode` in `transport/aca_sdk.py` cites FRD 0008 #107).
+    docstring — record it in the FRD Decisions log and keep the docstring to
+    the durable technical fact.
   - Comments say **why**, not what. Never narrate the next line.
+  - **No feature bookkeeping in code** — no phase labels (`P3a`, `P4a`, …), PR
+    numbers, or `FRD 0008 Decision #107` citations in comments, docstrings, or
+    test assertion messages. They mean nothing outside the feature that
+    invented them, and decision numbers are *renumbered on rebase*, so the
+    citation silently rots. State the durable technical reason instead; `git
+    blame` and PR history carry the provenance.
   - Config files (`pyproject.toml`, CI YAML) get a short pointer, never a
     rationale essay — that also belongs in the FRD.
 - **MAF is the only runtime.** The legacy `runtime:` frontmatter field is ignored

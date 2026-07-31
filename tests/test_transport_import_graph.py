@@ -1,4 +1,4 @@
-"""Architecture guards for P4a's preview-SDK containment and safe adapter shape."""
+"""Architecture guards for preview-SDK containment and safe adapter shape."""
 
 from __future__ import annotations
 

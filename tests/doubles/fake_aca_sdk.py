@@ -41,11 +41,9 @@ class FakeSdkEgressPolicy:
 class FakeSdkFileInfo:
     """Mirrors the preview SDK's ``FileInfo`` response shape.
 
-    ``mode`` is carried through untouched (typed ``object``, never coerced)
-    so a test can hand this whatever the real wire sends — an ``int`` per the
-    live-verified behavior — without the fake itself silently assuming a
-    type the way ``FileInfo``'s own ``str | None`` annotation incorrectly
-    does. See FRD 0008 Decision #107.
+    ``mode`` is carried through untouched (typed ``object``, never coerced) so
+    a test can pass whatever the real wire sends, rather than inheriting the
+    SDK's incorrect ``str | None`` assumption.
     """
 
     name: str = ""
@@ -144,7 +142,7 @@ class FakeSdkSandboxClient:
 
     async def delete_file(self, path: str, *, recursive: bool) -> None:
         if recursive:
-            raise AssertionError("P4a must not request recursive file deletion")
+            raise AssertionError("the adapter must not request recursive file deletion")
         await self.transport.delete_file(path)
 
     async def mkdir(self, path: str) -> None:
@@ -159,7 +157,7 @@ class FakeSdkSandboxClient:
         )
 
     async def get(self) -> None:
-        raise AssertionError("P4a readiness must not trust advisory sandbox state")
+        raise AssertionError("readiness must not trust advisory sandbox state")
 
     async def begin_stop(self, **kwargs: Any) -> FakePoller:
         self.stop_kwargs = kwargs
@@ -253,7 +251,7 @@ class FakeSdkGroupClient:
 
     def add_port(self) -> None:
         self.add_port_calls += 1
-        raise AssertionError("P4a must never add an inbound port")
+        raise AssertionError("the adapter must never add an inbound port")
 
 
 class FakeSdkEnvironment:

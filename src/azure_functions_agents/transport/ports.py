@@ -9,7 +9,7 @@ from .transport_models import SandboxExecResult, SandboxFileEntry, SandboxFileSt
 
 @runtime_checkable
 class SandboxFileTransport(Protocol):
-    """The exact six-operation data-plane file boundary (FRD 0008 Decision 72)."""
+    """The exact six-operation data-plane file boundary."""
 
     async def list_files(self, path: str) -> tuple[SandboxFileEntry, ...]:
         """List entries at ``path``."""
