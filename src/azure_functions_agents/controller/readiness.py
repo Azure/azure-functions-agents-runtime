@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -123,6 +124,33 @@ class _AsyncSingleton[T]:
             return self._value
 
 
+@dataclass(slots=True)
+class _SessionLockRegistry:
+    """Keep short activation and cancellation windows serialized per session."""
+
+    _locks: dict[str, asyncio.Lock] = field(default_factory=dict)
+    _waiters: dict[str, int] = field(default_factory=dict)
+    _guard: asyncio.Lock = field(default_factory=asyncio.Lock)
+
+    @asynccontextmanager
+    async def hold(self, session_id: str) -> AsyncIterator[None]:
+        async with self._guard:
+            lock = self._locks.setdefault(session_id, asyncio.Lock())
+            self._waiters[session_id] = self._waiters.get(session_id, 0) + 1
+        await lock.acquire()
+        try:
+            yield
+        finally:
+            lock.release()
+            async with self._guard:
+                remaining = self._waiters[session_id] - 1
+                if remaining == 0:
+                    del self._waiters[session_id]
+                    self._locks.pop(session_id, None)
+                else:
+                    self._waiters[session_id] = remaining
+
+
 @dataclass(frozen=True, slots=True)
 class SessionRuntimeBinding:
     """App-scoped dependencies for request-time sandbox activation."""
@@ -136,6 +164,7 @@ class SessionRuntimeBinding:
     protocol_version: str
     _provider: _AsyncSingleton[SandboxSessionProvider] = field(repr=False, compare=False)
     _state_store: _AsyncSingleton[StateStoreBinding] = field(repr=False, compare=False)
+    _session_locks: _SessionLockRegistry = field(repr=False, compare=False)
 
     @classmethod
     def create(
@@ -170,6 +199,7 @@ class SessionRuntimeBinding:
             protocol_version=protocol_version,
             _provider=_AsyncSingleton(provider_factory),
             _state_store=_AsyncSingleton(state_store_factory),
+            _session_locks=_SessionLockRegistry(),
         )
 
     async def get_provider(self) -> SandboxSessionProvider:
@@ -179,6 +209,12 @@ class SessionRuntimeBinding:
     async def get_state_store(self) -> StateStoreBinding:
         """Return the one lazily resolved state-store binding for this app."""
         return await self._state_store.get()
+
+    @asynccontextmanager
+    async def hold_session(self, session_id: str) -> AsyncIterator[None]:
+        """Serialize readiness-sensitive operations for one session ID."""
+        async with self._session_locks.hold(session_id):
+            yield
 
 
 @dataclass(frozen=True, slots=True)
