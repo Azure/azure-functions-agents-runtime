@@ -292,6 +292,11 @@ export default function CreateAgentPage() {
   const previewMd = draft.mdOverride ?? composed
 
   const deployJob = useDeployJob()
+  const deployedAppName = draft.target === 'existing' ? draft.existingApp : draft.newApp.appName
+  const deployedRg =
+    draft.target === 'existing'
+      ? (apps.find((a) => a.name === draft.existingApp)?.resourceGroup ?? '')
+      : draft.newApp.resourceGroup
   const runDeploy = () => {
     const target =
       draft.target === 'existing'
@@ -801,6 +806,11 @@ export default function CreateAgentPage() {
                 account: draft.foundryAccount,
                 tenantId: identity?.user?.tenantId,
               }
+            : undefined
+        }
+        github={
+          deployedAppName && deployedRg
+            ? { subscription: targetSub, resourceGroup: deployedRg, app: deployedAppName }
             : undefined
         }
       />

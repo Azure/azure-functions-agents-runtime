@@ -813,6 +813,16 @@ export async function getSite(accessToken, subscriptionId, resourceGroup, appNam
   }
 }
 
+// Merge a patch into a site's application settings (read-modify-write, since the
+// ARM update replaces the whole dictionary). Returns the merged properties.
+export async function setAppSettings(accessToken, subscriptionId, resourceGroup, appName, patch) {
+  const client = webClient(accessToken, subscriptionId)
+  const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
+  const properties = { ...(current?.properties || {}), ...patch }
+  await client.webApps.updateApplicationSettings(resourceGroup, appName, { properties })
+  return properties
+}
+
 // Fetch a host-level function key for invoking an app's functions (the built-in
 // chat endpoint defaults to FUNCTION auth). Best-effort: '' when unavailable.
 export async function functionHostKey(accessToken, subscriptionId, resourceGroup, appName) {

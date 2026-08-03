@@ -3,8 +3,15 @@
 // Azure portal link, so the user can watch progress in the portal instead of
 // waiting; the hook also polls the job to a terminal state in the background.
 
-import { useCallback, useRef, useState } from 'react'
-import { api, type DeployResult, type DeployTarget } from './api'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import {
+  api,
+  type DeployResult,
+  type DeployTarget,
+  type GitHubStatus,
+  type GitHubRepo,
+  type GitHubConnectResult,
+} from './api'
 
 export type DeployPhase = 'idle' | 'running' | 'deployed' | 'error'
 
@@ -140,18 +147,204 @@ function GrantAccess({
   )
 }
 
+function GitHubConnect({ github }: { github: { subscription: string; resourceGroup: string; app: string } }) {
+  const [status, setStatus] = useState<GitHubStatus | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [mode, setMode] = useState<'new' | 'existing'>('new')
+  const [repoName, setRepoName] = useState(github.app)
+  const [priv, setPriv] = useState(true)
+  const [repos, setRepos] = useState<GitHubRepo[] | null>(null)
+  const [existingRepo, setExistingRepo] = useState('')
+  const [pushing, setPushing] = useState(false)
+  const [result, setResult] = useState<GitHubConnectResult | null>(null)
+  const [error, setError] = useState('')
+
+  const refreshStatus = useCallback(async () => {
+    try {
+      setStatus(await api.githubStatus())
+    } catch {
+      setStatus({ configured: false, connected: false })
+    }
+  }, [])
+
+  useEffect(() => {
+    void refreshStatus()
+  }, [refreshStatus])
+
+  // Refresh once the OAuth popup reports back (content is untrusted — we re-check
+  // the real connection state via the authenticated status endpoint).
+  useEffect(() => {
+    const onMsg = (e: MessageEvent) => {
+      if ((e.data as { type?: string })?.type === 'github-oauth') void refreshStatus()
+    }
+    window.addEventListener('message', onMsg)
+    return () => window.removeEventListener('message', onMsg)
+  }, [refreshStatus])
+
+  const connect = async () => {
+    setError('')
+    setBusy(true)
+    // Open the popup synchronously (avoids blockers), then point it at GitHub.
+    const popup = window.open('', 'github-oauth', 'width=760,height=820')
+    try {
+      const { authorizeUrl } = await api.githubLoginUrl()
+      if (popup) popup.location.href = authorizeUrl
+    } catch (e) {
+      if (popup) popup.close()
+      setError((e as Error).message)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const loadRepos = async () => {
+    if (repos) return
+    try {
+      setRepos((await api.githubRepos()).repos)
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  const createAndPush = async () => {
+    setError('')
+    setPushing(true)
+    setResult(null)
+    try {
+      const r = await api.githubConnect({
+        subscription: github.subscription,
+        resourceGroup: github.resourceGroup,
+        app: github.app,
+        mode,
+        ...(mode === 'new' ? { repoName, private: priv } : { repo: existingRepo }),
+      })
+      setResult(r)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setPushing(false)
+    }
+  }
+
+  if (!status) return null
+  if (!status.configured) {
+    return (
+      <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
+        🐙 GitHub sign-in isn’t configured on the server yet. Set{' '}
+        <span className="mono">GITHUB_OAUTH_CLIENT_ID</span> and{' '}
+        <span className="mono">GITHUB_OAUTH_CLIENT_SECRET</span> to connect this agent to a repo.
+      </div>
+    )
+  }
+
+  return (
+    <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>🐙 Connect to GitHub</div>
+      {!status.connected ? (
+        <>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+            Sign in to push this agent’s source to a repo for history and pull-request edits.
+          </div>
+          <button className="btn sm primary" disabled={busy} onClick={() => void connect()}>
+            {busy ? 'Opening…' : '🐙 Connect GitHub'}
+          </button>
+        </>
+      ) : result ? (
+        <div style={{ fontSize: 13 }}>
+          ✓ Pushed to{' '}
+          <a href={result.htmlUrl} target="_blank" rel="noreferrer">
+            {result.owner}/{result.name}
+          </a>{' '}
+          <span className="muted">({result.branch})</span>
+          {!result.stored && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
+              Couldn’t save the repo link on the app (permission) — the push still succeeded.
+            </div>
+          )}
+        </div>
+      ) : (
+        <>
+          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
+            Connected as <strong>{status.login}</strong>.
+          </div>
+          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
+            <button className={`btn sm ${mode === 'new' ? 'primary' : ''}`} onClick={() => setMode('new')}>
+              New repo
+            </button>
+            <button
+              className={`btn sm ${mode === 'existing' ? 'primary' : ''}`}
+              onClick={() => {
+                setMode('existing')
+                void loadRepos()
+              }}
+            >
+              Existing repo
+            </button>
+          </div>
+          {mode === 'new' ? (
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+              <input
+                value={repoName}
+                onChange={(e) => setRepoName(e.target.value)}
+                placeholder="repo-name"
+                style={{ minWidth: 200 }}
+              />
+              <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input type="checkbox" checked={priv} onChange={(e) => setPriv(e.target.checked)} /> Private
+              </label>
+            </div>
+          ) : (
+            <select
+              value={existingRepo}
+              onChange={(e) => setExistingRepo(e.target.value)}
+              style={{ minWidth: 260 }}
+            >
+              <option value="">{repos ? 'Select a repo…' : 'Loading…'}</option>
+              {repos?.map((r) => (
+                <option key={r.fullName} value={r.fullName}>
+                  {r.fullName}
+                  {r.private ? ' (private)' : ''}
+                </option>
+              ))}
+            </select>
+          )}
+          <div style={{ marginTop: 8 }}>
+            <button
+              className="btn sm primary"
+              disabled={pushing || (mode === 'new' ? !repoName.trim() : !existingRepo)}
+              onClick={() => void createAndPush()}
+            >
+              {pushing ? 'Pushing…' : mode === 'new' ? 'Create & push' : 'Push to repo'}
+            </button>{' '}
+            <button className="btn sm" onClick={() => void api.githubDisconnect().then(refreshStatus)}>
+              Disconnect
+            </button>
+          </div>
+        </>
+      )}
+      {error && (
+        <div className="muted" style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>
+          {error}
+        </div>
+      )}
+    </div>
+  )
+}
+
 export function DeploymentStatus({
   phase,
   result,
   portalUrl,
   message,
   grant,
+  github,
 }: {
   phase: DeployPhase
   result: DeployResult | null
   portalUrl?: string
   message?: string
   grant?: { subscription: string; resourceGroup: string; account: string; tenantId?: string }
+  github?: { subscription: string; resourceGroup: string; app: string }
 }) {
   if (phase === 'idle') return null
   return (
@@ -199,6 +392,7 @@ export function DeploymentStatus({
       {phase === 'deployed' && result?.grantOutcome !== 'granted' && result?.principalId && grant?.account && (
         <GrantAccess grant={grant} principalId={result.principalId} />
       )}
+      {phase === 'deployed' && github?.app && <GitHubConnect github={github} />}
       {result?.files && result.files.length > 0 && (
         <div style={{ marginTop: 6 }}>
           Source:{' '}
