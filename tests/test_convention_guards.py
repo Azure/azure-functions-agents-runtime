@@ -21,6 +21,13 @@ _PROVENANCE_PATTERNS = (
         ),
     ),
 )
+_CONCRETE_RUNTIME_TYPES = frozenset(
+    {
+        "AcaSandboxAdapter",
+        "AcaSandboxExecutionBackend",
+        "AcaSandboxHandle",
+    }
+)
 
 
 def _repository_root() -> Path:
@@ -160,6 +167,34 @@ def _repository_provenance_findings(paths: Iterable[Path], root: Path) -> list[s
     return findings
 
 
+def _imports_aca_sdk_adapter(tree: ast.AST) -> bool:
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            if module.endswith("transport.aca_sdk"):
+                return True
+            if module.endswith("transport") and any(alias.name == "aca_sdk" for alias in node.names):
+                return True
+        if isinstance(node, ast.Import) and any(
+            alias.name.endswith("transport.aca_sdk") for alias in node.names
+        ):
+            return True
+    return False
+
+
+def _concrete_runtime_cast_lines(tree: ast.AST) -> list[int]:
+    findings: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "cast" or not node.args:
+            continue
+        rendered_target = ast.unparse(node.args[0])
+        if any(runtime_type in rendered_target for runtime_type in _CONCRETE_RUNTIME_TYPES):
+            findings.append(node.lineno)
+    return findings
+
+
 def test_frozen_dataclass_guard_detects_direct_post_init_only() -> None:
     frozen_tree = ast.parse(
         """
@@ -244,6 +279,27 @@ def test_source_module_basenames_are_unique() -> None:
     assert not collisions, "\n".join(
         f"{name}: {', '.join(paths)}" for name, paths in sorted(collisions.items())
     )
+
+
+def test_execution_and_controller_activation_code_stay_behind_protocols() -> None:
+    root = _repository_root()
+    module_paths = [
+        *sorted((root / "src" / "azure_functions_agents" / "execution").glob("*.py")),
+        root / "src" / "azure_functions_agents" / "controller" / "readiness.py",
+    ]
+    sdk_imports: list[str] = []
+    concrete_casts: list[str] = []
+    for path in module_paths:
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        if _imports_aca_sdk_adapter(tree):
+            sdk_imports.append(str(path.relative_to(root)))
+        concrete_casts.extend(
+            f"{path.relative_to(root)}:{line}"
+            for line in _concrete_runtime_cast_lines(tree)
+        )
+
+    assert not sdk_imports, "\n".join(sdk_imports)
+    assert not concrete_casts, "\n".join(concrete_casts)
 
 
 def test_source_and_tests_have_no_feature_bookkeeping() -> None:

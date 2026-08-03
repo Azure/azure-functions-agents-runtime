@@ -37,6 +37,7 @@ from ..transport.transport_models import (
 from .package import (
     CapturedContentPackage,
     ContentBindingMismatchError,
+    ContentPackagingError,
     LiveManifestNotReadyError,
     build_expected_manifest_binding,
     capture_script_root,
@@ -323,7 +324,7 @@ async def activate_session(
                 setup_deadline,
             )
     except SandboxManifestMismatchError:
-        await _quarantine_session(
+        await _quarantine_detected_binding(
             store,
             session,
             session_read.etag,
@@ -537,7 +538,7 @@ async def _create_and_activate_session(
         return activated
     except (SandboxManifestMismatchError, ContentBindingMismatchError):
         if handle is not None:
-            await _quarantine_session(
+            await _quarantine_detected_binding(
                 state_binding.store,
                 persisted_session,
                 etag,
@@ -547,6 +548,8 @@ async def _create_and_activate_session(
         raise SessionActivationNotFoundError(
             "Session sandbox binding cannot be trusted."
         ) from None
+    except ContentPackagingError:
+        raise SessionActivationError("Sandbox content delivery could not be verified.") from None
     except TimeoutError:
         raise SessionActivationSetupTimeoutError(
             "Sandbox setup did not complete before the setup deadline."
@@ -595,7 +598,10 @@ def _capture_current_package(
     setup_deadline: SetupDeadline,
 ) -> CapturedContentPackage:
     _remaining_setup_seconds(setup_deadline)
-    package = capture_script_root(script_root)
+    try:
+        package = capture_script_root(script_root)
+    except ContentPackagingError:
+        raise SessionActivationError("Sandbox content package could not be captured.") from None
     _remaining_setup_seconds(setup_deadline)
     return package
 
@@ -740,6 +746,27 @@ async def _quarantine_session(
 ) -> None:
     quarantined = _quarantined_session(session, reason=reason, updated_at=datetime.now(UTC))
     await store.update_session(previous=session, updated=quarantined, etag=etag)
+
+
+async def _quarantine_detected_binding(
+    store: SessionStateStore,
+    session: DurableSessionRecord,
+    etag: str,
+    *,
+    reason: str,
+) -> None:
+    if session.active_run_id is None:
+        await _quarantine_session(store, session, etag, reason=reason)
+        return
+    active_run = await store.get_run(
+        session.owner_partition,
+        session.session_id,
+        session.active_run_id,
+    )
+    failed = _terminal_run(active_run.record, reason=reason)
+    await store.adopt_terminal_run(failed)
+    released = await store.get_session(session.owner_partition, session.session_id)
+    await _quarantine_session(store, released.record, released.etag, reason=reason)
 
 
 def _terminal_run(

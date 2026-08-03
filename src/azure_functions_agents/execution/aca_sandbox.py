@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
+from ..config import DEFAULT_TIMEOUT
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationError,
@@ -73,7 +74,7 @@ class AcaSandboxExecutionBackend:
                 allow_create=request.session_id is None,
             )
             try:
-                run = _new_run(activated.session, run_id)
+                run = _new_run(activated.session, run_id, timeout=request.timeout)
                 admitted_session = session_with_admitted_run(
                     activated.session,
                     run_id,
@@ -196,7 +197,12 @@ class AcaSandboxExecutionBackend:
                 await activated.handle.close()
 
 
-def _new_run(session: DurableSessionRecord, run_id: str) -> DurableRunRecord:
+def _new_run(
+    session: DurableSessionRecord,
+    run_id: str,
+    *,
+    timeout: float | None,
+) -> DurableRunRecord:
     now = datetime.now(UTC)
     return DurableRunRecord.create(
         owner_partition=session.owner_partition,
@@ -206,7 +212,7 @@ def _new_run(session: DurableSessionRecord, run_id: str) -> DurableRunRecord:
         status="accepted",
         result_available=False,
         status_reason=None,
-        expires_at=session.expires_at,
+        expires_at=now + timedelta(seconds=timeout if timeout is not None else DEFAULT_TIMEOUT),
         created_at=now,
         updated_at=now,
     )

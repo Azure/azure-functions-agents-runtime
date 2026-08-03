@@ -294,6 +294,7 @@ class SandboxRunControl:
                 "failed",
                 "canceled",
                 "timed_out",
+                "abandoned",
             }:
                 return status
             await self._sleep_until_poll(deadline)
@@ -357,7 +358,12 @@ class SandboxRunControl:
         events: list[RunEvent] = []
         for path in paths:
             events.extend(_parse_event_lines(await handle.read_file(path)))
-        return sorted(events, key=lambda event: event.sequence)
+        ordered = sorted(events, key=lambda event: event.sequence)
+        if len({event.sequence for event in ordered}) != len(ordered):
+            raise RunJournalProtocolError(
+                "Sandbox run journal event segments contain duplicate sequences."
+            )
+        return ordered
 
     @staticmethod
     async def _with_deadline[T](operation: Awaitable[T], deadline: float) -> T:

@@ -15,11 +15,17 @@ from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
-from .config.schema import ResolvedAgent
+from .config.schema import GlobalConfig, ResolvedAgent
 from .config.validation import (
     validate_resolved_agent,
     validate_session_runtime,
     validate_subagent_references,
+)
+from .controller.readiness import (
+    DEFAULT_AUTO_SUSPEND_SECONDS,
+    DEFAULT_RECLAIM_IDLE_SECONDS,
+    SessionRuntimeBinding,
+    StateStoreBinding,
 )
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
@@ -28,6 +34,12 @@ from .registration.capabilities import build_capabilities, validate_subagent_too
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
+from .session_state import (
+    build_store_from_service_client,
+    get_table_service_client,
+    resolve_function_app_identity,
+)
+from .transport.ports import SandboxSessionProvider
 from .workflows import build_workflow_integration
 
 
@@ -60,6 +72,48 @@ def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
 
 def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
     return isinstance(workflows, dict) and workflows.get("enabled") is True
+
+
+def _build_session_runtime_binding(
+    global_config: GlobalConfig,
+    script_root: Path,
+) -> SessionRuntimeBinding | None:
+    session_runtime = global_config.session_runtime
+    if session_runtime is None or session_runtime.aca_sandbox is None:
+        return None
+
+    aca_sandbox = session_runtime.aca_sandbox
+    retention = aca_sandbox.retention
+    auto_suspend_seconds = (
+        retention.auto_suspend_idle if retention is not None else DEFAULT_AUTO_SUSPEND_SECONDS
+    )
+    reclaim_idle_seconds = (
+        retention.reclaim_idle if retention is not None else DEFAULT_RECLAIM_IDLE_SECONDS
+    )
+
+    async def provider_factory() -> SandboxSessionProvider:
+        from .transport.aca_sdk import AcaSandboxAdapter
+
+        return await AcaSandboxAdapter.open(aca_sandbox.sandbox_group_resource_id)
+
+    async def state_store_factory() -> StateStoreBinding:
+        service_client, fingerprint = await get_table_service_client()
+        store = await build_store_from_service_client(service_client)
+        await store.ensure_table()
+        return StateStoreBinding.create(
+            store=store,
+            state_store_fingerprint=fingerprint,
+        )
+
+    return SessionRuntimeBinding.create(
+        app_identity=resolve_function_app_identity(),
+        sandbox_group_resource_id=aca_sandbox.sandbox_group_resource_id,
+        script_root=script_root,
+        provider_factory=provider_factory,
+        state_store_factory=state_store_factory,
+        auto_suspend_seconds=auto_suspend_seconds,
+        reclaim_idle_seconds=reclaim_idle_seconds,
+    )
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
@@ -145,6 +199,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     # immediately) unless `session_runtime` is configured at all; configuring
     # `aca_sandbox` always fails here (capability gate), never at request time.
     validate_session_runtime(global_config, resolved_agents)
+    session_runtime = _build_session_runtime_binding(global_config, resolved_root)
 
     # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---
     # Must run before any other cross-agent validation: `validate_subagent_references`
@@ -249,25 +304,49 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         # used directly as the registered function name / built-in endpoint slug —
         # no allocator or de-duplication pass is needed here anymore.
         if resolved.trigger is not None:
-            register_agent(
-                app,
-                resolved,
-                capabilities,
-                function_name=resolved.slug,
-                catalog=catalog,
-                workflows_enabled=workflows_enabled,
-                workflow_system_addendum=trigger_workflow_system_addendum,
-            )
+            if session_runtime is None:
+                register_agent(
+                    app,
+                    resolved,
+                    capabilities,
+                    function_name=resolved.slug,
+                    catalog=catalog,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=trigger_workflow_system_addendum,
+                )
+            else:
+                register_agent(
+                    app,
+                    resolved,
+                    capabilities,
+                    function_name=resolved.slug,
+                    catalog=catalog,
+                    session_runtime=session_runtime,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=trigger_workflow_system_addendum,
+                )
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
-            register_builtin_endpoints(
-                app,
-                resolved,
-                capabilities,
-                slug=resolved.slug,
-                workflows_enabled=workflows_enabled,
-                workflow_system_addendum=workflow_system_addendum,
-                catalog=catalog,
-            )
+            if session_runtime is None:
+                register_builtin_endpoints(
+                    app,
+                    resolved,
+                    capabilities,
+                    slug=resolved.slug,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    catalog=catalog,
+                )
+            else:
+                register_builtin_endpoints(
+                    app,
+                    resolved,
+                    capabilities,
+                    slug=resolved.slug,
+                    workflows_enabled=workflows_enabled,
+                    workflow_system_addendum=workflow_system_addendum,
+                    catalog=catalog,
+                    session_runtime=session_runtime,
+                )
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {

@@ -202,6 +202,37 @@ async def test_manifest_mismatch_quarantines_without_deleting_state(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_manifest_mismatch_releases_an_active_slot_before_quarantine(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    provider.attach_error = SandboxManifestMismatchError(frozenset({"sandbox_id"}))
+    base_session = _session(script_root)
+    active_session = session_with_admitted_run(
+        base_session,
+        "run-1",
+        updated_at=datetime.now(UTC),
+    )
+    store = _FakeStore(active_session)
+    store.runs["run-1"] = _run(base_session)
+
+    with pytest.raises(SessionActivationNotFoundError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            active_session.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    assert store.operations == ["adopt", "update:quarantined"]
+    assert store.session is not None
+    assert store.session.status == "quarantined"
+    assert store.session.active_run_id is None
+
+
+@pytest.mark.asyncio
 async def test_owner_or_app_hash_mismatch_fails_without_attaching(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     provider = _FakeProvider(_FakeHandle())

@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from .._logger import logger
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..controller.readiness import SessionRuntimeBinding
 from . import _naming
 from ._auth import resolve_endpoint_auth_level
 from ._handlers import (
@@ -141,6 +142,7 @@ def _register_http_agent(
     trigger_params: dict[str, Any],
     catalog: AgentCatalog | None = None,
     *,
+    session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> None:
@@ -154,14 +156,25 @@ def _register_http_agent(
 
     methods = trigger_params.get("methods", ["POST"])
     auth = _resolve_http_trigger_auth(resolved, trigger_params)
-    handler = make_http_agent_handler(
-        resolved,
-        capabilities,
-        catalog,
-        auth=auth,
-        workflows_enabled=workflows_enabled,
-        workflow_system_addendum=workflow_system_addendum,
-    )
+    if session_runtime is None:
+        handler = make_http_agent_handler(
+            resolved,
+            capabilities,
+            catalog,
+            auth=auth,
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
+        )
+    else:
+        handler = make_http_agent_handler(
+            resolved,
+            capabilities,
+            catalog,
+            auth=auth,
+            session_runtime=session_runtime,
+            workflows_enabled=workflows_enabled,
+            workflow_system_addendum=workflow_system_addendum,
+        )
 
     if workflows_enabled:
         handler = app.durable_client_input(client_name="client")(handler)
@@ -181,6 +194,7 @@ def register_agent(
     function_name: str | None = None,
     catalog: AgentCatalog | None = None,
     *,
+    session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> None:
@@ -212,6 +226,7 @@ def register_agent(
             function_name,
             trigger_params,
             catalog,
+            session_runtime=session_runtime,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
         )

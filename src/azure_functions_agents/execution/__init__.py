@@ -1,5 +1,6 @@
 """Execution backend contracts."""
 
+from .aca_sandbox import AcaSandboxExecutionBackend
 from .backend import (
     AgentExecutionBackend,
     EventCursorExpiredError,
@@ -27,11 +28,14 @@ from .factory import (
 )
 from .in_lang_worker import LanguageWorkerExecutionBackend
 from .result import AgentResult
+from .run_control import RunControlError, RunEnvelope, SandboxRunControl
+from .setup_budget import SetupBudget, SetupBudgetExpiredError
 from .unavailable import BackendUnavailableError, UnavailableBackend, unavailable_backend_message
 
 __all__ = [
     "ACA_SANDBOX_EXECUTION_PROVIDER",
     "DEFAULT_EXECUTION_PROVIDER",
+    "AcaSandboxExecutionBackend",
     "AgentBinding",
     "AgentExecutionBackend",
     "AgentResult",
@@ -39,12 +43,17 @@ __all__ = [
     "EventCursorExpiredError",
     "LanguageWorkerExecutionBackend",
     "RunContext",
+    "RunControlError",
+    "RunEnvelope",
     "RunError",
     "RunEvent",
     "RunHandle",
     "RunResult",
     "RunState",
     "RunStatus",
+    "SandboxRunControl",
+    "SetupBudget",
+    "SetupBudgetExpiredError",
     "StartRunRequest",
     "UnavailableBackend",
     "collect_terminal_run",
