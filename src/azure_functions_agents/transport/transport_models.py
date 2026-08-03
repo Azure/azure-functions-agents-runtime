@@ -27,6 +27,23 @@ class AcaSandboxDependencyError(SandboxTransportError):
     """Raised when the optional ACA Sandbox SDK extra is unavailable."""
 
 
+class SandboxFileNotFoundError(SandboxTransportError):
+    """A ``SandboxFileTransport`` read/stat/delete found no entry at the given path."""
+
+
+class SandboxFileOperationError(SandboxTransportError):
+    """A ``SandboxFileTransport`` operation failed for an operational (non-missing) reason.
+
+    ``status_code`` is the provider HTTP status when known (``None`` for a
+    network-level failure with no response), so callers can still make a
+    narrow, typed retry decision without catching a provider SDK exception.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
 @dataclass(frozen=True, slots=True)
 class SandboxFileEntry:
     """A directory entry projected out of a provider file response."""

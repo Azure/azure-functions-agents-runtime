@@ -18,7 +18,12 @@ from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import aiohttp
 from azure.core.credentials_async import AsyncTokenCredential
-from azure.core.exceptions import AzureError, HttpResponseError, ServiceRequestError
+from azure.core.exceptions import (
+    AzureError,
+    HttpResponseError,
+    ResourceNotFoundError,
+    ServiceRequestError,
+)
 from azure.core.polling import AsyncLROPoller
 
 from azure_functions_agents._credential import build_async_credential
@@ -39,6 +44,8 @@ from .transport_models import (
     SandboxEgressPolicy,
     SandboxExecResult,
     SandboxFileEntry,
+    SandboxFileNotFoundError,
+    SandboxFileOperationError,
     SandboxFileStat,
     SandboxGroupBinding,
     SandboxGroupBindingError,
@@ -65,7 +72,7 @@ _CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
 _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
 _FAILED_CREATE_LOOKUP_DELAY_SECONDS = 1.0
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.5
-_RETRYABLE_MANIFEST_STATUS_CODES = frozenset({404, 409, 423, 425, 429, 500, 502, 503, 504})
+_RETRYABLE_MANIFEST_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
 _RECONCILIATION_ERRORS = (AzureError, TimeoutError, RuntimeError, ValueError)
 
 # A module-level indirection so tests can patch just this adapter's retry
@@ -499,6 +506,28 @@ class AcaSandboxAdapter:
             raise SandboxProvisioningError("ACA Sandbox adapter is closed.")
 
 
+async def _translate_file_errors[T](operation: Awaitable[T]) -> T:
+    """Translate preview-SDK file-operation exceptions to runtime-owned types.
+
+    Keeps every preview-SDK exception type confined to this module: code
+    outside ``aca_sdk.py`` only ever sees :class:`SandboxFileNotFoundError` or
+    :class:`SandboxFileOperationError` from a ``SandboxFileTransport`` call.
+    """
+
+    try:
+        return await operation
+    except ResourceNotFoundError:
+        raise SandboxFileNotFoundError(
+            "Sandbox file operation found no entry at the requested path."
+        ) from None
+    except HttpResponseError as exc:
+        raise SandboxFileOperationError(
+            "Sandbox file operation failed.", status_code=exc.status_code
+        ) from None
+    except (ServiceRequestError, AzureError):
+        raise SandboxFileOperationError("Sandbox file operation failed.") from None
+
+
 class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
     """A live individual sandbox with direct file and separate process operations."""
 
@@ -515,30 +544,32 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
 
     async def list_files(self, path: str) -> tuple[SandboxFileEntry, ...]:
         self._ensure_open()
-        listing = await self._sdk_client.list_files(path)
+        listing = await _translate_file_errors(self._sdk_client.list_files(path))
         return tuple(_project_file_entry(entry) for entry in listing.entries)
 
     async def stat_file(self, path: str) -> SandboxFileStat:
         self._ensure_open()
-        entry = await self._sdk_client.stat_file(path)
+        entry = await _translate_file_errors(self._sdk_client.stat_file(path))
         return _project_file_stat(entry)
 
     async def read_file(self, path: str) -> bytes:
         self._ensure_open()
-        content: bytes = await self._sdk_client.read_file(path)
+        content: bytes = await _translate_file_errors(self._sdk_client.read_file(path))
         return content
 
     async def write_file(self, path: str, content: bytes, *, create_dirs: bool = False) -> None:
         self._ensure_open()
-        await self._sdk_client.write_file(path, content, create_dirs=create_dirs)
+        await _translate_file_errors(
+            self._sdk_client.write_file(path, content, create_dirs=create_dirs)
+        )
 
     async def delete_file(self, path: str) -> None:
         self._ensure_open()
-        await self._sdk_client.delete_file(path, recursive=False)
+        await _translate_file_errors(self._sdk_client.delete_file(path, recursive=False))
 
     async def mkdir(self, path: str) -> None:
         self._ensure_open()
-        await self._sdk_client.mkdir(path)
+        await _translate_file_errors(self._sdk_client.mkdir(path))
 
     async def exec(
         self, command: str, *, timeout_seconds: float | None = None
@@ -682,10 +713,10 @@ async def _try_read_manifest(handle: AcaSandboxHandle, timeout_seconds: float) -
     try:
         async with asyncio.timeout(timeout_seconds):
             return await handle.read_file(SESSION_MANIFEST_PATH)
-    except ServiceRequestError:
+    except SandboxFileNotFoundError:
         return None
-    except HttpResponseError as exc:
-        if exc.status_code not in _RETRYABLE_MANIFEST_STATUS_CODES:
+    except SandboxFileOperationError as exc:
+        if exc.status_code is not None and exc.status_code not in _RETRYABLE_MANIFEST_STATUS_CODES:
             raise
         return None
     except TimeoutError:

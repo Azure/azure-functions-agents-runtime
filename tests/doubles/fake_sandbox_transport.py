@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from azure_functions_agents.transport.transport_models import (
     SandboxExecResult,
     SandboxFileEntry,
+    SandboxFileNotFoundError,
+    SandboxFileOperationError,
     SandboxFileStat,
 )
 
@@ -41,7 +43,7 @@ class FakeSandboxTransport:
         normalized = _normalize(path)
         self.calls.append(RecordedTransportCall("list_files", path=normalized))
         if normalized not in self._directories:
-            raise FileNotFoundError(normalized)
+            raise SandboxFileNotFoundError(normalized)
 
         prefix = "/" if normalized == "/" else f"{normalized}/"
         entries: list[SandboxFileEntry] = []
@@ -73,7 +75,7 @@ class FakeSandboxTransport:
                 size=len(self._files[normalized]),
                 is_directory=False,
             )
-        raise FileNotFoundError(normalized)
+        raise SandboxFileNotFoundError(normalized)
 
     async def read_file(self, path: str) -> bytes:
         normalized = _normalize(path)
@@ -83,7 +85,7 @@ class FakeSandboxTransport:
         try:
             return self._files[normalized]
         except KeyError:
-            raise FileNotFoundError(normalized) from None
+            raise SandboxFileNotFoundError(normalized) from None
 
     async def write_file(self, path: str, content: bytes, *, create_dirs: bool = False) -> None:
         normalized = _normalize(path)
@@ -91,7 +93,7 @@ class FakeSandboxTransport:
         parent = _parent(normalized)
         if parent not in self._directories:
             if not create_dirs:
-                raise FileNotFoundError(parent)
+                raise SandboxFileNotFoundError(parent)
             _add_parent_directories(self._directories, parent)
         self._files[normalized] = content
 
@@ -104,17 +106,17 @@ class FakeSandboxTransport:
         if normalized in self._directories:
             prefix = f"{normalized}/"
             if any(candidate.startswith(prefix) for candidate in (*self._directories, *self._files)):
-                raise OSError("directory is not empty")
+                raise SandboxFileOperationError("directory is not empty")
             self._directories.remove(normalized)
             return
-        raise FileNotFoundError(normalized)
+        raise SandboxFileNotFoundError(normalized)
 
     async def mkdir(self, path: str) -> None:
         normalized = _normalize(path)
         self.calls.append(RecordedTransportCall("mkdir", path=normalized))
         parent = _parent(normalized)
         if parent not in self._directories:
-            raise FileNotFoundError(parent)
+            raise SandboxFileNotFoundError(parent)
         self._directories.add(normalized)
 
     async def exec(
