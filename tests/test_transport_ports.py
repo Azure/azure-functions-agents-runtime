@@ -4,8 +4,19 @@ from __future__ import annotations
 
 import pytest
 
-from azure_functions_agents.transport.ports import SandboxFileTransport, SandboxProcessTransport
-from azure_functions_agents.transport.transport_models import SandboxExecResult
+from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter, AcaSandboxHandle
+from azure_functions_agents.transport.ports import (
+    SandboxFileTransport,
+    SandboxProcessTransport,
+    SandboxSessionHandle,
+    SandboxSessionProvider,
+)
+from azure_functions_agents.transport.transport_models import (
+    ProvisionedSandboxIdentity,
+    SandboxExecResult,
+    SandboxGroupIdentity,
+)
+from tests.doubles.fake_aca_sdk import FakeCredential, FakeSdkEnvironment
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
 
@@ -39,6 +50,38 @@ def test_fake_structurally_satisfies_both_runtime_owned_protocols() -> None:
 
     assert isinstance(transport, SandboxFileTransport)
     assert isinstance(transport, SandboxProcessTransport)
+
+
+def test_aca_adapter_and_handle_satisfy_session_protocols() -> None:
+    environment = FakeSdkEnvironment()
+    credential = FakeCredential()
+    group = SandboxGroupIdentity(
+        resource_id=(
+            "/subscriptions/sub/resourceGroups/rg/providers/"
+            "Microsoft.App/sandboxGroups/group"
+        ),
+        subscription_id="sub",
+        resource_group="rg",
+        group_name="group",
+        region="westus2",
+    )
+    adapter = AcaSandboxAdapter(
+        group=group,
+        credential=credential,
+        group_client=environment.make_group_client("endpoint", credential),
+        factories=environment.factories(),
+    )
+    handle = AcaSandboxHandle(
+        sdk_client=environment.add_sandbox("sandbox-1"),
+        identity=ProvisionedSandboxIdentity.create(
+            sandbox_id="sandbox-1",
+            group_resource_id=group.resource_id,
+            region=group.region,
+        ),
+    )
+
+    assert isinstance(adapter, SandboxSessionProvider)
+    assert isinstance(handle, SandboxSessionHandle)
 
 
 @pytest.mark.asyncio
