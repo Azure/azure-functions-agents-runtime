@@ -40,8 +40,8 @@ from .package import (
     ContentPackagingError,
     LiveManifestNotReadyError,
     build_expected_manifest_binding,
-    capture_script_root,
     deliver_content_package,
+    get_content_package,
     read_live_manifest_binding,
 )
 
@@ -281,7 +281,7 @@ async def activate_session(
     session = session_read.record
     _verify_owner_binding(owner, session)
     _verify_state_store_binding(session, state_binding.state_store_fingerprint)
-    package = _capture_current_package(runtime.script_root, setup_deadline)
+    package = await _capture_current_package(runtime.script_root, setup_deadline)
     if _digest_pair(session) != _digest_pair(package):
         await _drain_changed_epoch(store, session, session_read.etag)
         raise SessionActivationGoneError(
@@ -439,7 +439,7 @@ async def _create_and_activate_session(
             "No runtime bootstrap source is available for new sandbox sessions."
         )
 
-    package = _capture_current_package(runtime.script_root, setup_deadline)
+    package = await _capture_current_package(runtime.script_root, setup_deadline)
     provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
     now = datetime.now(UTC)
     initial_session = DurableSessionRecord.create(
@@ -593,17 +593,17 @@ async def _within_setup_budget[T](
         ) from None
 
 
-def _capture_current_package(
+async def _capture_current_package(
     script_root: Path,
     setup_deadline: SetupDeadline,
 ) -> CapturedContentPackage:
-    _remaining_setup_seconds(setup_deadline)
+    # Capture is process-cached and single-flight upstream, so only the first
+    # session on this worker pays the archive cost; every call still runs under
+    # the shared setup deadline because a cold capture can block on file I/O.
     try:
-        package = capture_script_root(script_root)
+        return await _within_setup_budget(get_content_package(script_root), setup_deadline)
     except ContentPackagingError:
         raise SessionActivationError("Sandbox content package could not be captured.") from None
-    _remaining_setup_seconds(setup_deadline)
-    return package
 
 
 def _remaining_setup_seconds(setup_deadline: SetupDeadline) -> float:
