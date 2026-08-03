@@ -178,6 +178,25 @@ async def test_read_events_enforces_exclusive_cursor_and_eviction_rules() -> Non
 
 
 @pytest.mark.asyncio
+async def test_read_events_stops_at_the_first_terminal_event() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", last_sequence=2),
+    )
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/events.jsonl",
+        ("\n".join([_event(1, "done"), _event(2, "delta")]) + "\n").encode("utf-8"),
+    )
+
+    events = [
+        event async for event in SandboxRunControl().read_events(transport, _context(), 0)
+    ]
+
+    assert [event.sequence for event in events] == [1]
+
+
+@pytest.mark.asyncio
 async def test_cancel_signals_the_recorded_process_group_and_waits_for_journal() -> None:
     transport = FakeSandboxTransport()
     transport.seed_file(f"{RUNS_PATH}/run-1/status.json", _status(state="running"))

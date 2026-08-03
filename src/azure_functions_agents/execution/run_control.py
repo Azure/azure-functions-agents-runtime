@@ -244,6 +244,8 @@ class SandboxRunControl:
                 if event.sequence > cursor:
                     cursor = event.sequence
                     yield event
+                    if event.type in {"done", "error"}:
+                        return
             status = await self.get_status(handle, context)
             if status.state in _TERMINAL_STATES:
                 return
