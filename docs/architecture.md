@@ -274,7 +274,10 @@ distinguish transient/auth/throttling conditions from simple not-yet-published
 absence. A content archive write that raises is never reclassified as landed
 by a same-sized file already at that path — unlike the small sidecar and seed,
 which are safe to retry because they are re-verified byte-for-byte and by
-strict re-parse.
+strict re-parse. Every one of these delivery verification reads carries the
+same narrow mapping: only a genuinely missing or differing artifact is a
+verification failure, so an operational read/stat failure propagates instead
+(falling back to the original write error when the write itself also raised).
 
 For a workflow-enabled main agent, `workflows/integration.py` produces shared workflow guidance plus channel-specific completion behavior. Built-in chat/MCP handlers receive the chat addendum; declared-trigger handlers receive the trigger addendum together with `workflow_enabled=True`, the Durable client, and the agent name. Registration consumes these resolved values and does not re-parse workflow metadata.
 

@@ -36,6 +36,7 @@ from azure_functions_agents.transport.manifest import (
 from azure_functions_agents.transport.transport_models import (
     ProvisionedSandboxIdentity,
     SandboxFileOperationError,
+    SandboxFileStat,
 )
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
@@ -1582,22 +1583,34 @@ def test_copy_fallback_locator_into_archive_translates_a_disappeared_file(tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_content_archive_landed_treats_a_stat_failure_as_not_landed(
+async def test_content_archive_landed_propagates_an_operational_stat_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A stat failure right after a successful write is a verification failure, not a crash."""
+    """A stat failure right after a successful write is inconclusive, not a
+    mismatch: it propagates so the caller can classify it, rather than being
+    folded into a false "not landed" verdict."""
     transport = FakeSandboxTransport()
-    captured = _captured_package()
-    expected = _expected_binding(captured)
+    fault = SandboxFileOperationError("transient stat failure")
 
-    async def _fail_stat(self: FakeSandboxTransport, path: str) -> object:
+    async def _fail_stat(self: FakeSandboxTransport, path: str) -> SandboxFileStat:
         del self, path
-        raise SandboxFileOperationError("transient stat failure")
+        raise fault
 
     monkeypatch.setattr(FakeSandboxTransport, "stat_file", _fail_stat)
 
-    with pytest.raises(package.ContentDeliveryVerificationError):
-        await package.deliver_content_package(transport, captured, expected, _live_identity())
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await package._content_archive_landed(transport, expected_size=100)
+
+    assert exc_info.value is fault
+
+
+@pytest.mark.asyncio
+async def test_content_archive_landed_treats_a_missing_file_as_not_landed() -> None:
+    transport = FakeSandboxTransport()
+
+    landed = await package._content_archive_landed(transport, expected_size=100)
+
+    assert landed is False
 
 
 # ---------------------------------------------------------------------------
@@ -1753,11 +1766,13 @@ def test_capture_translates_a_late_large_zip_file_error_into_a_typed_error(
 
 def test_build_expected_manifest_binding_stamps_all_fields_from_the_session_row() -> None:
     session = _session_record()
+    caller_fingerprint = "s1-" + ("e" * 52)
+    assert caller_fingerprint != session.state_store_fingerprint
 
     expected = package.build_expected_manifest_binding(
         session,
         sandbox_group_resource_id=_GROUP,
-        state_store_fingerprint=_STATE_STORE_FINGERPRINT,
+        state_store_fingerprint=caller_fingerprint,
     )
 
     assert expected.manifest_version == package.MANIFEST_VERSION
@@ -1771,7 +1786,10 @@ def test_build_expected_manifest_binding_stamps_all_fields_from_the_session_row(
     assert expected.generation == session.generation
     assert expected.digest_kind == session.digest_kind
     assert expected.digest == session.digest
-    assert expected.state_store_fingerprint == _STATE_STORE_FINGERPRINT
+    # The caller's explicit argument is stamped, not whatever value already sits
+    # on the session row: this function never compares current vs. stored state,
+    # it only stamps the value it is given.
+    assert expected.state_store_fingerprint == caller_fingerprint
 
 
 def test_build_expected_manifest_binding_requires_a_non_null_sandbox_id() -> None:
@@ -2178,6 +2196,114 @@ async def test_delivery_does_not_mask_an_uncertain_seed_write_with_an_unrelated_
         await package.deliver_content_package(transport, captured, expected, _live_identity())
 
     assert exc_info.value is write_fault
+
+
+@pytest.mark.asyncio
+async def test_delivery_does_not_mask_an_uncertain_sidecar_write_with_an_unrelated_read_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Mirrors the seed case: the read-back's own failure must not overwrite
+    the original write fault's identity for the sidecar path either."""
+    transport = FakeSandboxTransport()
+    captured = _captured_package()
+    expected = _expected_binding(captured)
+    write_fault = SandboxFileOperationError("sidecar write never reached the sandbox")
+    read_fault = SandboxFileOperationError("read-back also failed")
+    real_write_file = FakeSandboxTransport.write_file
+    real_read_file = FakeSandboxTransport.read_file
+
+    async def _raise_without_writing(
+        self: FakeSandboxTransport, path: str, content: bytes, *, create_dirs: bool = False
+    ) -> None:
+        if path == package.CONTENT_DIGEST_SIDECAR_PATH:
+            raise write_fault
+        await real_write_file(self, path, content, create_dirs=create_dirs)
+
+    async def _fail_sidecar_read_back(self: FakeSandboxTransport, path: str) -> bytes:
+        if path == package.CONTENT_DIGEST_SIDECAR_PATH:
+            raise read_fault
+        return await real_read_file(self, path)
+
+    monkeypatch.setattr(FakeSandboxTransport, "write_file", _raise_without_writing)
+    monkeypatch.setattr(FakeSandboxTransport, "read_file", _fail_sidecar_read_back)
+
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await package.deliver_content_package(transport, captured, expected, _live_identity())
+
+    assert exc_info.value is write_fault
+
+
+@pytest.mark.asyncio
+async def test_delivery_propagates_an_operational_failure_verifying_a_clean_archive_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A clean (non-raising) write's own verification stat failing operationally
+    (auth, throttling, network) is not a mismatch and must not be swallowed into
+    ``ContentDeliveryVerificationError``; the caller needs to see and classify it."""
+    transport = FakeSandboxTransport()
+    captured = _captured_package()
+    expected = _expected_binding(captured)
+    fault = SandboxFileOperationError("forbidden", status_code=403)
+    real_stat_file = FakeSandboxTransport.stat_file
+
+    async def _fail_archive_stat(self: FakeSandboxTransport, path: str) -> SandboxFileStat:
+        if path == package.CONTENT_ARCHIVE_PATH:
+            raise fault
+        return await real_stat_file(self, path)
+
+    monkeypatch.setattr(FakeSandboxTransport, "stat_file", _fail_archive_stat)
+
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await package.deliver_content_package(transport, captured, expected, _live_identity())
+
+    assert exc_info.value is fault
+    assert await transport.read_file(package.CONTENT_ARCHIVE_PATH) == captured.archive_bytes
+
+
+@pytest.mark.asyncio
+async def test_delivery_propagates_an_operational_failure_verifying_a_clean_sidecar_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeSandboxTransport()
+    captured = _captured_package()
+    expected = _expected_binding(captured)
+    fault = SandboxFileOperationError("transient failure", status_code=503)
+    real_read_file = FakeSandboxTransport.read_file
+
+    async def _fail_sidecar_read(self: FakeSandboxTransport, path: str) -> bytes:
+        if path == package.CONTENT_DIGEST_SIDECAR_PATH:
+            raise fault
+        return await real_read_file(self, path)
+
+    monkeypatch.setattr(FakeSandboxTransport, "read_file", _fail_sidecar_read)
+
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await package.deliver_content_package(transport, captured, expected, _live_identity())
+
+    assert exc_info.value is fault
+
+
+@pytest.mark.asyncio
+async def test_delivery_propagates_an_operational_failure_verifying_a_clean_seed_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    transport = FakeSandboxTransport()
+    captured = _captured_package()
+    expected = _expected_binding(captured)
+    fault = SandboxFileOperationError("network error")
+    real_read_file = FakeSandboxTransport.read_file
+
+    async def _fail_seed_read(self: FakeSandboxTransport, path: str) -> bytes:
+        if path == package.CONTENT_MANIFEST_SEED_PATH:
+            raise fault
+        return await real_read_file(self, path)
+
+    monkeypatch.setattr(FakeSandboxTransport, "read_file", _fail_seed_read)
+
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await package.deliver_content_package(transport, captured, expected, _live_identity())
+
+    assert exc_info.value is fault
 
 
 @pytest.mark.asyncio

@@ -384,7 +384,9 @@ async def deliver_content_package(
     The sidecar and seed are verified byte-for-byte and, for the seed, by a
     strict re-parse, so a write that raises after possibly committing is
     classified by one bounded read-back through that stronger check before
-    treating it as failed.
+    treating it as failed. An operational failure during any verification
+    read is never itself a mismatch: it propagates (or, if the write also
+    raised, that original write error takes precedence instead).
     """
 
     _require_matching_digest(package, expected)
@@ -458,9 +460,16 @@ async def _deliver_content_archive(
 
 
 async def _content_archive_landed(transport: SandboxFileTransport, expected_size: int) -> bool:
+    """Whether ``app.zip`` is present with the expected size.
+
+    Only a genuinely missing file counts as "not landed"; an operational
+    failure while reading this clean write's own verification stat is not a
+    mismatch and must propagate for the caller to classify.
+    """
+
     try:
         observed = await transport.stat_file(CONTENT_ARCHIVE_PATH)
-    except (SandboxFileNotFoundError, SandboxFileOperationError):
+    except SandboxFileNotFoundError:
         return False
     return not observed.is_directory and observed.size == expected_size
 
@@ -480,7 +489,17 @@ async def _deliver_digest_sidecar(
 async def _reraise_unless_sidecar_landed(
     transport: SandboxFileTransport, sidecar_bytes: bytes
 ) -> None:
-    if await _digest_sidecar_landed(transport, sidecar_bytes):
+    """The write above already raised; an inconclusive read-back must not
+    replace that original write error with an unrelated operational one, so
+    such a failure here is discarded in favor of re-raising the write's own
+    exception, same as a confirmed mismatch or absence would.
+    """
+
+    try:
+        landed = await _digest_sidecar_landed(transport, sidecar_bytes)
+    except SandboxFileOperationError:
+        landed = False
+    if landed:
         return
     raise
 
@@ -494,9 +513,12 @@ async def _require_sidecar_landed(transport: SandboxFileTransport, sidecar_bytes
 
 
 async def _digest_sidecar_landed(transport: SandboxFileTransport, expected_bytes: bytes) -> bool:
+    """Whether the sidecar's bytes match; propagates an operational read
+    failure rather than treating it as a mismatch (see ``_content_archive_landed``)."""
+
     try:
         observed_bytes = await transport.read_file(CONTENT_DIGEST_SIDECAR_PATH)
-    except (SandboxFileNotFoundError, SandboxFileOperationError):
+    except SandboxFileNotFoundError:
         return False
     return observed_bytes == expected_bytes
 
@@ -520,7 +542,14 @@ async def _reraise_unless_seed_landed(
     expected: ExpectedSandboxManifestBinding,
     live_identity: ProvisionedSandboxIdentity,
 ) -> None:
-    if await _manifest_seed_landed(transport, expected, live_identity):
+    """Mirrors ``_reraise_unless_sidecar_landed``: an inconclusive read-back
+    here must not mask the write's own exception behind an unrelated one."""
+
+    try:
+        landed = await _manifest_seed_landed(transport, expected, live_identity)
+    except SandboxFileOperationError:
+        landed = False
+    if landed:
         return
     raise
 
@@ -542,11 +571,14 @@ async def _manifest_seed_landed(
     expected: ExpectedSandboxManifestBinding,
     live_identity: ProvisionedSandboxIdentity,
 ) -> bool:
+    """Whether the seed is present and matches; propagates an operational
+    read failure rather than treating it as a mismatch (see ``_content_archive_landed``)."""
+
     try:
         seed_bytes = await transport.read_file(CONTENT_MANIFEST_SEED_PATH)
         observed = parse_sandbox_manifest_binding(seed_bytes)
         verify_sandbox_manifest(expected, observed, live_identity)
-    except (SandboxFileNotFoundError, SandboxFileOperationError, SandboxManifestMismatchError):
+    except (SandboxFileNotFoundError, SandboxManifestMismatchError):
         return False
     return True
 
