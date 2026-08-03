@@ -15,6 +15,7 @@ import express from 'express'
 import cors from 'cors'
 
 import * as azure from './azure.js'
+import * as github from './github.js'
 import * as provision from './provision.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -813,6 +814,173 @@ app.post(
         }),
       )
     } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
+// ---------------------------------------------------------------------------
+// GitHub connection (Phase 1) — OAuth App sign-in, then create/connect a repo,
+// push the app's source, and record the repo link on the Function App. The
+// OAuth token is kept server-side keyed by the user's oid; the browser never
+// sees it. See serverless-portal/app/server/src/github.js.
+// ---------------------------------------------------------------------------
+
+// Whether OAuth is configured on the server, and whether THIS user is connected.
+app.get(
+  '/api/github/status',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const { oid } = azure.getSignedInIdentity(token)
+    const entry = github.tokenStore.get(oid)
+    res.json({
+      configured: github.isConfigured(),
+      connected: Boolean(entry),
+      ...(entry ? { login: entry.login, avatarUrl: entry.avatarUrl } : {}),
+    })
+  }),
+)
+
+// Mint the GitHub authorize URL bound to this user (opened by the SPA in a popup).
+app.post(
+  '/api/github/login-url',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    if (!github.isConfigured()) throw new HttpError(501, 'GitHub sign-in is not configured on the server.')
+    const { oid } = azure.getSignedInIdentity(token)
+    res.json({ authorizeUrl: github.authorizeUrl(oid) })
+  }),
+)
+
+// OAuth callback — a top-level browser navigation, so it carries no ARM token;
+// the signed `state` binds it to the user. Returns a tiny self-closing page.
+app.get(
+  '/api/github/callback',
+  wrap(async (req, res) => {
+    const code = String(req.query.code || '')
+    const state = github.readState(req.query.state)
+    if (!code || !state) {
+      return res.status(400).send(github.closePage('GitHub sign-in failed (invalid or expired state).', false))
+    }
+    try {
+      const accessToken = await github.exchangeCode(code)
+      const user = await github.getUser(accessToken)
+      github.tokenStore.set(state.oid, { token: accessToken, login: user.login, avatarUrl: user.avatarUrl })
+      res.send(github.closePage(`Connected as ${user.login}. You can close this window.`, true))
+    } catch (err) {
+      res.status(502).send(github.closePage(`GitHub sign-in failed: ${String(err?.message ?? err).slice(0, 200)}`, false))
+    }
+  }),
+)
+
+// Disconnect this user's GitHub.
+app.post(
+  '/api/github/disconnect',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const { oid } = azure.getSignedInIdentity(token)
+    github.tokenStore.clear(oid)
+    res.json({ configured: github.isConfigured(), connected: false })
+  }),
+)
+
+// List the connected user's repos (for the "existing repo" picker).
+app.get(
+  '/api/github/repos',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const { oid } = azure.getSignedInIdentity(token)
+    const entry = github.tokenStore.get(oid)
+    if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
+    try {
+      res.json({ repos: await github.listRepos(entry.token) })
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
+// Create (or connect) a repo, push the app's source, and record the link on the app.
+app.post(
+  '/api/github/connect',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const { oid } = azure.getSignedInIdentity(token)
+    const entry = github.tokenStore.get(oid)
+    if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
+
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    const mode = String(req.body?.mode ?? 'new')
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+
+    // Read the portal-managed source tree for this app.
+    const dir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
+    if (!(await pathExists(dir))) throw new HttpError(404, 'No stored source for this app to push.')
+    const files = await readDirFiles(dir)
+    if (!files.length) throw new HttpError(404, 'No files to push for this app.')
+
+    try {
+      // Resolve the target repo (create new, or use an existing one).
+      let repo
+      if (mode === 'existing') {
+        const fullName = String(req.body?.repo ?? '').trim()
+        const [owner, name] = fullName.split('/')
+        if (!owner || !name) throw new HttpError(400, 'An existing repo "owner/name" is required.')
+        repo = {
+          owner,
+          name,
+          defaultBranch: String(req.body?.branch ?? '').trim() || 'main',
+          htmlUrl: `https://github.com/${owner}/${name}`,
+        }
+      } else {
+        const name = safeSegment(String(req.body?.repoName ?? appName).trim() || appName)
+        const priv = req.body?.private !== false
+        const org = String(req.body?.org ?? '').trim()
+        const created = await github.createRepo(entry.token, { name, private: priv, org })
+        repo = {
+          owner: created.owner,
+          name: created.name,
+          defaultBranch: created.defaultBranch,
+          htmlUrl: created.htmlUrl,
+        }
+      }
+
+      const branch = repo.defaultBranch || 'main'
+      await github.pushFiles(entry.token, {
+        owner: repo.owner,
+        repo: repo.name,
+        branch,
+        files,
+        message: 'Initial agent source from the Serverless Agent Portal',
+      })
+
+      // Record the connection on the Function App (light "deployment metadata"
+      // so a return visit / edit knows where to open PRs). Non-fatal on failure.
+      const repoUrl = `https://github.com/${repo.owner}/${repo.name}`
+      let stored = true
+      try {
+        await azure.setAppSettings(token, subscription, resourceGroup, appName, {
+          GITHUB_REPO_URL: repoUrl,
+          GITHUB_BRANCH: branch,
+          GITHUB_CONNECTED_BY: entry.login,
+        })
+      } catch {
+        stored = false
+      }
+
+      res.json({
+        htmlUrl: repo.htmlUrl || repoUrl,
+        repoUrl,
+        owner: repo.owner,
+        name: repo.name,
+        branch,
+        stored,
+        pushed: files.map((f) => f.name).sort(),
+      })
+    } catch (err) {
+      if (err instanceof HttpError) throw err
       throw new HttpError(err.status ?? 502, String(err?.message ?? err))
     }
   }),

@@ -135,6 +135,30 @@ export interface GrantResult {
   scope: string
 }
 
+export interface GitHubStatus {
+  configured: boolean
+  connected: boolean
+  login?: string
+  avatarUrl?: string
+}
+export interface GitHubRepo {
+  fullName: string
+  name: string
+  owner: string
+  private: boolean
+  defaultBranch: string
+  htmlUrl: string
+}
+export interface GitHubConnectResult {
+  htmlUrl: string
+  repoUrl: string
+  owner: string
+  name: string
+  branch: string
+  stored: boolean
+  pushed: string[]
+}
+
 export type DeployTarget =
   | { kind: 'existing'; app: string; resourceGroup: string }
   | {
@@ -312,4 +336,21 @@ export const api = {
     account: string
     principalId: string
   }) => req<GrantResult>('POST', '/api/foundry/grant-access', p),
+
+  // GitHub connection (Phase 1): OAuth status, sign-in URL, repo list, connect.
+  githubStatus: () => req<GitHubStatus>('GET', '/api/github/status'),
+  githubLoginUrl: () => req<{ authorizeUrl: string }>('POST', '/api/github/login-url'),
+  githubDisconnect: () => req<GitHubStatus>('POST', '/api/github/disconnect'),
+  githubRepos: () => req<{ repos: GitHubRepo[] }>('GET', '/api/github/repos'),
+  githubConnect: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    mode: 'new' | 'existing'
+    repoName?: string
+    private?: boolean
+    org?: string
+    repo?: string
+    branch?: string
+  }) => req<GitHubConnectResult>('POST', '/api/github/connect', p),
 }
