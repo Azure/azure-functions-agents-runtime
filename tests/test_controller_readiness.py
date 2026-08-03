@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from azure_functions_agents.controller.package import capture_script_root
 from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     SessionActivationError,
@@ -31,6 +30,7 @@ from azure_functions_agents.session_state import (
 )
 from azure_functions_agents.transport.manifest import SandboxManifestMismatchError
 from azure_functions_agents.transport.transport_models import DiskSource
+from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
 from tests.doubles.fake_session_runtime import FakeSandboxSessionHandle as _FakeHandle
 from tests.doubles.fake_session_runtime import FakeSandboxSessionProvider as _FakeProvider
@@ -39,6 +39,7 @@ from tests.doubles.fake_session_runtime import FakeSessionStateStore as _FakeSto
 _GROUP_RESOURCE_ID = DEFAULT_GROUP_RESOURCE_ID
 _FINGERPRINT = "s1-" + ("a" * 52)
 _TEST_SOURCE = DiskSource.create("test-harness")
+pytestmark = pytest.mark.usefixtures("deterministic_content_package")
 
 
 def _owner() -> FunctionAppOwnerContext:
@@ -58,7 +59,7 @@ def _session(
     fingerprint: str = _FINGERPRINT,
 ) -> DurableSessionRecord:
     resolved_owner = owner or _owner()
-    package = capture_script_root(script_root)
+    package = content_package()
     now = datetime.now(UTC)
     return DurableSessionRecord.create(
         owner_partition=owner_partition(resolved_owner),

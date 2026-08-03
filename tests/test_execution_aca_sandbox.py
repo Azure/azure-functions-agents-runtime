@@ -6,7 +6,6 @@ from pathlib import Path
 
 import pytest
 
-from azure_functions_agents.controller.package import capture_script_root
 from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
 from azure_functions_agents.execution.aca_sandbox import AcaSandboxExecutionBackend
 from azure_functions_agents.execution.backend import (
@@ -24,6 +23,7 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import DiskSource
+from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
     DEFAULT_GROUP_RESOURCE_ID,
     FakeSandboxSessionHandle,
@@ -33,6 +33,7 @@ from tests.doubles.fake_session_runtime import (
 from tests.test_execution_backend import assert_event_cursor_conformance
 
 _FINGERPRINT = "s1-" + ("a" * 52)
+pytestmark = pytest.mark.usefixtures("deterministic_content_package")
 
 
 def _owner() -> FunctionAppOwnerContext:
@@ -54,7 +55,7 @@ def _script_root(tmp_path: Path) -> Path:
 
 def _session(script_root: Path, *, status: str = "ready") -> DurableSessionRecord:
     owner = _owner()
-    package = capture_script_root(script_root)
+    package = content_package()
     now = datetime.now(UTC)
     return DurableSessionRecord.create(
         owner_partition=owner_partition(owner),
