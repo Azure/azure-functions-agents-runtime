@@ -1,30 +1,20 @@
 """Deterministic script-root packaging and digest-gated sandbox content delivery.
 
-Captures the controller's mounted Azure Functions script root into a
-byte-exact ``funcs_zip`` archive, delivers it plus a strict manifest seed
-through the runtime-owned :class:`~azure_functions_agents.transport.ports.SandboxFileTransport`,
-and reads back the harness-authored live session manifest for verification.
-This module never authors the live manifest itself: the harness is the sole
-writer of :data:`~azure_functions_agents.transport.manifest.SESSION_MANIFEST_PATH`,
-and the seed this module writes is content metadata, never a readiness signal.
-
-Script-root traversal never re-opens a path after validating it. On a
-platform with ``openat``-style primitives (Linux, the production target),
-every hop from an anchored root file descriptor is a ``dir_fd``-relative,
-``O_NOFOLLOW`` open, so a filesystem race can only turn into a failed open,
-never a silent escape, and the bytes archived for a file are read from that
-same validated descriptor. Platforms without those primitives (Windows) fall
-back to a resolved-path strategy strengthened with a captured file identity
-re-checked immediately before and after each read.
+Captures the mounted script root once per worker process (Linux only) into a
+byte-exact ``funcs_zip`` archive, then delivers it with a manifest seed through
+the injected :class:`~azure_functions_agents.transport.ports.SandboxFileTransport`.
+The harness alone authors the live manifest this module only verifies.
 """
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import os
 import re
 import stat as stat_module
 import tempfile
+import threading
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
@@ -63,12 +53,7 @@ MANIFEST_VERSION = 1
 
 _FUNCS_ZIP_DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 
-# Deterministic ZIP metadata: every version-sensitive field is pinned
-# explicitly so the archive is byte-identical across interpreters and hosts
-# rather than relying on any of zipfile's platform/version-dependent defaults.
-# The UTF-8 filename flag is not pinned here: stdlib's own write path derives
-# it deterministically from each name (clear for ASCII, set otherwise), and
-# forcing it would be silently overridden by that same write path anyway.
+# Fixed ZIP metadata makes equivalent trees byte-identical across supported interpreters.
 _ARCHIVE_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
 _UNIX_CREATOR_SYSTEM = 3
 _ZIP_SPEC_VERSION = 20
@@ -77,29 +62,16 @@ _DIRECTORY_UNIX_MODE = stat_module.S_IFDIR | 0o755
 _EXECUTABLE_FILE_UNIX_MODE = stat_module.S_IFREG | 0o755
 _STANDARD_FILE_UNIX_MODE = stat_module.S_IFREG | 0o644
 
-# Standard (non-ZIP64) ZIP format limits; a package that would need ZIP64
-# framing is rejected up front rather than silently switching digest regimes.
-# The entry-size bound stays well under the raw 4 GiB-1 format limit: stdlib
-# zipfile's own write path applies a conservative ~5% margin against the
-# 2**31-1 signed-size boundary even for uncompressed (ZIP_STORED) entries, so
-# a size preflighted against the raw format limit alone could still pass here
-# and raise an untyped zipfile.LargeZipFile when the archive is written; the
-# wrapping catch in the archive writer is the exact-boundary backstop.
+# ZIP64 is rejected so one digest never spans two archive formats.
 _MAX_STANDARD_ZIP_ENTRIES = 0xFFFF
 _MAX_STANDARD_ZIP_ENTRY_SIZE = 2_000_000_000
 
-# Fixed-size portions of the standard ZIP records, used only to preflight a
-# deterministic upper bound on the finished archive's size from metadata
-# alone, before any file content is read.
+# Standard ZIP record sizes support a pre-read aggregate-size check.
 _ZIP_LOCAL_HEADER_FIXED_SIZE = 30
 _ZIP_CENTRAL_DIRECTORY_FIXED_SIZE = 46
 _ZIP_END_OF_CENTRAL_DIRECTORY_SIZE = 22
 
-# Operational ceiling on the finished archive, human-approved for v1.
-# SandboxFileTransport.write_file() accepts only `bytes`, so the whole
-# archive is materialized in controller memory at least once at delivery
-# time regardless of how the capture itself streams file content; chunked
-# delivery to avoid this is deferred past v1.
+# The bytes-only transport requires one materialized archive; streaming is deferred.
 _MAX_ARCHIVE_OPERATIONAL_SIZE = 256 * 1024 * 1024
 
 # Streaming chunk size used to copy one validated file's bytes into the
@@ -109,13 +81,7 @@ _READ_CHUNK_SIZE = 1024 * 1024
 # Bound on manual symlink-chain resolution, matching typical POSIX MAXSYMLINKS.
 _MAX_SYMLINK_HOPS = 40
 
-# These POSIX-only os.open() flags are declared conditionally in typeshed based
-# on the platform mypy is checking, not on the platform actually running; a
-# repo-wide type-checking pin would be needed to reference them as bare `os.*`
-# attributes. Reading them through getattr keeps this module (and the mypy
-# config) portable: the fallback 0 is inert because every call site sits
-# behind `_posix_secure_traversal_available()`, which is False wherever these
-# flags do not really exist.
+# Conditional reads let the module fail cleanly when secure Linux primitives are absent.
 _O_NOFOLLOW: int = getattr(os, "O_NOFOLLOW", 0)
 _O_DIRECTORY: int = getattr(os, "O_DIRECTORY", 0)
 _O_NONBLOCK: int = getattr(os, "O_NONBLOCK", 0)
@@ -127,6 +93,10 @@ class ContentPackagingError(Exception):
 
 class ScriptRootUnavailableError(ContentPackagingError):
     """The configured script root is not usable for deterministic capture."""
+
+
+class UnsupportedCapturePlatformError(ContentPackagingError):
+    """This platform lacks the secure POSIX primitives content capture requires."""
 
 
 class UnsafeScriptRootEntryError(ContentPackagingError):
@@ -223,28 +193,10 @@ class _PosixSecureLocator:
 
 
 @dataclass(frozen=True, slots=True)
-class _FallbackLocator:
-    """Locates a regular file by its resolved path plus a captured identity.
-
-    Used only on platforms without ``dir_fd``/``O_NOFOLLOW`` support. ``identity``
-    is ``(st_dev, st_ino)`` captured at scan time, re-checked immediately before
-    and after the read to narrow (not eliminate) the platform's race window.
-    """
-
-    resolved_path: Path
-    identity: tuple[int, int]
-
-
-type _ContentLocator = _PosixSecureLocator | _FallbackLocator
-
-
-@dataclass(frozen=True, slots=True)
 class _ScriptRootEntry:
     """One safely resolved script-root entry ready for deterministic archiving.
 
-    ``device``/``inode`` identify the exact filesystem object captured, and
-    ``ctime_ns`` records its last metadata-change time; together with
-    ``size``/``mtime_ns`` these let every later re-stat detect not just a
+    ``device``/``inode``/``ctime_ns`` let a later re-stat detect not just a
     content rewrite but an in-place inode swap or a same-size mutation that
     also rewrote the timestamp, since even that still bumps ctime.
     """
@@ -257,36 +209,19 @@ class _ScriptRootEntry:
     device: int
     inode: int
     executable: bool
-    locator: _ContentLocator | None
+    locator: _PosixSecureLocator | None
 
 
-def capture_script_root(script_root: Path) -> CapturedContentPackage:
+def _capture_script_root(script_root: Path) -> CapturedContentPackage:
     """Deterministically archive a script root into an immutable content package.
 
-    Captures every regular file and empty directory beneath ``script_root``,
-    including hidden entries and vendored dependency trees, into a
-    byte-exact ``ZIP_STORED`` archive. Fails closed on an unsafe entry, an
-    empty root, a standard-ZIP size/count/aggregate overflow, or a mutation
-    detected between validating an entry and reading its bytes -- including a
-    final rescan that catches an entry added, removed, or retyped after the
-    initial scan but before delivery.
+    Captures every file and empty directory beneath ``script_root`` into a
+    byte-exact ``ZIP_STORED`` archive, race-closed against capture-time
+    mutation. Fails closed on an unsafe entry, an empty root, or a size/count
+    overflow. Linux only: callers must check platform support first.
     """
 
-    resolved_root = _validate_script_root(script_root)
-    if _posix_secure_traversal_available():
-        return _capture_script_root_posix(resolved_root)
-    return _capture_script_root_fallback(resolved_root)
-
-
-def _capture_script_root_posix(root: Path) -> CapturedContentPackage:
-    """Capture through one root file descriptor held open for the whole operation.
-
-    The same anchored ``root_fd`` -- never a re-derived root pathname -- backs
-    the initial scan, the archive write, and a closing rescan, so nothing in
-    this operation ever reopens the root by path between validating it and
-    reading from it.
-    """
-
+    root = _validate_script_root(script_root)
     root_fd = _open_root_directory(root)
     try:
         entries = _scan_posix_tree(root_fd)
@@ -298,16 +233,6 @@ def _capture_script_root_posix(root: Path) -> CapturedContentPackage:
         return _finish_captured_package(archive_bytes)
     finally:
         os.close(root_fd)
-
-
-def _capture_script_root_fallback(root: Path) -> CapturedContentPackage:
-    entries = _scan_fallback(root)
-    _require_non_empty_script_root(entries)
-    _preflight_standard_zip_limits(entries)
-    _preflight_aggregate_archive_size(entries)
-    archive_bytes = _write_deterministic_archive_fallback(entries)
-    _require_matching_entry_sets(entries, _scan_fallback(root))
-    return _finish_captured_package(archive_bytes)
 
 
 def _require_non_empty_script_root(entries: Sequence[_ScriptRootEntry]) -> None:
@@ -331,6 +256,71 @@ def _finish_captured_package(archive_bytes: bytes) -> CapturedContentPackage:
     return CapturedContentPackage.create(
         archive_bytes=archive_bytes, digest_kind=FUNCS_ZIP_DIGEST_KIND, digest=digest
     )
+
+
+class _ContentPackageCache:
+    """Process-local, single-flight cache of one deterministic package per root.
+
+    Per-root thread locks keep it safe across event loops and threads.
+    Failed captures are not cached; unrelated roots never block each other.
+    """
+
+    def __init__(self) -> None:
+        self._packages: dict[Path, CapturedContentPackage] = {}
+        self._locks_guard = threading.Lock()
+        self._locks: dict[Path, threading.Lock] = {}
+
+    def _lock_for(self, key: Path) -> threading.Lock:
+        with self._locks_guard:
+            lock = self._locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[key] = lock
+            return lock
+
+    async def get_or_capture(self, key: Path) -> CapturedContentPackage:
+        cached = self._packages.get(key)
+        if cached is not None:
+            return cached
+        return await asyncio.to_thread(self._get_or_capture_sync, key)
+
+    def _get_or_capture_sync(self, key: Path) -> CapturedContentPackage:
+        """The double-checked lookup/capture/store, run on a worker thread.
+
+        Runs entirely off the event loop so the blocking ``threading.Lock``
+        acquire below can never stall any caller's event loop.
+        """
+
+        cached = self._packages.get(key)
+        if cached is not None:
+            return cached
+        with self._lock_for(key):
+            cached = self._packages.get(key)
+            if cached is not None:
+                return cached
+            package = _capture_script_root(key)
+            self._packages[key] = package
+            return package
+
+
+_content_package_cache = _ContentPackageCache()
+
+
+async def get_content_package(script_root: Path) -> CapturedContentPackage:
+    """Return this worker's cached deterministic package for ``script_root``.
+
+    The first call captures; every later call for the same canonical root --
+    including concurrent sessions on this worker -- returns the exact same
+    immutable package, since the mounted root is immutable for the worker's
+    lifetime. Fails immediately on a platform without secure capture support.
+    """
+
+    if not _posix_secure_traversal_available():
+        raise UnsupportedCapturePlatformError(
+            "Content capture requires Linux dir_fd/O_NOFOLLOW support."
+        )
+    key = _resolve_script_root_path(script_root)
+    return await _content_package_cache.get_or_capture(key)
 
 
 def build_expected_manifest_binding(
@@ -374,19 +364,10 @@ async def deliver_content_package(
 ) -> DeliveredContentPackage:
     """Deliver a captured package plus its manifest seed, verifying every write.
 
-    Requires the captured digest and live sandbox identity to already match
-    ``expected`` before any sandbox write. The large content archive is
-    verified by size only (never re-read in full) and a failed write always
-    propagates as-is: unlike the small sidecar/seed, an ambiguous archive
-    write outcome cannot be strengthened into a "landed anyway" success
-    without a full read-back, which stays out of scope -- a coincidentally
-    same-sized stale file from an earlier delivery must never be accepted.
-    The sidecar and seed are verified byte-for-byte and, for the seed, by a
-    strict re-parse, so a write that raises after possibly committing is
-    classified by one bounded read-back through that stronger check before
-    treating it as failed. An operational failure during any verification
-    read is never itself a mismatch: it propagates (or, if the write also
-    raised, that original write error takes precedence instead).
+    Requires the captured digest and live identity to already match
+    ``expected``. The archive is verified by size only and a failed write
+    always propagates; the sidecar/seed are verified byte-for-byte (and the
+    seed by re-parse) and may be retried through that stronger check.
     """
 
     _require_matching_digest(package, expected)
@@ -406,12 +387,9 @@ async def read_live_manifest_binding(
 ) -> ObservedSandboxManifestBinding:
     """Read, strictly parse, and verify the harness-authored live session manifest.
 
-    Returns the verified observation only once every routing-critical field
-    matches. A missing manifest means the harness has not published one yet;
-    any other file-operation failure (auth, throttling, transient service
-    error) propagates unchanged so the caller can classify it, rather than
-    being folded into the same not-ready outcome as a simple absence. A parse
-    or binding mismatch on a manifest that *was* read is a redacted integrity
+    A missing manifest means the harness has not published one yet; any other
+    file-operation failure propagates for the caller to classify. A parse or
+    binding mismatch on a manifest that *was* read is a redacted integrity
     error. This performs one direct read, not a readiness-polling loop.
     """
 
@@ -619,8 +597,8 @@ def _validate_script_root(script_root: Path) -> Path:
 def _posix_secure_traversal_available() -> bool:
     """Whether this platform supports ``dir_fd``/``O_NOFOLLOW`` race-free traversal.
 
-    A module-level function (rather than an inline check) so tests can force
-    the portable fallback path on a platform that does support the secure one.
+    A module-level function (rather than an inline check) so tests can
+    simulate an unsupported platform regardless of the host actually running.
     """
 
     return (
@@ -1021,204 +999,6 @@ def _write_deterministic_archive_posix(
         _write_entry_posix(archive, root_fd, entry)
 
     return _stream_entries_into_archive(entries, write_entry)
-
-
-# ---------------------------------------------------------------------------
-# Portable fallback traversal (platforms without dir_fd/O_NOFOLLOW support)
-# ---------------------------------------------------------------------------
-
-
-def _list_directory_children(directory: Path) -> list[Path]:
-    try:
-        return sorted(directory.iterdir(), key=lambda child: child.name)
-    except OSError:
-        raise ContentCaptureRaceError("Script root changed while it was being captured.") from None
-
-
-def _scan_fallback_directory(root: Path, directory: Path, entries: list[_ScriptRootEntry]) -> None:
-    children = _list_directory_children(directory)
-    if not children:
-        _append_fallback_empty_directory(root, directory, entries)
-        return
-    for child in children:
-        _scan_fallback_child(root, child, entries)
-
-
-def _scan_fallback(root: Path) -> tuple[_ScriptRootEntry, ...]:
-    entries: list[_ScriptRootEntry] = []
-    _scan_fallback_directory(root, root, entries)
-    return tuple(sorted(entries, key=lambda entry: entry.archive_name))
-
-
-def _append_fallback_empty_directory(
-    root: Path, directory: Path, entries: list[_ScriptRootEntry]
-) -> None:
-    if directory == root:
-        return
-    entries.append(_fallback_empty_directory_entry(root, directory))
-
-
-def _stat_fallback_path(path: Path) -> os.stat_result:
-    """Stat a path just observed during the scan; its disappearance here is a capture race."""
-
-    try:
-        return path.stat()
-    except OSError:
-        raise ContentCaptureRaceError("Script root changed while it was being captured.") from None
-
-
-def _fallback_empty_directory_entry(root: Path, directory: Path) -> _ScriptRootEntry:
-    dir_stat = _stat_fallback_path(directory)
-    return _ScriptRootEntry(
-        archive_name=f"{directory.relative_to(root).as_posix()}/",
-        is_directory=True,
-        size=0,
-        mtime_ns=dir_stat.st_mtime_ns,
-        ctime_ns=dir_stat.st_ctime_ns,
-        device=dir_stat.st_dev,
-        inode=dir_stat.st_ino,
-        executable=False,
-        locator=None,
-    )
-
-
-def _fallback_stat_predicate(path: Path, predicate: Callable[[Path], bool]) -> bool:
-    """Evaluate a stat-based type predicate, translating any raised ``OSError``.
-
-    An unwrapped predicate call can otherwise leak a path through a
-    permission or other stat failure (e.g. ``EACCES``, which
-    ``Path.is_dir``/``is_file``/``is_symlink`` do not themselves swallow) --
-    exactly the condition an adversarial or racing script root can trigger.
-    """
-
-    try:
-        return predicate(path)
-    except OSError:
-        raise ContentCaptureRaceError("Script root changed while it was being captured.") from None
-
-
-def _scan_fallback_child(root: Path, child: Path, entries: list[_ScriptRootEntry]) -> None:
-    if _fallback_stat_predicate(child, Path.is_symlink):
-        entries.append(_resolve_fallback_symlink(root, child))
-        return
-    if _fallback_stat_predicate(child, Path.is_dir):
-        _scan_fallback_directory(root, child, entries)
-        return
-    if _fallback_stat_predicate(child, Path.is_file):
-        entries.append(_fallback_file_entry(root, child, child))
-        return
-    raise UnsafeScriptRootEntryError(
-        "Script root entry is neither a regular file, directory, nor safe symlink."
-    )
-
-
-def _read_fallback_symlink_target(link_path: Path) -> str:
-    try:
-        return os.readlink(link_path)
-    except OSError:
-        raise UnsafeScriptRootEntryError(
-            "Script root symlink is broken or forms a loop."
-        ) from None
-
-
-def _resolve_fallback_symlink_path(link_path: Path) -> Path:
-    try:
-        return link_path.resolve(strict=True)
-    except (OSError, RuntimeError):
-        raise UnsafeScriptRootEntryError(
-            "Script root symlink is broken or forms a loop."
-        ) from None
-
-
-def _resolve_fallback_symlink(root: Path, link_path: Path) -> _ScriptRootEntry:
-    """Resolve one script-root symlink to a contained regular file.
-
-    Only the immediate target is checked for being absolute; a deeper hop
-    that is itself absolute is not inspected (unlike the POSIX secure path,
-    which checks every hop). The containment check below still rejects any
-    chain that resolves outside the root, so this narrows accuracy, not safety.
-    """
-
-    immediate_target = _read_fallback_symlink_target(link_path)
-    if os.path.isabs(immediate_target):
-        raise UnsafeScriptRootEntryError("Script root symlink resolves outside the script root.")
-    resolved = _resolve_fallback_symlink_path(link_path)
-    if not resolved.is_relative_to(root):
-        raise UnsafeScriptRootEntryError("Script root symlink resolves outside the script root.")
-    if _fallback_stat_predicate(resolved, Path.is_dir):
-        raise UnsafeScriptRootEntryError(
-            "Script root symlink targets a directory, which is unsupported."
-        )
-    if not _fallback_stat_predicate(resolved, Path.is_file):
-        raise UnsafeScriptRootEntryError("Script root symlink does not target a regular file.")
-    return _fallback_file_entry(root, link_path, resolved)
-
-
-def _fallback_file_entry(root: Path, archive_source: Path, bytes_source: Path) -> _ScriptRootEntry:
-    file_stat = _stat_fallback_path(bytes_source)
-    return _ScriptRootEntry(
-        archive_name=archive_source.relative_to(root).as_posix(),
-        is_directory=False,
-        size=file_stat.st_size,
-        mtime_ns=file_stat.st_mtime_ns,
-        ctime_ns=file_stat.st_ctime_ns,
-        device=file_stat.st_dev,
-        inode=file_stat.st_ino,
-        executable=(file_stat.st_mode & 0o111) != 0,
-        locator=_FallbackLocator(
-            resolved_path=bytes_source, identity=(file_stat.st_dev, file_stat.st_ino)
-        ),
-    )
-
-
-def _require_fallback_locator(entry: _ScriptRootEntry) -> _FallbackLocator:
-    if isinstance(entry.locator, _FallbackLocator):
-        return entry.locator
-    raise ContentPackagingError("Script root entry is missing its secure content locator.")
-
-
-def _stat_fallback_locator(locator: _FallbackLocator) -> os.stat_result:
-    try:
-        return locator.resolved_path.stat()
-    except OSError:
-        raise ContentCaptureRaceError("Script root changed while it was being captured.") from None
-
-
-def _require_matching_fallback_stat(
-    observed: os.stat_result, entry: _ScriptRootEntry, locator: _FallbackLocator
-) -> None:
-    if (
-        (observed.st_dev, observed.st_ino) != locator.identity
-        or observed.st_size != entry.size
-        or observed.st_mtime_ns != entry.mtime_ns
-        or observed.st_ctime_ns != entry.ctime_ns
-    ):
-        raise ContentCaptureRaceError("Script root changed while it was being captured.")
-
-
-def _copy_fallback_locator_into_archive(
-    locator: _FallbackLocator, archive: zipfile.ZipFile, info: zipfile.ZipInfo
-) -> None:
-    try:
-        with locator.resolved_path.open("rb") as source, archive.open(info, mode="w") as dest:
-            _copy_file_into_archive_entry(source, dest)
-    except OSError:
-        raise ContentCaptureRaceError("Script root changed while it was being captured.") from None
-
-
-def _write_entry_fallback(archive: zipfile.ZipFile, entry: _ScriptRootEntry) -> None:
-    info = _archive_member_info(entry)
-    if entry.is_directory:
-        _write_empty_archive_entry(archive, info)
-        return
-    locator = _require_fallback_locator(entry)
-    _require_matching_fallback_stat(_stat_fallback_locator(locator), entry, locator)
-    _copy_fallback_locator_into_archive(locator, archive, info)
-    _require_matching_fallback_stat(_stat_fallback_locator(locator), entry, locator)
-
-
-def _write_deterministic_archive_fallback(entries: Sequence[_ScriptRootEntry]) -> bytes:
-    return _stream_entries_into_archive(entries, _write_entry_fallback)
 
 
 # ---------------------------------------------------------------------------

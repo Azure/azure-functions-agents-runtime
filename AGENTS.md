@@ -125,7 +125,9 @@ the Decisions log is durable history. Start from
    characters per row; treat ~500 as the hard ceiling. `Decision` is a short
    noun phrase, `Options considered` is `A / B / C`, and `Choice` is the
    decision plus the one fact that justifies it. A long log is one nobody
-   reads, which defeats the point of keeping it.
+   reads, which defeats the point of keeping it. Group related choices into
+   one durable row rather than adding a separate row per test, per review
+   finding, or per implementation correction.
 
    If a decision genuinely needs more, the detail belongs in the design
    section the decision governs — not in the table cell. Do not restate what

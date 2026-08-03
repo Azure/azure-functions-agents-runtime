@@ -50,15 +50,24 @@ bug fixes.
 The log is an **index of choices, not an essay**. On a long-running FRD it is
 the section that rots first, because every phase appends and nobody prunes.
 
-- **One row per decision.** Target ≤ ~350 characters; treat ~500 as the hard
-  ceiling. `Decision` is a short noun phrase, `Options considered` is
-  `A / B / C`, and `Choice` is the decision plus the one fact that justifies it.
+- **One row per durable decision, not per event.** Group related choices
+  (e.g. a whole implementation pass's worth of fixes) into the fewest rows
+  that cover them. Never add a separate row per test, per review finding, or
+  per implementation correction — a chain of "narrows #X" rows for what is
+  really one evolving decision is exactly the rot this log exists to avoid;
+  fold it into one row (or revise via §"Append-only" below) instead.
+  Target ≤ ~350 characters; treat ~500 as the hard ceiling. `Decision` is a
+  short noun phrase, `Options considered` is `A / B / C`, and `Choice` is the
+  decision plus the one fact that justifies it.
 - **Record *what* was chosen and *why*, never *how* it was implemented.** Do not
   restate what the code, `AGENTS.md`, or `docs/architecture.md` already says.
   If a decision truly needs more, the detail belongs in the design section it
   governs — not in a table cell.
 - **Append-only.** To revise, add a new row and annotate the row it narrows
-  (e.g. "narrows #100"). Never rewrite or delete an existing row.
+  (e.g. "narrows #100"). Never rewrite or delete an existing row. The one
+  exception is a human-authorized editorial compaction of an **unmerged**
+  block (e.g. this feature's own in-flight rows before its first merge) —
+  never compact rows from a phase that has already merged.
 - **Numbers are positional, not stable.** Parallel phases and rebases renumber
   them. So:
   - never cite a decision number from code (see Phase 3);

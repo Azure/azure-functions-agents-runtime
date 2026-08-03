@@ -8,41 +8,6 @@ jobs:
   - job: "TestPython"
     displayName: "Run Azure Functions Agent Runtime Unit Tests"
 
-    strategy:
-      matrix:
-        python-313:
-          PYTHON_VERSION: '3.13'
-        python-314:
-          PYTHON_VERSION: '3.14'
-
-    steps:
-      - task: PipAuthenticate@1
-        displayName: 'Pip Authenticate'
-        inputs:
-          artifactFeeds: ${{ parameters.artifactFeed }}
-      - task: UsePythonVersion@0
-        inputs:
-          versionSpec: $(PYTHON_VERSION)
-      - bash: |
-          python -m pip install --upgrade pip
-          python -m pip install -U -e .[dev]
-        displayName: 'Install dependencies'
-      - bash: |
-          python -m ruff check src tests
-        displayName: 'Lint with ruff'
-      - bash: |
-          python -m mypy src
-        displayName: 'Type check with mypy'
-      - bash: |
-          python eng/scripts/generate_config_reference.py --check
-        displayName: 'Verify config reference docs are up to date'
-      - bash: |
-          python -m pytest --cache-clear --cov=./src/azure_functions_agents --cov-report=xml --cov-branch tests
-        displayName: 'Test with pytest'
-
-  - job: "TestPythonLinux"
-    displayName: "Run Azure Functions Agent Runtime Unit Tests (Linux)"
-
     pool:
       name: ${{ parameters.poolName }}
       image: 1es-ubuntu-22.04

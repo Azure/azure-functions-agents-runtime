@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import io
 import os
 import re
 import stat
-import sys
 import tempfile
+import threading
 import time
 import zipfile
 from collections.abc import Iterator, Sequence
@@ -47,11 +48,11 @@ _GROUP = (
 )
 _STATE_STORE_FINGERPRINT = "s1-" + ("f" * 52)
 
-# A byte-exact golden vector: same tree, same digest, on both supported
-# interpreters and on both the secure and portable capture implementations
-# (verified directly against this exact fixture). Regenerate only if the
-# deterministic ZIP contract changes; avoid an executable file here, since
-# POSIX execute bits are not reproducible through this fixture on Windows.
+# A byte-exact golden vector: same tree, same digest on both supported
+# interpreters (verified directly against this exact fixture). Regenerate
+# only if the deterministic ZIP contract changes; avoid an executable file
+# here, since POSIX execute bits are not reproducible through this fixture
+# on Windows.
 _GOLDEN_DIGEST = "sha256:802a8d501bf9701723ca2b0a566000d1ba7076cacf6694f5e5ddce2759b1659f"
 _GOLDEN_ARCHIVE_HEX = (
     "504b030414000000000000002100f187b58e0e0000000e000000070000002e6869646465"
@@ -174,8 +175,8 @@ def _make_symlink(link_path: Path, target: str, *, target_is_directory: bool = F
         pytest.skip(f"Platform cannot create symlinks in this environment: {exc}")
 
 
-def _force_fallback_traversal(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Force the portable fallback path even where the secure path is available."""
+def _force_unsupported_capture_platform(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Simulate a platform without secure traversal support, regardless of the host."""
 
     monkeypatch.setattr(package, "_posix_secure_traversal_available", lambda: False)
 
@@ -206,17 +207,14 @@ _skip_unless_posix_secure_traversal = pytest.mark.skipif(
     _posix_secure_traversal_unavailable,
     reason="dir_fd/O_NOFOLLOW secure traversal is not available on this platform",
 )
-_skip_unless_ctime_reflects_metadata_changes = pytest.mark.skipif(
-    sys.platform == "win32",
-    reason="Windows os.stat_result.st_ctime is creation time, not metadata-change time",
-)
 
 
 # ---------------------------------------------------------------------------
-# capture_script_root: determinism, safety, and mutation detection
+# _capture_script_root: determinism, safety, and mutation detection
 # ---------------------------------------------------------------------------
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_is_invariant_to_enumeration_order_and_mtime(tmp_path: Path) -> None:
     first_root = tmp_path / "first"
     second_root = tmp_path / "second"
@@ -224,52 +222,56 @@ def test_capture_is_invariant_to_enumeration_order_and_mtime(tmp_path: Path) -> 
     _write_tree(second_root, {"d.py": b"d", "b/c.py": b"c", "a.py": b"a"})
     os.utime(second_root / "a.py", (1_000_000, 1_000_000))
 
-    first = package.capture_script_root(first_root)
-    second = package.capture_script_root(second_root)
+    first = package._capture_script_root(first_root)
+    second = package._capture_script_root(second_root)
 
     assert first.digest == second.digest
     assert first.archive_bytes == second.archive_bytes
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_digest_changes_when_one_byte_changes(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(root, {"main.py": b"print(1)\n"})
-    before = package.capture_script_root(root)
+    before = package._capture_script_root(root)
 
     (root / "main.py").write_bytes(b"print(2)\n")
-    after = package.capture_script_root(root)
+    after = package._capture_script_root(root)
 
     assert before.digest != after.digest
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_digest_changes_when_a_path_changes(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(root, {"main.py": b"print(1)\n"})
-    before = package.capture_script_root(root)
+    before = package._capture_script_root(root)
 
     (root / "main.py").rename(root / "renamed.py")
-    after = package.capture_script_root(root)
+    after = package._capture_script_root(root)
 
     assert before.digest != after.digest
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_digest_changes_when_an_empty_directory_is_added(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(root, {"main.py": b"print(1)\n"})
-    before = package.capture_script_root(root)
+    before = package._capture_script_root(root)
 
     (root / "empty").mkdir()
-    after = package.capture_script_root(root)
+    after = package._capture_script_root(root)
 
     assert before.digest != after.digest
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_fails_closed_for_a_completely_empty_script_root(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
 
     with pytest.raises(package.ScriptRootUnavailableError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 def test_archive_metadata_differs_between_executable_and_standard_files() -> None:
@@ -285,22 +287,20 @@ def test_archive_metadata_differs_between_executable_and_standard_files() -> Non
     assert (standard_info.external_attr >> 16) & 0o777 == 0o644
 
 
-@pytest.mark.skipif(
-    sys.platform.startswith("win"),
-    reason="os.chmod does not set POSIX execute bits on Windows",
-)
+@_skip_unless_posix_secure_traversal
 def test_capture_digest_changes_when_the_execute_bit_changes_on_posix(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(root, {"run.sh": b"#!/bin/sh\necho hi\n"})
     (root / "run.sh").chmod(0o644)
-    before = package.capture_script_root(root)
+    before = package._capture_script_root(root)
 
     (root / "run.sh").chmod(0o755)
-    after = package.capture_script_root(root)
+    after = package._capture_script_root(root)
 
     assert before.digest != after.digest
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_includes_python_packages_hidden_and_nested_files(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(
@@ -313,7 +313,7 @@ def test_capture_includes_python_packages_hidden_and_nested_files(tmp_path: Path
         },
     )
 
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
 
     with zipfile.ZipFile(io.BytesIO(captured.archive_bytes)) as archive:
         names = set(archive.namelist())
@@ -323,6 +323,7 @@ def test_capture_includes_python_packages_hidden_and_nested_files(tmp_path: Path
         assert archive.read("nested/deep/path/module.py") == b"x = 1\n"
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_produces_a_byte_exact_golden_archive_across_interpreters(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(
@@ -336,40 +337,18 @@ def test_capture_produces_a_byte_exact_golden_archive_across_interpreters(tmp_pa
     (root / "empty_dir").mkdir()
     (root / "sub" / "nested_empty").mkdir()
 
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
 
     assert captured.digest == _GOLDEN_DIGEST
     assert captured.archive_bytes == bytes.fromhex(_GOLDEN_ARCHIVE_HEX)
 
 
-def test_capture_produces_the_same_golden_bytes_through_the_fallback_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The secure and portable implementations must agree byte-for-byte."""
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    _write_tree(
-        root,
-        {
-            ".hidden": b"hidden-content",
-            "main.py": b"import os\nprint('hello')\n",
-            "sub/util.py": b"def helper():\n    return 42\n",
-        },
-    )
-    (root / "empty_dir").mkdir()
-    (root / "sub" / "nested_empty").mkdir()
-
-    captured = package.capture_script_root(root)
-
-    assert captured.digest == _GOLDEN_DIGEST
-    assert captured.archive_bytes == bytes.fromhex(_GOLDEN_ARCHIVE_HEX)
-
-
+@_skip_unless_posix_secure_traversal
 def test_captured_package_digest_kind_and_shape_are_fixed(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(root, {"main.py": b"print(1)\n"})
 
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
 
     assert captured.digest_kind == "funcs_zip"
     assert re.fullmatch(r"sha256:[0-9a-f]{64}", captured.digest)
@@ -437,10 +416,195 @@ def test_captured_content_package_rejects_bytes_over_the_operational_bound() -> 
 
 
 # ---------------------------------------------------------------------------
+# get_content_package: once-per-worker cache and async API
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture(autouse=True)
+def _isolated_content_package_cache(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Give every test its own cache so captures never leak across test cases."""
+
+    monkeypatch.setattr(package, "_content_package_cache", package._ContentPackageCache())
+
+
+@_skip_unless_posix_secure_traversal
+@pytest.mark.asyncio
+async def test_get_content_package_returns_the_same_object_to_every_caller(tmp_path: Path) -> None:
+    root = tmp_path / "app"
+    _write_tree(root, {"main.py": b"print(1)\n"})
+
+    first = await package.get_content_package(root)
+    second = await package.get_content_package(root)
+
+    assert second is first
+
+
+@_skip_unless_posix_secure_traversal
+@pytest.mark.asyncio
+async def test_get_content_package_invokes_capture_only_once_for_concurrent_callers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "app"
+    _write_tree(root, {"main.py": b"print(1)\n"})
+    real_capture = package._capture_script_root
+    call_count = 0
+
+    def _counting_capture(script_root: Path) -> package.CapturedContentPackage:
+        nonlocal call_count
+        call_count += 1
+        time.sleep(0.05)
+        return real_capture(script_root)
+
+    monkeypatch.setattr(package, "_capture_script_root", _counting_capture)
+
+    results = await asyncio.gather(*(package.get_content_package(root) for _ in range(8)))
+
+    assert call_count == 1
+    assert all(result is results[0] for result in results)
+
+
+@_skip_unless_posix_secure_traversal
+@pytest.mark.asyncio
+async def test_get_content_package_does_not_recapture_after_the_root_changes(
+    tmp_path: Path,
+) -> None:
+    """The mounted script root is treated as immutable for the worker's lifetime."""
+    root = tmp_path / "app"
+    _write_tree(root, {"main.py": b"print(1)\n"})
+
+    before = await package.get_content_package(root)
+    (root / "main.py").write_bytes(b"print(2)\n")
+    after = await package.get_content_package(root)
+
+    assert after is before
+
+
+@_skip_unless_posix_secure_traversal
+@pytest.mark.asyncio
+async def test_get_content_package_does_not_cache_a_failed_capture(tmp_path: Path) -> None:
+    root = tmp_path / "app"
+    root.mkdir()
+
+    with pytest.raises(package.ScriptRootUnavailableError):
+        await package.get_content_package(root)
+
+    _write_tree(root, {"main.py": b"print(1)\n"})
+    captured = await package.get_content_package(root)
+
+    assert captured.digest_kind == "funcs_zip"
+
+
+@_skip_unless_posix_secure_traversal
+@pytest.mark.asyncio
+async def test_get_content_package_uses_independent_entries_per_root(tmp_path: Path) -> None:
+    first_root = tmp_path / "first"
+    second_root = tmp_path / "second"
+    _write_tree(first_root, {"main.py": b"print('first')\n"})
+    _write_tree(second_root, {"main.py": b"print('second')\n"})
+
+    first = await package.get_content_package(first_root)
+    second = await package.get_content_package(second_root)
+
+    assert first.digest != second.digest
+
+
+@_skip_unless_posix_secure_traversal
+@pytest.mark.asyncio
+async def test_get_content_package_offloads_capture_off_the_event_loop_thread(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = tmp_path / "app"
+    _write_tree(root, {"main.py": b"print(1)\n"})
+    event_loop_thread = threading.current_thread()
+    real_capture = package._capture_script_root
+    capture_thread: threading.Thread | None = None
+
+    def _recording_capture(script_root: Path) -> package.CapturedContentPackage:
+        nonlocal capture_thread
+        capture_thread = threading.current_thread()
+        return real_capture(script_root)
+
+    monkeypatch.setattr(package, "_capture_script_root", _recording_capture)
+
+    await package.get_content_package(root)
+
+    assert capture_thread is not None
+    assert capture_thread is not event_loop_thread
+
+
+@_skip_unless_posix_secure_traversal
+def test_get_content_package_is_single_flight_across_independent_event_loops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Two OS threads, each running its own event loop, must still single-flight.
+
+    A process-global ``asyncio.Lock`` would be unsafe here (bound to whichever
+    loop first awaits it); this is exactly why the cache's internal locking
+    uses only ``threading.Lock``, never an event-loop-bound primitive.
+    """
+    root = tmp_path / "app"
+    _write_tree(root, {"main.py": b"print(1)\n"})
+    real_capture = package._capture_script_root
+    call_count = 0
+    count_lock = threading.Lock()
+
+    def _counting_capture(script_root: Path) -> package.CapturedContentPackage:
+        nonlocal call_count
+        with count_lock:
+            call_count += 1
+        time.sleep(0.05)
+        return real_capture(script_root)
+
+    monkeypatch.setattr(package, "_capture_script_root", _counting_capture)
+
+    results: list[package.CapturedContentPackage] = []
+    errors: list[BaseException] = []
+    results_lock = threading.Lock()
+
+    def _run_in_a_fresh_event_loop() -> None:
+        try:
+            result = asyncio.run(package.get_content_package(root))
+        except BaseException as exc:
+            with results_lock:
+                errors.append(exc)
+            return
+        with results_lock:
+            results.append(result)
+
+    threads = [threading.Thread(target=_run_in_a_fresh_event_loop) for _ in range(2)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5.0)
+
+    assert not any(thread.is_alive() for thread in threads), "a thread deadlocked or hung"
+    assert not errors
+    assert call_count == 1
+    assert len(results) == 2
+    assert results[0] is results[1]
+
+
+@pytest.mark.asyncio
+async def test_get_content_package_fails_before_any_filesystem_access_on_an_unsupported_platform(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _force_unsupported_capture_platform(monkeypatch)
+
+    def _fail_if_called(_script_root: Path) -> Path:
+        raise AssertionError("path resolution must not run once the platform check fails")
+
+    monkeypatch.setattr(package, "_resolve_script_root_path", _fail_if_called)
+
+    with pytest.raises(package.UnsupportedCapturePlatformError):
+        await package.get_content_package(Path("/does/not/matter"))
+
+
+# ---------------------------------------------------------------------------
 # Safe symlink handling
 # ---------------------------------------------------------------------------
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_dereferences_a_contained_regular_file_symlink_deterministically(
     tmp_path: Path,
 ) -> None:
@@ -448,8 +612,8 @@ def test_capture_dereferences_a_contained_regular_file_symlink_deterministically
     _write_tree(root, {"real.py": b"print('real')\n"})
     _make_symlink(root / "link.py", "real.py")
 
-    first = package.capture_script_root(root)
-    second = package.capture_script_root(root)
+    first = package._capture_script_root(root)
+    second = package._capture_script_root(root)
 
     assert first.digest == second.digest
     with zipfile.ZipFile(io.BytesIO(first.archive_bytes)) as archive:
@@ -457,18 +621,20 @@ def test_capture_dereferences_a_contained_regular_file_symlink_deterministically
         assert archive.read("real.py") == b"print('real')\n"
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_dereferences_a_multi_hop_relative_symlink_chain(tmp_path: Path) -> None:
     root = tmp_path / "app"
     _write_tree(root, {"c.txt": b"final-content"})
     _make_symlink(root / "b.txt", "c.txt")
     _make_symlink(root / "a.txt", "b.txt")
 
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
 
     with zipfile.ZipFile(io.BytesIO(captured.archive_bytes)) as archive:
         assert archive.read("a.txt") == b"final-content"
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_rejects_a_symlink_with_an_absolute_target_escaping_the_root(
     tmp_path: Path,
 ) -> None:
@@ -479,9 +645,10 @@ def test_capture_rejects_a_symlink_with_an_absolute_target_escaping_the_root(
     _make_symlink(root / "escape.py", str(outside))
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_rejects_an_absolute_symlink_target_even_when_it_would_resolve_inside_the_root(
     tmp_path: Path,
 ) -> None:
@@ -497,9 +664,10 @@ def test_capture_rejects_an_absolute_symlink_target_even_when_it_would_resolve_i
     _make_symlink(root / "abslink.txt", str(root / "real.txt"))
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_rejects_a_symlink_with_a_relative_target_escaping_the_root(
     tmp_path: Path,
 ) -> None:
@@ -509,27 +677,30 @@ def test_capture_rejects_a_symlink_with_a_relative_target_escaping_the_root(
     _make_symlink(root / "escape.py", "../outside.txt")
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_rejects_a_broken_symlink(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
     _make_symlink(root / "broken.py", "does-not-exist.py")
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_rejects_a_directory_symlink(tmp_path: Path) -> None:
     root = tmp_path / "app"
     (root / "realdir").mkdir(parents=True)
     _make_symlink(root / "dirlink", "realdir", target_is_directory=True)
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_rejects_a_cyclic_symlink(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
@@ -537,7 +708,7 @@ def test_capture_rejects_a_cyclic_symlink(tmp_path: Path) -> None:
     _make_symlink(root / "b.link", "a.link")
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
@@ -548,7 +719,7 @@ def test_capture_rejects_a_symlink_targeting_a_fifo(tmp_path: Path) -> None:
     _make_symlink(root / "link", "pipe")
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 @pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
@@ -558,48 +729,10 @@ def test_capture_rejects_a_special_file_fifo(tmp_path: Path) -> None:
     os.mkfifo(root / "pipe")  # type: ignore[attr-defined]
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
-def test_fallback_rejects_a_special_file_fifo_too(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """The portable fallback must reject the same special file, not just the secure path."""
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    root.mkdir()
-    os.mkfifo(root / "pipe")  # type: ignore[attr-defined]
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-def test_fallback_rejects_a_special_file_via_monkeypatched_classification(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """A portable-path supplement for platforms without a real FIFO to create."""
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    root.mkdir()
-    special = root / "special"
-    special.write_bytes(b"")
-    original_is_file = Path.is_file
-    original_is_dir = Path.is_dir
-
-    def _fake_is_file(self: Path) -> bool:
-        return False if self == special else original_is_file(self)
-
-    def _fake_is_dir(self: Path) -> bool:
-        return False if self == special else original_is_dir(self)
-
-    monkeypatch.setattr(Path, "is_file", _fake_is_file)
-    monkeypatch.setattr(Path, "is_dir", _fake_is_dir)
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
+@_skip_unless_posix_secure_traversal
 def test_capture_handles_a_python_packages_tree_with_a_contained_shared_library_symlink(
     tmp_path: Path,
 ) -> None:
@@ -612,10 +745,10 @@ def test_capture_handles_a_python_packages_tree_with_a_contained_shared_library_
     (tmp_path / "outside.so").write_bytes(b"should never be reachable")
 
     with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
     (package_dir / "escape.so").unlink()
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
     with zipfile.ZipFile(io.BytesIO(captured.archive_bytes)) as archive:
         member = ".python_packages/lib/site-packages/native_pkg/libfoo.so"
         assert archive.read(member) == b"\x7fELF-fake-shared-object"
@@ -630,7 +763,7 @@ def test_capture_fails_closed_for_a_missing_script_root(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist"
 
     with pytest.raises(package.ScriptRootUnavailableError):
-        package.capture_script_root(missing)
+        package._capture_script_root(missing)
 
 
 def test_capture_fails_closed_when_the_script_root_is_a_file(tmp_path: Path) -> None:
@@ -638,7 +771,7 @@ def test_capture_fails_closed_when_the_script_root_is_a_file(tmp_path: Path) -> 
     not_a_directory.write_bytes(b"not a directory")
 
     with pytest.raises(package.ScriptRootUnavailableError):
-        package.capture_script_root(not_a_directory)
+        package._capture_script_root(not_a_directory)
 
 
 # ---------------------------------------------------------------------------
@@ -697,68 +830,23 @@ def test_posix_write_phase_fails_closed_when_a_scanned_file_disappears(tmp_path:
         package._write_deterministic_archive_posix(root_fd, entries)
 
 
-def test_fallback_write_phase_fails_closed_when_a_scanned_files_identity_changes(
-    tmp_path: Path,
-) -> None:
-    """The portable fallback narrows (but need not eliminate) the same race window."""
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"original"})
-
-    entries = package._scan_fallback(root)
-    (root / "a.py").write_bytes(b"mutated-content-of-a-different-length")
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._write_deterministic_archive_fallback(entries)
-
-
-@_skip_unless_ctime_reflects_metadata_changes
-def test_fallback_write_phase_fails_closed_on_a_same_size_mutation_with_a_restored_mtime(
-    tmp_path: Path,
-) -> None:
-    """Proves ctime, not just size/mtime, is checked on the fallback path too: a
-    same-size in-place rewrite with mtime forced back to its original value must
-    still fail closed, since even that forced restore itself bumps ctime. A short
-    sleep guarantees real wall-clock time passes, since a sub-tick-resolution
-    rewrite could otherwise land on an unchanged ctime by coincidence."""
-    root = tmp_path / "app"
-    original_content = b"original-content"
-    _write_tree(root, {"a.py": original_content})
-    entries = package._scan_fallback(root)
-    original_entry = next(entry for entry in entries if entry.archive_name == "a.py")
-
-    time.sleep(0.02)
-    (root / "a.py").write_bytes(b"y" * len(original_content))
-    os.utime(root / "a.py", ns=(original_entry.mtime_ns, original_entry.mtime_ns))
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._write_deterministic_archive_fallback(entries)
-
-
+@_skip_unless_posix_secure_traversal
 def test_capture_fails_closed_when_content_changes_between_scan_and_write_via_public_api(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """An end-to-end proof through the public API, on whichever path this platform uses."""
+    """An end-to-end proof through the module's capture entry point."""
     root = tmp_path / "app"
     _write_tree(root, {"a.py": b"original"})
-    scan = package._scan_posix_secure if not _posix_secure_traversal_unavailable else package._scan_fallback
-    real_entries = scan(root)
+    real_entries = package._scan_posix_secure(root)
 
-    if _posix_secure_traversal_unavailable:
+    def _stale_posix_scan(_root_fd: int) -> tuple[package._ScriptRootEntry, ...]:
+        return real_entries
 
-        def _stale_fallback_scan(_root: Path) -> tuple[package._ScriptRootEntry, ...]:
-            return real_entries
-
-        monkeypatch.setattr(package, "_scan_fallback", _stale_fallback_scan)
-    else:
-
-        def _stale_posix_scan(_root_fd: int) -> tuple[package._ScriptRootEntry, ...]:
-            return real_entries
-
-        monkeypatch.setattr(package, "_scan_posix_tree", _stale_posix_scan)
+    monkeypatch.setattr(package, "_scan_posix_tree", _stale_posix_scan)
     (root / "a.py").write_bytes(b"mutated-content-of-a-different-length")
 
     with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 @_skip_unless_posix_secure_traversal
@@ -792,7 +880,7 @@ def test_posix_capture_ignores_a_root_path_replacement_via_the_persistent_root_f
         package, "_preflight_aggregate_archive_size", _repoint_root_path_then_preflight
     )
 
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
 
     with zipfile.ZipFile(io.BytesIO(captured.archive_bytes)) as archive:
         assert archive.read("a.py") == b"original-content"
@@ -863,7 +951,7 @@ def test_posix_capture_fails_closed_when_a_new_file_appears_before_the_final_res
     monkeypatch.setattr(package, "_write_deterministic_archive_posix", _write_then_add_file)
 
     with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 @_skip_unless_posix_secure_traversal
@@ -884,7 +972,7 @@ def test_posix_capture_fails_closed_when_a_file_disappears_before_the_final_resc
     monkeypatch.setattr(package, "_write_deterministic_archive_posix", _write_then_remove_file)
 
     with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 @_skip_unless_posix_secure_traversal
@@ -904,65 +992,7 @@ def test_posix_capture_fails_closed_when_a_file_is_retyped_before_the_final_resc
     monkeypatch.setattr(package, "_write_deterministic_archive_posix", _write_then_retype)
 
     with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
-
-
-def test_fallback_capture_fails_closed_when_a_new_file_appears_before_the_final_rescan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"original"})
-    real_write = package._write_deterministic_archive_fallback
-
-    def _write_then_add_file(entries: Sequence[package._ScriptRootEntry]) -> bytes:
-        result = real_write(entries)
-        (root / "b.py").write_bytes(b"appeared-after-the-scan")
-        return result
-
-    monkeypatch.setattr(package, "_write_deterministic_archive_fallback", _write_then_add_file)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
-
-
-def test_fallback_capture_fails_closed_when_a_file_disappears_before_the_final_rescan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"original", "b.py": b"other"})
-    real_write = package._write_deterministic_archive_fallback
-
-    def _write_then_remove_file(entries: Sequence[package._ScriptRootEntry]) -> bytes:
-        result = real_write(entries)
-        (root / "b.py").unlink()
-        return result
-
-    monkeypatch.setattr(package, "_write_deterministic_archive_fallback", _write_then_remove_file)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
-
-
-def test_fallback_capture_fails_closed_when_a_file_is_retyped_before_the_final_rescan(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"original", "b.py": b"other"})
-    real_write = package._write_deterministic_archive_fallback
-
-    def _write_then_retype(entries: Sequence[package._ScriptRootEntry]) -> bytes:
-        result = real_write(entries)
-        (root / "b.py").unlink()
-        (root / "b.py").mkdir()
-        return result
-
-    monkeypatch.setattr(package, "_write_deterministic_archive_fallback", _write_then_retype)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 def test_require_matching_entry_sets_accepts_identical_shapes() -> None:
@@ -1001,6 +1031,7 @@ def test_require_matching_entry_sets_rejects_a_retyped_entry() -> None:
 # ---------------------------------------------------------------------------
 
 
+@_skip_unless_posix_secure_traversal
 def test_escaping_symlink_error_never_leaks_the_target_path(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
@@ -1010,20 +1041,21 @@ def test_escaping_symlink_error_never_leaks_the_target_path(tmp_path: Path) -> N
     _make_symlink(root / "escape.py", str(outside))
 
     with pytest.raises(package.UnsafeScriptRootEntryError) as exc_info:
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
     assert secret_marker not in str(exc_info.value)
     assert str(root) not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
 
 
+@_skip_unless_posix_secure_traversal
 def test_broken_symlink_error_never_leaks_the_root_path(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
     _make_symlink(root / "broken.py", "does-not-exist.py")
 
     with pytest.raises(package.UnsafeScriptRootEntryError) as exc_info:
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
     assert str(root) not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
@@ -1047,7 +1079,7 @@ def test_missing_script_root_error_never_leaks_the_path(tmp_path: Path) -> None:
     missing = tmp_path / "does-not-exist-anywhere"
 
     with pytest.raises(package.ScriptRootUnavailableError) as exc_info:
-        package.capture_script_root(missing)
+        package._capture_script_root(missing)
 
     assert str(missing) not in str(exc_info.value)
     assert exc_info.value.__cause__ is None
@@ -1166,7 +1198,7 @@ def test_capture_dereferences_a_symlink_whose_target_contains_a_dot_segment(
     _write_tree(root, {"real.txt": b"real-content"})
     _make_symlink(root / "link.txt", "./real.txt")
 
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
 
     with zipfile.ZipFile(io.BytesIO(captured.archive_bytes)) as archive:
         assert archive.read("link.txt") == b"real-content"
@@ -1250,87 +1282,6 @@ def test_require_matching_fd_stat_accepts_a_fully_matching_observation() -> None
     package._require_matching_fd_stat(observed, entry)
 
 
-def test_require_matching_fallback_stat_rejects_a_size_that_changed_during_the_copy() -> None:
-    entry = package._ScriptRootEntry(
-        archive_name="f",
-        is_directory=False,
-        size=100,
-        mtime_ns=5_000,
-        ctime_ns=5_000,
-        device=1,
-        inode=1,
-        executable=False,
-        locator=None,
-    )
-    locator = package._FallbackLocator(resolved_path=Path("f"), identity=(1, 1))
-    mismatched = _fake_stat_result(device=1, inode=1, size=99, mtime_ns=5_000, ctime_ns=5_000)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._require_matching_fallback_stat(mismatched, entry, locator)
-
-
-def test_require_matching_fallback_stat_rejects_a_ctime_change_with_an_unchanged_size_and_mtime() -> (
-    None
-):
-    """A same-size, same-mtime rewrite (e.g. a forged utime()) still bumps ctime
-    wherever the host's ctime genuinely tracks metadata changes."""
-    entry = package._ScriptRootEntry(
-        archive_name="f",
-        is_directory=False,
-        size=100,
-        mtime_ns=5_000,
-        ctime_ns=5_000,
-        device=1,
-        inode=1,
-        executable=False,
-        locator=None,
-    )
-    locator = package._FallbackLocator(resolved_path=Path("f"), identity=(1, 1))
-    observed = _fake_stat_result(device=1, inode=1, size=100, mtime_ns=5_000, ctime_ns=6_000)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._require_matching_fallback_stat(observed, entry, locator)
-
-
-def test_require_matching_fallback_stat_rejects_an_inode_swap_with_the_same_size_and_mtime() -> (
-    None
-):
-    entry = package._ScriptRootEntry(
-        archive_name="f",
-        is_directory=False,
-        size=100,
-        mtime_ns=5_000,
-        ctime_ns=5_000,
-        device=1,
-        inode=1,
-        executable=False,
-        locator=None,
-    )
-    locator = package._FallbackLocator(resolved_path=Path("f"), identity=(1, 1))
-    observed = _fake_stat_result(device=1, inode=2, size=100, mtime_ns=5_000, ctime_ns=5_000)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._require_matching_fallback_stat(observed, entry, locator)
-
-
-def test_require_matching_fallback_stat_accepts_a_fully_matching_observation() -> None:
-    entry = package._ScriptRootEntry(
-        archive_name="f",
-        is_directory=False,
-        size=100,
-        mtime_ns=5_000,
-        ctime_ns=5_000,
-        device=1,
-        inode=1,
-        executable=False,
-        locator=None,
-    )
-    locator = package._FallbackLocator(resolved_path=Path("f"), identity=(1, 1))
-    observed = _fake_stat_result(device=1, inode=1, size=100, mtime_ns=5_000, ctime_ns=5_000)
-
-    package._require_matching_fallback_stat(observed, entry, locator)
-
-
 @_skip_unless_posix_secure_traversal
 def test_copy_posix_fd_into_archive_translates_an_oserror_during_the_copy(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -1352,234 +1303,6 @@ def test_copy_posix_fd_into_archive_translates_an_oserror_during_the_copy(
             package._copy_posix_fd_into_archive(fd, entry, archive, info)
     finally:
         os.close(root_fd)
-
-
-def test_fallback_dereferences_a_contained_relative_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    _write_tree(root, {"real.txt": b"real-content"})
-    _make_symlink(root / "link.txt", "real.txt")
-
-    captured = package.capture_script_root(root)
-
-    with zipfile.ZipFile(io.BytesIO(captured.archive_bytes)) as archive:
-        assert archive.read("link.txt") == b"real-content"
-
-
-def test_fallback_rejects_an_absolute_symlink_target_even_when_contained(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    _write_tree(root, {"real.txt": b"real-content"})
-    _make_symlink(root / "abslink.txt", str(root / "real.txt"))
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-def test_fallback_rejects_an_escaping_relative_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    root.mkdir()
-    (tmp_path / "outside.txt").write_bytes(b"outside\n")
-    _make_symlink(root / "escape.py", "../outside.txt")
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-def test_fallback_rejects_a_broken_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    root.mkdir()
-    _make_symlink(root / "broken.py", "does-not-exist.py")
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-def test_fallback_rejects_a_directory_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    (root / "realdir").mkdir(parents=True)
-    _make_symlink(root / "dirlink", "realdir", target_is_directory=True)
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-def test_fallback_rejects_a_cyclic_symlink(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    root.mkdir()
-    _make_symlink(root / "a.link", "b.link")
-    _make_symlink(root / "b.link", "a.link")
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="FIFOs are POSIX-only")
-def test_fallback_rejects_a_symlink_targeting_a_fifo(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    _force_fallback_traversal(monkeypatch)
-    root = tmp_path / "app"
-    root.mkdir()
-    os.mkfifo(root / "pipe")  # type: ignore[attr-defined]
-    _make_symlink(root / "link", "pipe")
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package.capture_script_root(root)
-
-
-def test_fallback_read_symlink_target_translates_a_non_symlink(tmp_path: Path) -> None:
-    root = tmp_path / "app"
-    root.mkdir()
-    regular = root / "regular.txt"
-    regular.write_bytes(b"x")
-
-    with pytest.raises(package.UnsafeScriptRootEntryError):
-        package._read_fallback_symlink_target(regular)
-
-
-def test_fallback_scan_returns_no_entry_for_a_completely_empty_root(tmp_path: Path) -> None:
-    root = tmp_path / "app"
-    root.mkdir()
-
-    assert package._scan_fallback(root) == ()
-
-
-def test_list_directory_children_translates_a_non_directory_path(tmp_path: Path) -> None:
-    a_file = tmp_path / "file.txt"
-    a_file.write_bytes(b"x")
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._list_directory_children(a_file)
-
-
-def test_require_fallback_locator_rejects_an_entry_without_a_fallback_locator() -> None:
-    entry = _synthetic_entry(name="f")
-
-    with pytest.raises(package.ContentPackagingError):
-        package._require_fallback_locator(entry)
-
-
-def test_stat_fallback_locator_translates_a_disappeared_file(tmp_path: Path) -> None:
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"content"})
-    entry = package._scan_fallback(root)[0]
-    (root / "a.py").unlink()
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._stat_fallback_locator(entry.locator)  # type: ignore[arg-type]
-
-
-def test_stat_fallback_path_translates_a_disappeared_path(tmp_path: Path) -> None:
-    missing = tmp_path / "does-not-exist.txt"
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._stat_fallback_path(missing)
-
-
-def test_stat_fallback_path_error_never_leaks_the_path(tmp_path: Path) -> None:
-    missing = tmp_path / "does-not-exist.txt"
-
-    with pytest.raises(package.ContentCaptureRaceError) as exc_info:
-        package._stat_fallback_path(missing)
-
-    assert str(missing) not in str(exc_info.value)
-    assert exc_info.value.__cause__ is None
-
-
-def test_fallback_stat_predicate_translates_a_raised_os_error(tmp_path: Path) -> None:
-    """A type predicate like ``Path.is_dir`` does not itself raise for every
-    OSError (e.g. a missing path), so this proves the wrapper still translates
-    one that does (e.g. permission-denied) instead of letting it propagate."""
-
-    def _raising_predicate(path: Path) -> bool:
-        raise PermissionError(13, "Permission denied", str(path))
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._fallback_stat_predicate(tmp_path, _raising_predicate)
-
-
-def test_fallback_stat_predicate_error_never_leaks_the_path(tmp_path: Path) -> None:
-    def _raising_predicate(path: Path) -> bool:
-        raise PermissionError(13, "Permission denied", str(path))
-
-    with pytest.raises(package.ContentCaptureRaceError) as exc_info:
-        package._fallback_stat_predicate(tmp_path, _raising_predicate)
-
-    assert str(tmp_path) not in str(exc_info.value)
-    assert exc_info.value.__cause__ is None
-
-
-def test_scan_fallback_child_translates_a_type_predicate_permission_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An OSError from classifying one child's type during fallback scanning fails
-    closed rather than propagating a raw filesystem error out of the scan."""
-
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"content"})
-    real_is_dir = Path.is_dir
-
-    def _failing_is_dir(self: Path) -> bool:
-        if self.name == "a.py":
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_is_dir(self)
-
-    monkeypatch.setattr(Path, "is_dir", _failing_is_dir)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._scan_fallback(root)
-
-
-def test_resolve_fallback_symlink_translates_a_type_predicate_permission_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """An OSError from classifying a symlink's resolved target fails closed rather
-    than propagating a raw filesystem error out of fallback symlink resolution."""
-
-    root = tmp_path / "app"
-    root.mkdir()
-    (root / "target.py").write_bytes(b"content")
-    link = root / "link.py"
-    _make_symlink(link, "target.py")
-    real_is_dir = Path.is_dir
-
-    def _failing_is_dir(self: Path) -> bool:
-        if self.name == "target.py":
-            raise PermissionError(13, "Permission denied", str(self))
-        return real_is_dir(self)
-
-    monkeypatch.setattr(Path, "is_dir", _failing_is_dir)
-
-    with pytest.raises(package.ContentCaptureRaceError):
-        package._resolve_fallback_symlink(root, link)
-
-
-def test_copy_fallback_locator_into_archive_translates_a_disappeared_file(tmp_path: Path) -> None:
-    root = tmp_path / "app"
-    _write_tree(root, {"a.py": b"content"})
-    entry = package._scan_fallback(root)[0]
-    info = package._archive_member_info(entry)
-    (root / "a.py").unlink()
-
-    with tempfile_zip_archive() as archive, pytest.raises(package.ContentCaptureRaceError):
-        package._copy_fallback_locator_into_archive(entry.locator, archive, info)  # type: ignore[arg-type]
 
 
 @pytest.mark.asyncio
@@ -1685,6 +1408,7 @@ def test_aggregate_preflight_rejects_many_entries_that_individually_pass_per_ent
         package._preflight_aggregate_archive_size(entries)
 
 
+@_skip_unless_posix_secure_traversal
 def test_preflight_runs_before_the_archive_is_ever_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1692,18 +1416,17 @@ def test_preflight_runs_before_the_archive_is_ever_written(
     root.mkdir()
     oversized = (_synthetic_entry(size=package._MAX_STANDARD_ZIP_ENTRY_SIZE + 1),)
     monkeypatch.setattr(package, "_scan_posix_tree", lambda _root_fd: oversized)
-    monkeypatch.setattr(package, "_scan_fallback", lambda _root: oversized)
 
     def _fail_if_called(*_args: object, **_kwargs: object) -> bytes:
         raise AssertionError("the archive must never be written once preflight has rejected it")
 
     monkeypatch.setattr(package, "_write_deterministic_archive_posix", _fail_if_called)
-    monkeypatch.setattr(package, "_write_deterministic_archive_fallback", _fail_if_called)
 
     with pytest.raises(package.ContentArchiveTooLargeError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
+@_skip_unless_posix_secure_traversal
 def test_aggregate_preflight_runs_before_the_archive_is_ever_written(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1714,16 +1437,14 @@ def test_aggregate_preflight_runs_before_the_archive_is_ever_written(
         _synthetic_entry(name="f", size=package._MAX_ARCHIVE_OPERATIONAL_SIZE - overhead + 1),
     )
     monkeypatch.setattr(package, "_scan_posix_tree", lambda _root_fd: oversized)
-    monkeypatch.setattr(package, "_scan_fallback", lambda _root: oversized)
 
     def _fail_if_called(*_args: object, **_kwargs: object) -> bytes:
         raise AssertionError("the archive must never be written once preflight has rejected it")
 
     monkeypatch.setattr(package, "_write_deterministic_archive_posix", _fail_if_called)
-    monkeypatch.setattr(package, "_write_deterministic_archive_fallback", _fail_if_called)
 
     with pytest.raises(package.ContentArchiveTooLargeError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 def test_write_deterministic_archive_translates_a_late_large_zip_file_error(
@@ -1740,10 +1461,14 @@ def test_write_deterministic_archive_translates_a_late_large_zip_file_error(
 
     monkeypatch.setattr(zipfile.ZipFile, "open", _raise_large_zip_file)
 
+    def write_entry(archive: zipfile.ZipFile, entry: package._ScriptRootEntry) -> None:
+        package._write_entry_posix(archive, -1, entry)
+
     with pytest.raises(package.ContentArchiveTooLargeError):
-        package._stream_entries_into_archive((directory_entry,), package._write_entry_fallback)
+        package._stream_entries_into_archive((directory_entry,), write_entry)
 
 
+@_skip_unless_posix_secure_traversal
 def test_capture_translates_a_late_large_zip_file_error_into_a_typed_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1756,7 +1481,7 @@ def test_capture_translates_a_late_large_zip_file_error_into_a_typed_error(
     monkeypatch.setattr(zipfile.ZipFile, "open", _raise_large_zip_file)
 
     with pytest.raises(package.ContentArchiveTooLargeError):
-        package.capture_script_root(root)
+        package._capture_script_root(root)
 
 
 # ---------------------------------------------------------------------------
@@ -2320,11 +2045,12 @@ async def test_delivery_never_writes_or_disturbs_an_existing_live_manifest() -> 
 
 
 @pytest.mark.asyncio
+@_skip_unless_posix_secure_traversal
 async def test_delivery_succeeds_for_a_payload_over_four_mebibytes(tmp_path: Path) -> None:
     root = tmp_path / "app"
     root.mkdir()
     (root / "large.bin").write_bytes(b"A" * (5 * 1024 * 1024))
-    captured = package.capture_script_root(root)
+    captured = package._capture_script_root(root)
     expected = _expected_binding(captured)
     transport = FakeSandboxTransport()
 
@@ -2398,7 +2124,6 @@ async def test_read_live_manifest_binding_propagates_a_permanent_auth_read_failu
         await package.read_live_manifest_binding(transport, expected, _live_identity())
 
     assert exc_info.value is fault
-
 
 
 @pytest.mark.asyncio

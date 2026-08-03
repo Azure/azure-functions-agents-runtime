@@ -72,7 +72,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/execution/*` | Backend-neutral run-lifecycle seam (FRD 0008) that registration binds into: `backend.py` defines the `AgentExecutionBackend` Protocol plus request/status/event dataclasses; `binding.py`/`compat.py` adapt registration's per-agent config and legacy call shape into that seam; `in_lang_worker.py` is the `in_lang_worker` implementation, wrapping `runner.py`; `factory.py` selects a backend by whether `session_runtime.aca_sandbox` is configured; `unavailable.py` is the fail-closed `aca_sandbox` placeholder — reached only as defense in depth, since `config/validation.py:validate_session_runtime()` already rejects `aca_sandbox` at startup. | `create_execution_backend()`, `AgentExecutionBackend`, `LanguageWorkerExecutionBackend`, `UnavailableBackend` |
 | `azure_functions_agents/transport/*` | Deferred P4a controller-to-sandbox boundary. `transport_models.py` and `ports.py` own provider-neutral file/process projections plus the narrow `SandboxFileNotFoundError`/`SandboxFileOperationError` file-transport exception contract every `SandboxFileTransport` implementation raises; `manifest.py` strictly verifies controller-authoritative row inputs — including the non-secret `state_store_fingerprint` (P4b) alongside owner/app/session/group/sandbox/generation/digest/protocol — against a direct data-plane manifest, and renders the same canonical JSON for both the controller-authored seed and the harness-authored live manifest; `aca_sdk.py` is the sole optional-preview SDK adapter for one customer-owned Sandbox Group, and is also the only module permitted to import the preview SDK's own exception types, translating them to the narrow contract at its file-operation boundary. It creates/deletes individual session sandboxes only and is deliberately not wired to `AgentExecutionBackend` until P5a. | `SandboxFileTransport`, `SandboxProcessTransport`, `SandboxFileNotFoundError`, `SandboxFileOperationError`, `verify_sandbox_manifest()`, `render_sandbox_manifest_binding()`, `AcaSandboxAdapter` |
-| `azure_functions_agents/controller/package.py` | FRD 0008 P4b: deterministic script-root capture into a byte-exact `funcs_zip` ZIP (`ZIP_STORED`, fixed metadata, standard non-ZIP64 and aggregate-size limits preflighted before any content is read) with a SHA-256 digest; digest-gated delivery of that archive plus a strict manifest seed through an injected `SandboxFileTransport` (`session/content/app.zip`, `app.sha256`, `manifest.seed.json`, beside the harness-owned `session/manifest.json`); and capture/verification of the harness-authored live manifest against the Table-stored digest and live ACA identity. Script-root traversal is race-closed: on Linux, one anchored root file descriptor stays open through the scan, the archive write, and a closing rescan, with every hop a `dir_fd`-relative `O_NOFOLLOW` open, so the bytes archived for a file are read from the same descriptor validated moments earlier and never reopened by path; per-entry device/inode/size/mtime/ctime identity is re-verified before and after each read, and the rescan rejects any entry added, removed, or retyped since the scan. A capability-gated portable fallback (identity-checked, not `dir_fd`-anchored) covers platforms without those primitives. An empty script root fails closed rather than producing a valid empty archive, and the deterministic archive is capped at 256 MiB for v1 — enforced both at capture and at manual `CapturedContentPackage` construction, alongside a recomputed SHA-256 check. Imports no ACA SDK symbol — `transport.aca_sdk` is off limits here too, enforced by an import-graph guard — and adds no seventh transport operation; the controller never writes the live manifest itself (Decision 108), and a failed content-archive write is never reclassified as success by a same-sized file already at that path. Content capture and delivery are lazy, invoked only by a future ACA execution backend at session-start/resume time, never at startup. | `capture_script_root()`, `build_expected_manifest_binding()`, `deliver_content_package()`, `read_live_manifest_binding()`, `CapturedContentPackage`, `DeliveredContentPackage` |
+| `azure_functions_agents/controller/package.py` | FRD 0008 P4b: deterministic, Linux-only script-root capture into a byte-exact `funcs_zip` ZIP (`ZIP_STORED`, fixed metadata, standard non-ZIP64 and aggregate-size limits preflighted before any content is read, capped at 256 MiB for v1) with a SHA-256 digest; a process-local, single-flight cache keyed by the canonical script root captures once per worker process and reuses the same package for every later session (including resume), since the mounted root is immutable for the worker's lifetime; digest-gated delivery of that archive plus a strict manifest seed through an injected `SandboxFileTransport` (`session/content/app.zip`, `app.sha256`, `manifest.seed.json`, beside the harness-owned `session/manifest.json`); and capture/verification of the harness-authored live manifest against the Table-stored digest and live ACA identity. Script-root traversal is race-closed: one anchored root file descriptor stays open through the scan, the archive write, and a closing rescan, with every hop a `dir_fd`-relative `O_NOFOLLOW` open, so the bytes archived for a file are read from the same descriptor validated moments earlier and never reopened by path; per-entry device/inode/size/mtime/ctime identity is re-verified before and after each read, and the rescan rejects any entry added, removed, or retyped since the scan. Capture requires these Linux-only primitives and fails closed immediately, before any filesystem access, on a platform without them. Every deployed file is captured with no filename-based credential exclusion, and an empty script root fails closed rather than producing a valid empty archive. The async public entry point offloads the first blocking capture via `asyncio.to_thread` so it never blocks the event loop. Imports no ACA SDK symbol — `transport.aca_sdk` is off limits here too, enforced by an import-graph guard — and adds no seventh transport operation; the controller never writes the live manifest itself (Decision 108), and a failed content-archive write is never reclassified as success by a same-sized file already at that path. | `get_content_package()`, `build_expected_manifest_binding()`, `deliver_content_package()`, `read_live_manifest_binding()`, `CapturedContentPackage`, `DeliveredContentPackage`, `UnsupportedCapturePlatformError` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools from the `AgentCatalog` for agents that declare `subagents` (FRD 0007). | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction and the default MAF-backed implementation. | `ClientManager`, `get_client_manager()`, `set_client_manager()` |
 | `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool registry, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()` |
@@ -208,76 +208,32 @@ is only ever imported lazily inside `session_state` functions (never at module
 import time), so `in_lang_worker` installs are unaffected without the
 `[aca_sandbox]` extra.
 
-FRD 0008 P4b adds `controller/package.py`: deterministic script-root capture
-into a byte-exact `funcs_zip` ZIP archive (SHA-256 digest, standard `ZIP_STORED`
-framing so the digest is stable across interpreters and hosts), digest-gated
-delivery of that archive plus a strict JSON manifest seed through
-`transport.ports.SandboxFileTransport`, and capture/verification of the
-harness-authored live session manifest against the Table-stored digest and live
-ACA identity. The manifest wire contract (`transport/manifest.py`) now carries a
-twelfth field, the non-secret `state_store_fingerprint`, alongside the eleven
-routing fields P4a already verified; one canonical JSON renderer produces both
-the controller-authored seed and the field set the harness later copies into the
-live manifest, so the two can never independently drift. The controller never
-writes the live manifest itself — `SESSION_MANIFEST_PATH` remains sole harness
-territory (Decision 108) — so the seed is content metadata, not a readiness
-signal. `controller/package.py` performs only local script-root I/O and calls the
-injected `SandboxFileTransport`; it imports no ACA SDK symbol and adds no seventh
-transport operation. Live region, current-storage-epoch freshness, generation
-interpretation, and request-serving/ETag orchestration remain P5a's seam on top
-of this capture/verification building block — P4b only enforces that the
-row-stamped `state_store_fingerprint` matches the one the harness publishes.
-Like P3a/P3b, this phase wires nothing into registration or execution: content
-capture and sandbox I/O are lazy, execution-time work invoked only once a future
-ACA execution backend starts or resumes a session, never at startup.
+FRD 0008 P4b adds `controller/package.py`: deterministic Linux script-root
+capture into a byte-exact `funcs_zip`, digest-gated delivery through the
+provider-neutral file port, and verification of the harness-authored live
+manifest. The manifest adds the opaque `state_store_fingerprint` field and uses
+one canonical renderer for the controller seed and harness field set. The seed
+is content metadata, not readiness; the controller never writes the live
+manifest or imports the ACA SDK.
 
-Script-root capture is race-closed against filesystem changes across the whole
-capture, not just between validating an entry and reading its bytes. On Linux
-(the production platform), one anchored root file descriptor — opened
-`O_DIRECTORY|O_NOFOLLOW` and never reopened by pathname — stays open through
-the initial scan, the archive write, and a closing rescan; every hop within it
-(listing, symlink resolution, the read itself) is `dir_fd`-relative. Each entry
-records device, inode, size, mtime, and ctime; the stat snapshot taken
-immediately before a file's bytes are read from that same descriptor must
-still match immediately after, so a same-size in-place rewrite or an inode
-swap at the same path is detected rather than silently packaged. A symlink is
-dereferenced only when every hop, followed manually, stays within the anchored
-root, and only after being read from a descriptor obtained that same way. An
-absolute symlink target is always rejected, even one that would resolve back
-inside the root, since treating it as root-relative would blur escaping and
-contained cases in a way an attacker could exploit. Once the archive is
-written, a closing rescan from the same root descriptor recomputes the entry
-set and rejects any addition, deletion, or type change since the initial scan.
-Platforms without `dir_fd`/`O_NOFOLLOW` support (Windows) use a portable
-fallback gated by a capability check, narrowing the same race with the same
-per-entry identity fields re-verified before/after each read and once more at
-the end, rather than eliminating it outright via a persisted descriptor.
+`get_content_package()` lazily captures once per worker process and returns that
+same immutable package to every session on the worker; resume never recaptures.
+Equivalent workers produce the same digest, while rolling deployments may run
+different package epochs concurrently. First capture runs off the event loop,
+and failures are not cached. A future ACA backend invokes this work lazily;
+registration and the default execution path remain unchanged.
 
-A completely empty script root fails closed (`ScriptRootUnavailableError`)
-instead of producing a valid empty archive, and the deterministic-size
-preflight considers the whole archive's projected size — capped at 256 MiB
-for v1, with chunked/streaming delivery deferred — not just each entry, before
-any content is read; `CapturedContentPackage.create()` enforces the same bound
-and recomputes the SHA-256 digest against the supplied bytes, so a manually
-constructed package can neither claim an untrue digest nor bypass the size
-cap. The runtime-owned `SandboxFileNotFoundError`/`SandboxFileOperationError`
-pair (`transport/ports.py`, `transport/transport_models.py`) is the only
-file-transport exception contract `controller/package.py` catches;
-`transport/aca_sdk.py` alone translates the pinned preview SDK's
-`ResourceNotFoundError`/`HttpResponseError`/`ServiceRequestError` into it, so
-a real missing-manifest response is classified correctly instead of falling
-through a `FileNotFoundError` check that the SDK never raises.
-`read_live_manifest_binding()` maps only a genuinely missing manifest
-(`SandboxFileNotFoundError`) to `LiveManifestNotReadyError`; any other
-operational failure propagates unmodified so a future P5a caller can
-distinguish transient/auth/throttling conditions from simple not-yet-published
-absence. A content archive write that raises is never reclassified as landed
-by a same-sized file already at that path — unlike the small sidecar and seed,
-which are safe to retry because they are re-verified byte-for-byte and by
-strict re-parse. Every one of these delivery verification reads carries the
-same narrow mapping: only a genuinely missing or differing artifact is a
-verification failure, so an operational read/stat failure propagates instead
-(falling back to the original write error when the write itself also raised).
+Capture requires secure Linux filesystem primitives and fails closed elsewhere.
+One root descriptor spans scan, archive, and rescan; only contained regular-file
+symlinks may dereference, and capture-time changes fail closed. The mounted root
+is immutable for the worker lifetime. Every deployed file is included: a
+credential placed in `wwwroot` is copied into the sandbox and is a customer
+deployment error. Secrets belong in app settings, Key Vault, or proxy injection.
+
+Empty roots and packages above 256 MiB fail closed. The ACA adapter translates
+provider failures into runtime-owned not-found and operational errors; only
+genuine absence becomes not-ready. Archive write failures propagate, while the
+small sidecar and seed may retry only after exact verification.
 
 For a workflow-enabled main agent, `workflows/integration.py` produces shared workflow guidance plus channel-specific completion behavior. Built-in chat/MCP handlers receive the chat addendum; declared-trigger handlers receive the trigger addendum together with `workflow_enabled=True`, the Durable client, and the agent name. Registration consumes these resolved values and does not re-parse workflow metadata.
 
