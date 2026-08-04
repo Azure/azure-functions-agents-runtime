@@ -36,6 +36,7 @@ BLOB_NAME = "reports/functions-pr-status.html"
 TASK_HUB = "prstatusreports"
 AZURITE_ACCOUNT = "devstoreaccount1"
 AZURITE_KEY = (
+    # [SuppressMessage("Microsoft.Security", "CS002:SecretInNextLine", Justification="Azurite uses a public emulator account key")]
     "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/"
     "K1SZFPTOtr/KBHBeksoGMGw=="
 )

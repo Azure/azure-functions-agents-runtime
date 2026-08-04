@@ -1,3 +1,10 @@
+"""Pure unit tests for the opt-in sample verifier.
+
+These tests import helper functions but never call ``verify()``, start Docker,
+launch Functions Core Tools, or contact a model provider. The real E2E runs only
+when a user or a future E2E job explicitly invokes ``python scripts/verify.py``.
+"""
+
 from __future__ import annotations
 
 import importlib.util
