@@ -586,8 +586,10 @@ workflows:
 workflow-management tools (`start_workflow`, `get_workflow_status`,
 `list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public
 `@workflow_tool` handlers discovered from `tools/*.py` as workflow task targets.
-Workflow tool handlers must be synchronous, accept one dictionary argument, and
-return JSON-serializable values.
+The v1 runtime currently requires workflow tool handlers to be synchronous,
+accept one dictionary argument, and return JSON-serializable values. This is an
+implementation constraint of the v1 registry and Activity runner, not a Durable
+Functions requirement.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 
@@ -595,10 +597,12 @@ Normal custom tools keep their existing behavior. Plain public functions and `@t
 
 `workflows.subagents` is independent from top-level [`subagents`](#subagents).
 It is deny-by-default: only listed specialist slugs can appear in a workflow
-`subagent` node. Each entry must be an object containing `agent` and optionally
+`sub_agent` node. Each frontmatter entry must be an object containing `agent` and optionally
 `when`; unknown fields, duplicate references, self references, and unknown slugs
 fail startup. The `when` hint is shown to the workflow authoring model; if
-omitted, the specialist's `description` is used. Workflow specialists run with
+omitted or blank, the specialist's `description` is used. The generated DAG node
+is separate and contains `id`, `type: "sub_agent"`, `agent`, `task`, and optional
+`depends_on`. Workflow specialists run with
 a fresh context and their own instructions, model, normal tools, MCP servers,
 skills, `web_request` setting, and timeout. They receive no parent conversation
 history, request-scoped sandbox, workflow-management tools, or `delegate_*`

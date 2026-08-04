@@ -191,7 +191,8 @@ def register_workflows(
                 agent_slug,
             )
             raise RuntimeError(
-                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} failed"
+                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} failed "
+                "(error_code=workflow_subagent_execution_failed)"
             ) from None
 
         result = {

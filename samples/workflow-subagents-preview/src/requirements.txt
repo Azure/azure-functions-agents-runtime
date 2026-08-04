@@ -1,1 +1,2 @@
 -e ../../..
+azure-storage-queue==12.13.*

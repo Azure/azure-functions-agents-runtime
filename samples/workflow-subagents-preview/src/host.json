@@ -1,13 +1,21 @@
 {
   "version": "2.0",
+  "telemetryMode": "OpenTelemetry",
   "logging": {
     "logLevel": {
       "default": "Information"
     }
   },
   "extensions": {
+    "queues": {
+      "messageEncoding": "base64"
+    },
     "durableTask": {
       "hubName": "%TASKHUB_NAME%",
+      "tracing": {
+        "distributedTracingEnabled": true,
+        "version": "V2"
+      },
       "storageProvider": {
         "type": "azureManaged",
         "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING"

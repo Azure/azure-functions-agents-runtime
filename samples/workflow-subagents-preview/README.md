@@ -57,6 +57,28 @@ Copy-Item local.settings.template.json local.settings.json
 Set `FOUNDRY_PROJECT_ENDPOINT` and `FOUNDRY_MODEL` in
 `local.settings.json`, then authenticate with `az login`.
 
+### Verify everything with one command
+
+With the virtual environment active and provider settings configured, run this
+from the sample directory:
+
+```powershell
+python scripts/verify.py
+```
+
+The verifier starts isolated Azurite and DTS emulator containers on ephemeral
+host ports, starts the Functions host from a temporary app copy, submits the
+example request, validates the generated HTML and both PR links, then submits it
+again and verifies that the same Blob was overwritten with a new ETag. It removes
+the containers and temporary app on exit. Docker, Functions Core Tools, and model
+provider authentication must be available. Use `--keep-services` to retain only
+the uniquely named emulator containers for inspection.
+
+The verifier is organized as reusable process, storage, and assertion helpers so
+it can become part of the repository E2E suite without changing the scenario.
+
+### Run each component manually
+
 Start Azurite for the input queue, output Blob, and Functions host storage:
 
 ```powershell

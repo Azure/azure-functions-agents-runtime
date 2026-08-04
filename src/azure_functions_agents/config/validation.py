@@ -133,38 +133,15 @@ def validate_subagent_references(
     root) — these are fail-fast configuration errors, never silently
     dropped.
     """
-    source_file = resolved.source_file or "<unknown>"
-    seen: set[str] = set()
-    for ref in resolved.subagents:
-        if ref.agent == resolved.slug:
-            raise ValueError(
-                _format_error(
-                    source_file,
-                    "subagents",
-                    f"An agent cannot delegate to itself (`agent: {ref.agent}`).",
-                    "#subagents",
-                )
-            )
-        if ref.agent not in known_slugs:
-            raise ValueError(
-                _format_error(
-                    source_file,
-                    "subagents",
-                    f"Unknown agent reference `{ref.agent}`. No agent with that "
-                    "identity slug (file stem) was discovered in this app.",
-                    "#subagents",
-                )
-            )
-        if ref.agent in seen:
-            raise ValueError(
-                _format_error(
-                    source_file,
-                    "subagents",
-                    f"Duplicate reference to agent `{ref.agent}` in `subagents`.",
-                    "#subagents",
-                )
-            )
-        seen.add(ref.agent)
+    _validate_references(
+        resolved,
+        refs=resolved.subagents,
+        known_slugs=known_slugs,
+        field="subagents",
+        self_message="An agent cannot delegate to itself",
+        duplicate_message="Duplicate reference to agent",
+        spec_anchor="#subagents",
+    )
 
 
 def validate_workflow_subagent_references(

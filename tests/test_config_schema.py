@@ -177,6 +177,15 @@ def test_subagent_ref_object_form_with_when_parses() -> None:
     assert ref.when == "Route billing questions here."
 
 
+@pytest.mark.parametrize("ref_type", [SubagentRef, WorkflowSubagentRef])
+def test_subagent_ref_normalizes_blank_when_to_none(
+    ref_type: type[SubagentRef] | type[WorkflowSubagentRef],
+) -> None:
+    ref = ref_type.model_validate({"agent": "billing-specialist", "when": "   "})
+
+    assert ref.when is None
+
+
 def test_subagent_ref_rejects_empty_agent() -> None:
     with pytest.raises(ValidationError):
         SubagentRef(agent="   ")

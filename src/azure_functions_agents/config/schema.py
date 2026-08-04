@@ -124,35 +124,10 @@ class TriggerSpec(BaseModel):
         return trimmed
 
 
-class SubagentRef(BaseModel):
-    """A coordinator's reference to one specialist agent it may delegate to.
-
-    Object form only (no string shorthand) — see FRD 0007 §5 Decision #16.
-    ``agent`` is the specialist's identity slug (its file stem, sanitized;
-    see :mod:`azure_functions_agents._slug`). ``when`` is an optional
-    routing hint surfaced to the coordinator model as the ``delegate_<slug>``
-    tool's description; if omitted, the specialist's own ``description`` is
-    used instead (resolved once the specialist is known, not here).
-    """
+class _SubagentRefBase(BaseModel):
+    """Shared fields and normalization for Sub Agent capability grants."""
 
     model_config = ConfigDict(extra="forbid")
-
-    agent: str
-    when: str | None = None
-
-    @field_validator("agent")
-    @classmethod
-    def validate_agent(cls, value: str) -> str:
-        trimmed = value.strip()
-        if not trimmed:
-            raise ValueError("agent must be non-empty")
-        return trimmed
-
-
-class WorkflowSubagentRef(BaseModel):
-    """A workflow owner's authorization grant for one leaf specialist."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
     agent: str
     when: str | None = None
@@ -170,10 +145,24 @@ class WorkflowSubagentRef(BaseModel):
     def validate_when(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        trimmed = value.strip()
-        if not trimmed:
-            raise ValueError("when must be non-empty when provided")
-        return trimmed
+        return value.strip() or None
+
+
+class SubagentRef(_SubagentRefBase):
+    """A coordinator's reference to one specialist agent it may delegate to.
+
+    Object form only (no string shorthand) — see FRD 0007 §5 Decision #16.
+    ``agent`` is the specialist's identity slug (its file stem, sanitized;
+    see :mod:`azure_functions_agents._slug`). ``when`` is an optional
+    routing hint surfaced to the coordinator model as the ``delegate_<slug>``
+    tool's description; if omitted, the specialist's own ``description`` is
+    used instead (resolved once the specialist is known, not here).
+    """
+
+class WorkflowSubagentRef(_SubagentRefBase):
+    """A workflow owner's authorization grant for one leaf specialist."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class WorkflowConfig(BaseModel):

@@ -156,7 +156,8 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
         )
 
     assert str(exc_info.value) == (
-        "task 'analyze_pr': Workflow Sub Agent 'pr_status_analyst' failed"
+        "task 'analyze_pr': Workflow Sub Agent 'pr_status_analyst' failed "
+        "(error_code=workflow_subagent_execution_failed)"
     )
     assert secret not in str(exc_info.value)
 

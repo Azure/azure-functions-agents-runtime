@@ -238,7 +238,7 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`tool`** — call a discovered `@workflow_tool` by name with args.
 - **`wait`** — durable timer. Accepts `duration` (ISO-8601, e.g. `PT30S`)
   or `until` (absolute ISO-8601 timestamp).
-- **`subagent`** — invoke one leaf specialist authorized by
+- **`sub_agent`** — invoke one leaf specialist authorized by
   `workflows.subagents`, using `agent` and a self-contained `task`.
 
 v1 does not support per-task timeout or retry fields yet. Those are v2
@@ -260,8 +260,11 @@ hardening controls.
 
 ### Workflow Sub Agents
 
-A `sub_agent` node has exactly these fields: `id`, `type`, `agent`, `task`, and
-optional `depends_on`. It does not accept `tool`, `args`, `duration`, or `until`.
+The author grants access in `main.agent.md` with `workflows.subagents`. Each
+frontmatter grant contains `agent` and optional `when`; it is not a DAG node.
+The model then generates a `sub_agent` DAG node with exactly `id`, `type`,
+`agent`, `task`, and optional `depends_on`. A node does not accept `when`,
+`tool`, `args`, `duration`, or `until`.
 The runtime validates every specialist slug against the workflow owner's
 immutable grant before any node is scheduled and fails closed if the specialist
 is unavailable.
@@ -297,7 +300,11 @@ specialist uses its own model, instructions, normal tools, MCP servers, skills,
 `web_request` configuration, and timeout. It does not receive the parent's
 history, sandbox, workflow-management tools, or chat-time delegation tools.
 Success returns `{"agent": "<slug>", "text": "<answer>"}`. A specialist error or
-timeout fails the parent workflow.
+timeout fails the parent workflow. Timeout and missing-specialist failures have
+distinct messages. Other failures expose only the stable, non-sensitive
+`workflow_subagent_execution_failed` error code; provider and tool details stay
+in runtime logs. Operators can correlate those logs using the Workflow ID, node
+ID, and specialist slug.
 
 Sub Agent execution can be delivered more than once after a worker failure.
 Specialist tools should therefore tolerate re-execution, and terminal publishers

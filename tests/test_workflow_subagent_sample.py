@@ -109,9 +109,14 @@ def test_sample_runtime_files_and_customer_readme_are_complete() -> None:
     assert settings["Values"]["PR_STATUS_REPORT_CONTAINER"] == "workflow-reports"
 
     host = json.loads((SAMPLE_SRC / "host.json").read_text(encoding="utf-8"))
+    assert host["telemetryMode"] == "OpenTelemetry"
     durable_task = host["extensions"]["durableTask"]
     assert durable_task == {
         "hubName": "%TASKHUB_NAME%",
+        "tracing": {
+            "distributedTracingEnabled": True,
+            "version": "V2",
+        },
         "storageProvider": {
             "type": "azureManaged",
             "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
@@ -126,6 +131,7 @@ def test_sample_runtime_files_and_customer_readme_are_complete() -> None:
     assert "http://localhost:8082" in readme
     assert "Azurite must still be running" in readme
     assert "Restart the Functions host" in readme
+    assert "python scripts/verify.py" in readme
 
 
 def test_fake_pr_tools_are_deterministic() -> None:
