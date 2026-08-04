@@ -545,6 +545,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
+- [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
 
 ## Deployment Notes
 
