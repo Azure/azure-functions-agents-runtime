@@ -6,7 +6,11 @@ from pathlib import Path
 
 import pytest
 
-from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
+from azure_functions_agents.controller.readiness import (
+    SessionRunOwnershipChangedError,
+    SessionRuntimeBinding,
+    StateStoreBinding,
+)
 from azure_functions_agents.execution.aca_sandbox import AcaSandboxExecutionBackend
 from azure_functions_agents.execution.backend import (
     AgentExecutionBackend,
@@ -16,6 +20,8 @@ from azure_functions_agents.execution.backend import (
 )
 from azure_functions_agents.execution.binding import AgentBinding
 from azure_functions_agents.session_state import (
+    AdmissionOutcome,
+    AdmissionRecords,
     AppIdentity,
     DurableRunRecord,
     DurableSessionRecord,
@@ -140,6 +146,64 @@ def _status(
     ).encode("utf-8")
 
 
+def _quarantined_session(session: DurableSessionRecord) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="quarantined",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason="sandbox_manifest_mismatch",
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+class _QuarantiningSessionStore(FakeSessionStateStore):
+    async def admit_run(
+        self,
+        records: AdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
+        outcome = await super().admit_run(
+            records,
+            expected_session_etag=expected_session_etag,
+        )
+        failed = DurableRunRecord.create(
+            owner_partition=records.run.owner_partition,
+            session_id=records.run.session_id,
+            run_id=records.run.run_id,
+            generation=records.run.generation,
+            status="failed",
+            result_available=False,
+            status_reason="sandbox_manifest_mismatch",
+            expires_at=records.run.expires_at,
+            created_at=records.run.created_at,
+            updated_at=records.run.updated_at,
+        )
+        await self.adopt_terminal_run(failed)
+        assert self.session is not None
+        released = self.session
+        await self.update_session(
+            previous=released,
+            updated=_quarantined_session(released),
+            etag=self.etag,
+        )
+        return outcome
+
+
 @pytest.mark.asyncio
 async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     tmp_path: Path,
@@ -180,6 +244,36 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     assert store.admission_expected_session_etags == ["etag-5"]
     assert provider.create_calls
     assert handle.closed
+
+
+@pytest.mark.asyncio
+async def test_backend_does_not_submit_after_a_concurrent_quarantine(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _QuarantiningSessionStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionRunOwnershipChangedError):
+        await backend.start_run(
+            StartRunRequest(prompt="hello", session_id=session.session_id)
+        )
+
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+    assert len(store.adopted) == 1
+    assert store.adopted[0].status == "failed"
+    assert store.adopted[0].status_reason == "sandbox_manifest_mismatch"
+    assert store.session is not None
+    assert store.session.status == "quarantined"
+    assert store.session.quarantine_reason == "sandbox_manifest_mismatch"
+    assert store.session.active_run_id is None
+    durable_run = store.runs[store.adopted[0].run_id]
+    assert durable_run.status_reason == "sandbox_manifest_mismatch"
 
 
 @pytest.mark.asyncio

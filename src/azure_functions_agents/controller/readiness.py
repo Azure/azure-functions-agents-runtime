@@ -89,6 +89,10 @@ class SessionBindingChangedError(SessionActivationError):
         )
 
 
+class SessionRunOwnershipChangedError(SessionActivationError):
+    """The session no longer owns the admitted run before submission."""
+
+
 @dataclass(frozen=True, slots=True)
 class StateStoreBinding:
     """A state-store seam paired with the live, non-secret storage fingerprint."""
@@ -349,6 +353,13 @@ async def revalidate_before_submit(
 ) -> None:
     """Detect routing changes after admission before any sandbox work is launched."""
     reread = await activated.store.get_session(activated.partition, activated.session.session_id)
+    if (
+        reread.record.status != "running"
+        or reread.record.active_run_id != admitted_run.run_id
+    ):
+        raise SessionRunOwnershipChangedError(
+            "Session no longer owns the admitted run before submission."
+        )
     fields = _routing_differences(activated.session, reread.record)
     if not fields:
         return

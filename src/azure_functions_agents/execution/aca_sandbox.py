@@ -10,6 +10,7 @@ from ..config import DEFAULT_TIMEOUT
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationError,
+    SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
     activate_session,
     revalidate_before_submit,
@@ -108,6 +109,8 @@ class AcaSandboxExecutionBackend:
                         timeout_seconds=setup_budget.remaining_setup_seconds(),
                     )
                     submitted = True
+                except SessionRunOwnershipChangedError:
+                    raise
                 except Exception:
                     if not submitted:
                         await _adopt_failed_submission(activated, outcome.run)
