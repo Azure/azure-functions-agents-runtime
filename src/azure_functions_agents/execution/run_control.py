@@ -18,13 +18,14 @@ from ..session_state import validate_run_id, validate_session_id
 from ..transport.ports import SandboxSessionHandle
 from ..transport.transport_models import SandboxFileNotFoundError
 from .backend import (
-    EventCursorExpiredError,
+    TERMINAL_EVENT_TYPES,
     RunContext,
     RunError,
     RunEvent,
     RunResult,
     RunState,
     RunStatus,
+    assert_event_cursor_available,
 )
 
 JOURNAL_ROOT_PATH = "/var/lib/azure-functions-agents"
@@ -295,7 +296,10 @@ class SandboxRunControl:
         visibility_deadline: float | None = None
         while True:
             events = await self._read_events(handle, context, completed_segments)
-            _assert_cursor_available(events, cursor)
+            assert_event_cursor_available(
+                events[0].sequence if events else None,
+                cursor,
+            )
             status = await self._read_status(handle, context)
             if not _event_history_matches_status(events, status):
                 visibility_deadline = visibility_deadline or (
@@ -308,7 +312,7 @@ class SandboxRunControl:
                 if event.sequence > cursor:
                     cursor = event.sequence
                     yield event
-                    if event.type in {"done", "error"}:
+                    if event.type in TERMINAL_EVENT_TYPES:
                         # The event can arrive before the terminal status write.
                         break
             if status.state in _TERMINAL_STATES:
@@ -589,16 +593,6 @@ def _parse_timestamp(value: str) -> datetime:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
     return parsed.astimezone(UTC)
-
-
-def _assert_cursor_available(events: list[RunEvent], after_sequence: int) -> None:
-    if not events or after_sequence == 0:
-        return
-    earliest = events[0].sequence
-    if after_sequence < earliest - 1:
-        raise EventCursorExpiredError(
-            f"Event cursor {after_sequence} expired; earliest retained event is {earliest}"
-        )
 
 
 def _event_history_matches_status(
