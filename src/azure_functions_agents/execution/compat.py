@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Mapping
 from typing import Any, cast
@@ -9,6 +10,10 @@ from typing import Any, cast
 from .backend import AgentExecutionBackend, RunContext, RunEvent, RunStatus, StartRunRequest
 from .binding import AgentBinding
 from .result import AgentResult
+
+
+class SynchronousRunTimeoutError(TimeoutError):
+    """The controller stopped waiting while the sandbox run remains attachable."""
 
 
 def split_runner_call(
@@ -62,8 +67,25 @@ def split_runner_call(
 async def collect_terminal_run(
     backend: AgentExecutionBackend,
     context: RunContext,
+    *,
+    wait_timeout_seconds: float | None = None,
 ) -> tuple[RunStatus, list[RunEvent]]:
     """Read a run's complete journal, then return its terminal status."""
+    if wait_timeout_seconds is None:
+        return await _collect_terminal_run(backend, context)
+    try:
+        async with asyncio.timeout(wait_timeout_seconds):
+            return await _collect_terminal_run(backend, context)
+    except TimeoutError:
+        raise SynchronousRunTimeoutError(
+            "Controller synchronous wait expired while the run remains active."
+        ) from None
+
+
+async def _collect_terminal_run(
+    backend: AgentExecutionBackend,
+    context: RunContext,
+) -> tuple[RunStatus, list[RunEvent]]:
     events = [event async for event in backend.read_events(context, after_sequence=0)]
     return await backend.get_run(context), events
 
@@ -71,12 +93,15 @@ async def collect_terminal_run(
 async def run_to_agent_result(
     backend: AgentExecutionBackend,
     request: StartRunRequest,
+    *,
+    wait_timeout_seconds: float | None = None,
 ) -> AgentResult:
     """Run a request through the lifecycle and adapt its terminal result."""
     handle = await backend.start_run(request)
     status, events = await collect_terminal_run(
         backend,
         RunContext(run_id=handle.run_id, session_id=handle.session_id),
+        wait_timeout_seconds=wait_timeout_seconds,
     )
     return status_to_agent_result(status, events)
 

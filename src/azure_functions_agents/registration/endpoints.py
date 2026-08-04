@@ -25,6 +25,7 @@ from ..execution.compat import (
     split_runner_call,
 )
 from ..execution.factory import create_execution_backend
+from ..execution.setup_budget import synchronous_wait_seconds
 from ..session_state import FunctionAppPrincipal, OwnerPrincipal
 from ._auth import (
     AuthError,
@@ -80,7 +81,14 @@ async def _run_agent(
             owner=owner,
         )
     )
-    return await run_to_agent_result(backend, request)
+    wait_timeout_seconds = (
+        None if session_runtime is None else synchronous_wait_seconds(request.timeout)
+    )
+    return await run_to_agent_result(
+        backend,
+        request,
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
 
 
 def _run_agent_stream(

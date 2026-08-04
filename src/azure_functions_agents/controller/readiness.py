@@ -138,22 +138,52 @@ class _SessionLockRegistry:
     _guard: asyncio.Lock = field(default_factory=asyncio.Lock)
 
     @asynccontextmanager
-    async def hold(self, session_id: str) -> AsyncIterator[None]:
-        async with self._guard:
-            lock = self._locks.setdefault(session_id, asyncio.Lock())
-            self._waiters[session_id] = self._waiters.get(session_id, 0) + 1
-        await lock.acquire()
+    async def hold(
+        self,
+        session_id: str,
+        *,
+        setup_deadline: SetupDeadline | None = None,
+    ) -> AsyncIterator[None]:
+        try:
+            lock = await self._acquire(session_id, setup_deadline=setup_deadline)
+        except TimeoutError:
+            raise SessionActivationSetupTimeoutError(
+                "Sandbox setup did not complete before the setup deadline."
+            ) from None
         try:
             yield
         finally:
             lock.release()
-            async with self._guard:
-                remaining = self._waiters[session_id] - 1
-                if remaining == 0:
-                    del self._waiters[session_id]
-                    self._locks.pop(session_id, None)
-                else:
-                    self._waiters[session_id] = remaining
+            await self._release_waiter(session_id)
+
+    async def _acquire(
+        self,
+        session_id: str,
+        *,
+        setup_deadline: SetupDeadline | None,
+    ) -> asyncio.Lock:
+        async with self._guard:
+            lock = self._locks.setdefault(session_id, asyncio.Lock())
+            self._waiters[session_id] = self._waiters.get(session_id, 0) + 1
+        try:
+            if setup_deadline is None:
+                await lock.acquire()
+            else:
+                async with asyncio.timeout(setup_deadline.remaining_setup_seconds()):
+                    await lock.acquire()
+        except BaseException:
+            await self._release_waiter(session_id)
+            raise
+        return lock
+
+    async def _release_waiter(self, session_id: str) -> None:
+        async with self._guard:
+            remaining = self._waiters[session_id] - 1
+            if remaining == 0:
+                del self._waiters[session_id]
+                self._locks.pop(session_id, None)
+            else:
+                self._waiters[session_id] = remaining
 
 
 @dataclass(frozen=True, slots=True)
@@ -216,9 +246,17 @@ class SessionRuntimeBinding:
         return await self._state_store.get()
 
     @asynccontextmanager
-    async def hold_session(self, session_id: str) -> AsyncIterator[None]:
+    async def hold_session(
+        self,
+        session_id: str,
+        *,
+        setup_deadline: SetupDeadline | None = None,
+    ) -> AsyncIterator[None]:
         """Serialize readiness-sensitive operations for one session ID."""
-        async with self._session_locks.hold(session_id):
+        async with self._session_locks.hold(
+            session_id,
+            setup_deadline=setup_deadline,
+        ):
             yield
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -7,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.controller.readiness import (
+    SessionActivationSetupTimeoutError,
     SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
     StateStoreBinding,
@@ -33,6 +35,8 @@ from azure_functions_agents.session_state import (
     DurableRunRecord,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    OwnerPartition,
+    SessionRead,
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import (
@@ -214,6 +218,41 @@ class _QuarantiningSessionStore(FakeSessionStateStore):
         return outcome
 
 
+class _StallingAdmissionStore(FakeSessionStateStore):
+    def __init__(self, session: DurableSessionRecord) -> None:
+        super().__init__(session)
+        self.admission_started = asyncio.Event()
+        self.release_admission = asyncio.Event()
+
+    async def admit_run(
+        self,
+        records: AdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
+        self.admission_started.set()
+        await self.release_admission.wait()
+        return await super().admit_run(
+            records,
+            expected_session_etag=expected_session_etag,
+        )
+
+
+class _StallingRevalidationStore(FakeSessionStateStore):
+    def __init__(self, session: DurableSessionRecord) -> None:
+        super().__init__(session)
+        self._session_reads = 0
+        self.revalidation_started = asyncio.Event()
+        self.release_revalidation = asyncio.Event()
+
+    async def get_session(self, partition: OwnerPartition, session_id: str) -> SessionRead:
+        self._session_reads += 1
+        if self._session_reads == 2:
+            self.revalidation_started.set()
+            await self.release_revalidation.wait()
+        return await super().get_session(partition, session_id)
+
+
 @pytest.mark.asyncio
 async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     tmp_path: Path,
@@ -349,6 +388,107 @@ async def test_backend_releases_admitted_slot_when_request_write_fails(tmp_path:
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.session.active_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_backend_setup_deadline_bounds_session_lock(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    runtime = _runtime(script_root, provider, store)
+    backend = AcaSandboxExecutionBackend(_binding(), runtime=runtime, owner=_owner())
+    lock_acquired = asyncio.Event()
+    release_lock = asyncio.Event()
+    original_start = SetupBudget.start
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
+        lambda: original_start(setup_seconds=0.05),
+    )
+
+    async def hold_lock() -> None:
+        async with runtime.hold_session(session.session_id):
+            lock_acquired.set()
+            await release_lock.wait()
+
+    holder = asyncio.create_task(hold_lock())
+    await asyncio.wait_for(lock_acquired.wait(), timeout=1.0)
+    try:
+        with pytest.raises(SessionActivationSetupTimeoutError):
+            await asyncio.wait_for(
+                backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id)),
+                timeout=1.0,
+            )
+    finally:
+        release_lock.set()
+        await holder
+
+
+@pytest.mark.asyncio
+async def test_backend_setup_deadline_bounds_run_admission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _StallingAdmissionStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    original_start = SetupBudget.start
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
+        lambda: original_start(setup_seconds=0.05),
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    start = asyncio.create_task(
+        backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
+    )
+    await asyncio.wait_for(store.admission_started.wait(), timeout=1.0)
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await asyncio.wait_for(start, timeout=1.0)
+
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+
+@pytest.mark.asyncio
+async def test_backend_setup_deadline_bounds_submission_revalidation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _StallingRevalidationStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    original_start = SetupBudget.start
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
+        lambda: original_start(setup_seconds=0.05),
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    start = asyncio.create_task(
+        backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
+    )
+    await asyncio.wait_for(store.revalidation_started.wait(), timeout=1.0)
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await asyncio.wait_for(start, timeout=1.0)
+
+    assert [call for call in handle.calls if call.operation == "exec"] == []
 
 
 @pytest.mark.asyncio

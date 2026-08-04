@@ -11,6 +11,7 @@ from ..controller.readiness import (
     ActivatedSession,
     SessionActivationError,
     SessionRuntimeBinding,
+    _within_setup_budget,
     activate_session,
     revalidate_before_submit,
     session_with_admitted_run,
@@ -69,7 +70,10 @@ class AcaSandboxExecutionBackend:
         session_id = request.session_id or mint_session_id()
         run_id = mint_run_id()
         setup_budget = SetupBudget.start()
-        async with self._runtime.hold_session(session_id):
+        async with self._runtime.hold_session(
+            session_id,
+            setup_deadline=setup_budget,
+        ):
             activated = await activate_session(
                 self._runtime,
                 self._owner,
@@ -84,9 +88,12 @@ class AcaSandboxExecutionBackend:
                     run_id,
                     updated_at=run.updated_at,
                 )
-                outcome = await activated.store.admit_run(
-                    AdmissionRecords.create(admitted_session, run),
-                    expected_session_etag=activated.etag,
+                outcome = await _within_setup_budget(
+                    activated.store.admit_run(
+                        AdmissionRecords.create(admitted_session, run),
+                        expected_session_etag=activated.etag,
+                    ),
+                    setup_budget,
                 )
                 if outcome.replayed:
                     return RunHandle(
@@ -96,7 +103,10 @@ class AcaSandboxExecutionBackend:
                         created_at=outcome.run.created_at,
                     )
 
-                await revalidate_before_submit(activated, outcome.run)
+                await _within_setup_budget(
+                    revalidate_before_submit(activated, outcome.run),
+                    setup_budget,
+                )
                 try:
                     status = await self._run_control.submit(
                         activated.handle,
@@ -178,19 +188,26 @@ class AcaSandboxExecutionBackend:
 
     async def cancel_run(self, context: RunContext) -> RunStatus:
         """Serialize cancellation behind activation so the current process is signaled."""
-        async with self._runtime.hold_session(context.session_id):
+        setup_budget = SetupBudget.start()
+        async with self._runtime.hold_session(
+            context.session_id,
+            setup_deadline=setup_budget,
+        ):
             activated = await activate_session(
                 self._runtime,
                 self._owner,
                 context.session_id,
-                SetupBudget.start(),
+                setup_budget,
                 allow_create=False,
             )
             try:
-                run_read = await activated.store.get_run(
-                    activated.partition,
-                    context.session_id,
-                    context.run_id,
+                run_read = await _within_setup_budget(
+                    activated.store.get_run(
+                        activated.partition,
+                        context.session_id,
+                        context.run_id,
+                    ),
+                    setup_budget,
                 )
                 status = await self._run_control.cancel(activated.handle, context)
                 await _adopt_if_terminal(activated, run_read.record, status)

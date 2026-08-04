@@ -26,6 +26,7 @@ from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
 from ..controller.readiness import SessionRuntimeBinding
 from ..execution.compat import run_to_agent_result, split_runner_call
 from ..execution.factory import create_execution_backend
+from ..execution.setup_budget import synchronous_wait_seconds
 from ..session_state import OwnerPrincipal
 from ._auth import AuthError, authorize_entra_request, resolve_owner_principal
 from ._trigger_serialization import serialize_trigger_data
@@ -223,7 +224,14 @@ async def _run_agent(
             owner=owner,
         )
     )
-    return await run_to_agent_result(backend, request)
+    wait_timeout_seconds = (
+        None if session_runtime is None else synchronous_wait_seconds(request.timeout)
+    )
+    return await run_to_agent_result(
+        backend,
+        request,
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
 
 
 def _request_header_value(req: Request, header_name: str) -> str | None:
