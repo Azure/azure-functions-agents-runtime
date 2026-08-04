@@ -30,8 +30,14 @@ from .backend import (
 JOURNAL_ROOT_PATH = "/var/lib/azure-functions-agents"
 INBOX_PATH = f"{JOURNAL_ROOT_PATH}/inbox"
 RUNS_PATH = f"{JOURNAL_ROOT_PATH}/runs"
-MAX_RUN_ENVELOPE_BYTES = 4 * 1024 * 1024
-EVENT_POLL_INTERVAL_SECONDS = 0.25
+MAX_JOURNAL_DOCUMENT_BYTES = 4 * 1024 * 1024
+MAX_RUN_ENVELOPE_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
+MAX_STATUS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
+MAX_RESULT_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
+MAX_PROCESS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
+MAX_EVENT_SEGMENTS = 16
+MAX_EVENT_SEGMENT_BYTES = 1024 * 1024
+EVENT_POLL_INTERVAL_SECONDS = 1.0
 JOURNAL_VISIBILITY_TIMEOUT_SECONDS = 2.0
 CANCEL_CONFIRM_TIMEOUT_SECONDS = 5.0
 
@@ -285,9 +291,10 @@ class SandboxRunControl:
             raise ValueError("after_sequence must not be negative")
         _validate_context(context)
         cursor = after_sequence
+        completed_segments: dict[str, tuple[RunEvent, ...]] = {}
         visibility_deadline: float | None = None
         while True:
-            events = await self._read_events(handle, context)
+            events = await self._read_events(handle, context, completed_segments)
             _assert_cursor_available(events, cursor)
             status = await self._read_status(handle, context)
             if not _event_history_matches_status(events, status):
@@ -317,9 +324,9 @@ class SandboxRunControl:
         status = await self.get_status(handle, context)
         if status.state in _TERMINAL_STATES:
             return status
-        process = _parse_process(
-            await handle.read_file(_process_path(context.run_id))
-        )
+        process_payload = await handle.read_file(_process_path(context.run_id))
+        _assert_journal_payload_size(process_payload, MAX_PROCESS_BYTES, "process")
+        process = _parse_process(process_payload)
         deadline = time.monotonic() + self._cancel_confirm_timeout_seconds
         await handle.exec(
             _signal_process_group(process.process_group_id, force=False),
@@ -390,7 +397,9 @@ class SandboxRunControl:
         context: RunContext,
     ) -> _JournalRunStatus:
         _validate_context(context)
-        status = _parse_status(await handle.read_file(_status_path(context.run_id)))
+        status_payload = await handle.read_file(_status_path(context.run_id))
+        _assert_journal_payload_size(status_payload, MAX_STATUS_BYTES, "status")
+        status = _parse_status(status_payload)
         if status.run_id != context.run_id or status.session_id != context.session_id:
             raise RunJournalProtocolError("Run journal status does not match the requested context.")
         return status
@@ -400,7 +409,9 @@ class SandboxRunControl:
         handle: SandboxSessionHandle,
         context: RunContext,
     ) -> RunResult:
-        result = _parse_result(await handle.read_file(_result_path(context.run_id)))
+        result_payload = await handle.read_file(_result_path(context.run_id))
+        _assert_journal_payload_size(result_payload, MAX_RESULT_BYTES, "result")
+        result = _parse_result(result_payload)
         return RunResult(
             content=result.content,
             content_intermediate=result.content_intermediate,
@@ -413,6 +424,7 @@ class SandboxRunControl:
         self,
         handle: SandboxSessionHandle,
         context: RunContext,
+        completed_segments: dict[str, tuple[RunEvent, ...]],
     ) -> list[RunEvent]:
         entries = await handle.list_files(_run_path(context.run_id))
         paths = sorted(
@@ -422,9 +434,26 @@ class SandboxRunControl:
             and entry.name.startswith("events")
             and entry.name.endswith(".jsonl")
         )
+        if len(paths) > MAX_EVENT_SEGMENTS:
+            raise RunJournalProtocolError(
+                "Sandbox run journal has too many retained event segments."
+            )
+        active_tail = paths[-1] if paths else None
+        for cached_path in tuple(completed_segments):
+            if cached_path not in paths:
+                del completed_segments[cached_path]
         events: list[RunEvent] = []
         for path in paths:
-            events.extend(_parse_event_lines(await handle.read_file(path)))
+            cached_events = completed_segments.get(path)
+            if cached_events is not None:
+                events.extend(cached_events)
+                continue
+            payload = await handle.read_file(path)
+            _assert_journal_payload_size(payload, MAX_EVENT_SEGMENT_BYTES, "event segment")
+            parsed_events = _parse_event_lines(payload)
+            events.extend(parsed_events)
+            if path != active_tail:
+                completed_segments[path] = tuple(parsed_events)
         ordered = sorted(events, key=lambda event: event.sequence)
         if len({event.sequence for event in ordered}) != len(ordered):
             raise RunJournalProtocolError(
@@ -509,6 +538,13 @@ def _parse_result(payload: bytes) -> _JournalRunResult:
 
 def _parse_process(payload: bytes) -> _JournalProcess:
     return _parse_model(payload, _JournalProcess, "process")
+
+
+def _assert_journal_payload_size(payload: bytes, maximum: int, document_name: str) -> None:
+    if len(payload) > maximum:
+        raise RunJournalProtocolError(
+            f"Sandbox run journal {document_name} exceeds its size limit."
+        )
 
 
 def _parse_model[T: BaseModel](payload: bytes, model: type[T], document_name: str) -> T:

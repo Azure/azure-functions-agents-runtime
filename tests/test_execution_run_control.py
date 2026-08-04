@@ -8,6 +8,10 @@ import pytest
 
 from azure_functions_agents.execution.backend import EventCursorExpiredError, RunContext
 from azure_functions_agents.execution.run_control import (
+    MAX_EVENT_SEGMENT_BYTES,
+    MAX_EVENT_SEGMENTS,
+    MAX_RESULT_BYTES,
+    MAX_STATUS_BYTES,
     RUNS_PATH,
     RunControlError,
     RunEnvelope,
@@ -187,6 +191,34 @@ async def test_get_status_allows_evicted_success_result() -> None:
 
 
 @pytest.mark.asyncio
+async def test_get_status_rejects_oversized_status_payload() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        b"x" * (MAX_STATUS_BYTES + 1),
+    )
+
+    with pytest.raises(RunJournalProtocolError, match="status exceeds its size limit"):
+        await SandboxRunControl().get_status(transport, _context())
+
+
+@pytest.mark.asyncio
+async def test_get_status_rejects_oversized_result_payload() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", result_available=True),
+    )
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/result.json",
+        b"x" * (MAX_RESULT_BYTES + 1),
+    )
+
+    with pytest.raises(RunJournalProtocolError, match="result exceeds its size limit"):
+        await SandboxRunControl().get_status(transport, _context())
+
+
+@pytest.mark.asyncio
 async def test_read_events_enforces_exclusive_cursor_and_eviction_rules() -> None:
     transport = FakeSandboxTransport()
     transport.seed_file(
@@ -210,6 +242,64 @@ async def test_read_events_enforces_exclusive_cursor_and_eviction_rules() -> Non
     assert final == []
     with pytest.raises(EventCursorExpiredError):
         _ = [event async for event in control.read_events(transport, _context(), 1)]
+
+
+@pytest.mark.asyncio
+async def test_read_events_rejects_too_many_retained_segments() -> None:
+    transport = FakeSandboxTransport()
+    for sequence in range(1, MAX_EVENT_SEGMENTS + 2):
+        transport.seed_file(
+            f"{RUNS_PATH}/run-1/events.{sequence:02}.jsonl",
+            _event(sequence, "delta").encode("utf-8") + b"\n",
+        )
+
+    with pytest.raises(RunJournalProtocolError, match="too many retained event segments"):
+        _ = [event async for event in SandboxRunControl().read_events(transport, _context(), 0)]
+
+
+@pytest.mark.asyncio
+async def test_read_events_rejects_oversized_event_segment() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/events.jsonl",
+        b"x" * (MAX_EVENT_SEGMENT_BYTES + 1),
+    )
+
+    with pytest.raises(RunJournalProtocolError, match="event segment exceeds its size limit"):
+        _ = [event async for event in SandboxRunControl().read_events(transport, _context(), 0)]
+
+
+@pytest.mark.asyncio
+async def test_read_events_caches_completed_segments_between_polls() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="running", last_sequence=2),
+    )
+    completed_path = f"{RUNS_PATH}/run-1/events.000001.jsonl"
+    active_path = f"{RUNS_PATH}/run-1/events.jsonl"
+    transport.seed_file(completed_path, _event(1, "delta").encode("utf-8") + b"\n")
+    transport.seed_file(active_path, _event(2, "delta").encode("utf-8") + b"\n")
+    events = SandboxRunControl(event_poll_interval_seconds=0.001).read_events(
+        transport,
+        _context(),
+        0,
+    )
+
+    assert (await anext(events)).sequence == 1
+    assert (await anext(events)).sequence == 2
+
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", last_sequence=2),
+    )
+
+    with pytest.raises(StopAsyncIteration):
+        await anext(events)
+
+    reads = [call.path for call in transport.calls if call.operation == "read_file"]
+    assert reads.count(completed_path) == 1
+    assert reads.count(active_path) == 2
 
 
 @pytest.mark.asyncio
