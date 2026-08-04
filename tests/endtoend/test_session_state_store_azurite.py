@@ -188,6 +188,54 @@ def _run(
     )
 
 
+def _admitted_session(session: DurableSessionRecord, run_id: str) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="running",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=session.updated_at,
+    )
+
+
+def _quarantined_session(session: DurableSessionRecord) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="quarantined",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason="sandbox_manifest_mismatch",
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=_NOW,
+    )
+
+
 def _idempotency(
     *,
     session_id: str = "session-1",
@@ -419,6 +467,70 @@ async def test_admission_transaction_is_atomic_on_run_collision() -> None:
             partition, "session-1", _hash("key")
         )
         assert idem_lookup is None
+
+
+@pytest.mark.asyncio
+async def test_admission_does_not_resurrect_a_quarantined_session() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        await store_a.create_session(_session(partition=partition, status="ready"))
+        activated = await store_a.get_session(partition, "session-1")
+        quarantined = _quarantined_session(activated.record)
+        await store_b.update_session(
+            previous=activated.record,
+            updated=quarantined,
+            etag=activated.etag,
+        )
+
+        run = _run(partition=partition, run_id="run-after-quarantine")
+        records = AdmissionRecords.create(
+            _admitted_session(activated.record, run.run_id),
+            run,
+        )
+        with pytest.raises(ConcurrencyConflictError):
+            await store_a.admit_run(
+                records,
+                expected_session_etag=activated.etag,
+            )
+
+        stored = await store_a.get_session(partition, "session-1")
+        assert stored.record.status == "quarantined"
+        assert stored.record.quarantine_reason == "sandbox_manifest_mismatch"
+        assert stored.record.active_run_id is None
+        with pytest.raises(RunRowNotFoundError):
+            await store_a.get_run(partition, "session-1", run.run_id)
+
+
+@pytest.mark.asyncio
+async def test_admission_does_not_resurrect_a_tombstoned_session() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        await store_a.create_session(_session(partition=partition, status="ready"))
+        activated = await store_a.get_session(partition, "session-1")
+        await store_b.tombstone_session(
+            previous=activated.record,
+            etag=activated.etag,
+            tombstone_reason="owner_deleted",
+            updated_at=_NOW,
+        )
+
+        run = _run(partition=partition, run_id="run-after-tombstone")
+        records = AdmissionRecords.create(
+            _admitted_session(activated.record, run.run_id),
+            run,
+        )
+        with pytest.raises(ConcurrencyConflictError):
+            await store_a.admit_run(
+                records,
+                expected_session_etag=activated.etag,
+            )
+
+        stored = await store_a.get_session(partition, "session-1")
+        assert stored.record.status == "tombstoned"
+        assert stored.record.tombstone_reason == "owner_deleted"
+        assert stored.record.active_run_id is None
+        with pytest.raises(RunRowNotFoundError):
+            await store_a.get_run(partition, "session-1", run.run_id)
 
 
 # ---------------------------------------------------------------------------

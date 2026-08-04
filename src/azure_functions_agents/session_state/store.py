@@ -35,6 +35,7 @@ from .errors import (
     IdempotencyConflictError,
     RowAlreadyExistsError,
     RunRowNotFoundError,
+    SessionNotAdmissibleError,
     SessionRowNotFoundError,
     SessionStateStoreError,
     StateStoreUnavailableError,
@@ -80,6 +81,9 @@ _TERMINAL_RUN_STATUSES = TERMINAL_RUN_STATUSES
 # state -- because the session model forbids any status outside this pair
 # from carrying an active_run_id.
 _STATUSES_OWNING_ACTIVE_RUN = SESSION_STATUSES_REQUIRING_ACTIVE_RUN
+
+# A new run can start from an idle session, or after readiness resumed a suspended one.
+_STATUSES_ADMITTING_RUN: frozenset[str] = frozenset({"ready", "suspended"})
 
 _MAX_ADOPTION_ATTEMPTS = 5
 
@@ -190,7 +194,12 @@ class SessionStateStore(Protocol):
     ) -> RunRead:
         """Read a run row. Raises :class:`RunRowNotFoundError` if absent."""
 
-    async def admit_run(self, records: AdmissionRecords) -> AdmissionOutcome:
+    async def admit_run(
+        self,
+        records: AdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
         """Atomically admit a new active run for a session.
 
         Deduplicates by idempotency key first (replay on matching payload,
@@ -364,7 +373,12 @@ class AzureTableSessionStateStore:
 
     # -- admission (EGT) ------------------------------------------------
 
-    async def admit_run(self, records: AdmissionRecords) -> AdmissionOutcome:
+    async def admit_run(
+        self,
+        records: AdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
         from azure.core.exceptions import HttpResponseError
         from azure.data.tables import TableTransactionError
 
@@ -377,10 +391,19 @@ class AzureTableSessionStateStore:
                 return replay
 
         current_session = await self.get_session(partition, session_id)
+        if (
+            expected_session_etag is not None
+            and current_session.etag != expected_session_etag
+        ):
+            raise ConcurrencyConflictError("session changed concurrently before admission")
         if current_session.record.active_run_id is not None:
             raise ActiveRunConflictError(
                 f"session {session_id!r} already has an active run",
                 active_run_id=current_session.record.active_run_id,
+            )
+        if current_session.record.status not in _STATUSES_ADMITTING_RUN:
+            raise SessionNotAdmissibleError(
+                "session lifecycle state cannot accept a new run"
             )
         # Admission is never a backing rebind: the freshly re-read stored
         # generation and the caller's target generation must match exactly,

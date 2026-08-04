@@ -133,6 +133,7 @@ class FakeSessionStateStore:
         self.adopted: list[DurableRunRecord] = []
         self.operations: list[str] = []
         self.runs: dict[str, DurableRunRecord] = {}
+        self.admission_expected_session_etags: list[str | None] = []
 
     async def create_session(self, record: DurableSessionRecord) -> str:
         if self.session is not None:
@@ -189,8 +190,16 @@ class FakeSessionStateStore:
         self.etag = "etag-tombstone"
         return self.etag
 
-    async def admit_run(self, records: AdmissionRecords) -> AdmissionOutcome:
+    async def admit_run(
+        self,
+        records: AdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
         assert self.session is not None
+        if expected_session_etag is not None:
+            assert self.etag == expected_session_etag
+        self.admission_expected_session_etags.append(expected_session_etag)
         assert self.session.active_run_id is None
         self.session = records.session
         self.runs[records.run.run_id] = records.run

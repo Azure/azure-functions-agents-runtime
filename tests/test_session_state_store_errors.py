@@ -38,6 +38,7 @@ from azure_functions_agents.session_state import (
     IdempotencyConflictError,
     RowAlreadyExistsError,
     RunRowNotFoundError,
+    SessionNotAdmissibleError,
     SessionRowNotFoundError,
     SessionStateStoreError,
     StateStoreUnavailableError,
@@ -184,6 +185,8 @@ def _session(
     status: str = "ready",
     active_run_id: str | None = None,
     generation: int = 1,
+    quarantine_reason: str | None = None,
+    tombstone_reason: str | None = None,
 ) -> DurableSessionRecord:
     return DurableSessionRecord.create(
         owner_partition=_partition(),
@@ -201,8 +204,8 @@ def _session(
         snapshot_ids=(),
         region="westus2",
         state_store_fingerprint=_FINGERPRINT,
-        quarantine_reason=None,
-        tombstone_reason=None,
+        quarantine_reason=quarantine_reason,
+        tombstone_reason=tombstone_reason,
         created_at=_NOW,
         updated_at=_NOW,
     )
@@ -418,6 +421,87 @@ async def test_admit_run_succeeds_when_no_active_run() -> None:
     assert outcome.run.run_id == "run-1"
     stored = await store.get_session(_partition(), "session-1")
     assert stored.record.active_run_id == "run-1"
+
+
+@pytest.mark.asyncio
+async def test_admit_run_accepts_a_resumed_suspended_session() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    await store.create_session(_session(status="suspended"))
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="run-1"), _run(), None
+    )
+    await store.admit_run(records)
+
+    stored = await store.get_session(_partition(), "session-1")
+    assert stored.record.status == "running"
+    assert stored.record.active_run_id == "run-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "quarantine_reason", "tombstone_reason"),
+    [
+        ("creating", None, None),
+        ("suspending", None, None),
+        ("resuming", None, None),
+        ("failed", None, None),
+        ("quarantined", "sandbox_manifest_mismatch", None),
+        ("tombstoned", None, "owner_deleted"),
+        ("deleting", None, None),
+        ("deleted", None, None),
+    ],
+)
+async def test_admit_run_rejects_a_session_not_ready_for_a_new_run(
+    status: str,
+    quarantine_reason: str | None,
+    tombstone_reason: str | None,
+) -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    blocked = _session(
+        status=status,
+        quarantine_reason=quarantine_reason,
+        tombstone_reason=tombstone_reason,
+    )
+    await store.create_session(blocked)
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="run-1"), _run(), None
+    )
+    with pytest.raises(SessionNotAdmissibleError):
+        await store.admit_run(records)
+
+    stored = await store.get_session(_partition(), "session-1")
+    assert stored.record == blocked
+    with pytest.raises(RunRowNotFoundError):
+        await store.get_run(_partition(), "session-1", "run-1")
+
+
+@pytest.mark.asyncio
+async def test_admit_run_rejects_a_stale_expected_session_etag() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    session = _session(status="ready")
+    stale_etag = await store.create_session(session)
+    fresh_etag = await store.update_session(
+        previous=session,
+        updated=session,
+        etag=stale_etag,
+    )
+
+    records = AdmissionRecords.create(
+        _session(status="running", active_run_id="run-1"), _run(), None
+    )
+    with pytest.raises(ConcurrencyConflictError):
+        await store.admit_run(records, expected_session_etag=stale_etag)
+
+    stored = await store.get_session(_partition(), "session-1")
+    assert stored.etag == fresh_etag
+    assert stored.record == session
+    with pytest.raises(RunRowNotFoundError):
+        await store.get_run(_partition(), "session-1", "run-1")
 
 
 @pytest.mark.asyncio

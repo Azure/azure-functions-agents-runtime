@@ -81,7 +81,8 @@ class AcaSandboxExecutionBackend:
                     updated_at=run.updated_at,
                 )
                 outcome = await activated.store.admit_run(
-                    AdmissionRecords.create(admitted_session, run)
+                    AdmissionRecords.create(admitted_session, run),
+                    expected_session_etag=activated.etag,
                 )
                 if outcome.replayed:
                     return RunHandle(

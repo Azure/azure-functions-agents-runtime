@@ -94,6 +94,10 @@ class ActiveRunConflictError(SessionStateStoreError):
         self.active_run_id = active_run_id
 
 
+class SessionNotAdmissibleError(SessionStateStoreError):
+    """The current session lifecycle state cannot accept a new run."""
+
+
 class IdempotencyConflictError(SessionStateStoreError):
     """The same idempotency key was reused with a different request payload."""
 
@@ -130,6 +134,7 @@ __all__ = [
     "RowAlreadyExistsError",
     "RowNotFoundError",
     "RunRowNotFoundError",
+    "SessionNotAdmissibleError",
     "SessionRowNotFoundError",
     "SessionStateStoreError",
     "StateStoreConfigurationError",

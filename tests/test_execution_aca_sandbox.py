@@ -177,6 +177,7 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     assert store.session is not None
     assert store.session.status == "running"
     assert store.session.active_run_id == run_handle.run_id
+    assert store.admission_expected_session_etags == ["etag-5"]
     assert provider.create_calls
     assert handle.closed
 
