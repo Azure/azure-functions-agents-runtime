@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any
 
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
@@ -33,7 +33,11 @@ from ._auth import (
     resolve_endpoint_auth_level,
     resolve_owner_principal,
 )
-from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
+from ._handlers import (
+    _session_runtime_kwargs,
+    _set_run_result_attributes,
+    build_sandbox_tools_for_session,
+)
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
@@ -53,11 +57,6 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
 type ChatHandler = Callable[[Request, Any | None], Awaitable[Response]]
 type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[StreamingResponse]]
 type McpAgentChatHandler = Callable[[str, Any | None], Awaitable[str]]
-
-
-class _SessionRuntimeKwargs(TypedDict):
-    session_runtime: SessionRuntimeBinding
-    owner: OwnerPrincipal | None
 
 
 def _format_exception_message(exc: Exception) -> str:
@@ -148,15 +147,6 @@ def _index_path() -> Path:
 
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
-
-
-def _session_runtime_kwargs(
-    session_runtime: SessionRuntimeBinding | None,
-    owner: OwnerPrincipal | None,
-) -> _SessionRuntimeKwargs | None:
-    if session_runtime is None:
-        return None
-    return {"session_runtime": session_runtime, "owner": owner}
 
 
 def _resolve_session_owner(
