@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from datetime import UTC, datetime
 
@@ -227,6 +228,35 @@ async def test_read_events_stops_at_the_first_terminal_event() -> None:
     ]
 
     assert [event.sequence for event in events] == [1]
+
+
+@pytest.mark.asyncio
+async def test_read_events_waits_for_terminal_status_after_done_event() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(f"{RUNS_PATH}/run-1/status.json", _status(state="running", last_sequence=1))
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/events.jsonl",
+        _event(1, "done").encode("utf-8") + b"\n",
+    )
+    events = SandboxRunControl(event_poll_interval_seconds=0.001).read_events(
+        transport,
+        _context(),
+        0,
+    )
+
+    first = await anext(events)
+    pending_completion = asyncio.create_task(anext(events))
+    await asyncio.sleep(0.01)
+
+    assert first.type == "done"
+    assert pending_completion.done() is False
+
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", last_sequence=1),
+    )
+    with pytest.raises(StopAsyncIteration):
+        await pending_completion
 
 
 @pytest.mark.asyncio

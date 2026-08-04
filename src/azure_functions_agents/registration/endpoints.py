@@ -105,6 +105,7 @@ def _run_agent_stream(
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
         async for event in backend.read_events(context, after_sequence=0):
             yield render_sse_event(event)
+        await backend.get_run(context)
 
     return stream()
 

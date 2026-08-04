@@ -291,7 +291,8 @@ class SandboxRunControl:
                     cursor = event.sequence
                     yield event
                     if event.type in {"done", "error"}:
-                        return
+                        # The event can arrive before the terminal status write.
+                        break
             status = await self.get_status(handle, context)
             if status.state in _TERMINAL_STATES:
                 return

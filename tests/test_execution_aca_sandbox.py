@@ -25,6 +25,7 @@ from azure_functions_agents.execution.run_control import (
     SandboxRunControl,
 )
 from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.registration.endpoints import _run_agent_stream
 from azure_functions_agents.session_state import (
     AdmissionOutcome,
     AdmissionRecords,
@@ -348,6 +349,173 @@ async def test_backend_releases_admitted_slot_when_request_write_fails(tmp_path:
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.session.active_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_stream_releases_slot_for_followup_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class DelayedTerminalHandle(FakeSandboxSessionHandle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.event_path: str | None = None
+            self.status_path: str | None = None
+            self.terminal_run_id: str | None = None
+            self.event_read = False
+            self.status_reads_after_event = 0
+
+        async def read_file(self, path: str) -> bytes:
+            if path == self.status_path and self.event_read:
+                self.status_reads_after_event += 1
+                if (
+                    self.status_reads_after_event == 2
+                    and self.terminal_run_id is not None
+                ):
+                    self.seed_file(
+                        path,
+                        _status(
+                            state="succeeded",
+                            last_sequence=1,
+                            run_id=self.terminal_run_id,
+                        ),
+                    )
+            content = await super().read_file(path)
+            if path == self.event_path:
+                self.event_read = True
+            return content
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = DelayedTerminalHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    launched_run_ids: list[str] = []
+
+    async def accept_then_complete(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        launched_run_ids.append(run_id)
+        status_path = f"/var/lib/azure-functions-agents/runs/{run_id}/status.json"
+        handle.seed_file(
+            status_path,
+            _status(state="accepted", run_id=run_id, session_id=session.session_id),
+        )
+        if len(launched_run_ids) != 1:
+            handle.event_path = None
+            return
+        handle.event_path = f"/var/lib/azure-functions-agents/runs/{run_id}/events.jsonl"
+        handle.status_path = status_path
+        handle.terminal_run_id = run_id
+        handle.seed_file(
+            handle.event_path,
+            json.dumps(
+                {
+                    "sequence": 1,
+                    "type": "done",
+                    "data": {"content": "answer"},
+                    "timestamp": "2026-08-03T00:00:00+00:00",
+                }
+            ).encode("utf-8")
+            + b"\n",
+        )
+
+    handle.exec_hook = accept_then_complete
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: backend,
+    )
+
+    stream = _run_agent_stream(
+        prompt="hello",
+        session_id=session.session_id,
+        agent_name="main",
+    )
+    events = [event async for event in stream]
+
+    assert events == ['data: {"type": "done", "content": "answer"}\n\n']
+    assert len(store.adopted) == 1
+    assert store.adopted[0].status == "succeeded"
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.active_run_id is None
+
+    followup = await backend.start_run(
+        StartRunRequest(prompt="next", session_id=session.session_id)
+    )
+
+    assert followup.run_id != launched_run_ids[0]
+    assert store.session is not None
+    assert store.session.status == "running"
+    assert store.session.active_run_id == followup.run_id
+
+
+@pytest.mark.asyncio
+async def test_client_disconnect_leaves_streamed_run_active(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+
+    async def accept_with_delta(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            _status(state="accepted", run_id=run_id, session_id=session.session_id),
+        )
+        handle.seed_file(
+            f"/var/lib/azure-functions-agents/runs/{run_id}/events.jsonl",
+            json.dumps(
+                {
+                    "sequence": 1,
+                    "type": "delta",
+                    "data": {"content": "partial"},
+                    "timestamp": "2026-08-03T00:00:00+00:00",
+                }
+            ).encode("utf-8")
+            + b"\n",
+        )
+
+    handle.exec_hook = accept_with_delta
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: backend,
+    )
+
+    stream = _run_agent_stream(
+        prompt="hello",
+        session_id=session.session_id,
+        agent_name="main",
+    )
+    first_event = await anext(stream)
+    await stream.aclose()
+
+    assert first_event == 'data: {"type": "delta", "content": "partial"}\n\n'
+    assert store.adopted == []
+    assert store.session is not None
+    assert store.session.status == "running"
+    assert store.session.active_run_id is not None
+    active_run_id = store.session.active_run_id
+    status = await backend.get_run(
+        RunContext(run_id=active_run_id, session_id=session.session_id)
+    )
+
+    assert status.state == "accepted"
+    assert store.adopted == []
+    assert store.session.active_run_id == active_run_id
 
 
 @pytest.mark.asyncio
