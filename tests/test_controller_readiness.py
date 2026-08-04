@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -130,6 +131,40 @@ def _runtime(
 def _script_root(tmp_path: Path) -> Path:
     (tmp_path / "function_app.py").write_text("app = object()\n", encoding="utf-8")
     return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_session_locks_do_not_serialize_distinct_owners(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    store = _FakeStore(_session(script_root))
+    runtime = _runtime(script_root, provider, store)
+    first_owner = _owner()
+    second_owner = FunctionAppOwnerContext.create(first_owner.app_identity, "other")
+    first_entered = asyncio.Event()
+    release_first = asyncio.Event()
+    second_entered = asyncio.Event()
+
+    async def hold_first() -> None:
+        async with runtime.hold_session(owner_partition(first_owner), "session-1"):
+            first_entered.set()
+            await release_first.wait()
+
+    async def hold_second() -> None:
+        async with runtime.hold_session(owner_partition(second_owner), "session-1"):
+            second_entered.set()
+
+    first = asyncio.create_task(hold_first())
+    await asyncio.wait_for(first_entered.wait(), timeout=1.0)
+    second = asyncio.create_task(hold_second())
+    try:
+        await asyncio.wait_for(second_entered.wait(), timeout=1.0)
+    finally:
+        release_first.set()
+        await first
+        await second
 
 
 @pytest.mark.asyncio

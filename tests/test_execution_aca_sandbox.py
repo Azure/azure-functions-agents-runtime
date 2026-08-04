@@ -410,7 +410,7 @@ async def test_backend_setup_deadline_bounds_session_lock(
     )
 
     async def hold_lock() -> None:
-        async with runtime.hold_session(session.session_id):
+        async with runtime.hold_session(owner_partition(_owner()), session.session_id):
             lock_acquired.set()
             await release_lock.wait()
 

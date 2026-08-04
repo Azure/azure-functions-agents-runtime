@@ -70,7 +70,9 @@ class AcaSandboxExecutionBackend:
         session_id = request.session_id or mint_session_id()
         run_id = mint_run_id()
         setup_budget = SetupBudget.start()
+        partition = owner_partition(self._owner)
         async with self._runtime.hold_session(
+            partition,
             session_id,
             setup_deadline=setup_budget,
         ):
@@ -189,7 +191,9 @@ class AcaSandboxExecutionBackend:
     async def cancel_run(self, context: RunContext) -> RunStatus:
         """Serialize cancellation behind activation so the current process is signaled."""
         setup_budget = SetupBudget.start()
+        partition = owner_partition(self._owner)
         async with self._runtime.hold_session(
+            partition,
             context.session_id,
             setup_deadline=setup_budget,
         ):
