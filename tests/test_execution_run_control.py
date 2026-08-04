@@ -11,6 +11,7 @@ from azure_functions_agents.execution.run_control import (
     RUNS_PATH,
     RunControlError,
     RunEnvelope,
+    RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
     SandboxRunControl,
@@ -212,6 +213,33 @@ async def test_read_events_enforces_exclusive_cursor_and_eviction_rules() -> Non
 
 
 @pytest.mark.asyncio
+async def test_read_events_rejects_a_persistent_gap_in_retained_history(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.run_control.JOURNAL_VISIBILITY_TIMEOUT_SECONDS",
+        0.02,
+    )
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", last_sequence=3),
+    )
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/events.jsonl",
+        ("\n".join([_event(1, "delta"), _event(3, "done")]) + "\n").encode("utf-8"),
+    )
+
+    with pytest.raises(RunJournalProtocolError, match="event history is inconsistent"):
+        _ = [
+            event
+            async for event in SandboxRunControl(
+                event_poll_interval_seconds=0.001
+            ).read_events(transport, _context(), 0)
+        ]
+
+
+@pytest.mark.asyncio
 async def test_read_events_stops_at_the_first_terminal_event() -> None:
     transport = FakeSandboxTransport()
     transport.seed_file(
@@ -228,6 +256,36 @@ async def test_read_events_stops_at_the_first_terminal_event() -> None:
     ]
 
     assert [event.sequence for event in events] == [1]
+
+
+@pytest.mark.asyncio
+async def test_read_events_waits_for_event_visibility_before_terminal_return() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", last_sequence=2),
+    )
+    event_path = f"{RUNS_PATH}/run-1/events.jsonl"
+    transport.seed_file(event_path, _event(1, "done").encode("utf-8") + b"\n")
+    events = SandboxRunControl(event_poll_interval_seconds=0.001).read_events(
+        transport,
+        _context(),
+        0,
+    )
+
+    pending_event = asyncio.create_task(anext(events))
+    await asyncio.sleep(0.01)
+
+    assert pending_event.done() is False
+
+    transport.seed_file(
+        event_path,
+        ("\n".join([_event(1, "done"), _event(2, "delta")]) + "\n").encode("utf-8"),
+    )
+
+    assert (await pending_event).sequence == 1
+    with pytest.raises(StopAsyncIteration):
+        await anext(events)
 
 
 @pytest.mark.asyncio

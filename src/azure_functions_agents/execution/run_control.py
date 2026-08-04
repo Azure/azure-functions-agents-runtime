@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator, Awaitable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from itertools import pairwise
 from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -31,6 +32,7 @@ INBOX_PATH = f"{JOURNAL_ROOT_PATH}/inbox"
 RUNS_PATH = f"{JOURNAL_ROOT_PATH}/runs"
 MAX_RUN_ENVELOPE_BYTES = 4 * 1024 * 1024
 EVENT_POLL_INTERVAL_SECONDS = 0.25
+JOURNAL_VISIBILITY_TIMEOUT_SECONDS = 2.0
 CANCEL_CONFIRM_TIMEOUT_SECONDS = 5.0
 
 _TERMINAL_STATES: frozenset[RunState] = frozenset(
@@ -283,9 +285,18 @@ class SandboxRunControl:
             raise ValueError("after_sequence must not be negative")
         _validate_context(context)
         cursor = after_sequence
+        visibility_deadline: float | None = None
         while True:
             events = await self._read_events(handle, context)
             _assert_cursor_available(events, cursor)
+            status = await self._read_status(handle, context)
+            if not _event_history_matches_status(events, status):
+                visibility_deadline = visibility_deadline or (
+                    time.monotonic() + JOURNAL_VISIBILITY_TIMEOUT_SECONDS
+                )
+                await self._wait_for_event_visibility(visibility_deadline)
+                continue
+            visibility_deadline = None
             for event in events:
                 if event.sequence > cursor:
                     cursor = event.sequence
@@ -293,7 +304,6 @@ class SandboxRunControl:
                     if event.type in {"done", "error"}:
                         # The event can arrive before the terminal status write.
                         break
-            status = await self.get_status(handle, context)
             if status.state in _TERMINAL_STATES:
                 return
             await asyncio.sleep(self._event_poll_interval_seconds)
@@ -365,6 +375,14 @@ class SandboxRunControl:
             asyncio.sleep(min(self._event_poll_interval_seconds, _remaining_seconds(deadline))),
             deadline,
         )
+
+    async def _wait_for_event_visibility(self, deadline: float) -> None:
+        try:
+            await self._sleep_until_poll(deadline)
+        except RunControlTimeoutError:
+            raise RunJournalProtocolError(
+                "Sandbox run journal event history is inconsistent."
+            ) from None
 
     async def _read_status(
         self,
@@ -545,6 +563,22 @@ def _assert_cursor_available(events: list[RunEvent], after_sequence: int) -> Non
         raise EventCursorExpiredError(
             f"Event cursor {after_sequence} expired; earliest retained event is {earliest}"
         )
+
+
+def _event_history_matches_status(
+    events: list[RunEvent],
+    status: _JournalRunStatus,
+) -> bool:
+    if not events:
+        return status.last_sequence == 0
+    if status.last_sequence > events[-1].sequence:
+        return False
+    if status.state in _TERMINAL_STATES and status.last_sequence < events[-1].sequence:
+        return False
+    return all(
+        current.sequence == previous.sequence + 1
+        for previous, current in pairwise(events)
+    )
 
 
 class _DuplicateJsonKeyError(ValueError):
