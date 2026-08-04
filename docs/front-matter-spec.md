@@ -595,7 +595,7 @@ Normal custom tools keep their existing behavior. Plain public functions and `@t
 
 `workflows.subagents` is independent from top-level [`subagents`](#subagents).
 It is deny-by-default: only listed specialist slugs can appear in a workflow
-`sub_agent` node. Each entry must be an object containing `agent` and optionally
+`subagent` node. Each entry must be an object containing `agent` and optionally
 `when`; unknown fields, duplicate references, self references, and unknown slugs
 fail startup. The `when` hint is shown to the workflow authoring model; if
 omitted, the specialist's `description` is used. Workflow specialists run with
