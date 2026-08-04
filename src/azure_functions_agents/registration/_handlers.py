@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
-from typing import Any, cast
+from typing import Any, TypedDict, cast
 
 import azure.functions as func
 import jsonschema
@@ -23,9 +23,12 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..controller.readiness import SessionRuntimeBinding
 from ..execution.compat import run_to_agent_result, split_runner_call
 from ..execution.factory import create_execution_backend
-from ._auth import authorize_entra_request
+from ..execution.setup_budget import synchronous_wait_seconds
+from ..session_state import OwnerPrincipal
+from ._auth import AuthError, authorize_entra_request, resolve_owner_principal
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
@@ -36,6 +39,11 @@ AUTH_LEVEL_MAP = {
     "admin": func.AuthLevel.ADMIN,
 }
 _SESSION_ID_HEADER = "x-ms-session-id"
+
+
+class _SessionRuntimeKwargs(TypedDict):
+    session_runtime: SessionRuntimeBinding
+    owner: OwnerPrincipal | None
 
 
 def extract_json_from_response(text: str) -> str:
@@ -200,10 +208,30 @@ def _response_format_instructions(resolved: ResolvedAgent) -> list[str]:
     return []
 
 
-async def _run_agent(*args: Any, **kwargs: Any) -> Any:
+async def _run_agent(
+    *args: Any,
+    session_runtime: SessionRuntimeBinding | None = None,
+    owner: OwnerPrincipal | None = None,
+    **kwargs: Any,
+) -> Any:
     request, binding = split_runner_call(args, kwargs, stream=False)
-    backend = create_execution_backend(binding=binding)
-    return await run_to_agent_result(backend, request)
+    backend = (
+        create_execution_backend(binding=binding)
+        if session_runtime is None
+        else create_execution_backend(
+            binding=binding,
+            session_runtime=session_runtime,
+            owner=owner,
+        )
+    )
+    wait_timeout_seconds = (
+        None if session_runtime is None else synchronous_wait_seconds(request.timeout)
+    )
+    return await run_to_agent_result(
+        backend,
+        request,
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
 
 
 def _request_header_value(req: Request, header_name: str) -> str | None:
@@ -225,6 +253,15 @@ def _request_header_value(req: Request, header_name: str) -> str | None:
 
 def _new_session_id() -> str:
     return uuid.uuid4().hex
+
+
+def _session_runtime_kwargs(
+    session_runtime: SessionRuntimeBinding | None,
+    owner: OwnerPrincipal | None,
+) -> _SessionRuntimeKwargs | None:
+    if session_runtime is None:
+        return None
+    return {"session_runtime": session_runtime, "owner": owner}
 
 
 def make_agent_handler(
@@ -335,6 +372,7 @@ def make_http_agent_handler(
     catalog: AgentCatalog | None = None,
     auth: EndpointAuthConfig | None = None,
     *,
+    session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
 ) -> Callable[..., Any]:
@@ -348,13 +386,24 @@ def make_http_agent_handler(
     auth_policy = auth or EndpointAuthConfig()
 
     async def _handle(req: Request, durable_client: Any | None) -> Response:
-        auth_error = authorize_entra_request(req.headers.get, auth_policy)
-        if auth_error is not None:
-            return Response(
-                content=json.dumps({"error": auth_error.message}),
-                status_code=auth_error.status_code,
-                media_type="application/json",
-            )
+        owner: OwnerPrincipal | None = None
+        if session_runtime is None:
+            auth_error = authorize_entra_request(req.headers.get, auth_policy)
+            if auth_error is not None:
+                return Response(
+                    content=json.dumps({"error": auth_error.message}),
+                    status_code=auth_error.status_code,
+                    media_type="application/json",
+                )
+        else:
+            resolved_owner = resolve_owner_principal(req.headers.get, auth_policy)
+            if isinstance(resolved_owner, AuthError):
+                return Response(
+                    content=json.dumps({"error": resolved_owner.message}),
+                    status_code=resolved_owner.status_code,
+                    media_type="application/json",
+                )
+            owner = resolved_owner
 
         logger.info(
             "HTTP agent triggered: source_file=%s",
@@ -372,7 +421,9 @@ def make_http_agent_handler(
             },
         ) as span:
             try:
-                session_id = _request_header_value(req, _SESSION_ID_HEADER) or _new_session_id()
+                session_id = _request_header_value(req, _SESSION_ID_HEADER) or (
+                    None if session_runtime is not None else _new_session_id()
+                )
                 span.set_attribute("af.agent.session_id", session_id)
                 try:
                     body = await req.json()
@@ -402,7 +453,7 @@ def make_http_agent_handler(
                             "af.http.status_code": validation_error.status_code,
                         },
                     )
-                    validation_error.headers[_SESSION_ID_HEADER] = session_id
+                    validation_error.headers[_SESSION_ID_HEADER] = session_id or _new_session_id()
                     return validation_error
 
                 parts: list[str] = []
@@ -410,24 +461,28 @@ def make_http_agent_handler(
                 parts.append(f"HTTP request data:\n```json\n{body_json}\n```")
                 prompt = "\n\n".join(parts)
 
-                result = await _run_agent(
-                    prompt,
-                    instructions=resolved.instructions,
-                    timeout=resolved.timeout,
-                    model=resolved.model,
-                    session_id=session_id,
-                    sandbox_tools=build_sandbox_tools_for_session(resolved, session_id),
-                    web_request_tools=capabilities.web_request_tools,
-                    tools=capabilities.filtered_user_tools,
-                    mcp_tools=capabilities.filtered_mcp_tools,
-                    skill_paths=capabilities.enabled_skill_paths,
-                    subagents=resolved.subagents,
-                    catalog=catalog,
-                    system_addendum=workflow_system_addendum,
-                    workflow_enabled=workflows_enabled,
-                    workflow_durable_client=durable_client,
-                    agent_name=resolved.slug,
-                )
+                runner_kwargs: dict[str, Any] = {
+                    "instructions": resolved.instructions,
+                    "timeout": resolved.timeout,
+                    "model": resolved.model,
+                    "session_id": session_id,
+                    "sandbox_tools": build_sandbox_tools_for_session(resolved, session_id),
+                    "web_request_tools": capabilities.web_request_tools,
+                    "tools": capabilities.filtered_user_tools,
+                    "mcp_tools": capabilities.filtered_mcp_tools,
+                    "skill_paths": capabilities.enabled_skill_paths,
+                    "subagents": resolved.subagents,
+                    "catalog": catalog,
+                    "system_addendum": workflow_system_addendum,
+                    "workflow_enabled": workflows_enabled,
+                    "workflow_durable_client": durable_client,
+                    "agent_name": resolved.slug,
+                }
+                runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
+                if runtime_kwargs is None:
+                    result = await _run_agent(prompt, **runner_kwargs)
+                else:
+                    result = await _run_agent(prompt, **runner_kwargs, **runtime_kwargs)
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
@@ -469,7 +524,7 @@ def make_http_agent_handler(
                             ),
                             status_code=500,
                             media_type="application/json",
-                            headers={_SESSION_ID_HEADER: session_id},
+                            headers={_SESSION_ID_HEADER: result.session_id},
                         )
                     if resolved.response_schema:
                         try:
@@ -500,20 +555,20 @@ def make_http_agent_handler(
                                 ),
                                 status_code=500,
                                 media_type="application/json",
-                                headers={_SESSION_ID_HEADER: session_id},
+                                headers={_SESSION_ID_HEADER: result.session_id},
                             )
                     return Response(
                         content=json.dumps(parsed, ensure_ascii=False),
                         status_code=200,
                         media_type="application/json",
-                        headers={_SESSION_ID_HEADER: session_id},
+                        headers={_SESSION_ID_HEADER: result.session_id},
                     )
 
                 return Response(
                     content=result.content,
                     status_code=200,
                     media_type="text/plain",
-                    headers={_SESSION_ID_HEADER: session_id},
+                    headers={_SESSION_ID_HEADER: result.session_id},
                 )
             except Exception as exc:
                 span.set_attribute("af.agent.outcome", "error")
@@ -523,7 +578,7 @@ def make_http_agent_handler(
                     content=json.dumps({"error": str(exc)}),
                     status_code=500,
                     media_type="application/json",
-                    headers={_SESSION_ID_HEADER: session_id},
+                    headers={_SESSION_ID_HEADER: session_id or _new_session_id()},
                 )
 
     async def _handler_with_client(req: Request, client: str) -> Response:

@@ -7,7 +7,14 @@ from typing import Any
 
 import pytest
 
+from azure_functions_agents import app as app_module
 from azure_functions_agents.app import create_function_app
+from azure_functions_agents.config.schema import (
+    AcaSandboxConfig,
+    GlobalConfig,
+    SessionRuntimeConfig,
+)
+from azure_functions_agents.session_state import AppIdentity
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
 # (see FIXTURES_ROOT there). Used here for end-to-end create_function_app()
@@ -43,6 +50,33 @@ def _http_routes(functions: list[Any]) -> list[str]:
             if route is not None:
                 routes.append(route)
     return routes
+
+
+def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app_identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    config = GlobalConfig(
+        session_runtime=SessionRuntimeConfig(
+            aca_sandbox=AcaSandboxConfig(
+                sandbox_group_resource_id=(
+                    "/subscriptions/sub/resourceGroups/rg/providers/"
+                    "Microsoft.App/sandboxGroups/group"
+                )
+            )
+        )
+    )
+    monkeypatch.setattr(app_module, "resolve_function_app_identity", lambda: app_identity)
+
+    runtime = app_module._build_session_runtime_binding(config, tmp_path)
+
+    assert runtime is not None
+    assert runtime.app_identity == app_identity
+    assert runtime.sandbox_group_resource_id.endswith("/sandboxGroups/group")
 
 
 def test_create_function_app_fails_fast_on_duplicate_function_names(

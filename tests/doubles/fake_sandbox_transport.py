@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 
 from azure_functions_agents.transport.transport_models import (
@@ -31,6 +32,8 @@ class FakeSandboxTransport:
         self._directories: set[str] = {"/"}
         self.next_exec_result = SandboxExecResult(exit_code=0, stdout="", stderr="")
         self.read_errors: list[Exception] = []
+        self.write_errors: list[Exception] = []
+        self.exec_hook: Callable[[str], Awaitable[None]] | None = None
 
     def seed_file(self, path: str, content: bytes) -> None:
         """Populate a file without recording a transport operation."""
@@ -90,6 +93,8 @@ class FakeSandboxTransport:
     async def write_file(self, path: str, content: bytes, *, create_dirs: bool = False) -> None:
         normalized = _normalize(path)
         self.calls.append(RecordedTransportCall("write_file", path=normalized))
+        if self.write_errors:
+            raise self.write_errors.pop(0)
         parent = _parent(normalized)
         if parent not in self._directories:
             if not create_dirs:
@@ -124,6 +129,8 @@ class FakeSandboxTransport:
     ) -> SandboxExecResult:
         del timeout_seconds
         self.calls.append(RecordedTransportCall("exec", command=command))
+        if self.exec_hook is not None:
+            await self.exec_hook(command)
         return self.next_exec_result
 
 

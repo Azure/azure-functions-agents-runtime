@@ -14,7 +14,7 @@ from uuid import uuid4
 
 from .._logger import logger
 from .backend import (
-    EventCursorExpiredError,
+    TERMINAL_EVENT_TYPES,
     RunContext,
     RunError,
     RunEvent,
@@ -23,6 +23,7 @@ from .backend import (
     RunState,
     RunStatus,
     StartRunRequest,
+    assert_event_cursor_available,
 )
 from .binding import AgentBinding
 from .result import AgentResult
@@ -120,7 +121,10 @@ class LanguageWorkerExecutionBackend:
         while True:
             async with self._condition:
                 run = self._require_run(context)
-                self._assert_cursor_available(run, after_sequence)
+                assert_event_cursor_available(
+                    run.events[0].sequence if run.events else None,
+                    after_sequence,
+                )
                 pending = [event for event in run.events if event.sequence > after_sequence]
                 terminal = run.status.state in _TERMINAL_STATES
                 if not pending and not terminal:
@@ -361,22 +365,12 @@ class LanguageWorkerExecutionBackend:
         return run
 
     @staticmethod
-    def _assert_cursor_available(run: _LanguageWorkerRun, after_sequence: int) -> None:
-        if not run.events or after_sequence == 0:
-            return
-        earliest = run.events[0].sequence
-        if after_sequence < earliest - 1:
-            raise EventCursorExpiredError(
-                f"Event cursor {after_sequence} expired; earliest retained event is {earliest}"
-            )
-
-    @staticmethod
     def _load_runner_module() -> _RunnerModule:
         return import_module("azure_functions_agents.runner")
 
 
 def _ends_with_terminal_event(events: list[RunEvent]) -> bool:
-    return bool(events) and events[-1].type in {"done", "error"}
+    return bool(events) and events[-1].type in TERMINAL_EVENT_TYPES
 
 
 def _parse_sse_chunk(chunk: str) -> tuple[str, dict[str, object]]:

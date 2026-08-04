@@ -4,7 +4,17 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .transport_models import SandboxExecResult, SandboxFileEntry, SandboxFileStat
+from .manifest import ExpectedSandboxManifestBinding
+from .transport_models import (
+    PersistedSandboxBinding,
+    ProvisionedSandboxIdentity,
+    SandboxCreateRequest,
+    SandboxExecResult,
+    SandboxFileEntry,
+    SandboxFileStat,
+    SandboxGroupBinding,
+    SandboxGroupIdentity,
+)
 
 
 @runtime_checkable
@@ -44,3 +54,62 @@ class SandboxProcessTransport(Protocol):
         self, command: str, *, timeout_seconds: float | None = None
     ) -> SandboxExecResult:
         """Run a controlled harness process command."""
+
+
+@runtime_checkable
+class SandboxSessionHandle(SandboxFileTransport, SandboxProcessTransport, Protocol):
+    """A live session sandbox with file, process, and lifecycle operations."""
+
+    @property
+    def identity(self) -> ProvisionedSandboxIdentity:
+        """Return the provider-neutral identity for this live sandbox."""
+
+    async def stop(self) -> None:
+        """Stop this individual sandbox without changing its group."""
+
+    async def resume(self) -> None:
+        """Resume this individual sandbox without trusting advisory state."""
+
+    async def delete(self) -> None:
+        """Delete this individual sandbox."""
+
+    async def close(self) -> None:
+        """Release controller-side resources for this handle."""
+
+
+@runtime_checkable
+class SandboxSessionProvider(Protocol):
+    """A provider-neutral owner of one customer-configured Sandbox Group."""
+
+    @property
+    def group(self) -> SandboxGroupIdentity:
+        """Return the resolved, immutable Sandbox Group identity."""
+
+    async def create(
+        self,
+        request: SandboxCreateRequest,
+        *,
+        persisted_group: SandboxGroupBinding,
+    ) -> SandboxSessionHandle:
+        """Create one session sandbox in the bound group."""
+
+    async def attach(
+        self,
+        persisted: PersistedSandboxBinding,
+        expected: ExpectedSandboxManifestBinding,
+        *,
+        readiness_timeout_seconds: float,
+    ) -> SandboxSessionHandle:
+        """Attach to a persisted sandbox and prove its manifest binding."""
+
+    async def resume(
+        self,
+        persisted: PersistedSandboxBinding,
+        expected: ExpectedSandboxManifestBinding,
+        *,
+        readiness_timeout_seconds: float,
+    ) -> SandboxSessionHandle:
+        """Resume a persisted sandbox and prove its manifest binding."""
+
+    async def close(self) -> None:
+        """Release controller-side provider resources."""

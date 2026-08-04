@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import json
 from collections.abc import Iterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, get_type_hints
@@ -17,10 +18,12 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.execution.backend import RunContext, RunEvent, RunHandle, RunStatus
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _SAFE_SESSION_ID_PATTERN,
     _extract_mcp_session_id,
+    _run_agent_stream,
     _run_builtin_agent,
     _run_builtin_agent_stream,
     register_builtin_endpoints,
@@ -86,6 +89,109 @@ class DummyRequest:
 
     async def json(self) -> Any:
         return self._payload
+
+
+def test_run_agent_stream_adopts_terminal_state_after_normal_exhaustion(
+    monkeypatch: Any,
+) -> None:
+    class StreamingBackend:
+        def __init__(self) -> None:
+            self.get_run_contexts: list[RunContext] = []
+
+        async def start_run(self, _request: Any) -> RunHandle:
+            return RunHandle(
+                run_id="run-1",
+                session_id="session-1",
+                state="accepted",
+                created_at=datetime.now(UTC),
+            )
+
+        def read_events(self, _context: RunContext, after_sequence: int) -> Any:
+            del after_sequence
+
+            async def events() -> Any:
+                yield RunEvent(
+                    sequence=1,
+                    type="done",
+                    data={"content": "answer"},
+                    timestamp=datetime.now(UTC),
+                )
+
+            return events()
+
+        async def get_run(self, context: RunContext) -> RunStatus:
+            self.get_run_contexts.append(context)
+            return RunStatus(
+                run_id=context.run_id,
+                session_id=context.session_id,
+                state="succeeded",
+                last_sequence=1,
+                result_available=False,
+            )
+
+    backend = StreamingBackend()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: backend,
+    )
+
+    async def consume() -> list[str]:
+        stream = _run_agent_stream(prompt="hello", agent_name="main")
+        return [event async for event in stream]
+
+    events = asyncio.run(consume())
+
+    assert events == ['data: {"type": "done", "content": "answer"}\n\n']
+    assert backend.get_run_contexts == [RunContext(run_id="run-1", session_id="session-1")]
+
+
+def test_run_agent_stream_does_not_adopt_after_client_disconnect(monkeypatch: Any) -> None:
+    class StreamingBackend:
+        def __init__(self) -> None:
+            self.get_run_calls = 0
+
+        async def start_run(self, _request: Any) -> RunHandle:
+            return RunHandle(
+                run_id="run-1",
+                session_id="session-1",
+                state="accepted",
+                created_at=datetime.now(UTC),
+            )
+
+        def read_events(self, _context: RunContext, after_sequence: int) -> Any:
+            del after_sequence
+
+            async def events() -> Any:
+                yield RunEvent(
+                    sequence=1,
+                    type="delta",
+                    data={"content": "partial"},
+                    timestamp=datetime.now(UTC),
+                )
+                await asyncio.Event().wait()
+
+            return events()
+
+        async def get_run(self, _context: RunContext) -> RunStatus:
+            self.get_run_calls += 1
+            raise AssertionError("A disconnected stream must not adopt the run.")
+
+    backend = StreamingBackend()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: backend,
+    )
+
+    async def disconnect() -> str:
+        stream = _run_agent_stream(prompt="hello", agent_name="main")
+        first_event = await anext(stream)
+        await stream.aclose()
+        return first_event
+
+    event = asyncio.run(disconnect())
+
+    assert event == 'data: {"type": "delta", "content": "partial"}\n\n'
+    assert backend.get_run_calls == 0
 
 
 def _resolved_agent(

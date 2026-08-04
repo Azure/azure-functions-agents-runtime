@@ -17,6 +17,7 @@ from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..controller.readiness import SessionRuntimeBinding
 from ..execution.backend import RunContext
 from ..execution.compat import (
     render_sse_event,
@@ -24,8 +25,19 @@ from ..execution.compat import (
     split_runner_call,
 )
 from ..execution.factory import create_execution_backend
-from ._auth import authorize_entra_request, resolve_endpoint_auth_level
-from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_session
+from ..execution.setup_budget import synchronous_wait_seconds
+from ..session_state import FunctionAppPrincipal, OwnerPrincipal
+from ._auth import (
+    AuthError,
+    authorize_entra_request,
+    resolve_endpoint_auth_level,
+    resolve_owner_principal,
+)
+from ._handlers import (
+    _session_runtime_kwargs,
+    _set_run_result_attributes,
+    build_sandbox_tools_for_session,
+)
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
@@ -52,20 +64,55 @@ def _format_exception_message(exc: Exception) -> str:
     return message if message else f"{type(exc).__name__}: {exc!r}"
 
 
-async def _run_agent(*args: Any, **kwargs: Any) -> Any:
+async def _run_agent(
+    *args: Any,
+    session_runtime: SessionRuntimeBinding | None = None,
+    owner: OwnerPrincipal | None = None,
+    **kwargs: Any,
+) -> Any:
     request, binding = split_runner_call(args, kwargs, stream=False)
-    backend = create_execution_backend(binding=binding)
-    return await run_to_agent_result(backend, request)
+    backend = (
+        create_execution_backend(binding=binding)
+        if session_runtime is None
+        else create_execution_backend(
+            binding=binding,
+            session_runtime=session_runtime,
+            owner=owner,
+        )
+    )
+    wait_timeout_seconds = (
+        None if session_runtime is None else synchronous_wait_seconds(request.timeout)
+    )
+    return await run_to_agent_result(
+        backend,
+        request,
+        wait_timeout_seconds=wait_timeout_seconds,
+    )
 
 
-def _run_agent_stream(*args: Any, **kwargs: Any) -> AsyncIterator[str]:
+def _run_agent_stream(
+    *args: Any,
+    session_runtime: SessionRuntimeBinding | None = None,
+    owner: OwnerPrincipal | None = None,
+    **kwargs: Any,
+) -> AsyncIterator[str]:
     async def stream() -> AsyncIterator[str]:
         request, binding = split_runner_call(args, kwargs, stream=True)
-        backend = create_execution_backend(binding=binding, stream_events=True)
+        backend = (
+            create_execution_backend(binding=binding, stream_events=True)
+            if session_runtime is None
+            else create_execution_backend(
+                binding=binding,
+                stream_events=True,
+                session_runtime=session_runtime,
+                owner=owner,
+            )
+        )
         handle = await backend.start_run(request)
         context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
         async for event in backend.read_events(context, after_sequence=0):
             yield render_sse_event(event)
+        await backend.get_run(context)
 
     return stream()
 
@@ -100,6 +147,19 @@ def _index_path() -> Path:
 
 def _resolve_builtin_endpoints_session_id(session_id: str | None) -> str:
     return session_id or uuid.uuid4().hex
+
+
+def _resolve_session_owner(
+    get_header: Callable[[str], str | None],
+    auth: EndpointAuthConfig,
+    session_runtime: SessionRuntimeBinding | None,
+) -> tuple[OwnerPrincipal | None, AuthError | None]:
+    if session_runtime is None:
+        return None, authorize_entra_request(get_header, auth)
+    resolved_owner = resolve_owner_principal(get_header, auth)
+    if isinstance(resolved_owner, AuthError):
+        return None, resolved_owner
+    return resolved_owner, None
 
 
 def _chat_handler_with_client(handle_chat: ChatHandler) -> Callable[[Request, str], Awaitable[Response]]:
@@ -162,27 +222,40 @@ async def _run_builtin_agent(
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
+    session_runtime: SessionRuntimeBinding | None = None,
+    owner: OwnerPrincipal | None = None,
 ) -> Any:
-    resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
-    sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
-    return await _run_agent(
-        prompt,
-        instructions=resolved.instructions,
-        timeout=resolved.timeout,
-        model=resolved.model,
-        session_id=resolved_session_id,
-        sandbox_tools=sandbox_tools,
-        web_request_tools=capabilities.web_request_tools,
-        tools=capabilities.filtered_user_tools,
-        mcp_tools=capabilities.filtered_mcp_tools,
-        skill_paths=capabilities.enabled_skill_paths,
-        system_addendum=workflow_system_addendum,
-        workflow_enabled=workflows_enabled,
-        workflow_durable_client=durable_client,
-        agent_name=resolved.slug,
-        subagents=resolved.subagents,
-        catalog=catalog,
+    resolved_session_id = (
+        session_id
+        if session_id is not None
+        else (
+            None
+            if session_runtime is not None
+            else _resolve_builtin_endpoints_session_id(session_id)
+        )
     )
+    sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
+    runner_kwargs: dict[str, Any] = {
+        "instructions": resolved.instructions,
+        "timeout": resolved.timeout,
+        "model": resolved.model,
+        "session_id": resolved_session_id,
+        "sandbox_tools": sandbox_tools,
+        "web_request_tools": capabilities.web_request_tools,
+        "tools": capabilities.filtered_user_tools,
+        "mcp_tools": capabilities.filtered_mcp_tools,
+        "skill_paths": capabilities.enabled_skill_paths,
+        "system_addendum": workflow_system_addendum,
+        "workflow_enabled": workflows_enabled,
+        "workflow_durable_client": durable_client,
+        "agent_name": resolved.slug,
+        "subagents": resolved.subagents,
+        "catalog": catalog,
+    }
+    runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
+    if runtime_kwargs is None:
+        return await _run_agent(prompt, **runner_kwargs)
+    return await _run_agent(prompt, **runner_kwargs, **runtime_kwargs)
 
 
 def _run_builtin_agent_stream(
@@ -195,33 +268,41 @@ def _run_builtin_agent_stream(
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
+    session_runtime: SessionRuntimeBinding | None = None,
+    owner: OwnerPrincipal | None = None,
 ) -> Any:
-    resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
-    sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
-    return _run_agent_stream(
-        prompt,
-        instructions=resolved.instructions,
-        timeout=resolved.timeout,
-        model=resolved.model,
-        session_id=resolved_session_id,
-        sandbox_tools=sandbox_tools,
-        web_request_tools=capabilities.web_request_tools,
-        tools=capabilities.filtered_user_tools,
-        mcp_tools=capabilities.filtered_mcp_tools,
-        skill_paths=capabilities.enabled_skill_paths,
-        system_addendum=workflow_system_addendum,
-        workflow_enabled=workflows_enabled,
-        workflow_durable_client=durable_client,
-        agent_name=resolved.slug,
-        # S1b: `_register_http_chat_stream`'s `handle_chat_stream` (unlike
-        # `handle_chat`/`handle_mcp_agent_chat` above) opens no span of its
-        # own around this call, so `run_agent_stream`'s own internal
-        # `agent.run {name}` span is the only place `af.agent.display_name`
-        # can be recorded for the streaming surface — thread it through.
-        display_name=resolved.name,
-        subagents=resolved.subagents,
-        catalog=catalog,
+    resolved_session_id = (
+        session_id
+        if session_id is not None
+        else (
+            None
+            if session_runtime is not None
+            else _resolve_builtin_endpoints_session_id(session_id)
+        )
     )
+    sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
+    runner_kwargs: dict[str, Any] = {
+        "instructions": resolved.instructions,
+        "timeout": resolved.timeout,
+        "model": resolved.model,
+        "session_id": resolved_session_id,
+        "sandbox_tools": sandbox_tools,
+        "web_request_tools": capabilities.web_request_tools,
+        "tools": capabilities.filtered_user_tools,
+        "mcp_tools": capabilities.filtered_mcp_tools,
+        "skill_paths": capabilities.enabled_skill_paths,
+        "system_addendum": workflow_system_addendum,
+        "workflow_enabled": workflows_enabled,
+        "workflow_durable_client": durable_client,
+        "agent_name": resolved.slug,
+        "display_name": resolved.name,
+        "subagents": resolved.subagents,
+        "catalog": catalog,
+    }
+    runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
+    if runtime_kwargs is None:
+        return _run_agent_stream(prompt, **runner_kwargs)
+    return _run_agent_stream(prompt, **runner_kwargs, **runtime_kwargs)
 
 
 def _extract_prompt_from_body(body: Any) -> str:
@@ -286,10 +367,27 @@ def _register_http_chat(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    session_runtime: SessionRuntimeBinding | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
-        resolved_session_id = _resolve_builtin_endpoints_session_id(
-            req.headers.get("x-ms-session-id")
+        owner: OwnerPrincipal | None = None
+        if session_runtime is not None:
+            owner, auth_error = _resolve_session_owner(
+                req.headers.get,
+                auth,
+                session_runtime,
+            )
+            if auth_error is not None:
+                return _json_error(auth_error.message, status_code=auth_error.status_code)
+        requested_session_id = req.headers.get("x-ms-session-id")
+        resolved_session_id = (
+            requested_session_id
+            if requested_session_id is not None
+            else (
+                None
+                if session_runtime is not None
+                else _resolve_builtin_endpoints_session_id(None)
+            )
         )
         # This endpoint calls `run_agent` directly rather than going through
         # `_handlers.py`'s trigger-registered handlers, so — unlike a
@@ -310,11 +408,12 @@ def _register_http_chat(
             },
         ) as span:
             try:
-                auth_error = authorize_entra_request(req.headers.get, auth)
-                if auth_error is not None:
-                    span.set_attribute("af.agent.outcome", "error")
-                    span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
-                    return _json_error(auth_error.message, status_code=auth_error.status_code)
+                if session_runtime is None:
+                    auth_error = authorize_entra_request(req.headers.get, auth)
+                    if auth_error is not None:
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_error(auth_error.message, fault_domain=FaultDomain.APP)
+                        return _json_error(auth_error.message, status_code=auth_error.status_code)
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
                 result = await _run_builtin_agent(
@@ -326,6 +425,8 @@ def _register_http_chat(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
+                    session_runtime=session_runtime,
+                    owner=owner,
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
@@ -381,18 +482,32 @@ def _register_http_chat_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    session_runtime: SessionRuntimeBinding | None = None,
 ) -> None:
     async def handle_chat_stream(
         req: Request,
         durable_client: Any | None,
     ) -> StreamingResponse:
         try:
-            auth_error = authorize_entra_request(req.headers.get, auth)
+            owner, auth_error = _resolve_session_owner(
+                req.headers.get,
+                auth,
+                session_runtime,
+            )
             if auth_error is not None:
                 return _sse_error_response(auth_error.message, status_code=auth_error.status_code)
             body = await req.json()
             prompt = _extract_prompt_from_body(body)
-            session_id = req.headers.get("x-ms-session-id")
+            requested_session_id = req.headers.get("x-ms-session-id")
+            session_id = (
+                requested_session_id
+                if requested_session_id is not None
+                else (
+                    None
+                    if session_runtime is not None
+                    else _resolve_builtin_endpoints_session_id(None)
+                )
+            )
             return StreamingResponse(
                 _run_builtin_agent_stream(
                     prompt,
@@ -403,6 +518,8 @@ def _register_http_chat_stream(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
+                    session_runtime=session_runtime,
+                    owner=owner,
                 ),
                 media_type="text/event-stream",
             )
@@ -442,6 +559,7 @@ def _register_mcp_endpoint(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    session_runtime: SessionRuntimeBinding | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         # Same rationale as `handle_chat` above: this built-in MCP surface
@@ -480,6 +598,8 @@ def _register_mcp_endpoint(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
+                    session_runtime=session_runtime,
+                    owner=FunctionAppPrincipal() if session_runtime is not None else None,
                 )
                 # When the caller supplies no explicit session id (`session_id`
                 # is `None` above), the runner still resolves/generates one for
@@ -617,6 +737,7 @@ def register_builtin_endpoints(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    session_runtime: SessionRuntimeBinding | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
@@ -648,6 +769,7 @@ def register_builtin_endpoints(
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
+            session_runtime=session_runtime,
         )
         _register_http_chat_stream(
             app,
@@ -659,6 +781,7 @@ def register_builtin_endpoints(
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
+            session_runtime=session_runtime,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
@@ -678,4 +801,5 @@ def register_builtin_endpoints(
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
+            session_runtime=session_runtime,
         )

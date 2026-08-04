@@ -17,6 +17,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
 from azure_functions_agents.registration._handlers import (
     _tool_error_count,
     _total_tool_error_count,
@@ -25,6 +26,13 @@ from azure_functions_agents.registration._handlers import (
     make_http_agent_handler,
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.session_state import AppIdentity, FunctionAppPrincipal
+from tests.doubles.fake_session_runtime import (
+    DEFAULT_GROUP_RESOURCE_ID,
+    FakeSandboxSessionHandle,
+    FakeSandboxSessionProvider,
+    FakeSessionStateStore,
+)
 
 
 class DummyRequest:
@@ -108,6 +116,32 @@ def _resolved_agent(
         response_example=None,
         metadata={},
         source_file=str(source),
+    )
+
+
+def _runtime(tmp_path: Path) -> SessionRuntimeBinding:
+    app_identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    store = FakeSessionStateStore()
+
+    async def provider_factory() -> FakeSandboxSessionProvider:
+        return provider
+
+    async def store_factory() -> StateStoreBinding:
+        return StateStoreBinding.create(
+            store=store,
+            state_store_fingerprint="s1-" + ("a" * 52),
+        )
+
+    return SessionRuntimeBinding.create(
+        app_identity=app_identity,
+        sandbox_group_resource_id=DEFAULT_GROUP_RESOURCE_ID,
+        script_root=tmp_path,
+        provider_factory=provider_factory,
+        state_store_factory=store_factory,
     )
 
 
@@ -389,6 +423,81 @@ def test_http_handler_generates_session_id_once_per_request(monkeypatch: Any) ->
     assert sandbox_session_ids == ["generated-session"]
     assert run_kwargs["session_id"] == "generated-session"
     assert run_kwargs["sandbox_tools"] == ["sandbox:generated-session"]
+
+
+def test_http_handler_binds_the_authenticated_owner_for_sandbox_execution(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(content="plain text", session_id="runtime-created")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    runtime = _runtime(tmp_path)
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=runtime,
+    )
+
+    response = asyncio.run(handler(DummyRequest({"hello": "world"})))
+
+    assert response.status_code == 200
+    assert response.headers["x-ms-session-id"] == "runtime-created"
+    assert captured["session_runtime"] is runtime
+    assert captured["owner"] == FunctionAppPrincipal()
+    assert captured["session_id"] is None
+
+
+def test_http_handler_rejects_unresolvable_runtime_owner_before_execution(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    async def unexpected_run(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("owner rejection must happen before backend construction")
+
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "true")
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        unexpected_run,
+    )
+    principal = base64.b64encode(
+        json.dumps(
+            {
+                "auth_typ": "aad",
+                "claims": [
+                    {
+                        "typ": "tid",
+                        "val": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+                    }
+                ],
+            }
+        ).encode("utf-8")
+    ).decode("ascii")
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="entra"),
+        session_runtime=_runtime(tmp_path),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"x-ms-client-principal": principal},
+            )
+        )
+    )
+
+    assert response.status_code == 401
 
 
 def test_http_handler_passes_instructions_only_as_system_message(monkeypatch: Any) -> None:

@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import asdict, dataclass
-from typing import Annotated, Any
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from .transport_models import (
     ProvisionedSandboxIdentity,
     SandboxGroupBindingError,
@@ -125,8 +126,7 @@ def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManif
     """
 
     try:
-        raw = payload.decode("utf-8") if isinstance(payload, bytes) else payload
-        decoded = json.loads(raw, object_pairs_hook=_manifest_object)
+        decoded = decode_json_object(payload)
         observed = ObservedSandboxManifestBinding.model_validate(decoded)
         return observed.model_copy(
             update={
@@ -141,7 +141,7 @@ def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManif
         ValidationError,
         TypeError,
         ValueError,
-        _DuplicateManifestKeyError,
+        DuplicateJsonKeyError,
         SandboxGroupBindingError,
         SandboxProvisioningError,
     ):
@@ -200,16 +200,3 @@ def render_sandbox_manifest_binding(expected: ExpectedSandboxManifestBinding) ->
 
     text = json.dumps(asdict(expected), sort_keys=True, separators=(",", ":"), allow_nan=False)
     return f"{text}\n".encode()
-
-
-class _DuplicateManifestKeyError(ValueError):
-    """Raised internally when untrusted manifest JSON repeats a key."""
-
-
-def _manifest_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateManifestKeyError
-        result[key] = value
-    return result

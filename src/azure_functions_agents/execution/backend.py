@@ -17,6 +17,8 @@ type RunState = Literal[
     "abandoned",
 ]
 
+TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"done", "error"})
+
 
 @dataclass
 class StartRunRequest:
@@ -91,6 +93,16 @@ class RunEvent:
 
 class EventCursorExpiredError(Exception):
     """Raised when an event cursor is older than the backend's retained journal."""
+
+
+def assert_event_cursor_available(earliest_sequence: int | None, after_sequence: int) -> None:
+    """Raise when an exclusive event cursor precedes retained history."""
+    if earliest_sequence is None or after_sequence == 0:
+        return
+    if after_sequence < earliest_sequence - 1:
+        raise EventCursorExpiredError(
+            f"Event cursor {after_sequence} expired; earliest retained event is {earliest_sequence}"
+        )
 
 
 @runtime_checkable
