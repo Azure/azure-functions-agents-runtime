@@ -111,6 +111,23 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
         assert await created.read_file(path) == b"p4a-direct-file"
         await created.delete_file(path)
 
+        # Overwrite semantics: write, then a second *direct* write with distinct
+        # content of a different length, and require the final read-back and
+        # size to match the overwrite exactly. Production has no delete/write
+        # fallback, so this must fail here if the real data plane does not
+        # actually replace the prior bytes on a second direct write.
+        overwrite_path = f"{root}/overwrite.bin"
+        first_content = b"p4a-overwrite-before"
+        second_content = b"p4a-overwrite-after-with-a-different-length"
+        await created.write_file(overwrite_path, first_content)
+        assert await created.read_file(overwrite_path) == first_content
+
+        await created.write_file(overwrite_path, second_content)
+        overwrite_stat = await created.stat_file(overwrite_path)
+        assert overwrite_stat.size == len(second_content)
+        assert await created.read_file(overwrite_path) == second_content
+        await created.delete_file(overwrite_path)
+
         expected = ExpectedSandboxManifestBinding.create(
             manifest_version=1,
             protocol_version="p4a-smoke-v1",
@@ -123,6 +140,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             generation=1,
             digest_kind="smoke",
             digest="sha256:" + "b" * 64,
+            state_store_fingerprint="s1-" + ("c" * 52),
         )
         await created.write_file(
             SESSION_MANIFEST_PATH,

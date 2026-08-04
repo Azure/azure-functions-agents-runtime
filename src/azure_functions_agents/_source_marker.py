@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from pathlib import Path
+from pathlib import PurePosixPath
 
 
 def source_marker(source_file: str | None) -> str:
@@ -24,7 +24,7 @@ def source_marker(source_file: str | None) -> str:
     if not source_file:
         return "<unknown>"
 
-    path = Path(str(source_file))
+    path = PurePosixPath(source_file.replace("\\", "/"))
     filename = path.name
 
     # Check if file is directly in agents/ directory (no subdirectories supported)

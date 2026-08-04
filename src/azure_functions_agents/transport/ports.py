@@ -9,7 +9,13 @@ from .transport_models import SandboxExecResult, SandboxFileEntry, SandboxFileSt
 
 @runtime_checkable
 class SandboxFileTransport(Protocol):
-    """The exact six-operation data-plane file boundary."""
+    """The exact six-operation data-plane file boundary.
+
+    Every operation raises :class:`~.transport_models.SandboxFileNotFoundError`
+    for a missing path and :class:`~.transport_models.SandboxFileOperationError`
+    for any other operational failure; callers must not catch a bare ``OSError``
+    or ``Exception`` expecting to observe provider-specific exception types.
+    """
 
     async def list_files(self, path: str) -> tuple[SandboxFileEntry, ...]:
         """List entries at ``path``."""

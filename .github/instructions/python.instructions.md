@@ -30,8 +30,21 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 
 ## Documentation and logging
 
-- Keep docstrings and comments terse. Explain a durable contract or reason, not
-  the next line of code or feature/PR history. Do not cite phase labels, PR
-  numbers, or mutable FRD decision numbers in source comments, docstrings, or
-  assertion messages.
+- Default to a one-line docstring; the name and signature usually say enough.
+  Use a multi-line docstring only for a non-obvious durable contract or
+  invariant, and keep it to a summary line plus at most four short lines.
+- Never use a docstring (or comment) for a step-by-step algorithm walkthrough,
+  platform-specific mechanics, retry/error choreography, or design history —
+  that belongs in `docs/architecture.md` or the owning FRD's design section,
+  or, for a narrowly-scoped gotcha, a short comment placed at the exact line
+  it explains.
+- Keep docstrings and comments terse otherwise too. Explain a durable contract
+  or reason, not the next line of code or feature/PR history. Do not cite
+  phase labels, PR numbers, or mutable FRD decision numbers in source
+  comments, docstrings, or assertion messages.
+- When a change needs an FRD Decisions-log update, add the fewest durable
+  rows that cover it — group related choices into one row rather than one row
+  per test, review finding, or implementation correction, and keep mechanics
+  out of the row (they belong in the design section the decision governs).
+  See the add-feature skill for the full logging discipline.
 - Use the shared `azure_functions_agents._logger.logger`.

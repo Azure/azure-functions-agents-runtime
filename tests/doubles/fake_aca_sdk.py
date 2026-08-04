@@ -17,14 +17,18 @@ these tests independent of whether the optional extra happens to be present.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
 from azure.core.credentials import AccessToken
+from azure.core.exceptions import ResourceNotFoundError
 
 from azure_functions_agents.transport.aca_sdk import SdkFactories
-from azure_functions_agents.transport.transport_models import SandboxExecResult
+from azure_functions_agents.transport.transport_models import (
+    SandboxExecResult,
+    SandboxFileNotFoundError,
+)
 
 from .fake_sandbox_transport import FakeSandboxTransport, RecordedTransportCall
 
@@ -94,8 +98,25 @@ class FakeCredential:
         self.closed = True
 
 
+async def _as_sdk_response[T](operation: Awaitable[T]) -> T:
+    """Re-raise a fake-transport not-found as the real SDK's wire-level shape."""
+
+    try:
+        return await operation
+    except SandboxFileNotFoundError:
+        raise ResourceNotFoundError(message="Not Found") from None
+
+
 class FakeSdkSandboxClient:
-    """A direct-file SDK-client stand-in with advisory ``get`` intentionally forbidden."""
+    """A direct-file SDK-client stand-in with advisory ``get`` intentionally forbidden.
+
+    File operations translate this repository's own
+    :class:`SandboxFileNotFoundError` (raised by the underlying
+    :class:`FakeSandboxTransport` store) into ``azure.core``'s
+    :class:`ResourceNotFoundError`, mirroring the real preview SDK's wire-level
+    404 so ``transport/aca_sdk.py``'s own translation layer has a real SDK
+    exception shape to translate from, not this repository's own type.
+    """
 
     def __init__(self, sandbox_id: str, *, labels: dict[str, str] | None = None) -> None:
         self.sandbox_id = sandbox_id
@@ -108,7 +129,7 @@ class FakeSdkSandboxClient:
         self.delete_kwargs: dict[str, Any] | None = None
 
     async def list_files(self, path: str) -> FakeSdkDirListing:
-        entries = await self.transport.list_files(path)
+        entries = await _as_sdk_response(self.transport.list_files(path))
         return FakeSdkDirListing(
             path=path,
             entries=[
@@ -125,7 +146,7 @@ class FakeSdkSandboxClient:
         )
 
     async def stat_file(self, path: str) -> FakeSdkFileInfo:
-        stat = await self.transport.stat_file(path)
+        stat = await _as_sdk_response(self.transport.stat_file(path))
         return FakeSdkFileInfo(
             path=stat.path,
             size=stat.size,
@@ -135,18 +156,18 @@ class FakeSdkSandboxClient:
         )
 
     async def read_file(self, path: str) -> bytes:
-        return await self.transport.read_file(path)
+        return await _as_sdk_response(self.transport.read_file(path))
 
     async def write_file(self, path: str, content: bytes, *, create_dirs: bool) -> None:
-        await self.transport.write_file(path, content, create_dirs=create_dirs)
+        await _as_sdk_response(self.transport.write_file(path, content, create_dirs=create_dirs))
 
     async def delete_file(self, path: str, *, recursive: bool) -> None:
         if recursive:
             raise AssertionError("the adapter must not request recursive file deletion")
-        await self.transport.delete_file(path)
+        await _as_sdk_response(self.transport.delete_file(path))
 
     async def mkdir(self, path: str) -> None:
-        await self.transport.mkdir(path)
+        await _as_sdk_response(self.transport.mkdir(path))
 
     async def exec(self, command: str) -> FakeSdkExecResult:
         result = await self.transport.exec(command)

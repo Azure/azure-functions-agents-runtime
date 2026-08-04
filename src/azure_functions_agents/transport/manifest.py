@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
@@ -38,6 +38,8 @@ class ExpectedSandboxManifestBinding:
 
     Already-typed controller state; ``create`` normalizes only the Sandbox
     Group resource ID so it compares correctly against the live manifest.
+    ``state_store_fingerprint`` is the non-secret ``s1-<52 base32>`` value the
+    caller chooses to stamp -- this layer never derives or freshness-checks it.
     """
 
     manifest_version: int
@@ -51,6 +53,7 @@ class ExpectedSandboxManifestBinding:
     generation: int
     digest_kind: str
     digest: str
+    state_store_fingerprint: str
 
     @classmethod
     def create(
@@ -67,6 +70,7 @@ class ExpectedSandboxManifestBinding:
         generation: int,
         digest_kind: str,
         digest: str,
+        state_store_fingerprint: str,
     ) -> ExpectedSandboxManifestBinding:
         return cls(
             manifest_version=manifest_version,
@@ -82,6 +86,7 @@ class ExpectedSandboxManifestBinding:
             generation=generation,
             digest_kind=digest_kind,
             digest=digest,
+            state_store_fingerprint=state_store_fingerprint,
         )
 
 
@@ -106,6 +111,7 @@ class ObservedSandboxManifestBinding(BaseModel):
     generation: _ManifestCount
     digest_kind: _ManifestText
     digest: _ManifestText
+    state_store_fingerprint: _ManifestText
 
 
 def parse_sandbox_manifest_binding(payload: bytes | str) -> ObservedSandboxManifestBinding:
@@ -168,6 +174,8 @@ def verify_sandbox_manifest(
         mismatches.add("digest_kind")
     if expected.digest != observed.digest:
         mismatches.add("digest")
+    if expected.state_store_fingerprint != observed.state_store_fingerprint:
+        mismatches.add("state_store_fingerprint")
 
     if (
         expected.sandbox_group_resource_id != observed.sandbox_group_resource_id
@@ -179,6 +187,19 @@ def verify_sandbox_manifest(
 
     if mismatches:
         raise SandboxManifestMismatchError(frozenset(mismatches))
+
+
+def render_sandbox_manifest_binding(expected: ExpectedSandboxManifestBinding) -> bytes:
+    """Render the canonical seed/live payload for one expected binding.
+
+    One dataclass drives both the controller-authored seed and the field set
+    the harness later copies verbatim into the live manifest, so the two
+    renderings can never independently drift. Output is UTF-8 JSON with
+    sorted keys, compact separators, no NaN, and a single trailing newline.
+    """
+
+    text = json.dumps(asdict(expected), sort_keys=True, separators=(",", ":"), allow_nan=False)
+    return f"{text}\n".encode()
 
 
 class _DuplicateManifestKeyError(ValueError):

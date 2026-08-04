@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-07-30
+updated: 2026-08-03
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -359,6 +359,15 @@ provenance.
 | 117 | `session_state` module rename (fulfills #109 deferral) | Keep / mechanical P3b rename | Rename `session_state/models.py` to `session_models.py` by `git mv`, updating importers/test; package re-exports, public types, fields, schemas unchanged. | Human (relayed) + Agent (P3b implementation) | 2026-07-30 | P3b |
 | 118 | Convention enforcement (narrows #109/#111) | AGENTS prose / lint, guards, scoped instructions | Keep mechanical rules in ruff/mypy and AST guards; put source-only judgment in scoped instructions. AGENTS stays process-focused; rename workflow modules to enforce unique basenames. | Human + Agent | 2026-07-31 | 0008 (parent) |
 | Meta | Editorial normalization | Historical wording / concise flat table | Human-approved editorial compaction preserves every decision's meaning and revision relationships; the user selected this flat-table structure. | Human | 2026-07-31 | 0008 (parent) |
+| 119 | Archive identity | custom writer / deterministic stdlib ZIP | Use `ZIP_STORED` with fixed metadata, no ZIP64, and a 256 MiB cap; verify identical bytes on Python 3.13/3.14. Capture the live script root, never a platform deploy ZIP. | Human + Agent | 2026-08-03 | 0008.6 |
+| 120 | Secure capture scope | portable fallback / Linux-only fail closed | Require secure Linux traversal: one root fd spans scan, write, and rescan; only contained regular-file symlinks dereference. Other platforms, absolute targets, special files, and empty roots fail closed. | Human + Agent | 2026-08-03 | 0008.6 |
+| 121 | Worker package lifecycle | capture per session / cache once per worker | Lazily capture once per worker process and reuse one immutable package for all sessions. Equivalent workers produce the same digest; redeploy creates new worker caches. First capture runs off-loop and failures are not cached. | Human + Agent | 2026-08-03 | 0008.6 |
+| 122 | Delivery verification | full read-back / bounded verification | Verify archive size and harness digest; verify sidecar/seed exactly. Archive write failures propagate. Uncertain small writes may succeed only after exact read-back; operational read failures remain typed. | Human + Agent | 2026-08-03 | 0008.6 |
+| 123 | Manifest binding | controller writes / harness-only live manifest | The harness alone publishes the live manifest; the controller seed is not readiness. `state_store_fingerprint` is an opaque caller-supplied 12th field. Only missing maps to not-ready. | Human + Agent | 2026-08-03 | 0008.6 |
+| 124 | File transport errors | provider exceptions / runtime-owned errors | The ACA adapter maps not-found and operational SDK failures to runtime-owned types. Production smoke requires direct overwrite; no delete/rewrite fallback exists. | Agent | 2026-08-03 | 0008.6 |
+| 125 | Memory and streaming | full file reads / bounded capture | Stream files into a temporary ZIP, then materialize one ≤256 MiB payload for the current transport. Per-worker caching prevents duplicate captures; chunked delivery is deferred. | Human + Agent | 2026-08-03 | 0008.6 |
+| 126 | Runtime and CI platform | cross-platform / Linux only | Support Linux x86_64 Python 3.13/3.14 only. CI runs the full gate on Linux 3.13/3.14; unsupported platforms fail before filesystem access. | Human + Agent | 2026-08-03 | 0008.6 |
+| Meta | Implementation compaction | 30 event rows / 8 durable rows | Human-authorized pre-merge editing replaces unmerged rows 119-148 with rows 119-126; merged history remains append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -509,6 +518,31 @@ infrastructure samples.
   parallel P4a `transport/transport_models.py` rename; every importer and
   the mirroring test module were updated in the same change with no
   behavior or public-type change.
+- **P4b implementation (2026-07-31):** `controller/package.py` added
+  deterministic script-root capture — byte-exact `funcs_zip` `ZIP_STORED`
+  archives with fully pinned metadata, standard non-ZIP64 preflight, pre/post
+  metadata-snapshot mutation detection, and contained-regular-file symlink
+  dereferencing — verified with a Python 3.13.7/3.14.0rc3 byte-exact golden
+  vector (Decisions 119–120). It also added digest-gated delivery of that
+  archive plus a strict manifest seed through `SandboxFileTransport`, verifying
+  the large archive by size only and the small sidecar/seed byte-for-byte and
+  by strict re-parse, with same-digest incomplete retries and one bounded
+  read-back reclassification for a write that raises after possibly committing
+  (Decision 122). `transport/manifest.py` gained the twelfth
+  `state_store_fingerprint` field, opaque and caller-supplied per Decision 123,
+  plus one canonical JSON renderer shared by the controller-authored seed and
+  the harness-authored live manifest so the two cannot independently drift.
+  This phase reads back and verifies that live manifest against the
+  Table-stored digest and live ACA identity, completing the live-manifest half
+  of the P4b/P5a split noted above; live region, current-storage-epoch
+  freshness, and generation interpretation before serving remain P5a. The
+  controller still never writes `SESSION_MANIFEST_PATH` (Decision 108); the
+  harness-local atomic publication contract is specified here and implemented
+  in P7. A deployment-artifact deep dive confirmed script-root capture remains
+  the only v1 content path — the platform Run-From-Package ZIP's raw bytes are
+  not a stable content identity (Decision 119). An import-graph guard now also
+  confines `controller/**` from importing `transport.aca_sdk`, alongside the
+  existing raw-SDK confinement.
 - **Human sign-off:** **Recorded — larohra, 2026-07-27; SDK verification
   consolidated 2026-07-28.** Status remains **Finalized**. Implementation may
   proceed per the finalized decisions, including Decisions 71–82.
@@ -828,7 +862,9 @@ Structured input validation remains controller-side pre-dispatch; output validat
 
 ##### Active Path 1
 
-At session creation the controller captures its mounted Functions script root (`/home/site/wwwroot` or Flex equivalent): code plus vendored `.python_packages`. It zips those bytes, hashes `SHA-256` (`sha256:<hex>`), persists `digest_kind=funcs_zip`, delivers to `session/content/` through the file plane, then sandbox unpacks to `/app`, verifies digest against the authoritative Table row and live manifest, and only then accepts a run. This is deliver → unpack → verify → ready; package transfer may be tens/hundreds of MiB and is exempt from inbox/result caps but must be measured in the transport load/latency gate. No sandbox storage access, package URL assumptions, package signing scheme, dependency install, or internet is allowed.
+At session creation, the first session on a worker process lazily captures its mounted Functions script root (`/home/site/wwwroot` or Flex equivalent): code plus vendored `.python_packages`, and every deployed file. It zips those bytes, hashes `SHA-256` (`sha256:<hex>`), persists `digest_kind=funcs_zip`, and every later session created by that same worker — including on resume — reuses the exact same cached package without recapturing. Delivery to `session/content/` through the file plane, sandbox unpack to `/app`, digest verification against the authoritative Table row and live manifest, and only then run acceptance are unchanged per session: deliver → unpack → verify → ready. Package transfer may be tens/hundreds of MiB and is exempt from inbox/result caps but must be measured in the transport load/latency gate. No sandbox storage access, package URL assumptions, package signing scheme, dependency install, or internet is allowed.
+
+The mounted script root is immutable for the worker process's lifetime: modifying it in place after the first capture is unsupported and a customer error, since a later session on that worker would still receive the earlier cached package. Equivalent workers in one deployment independently capture the same deterministic bytes and digest by construction; a rolling deployment may run multiple worker epochs concurrently, and each session is stamped with the digest its own worker captured. Capture includes every deployed file with no filename-based allowlist or credential exclusion — an accidentally deployed secret file is captured like any other file, since filtering by name would silently diverge the captured content from the code tree the worker actually runs. Secrets belong in app settings, Key Vault, or egress-proxy-injected configuration, never in `wwwroot`.
 
 The generic runtime-authored image is byte-identical per customer, pinned by IaC digest, built **FROM** the Azure Functions Linux Python base. It contains only a stdlib bootstrap; MAF/runtime are in the captured tree. Bootstrap uses `site.addsitedir()` (not raw `sys.path.insert`) and ordering that prevents `/app` shadowing stdlib, then imports the harness from captured content. There is one pip-resolved environment: runtime, MAF, and tool dependencies. Supported ABI is Linux x86_64, CPython 3.13/3.14, matching base/glibc/manylinux; registration rejects mismatch up front.
 
@@ -887,7 +923,7 @@ Invariants: no anonymous ingress; no ingress ports; one active run; free slot on
 * **P3a:** pure owner/app identity, canonical hashes, durable Table keys/row schemas, generation contract, snapshot encoding, and golden/negative vectors; no live storage or ACA calls. **Complete** — see Decisions #89–96.
 * **P3b:** Azure Table I/O plus Azurite CAS race/409, admission EGT, idempotency, and tombstone/410 behavior. **Complete** — see Decisions #106, #113–117: label-safe base32 `a1`/`o1` re-encoding (ACA's 63-character label limit), the `s1` state-store fingerprint (computed here, ahead of its original placeholder framing), `AzureWebJobsStorage` Table connection resolution/caching, and the full Table store (`connection.py`/`errors.py`/`store.py`) verified against real Azurite for every CAS/EGT/race claim. P3 ends here for owner/Table/CAS/EGT correctness. Live sandbox-manifest, region, generation, and state-store-fingerprint/epoch binding (i.e., cross-checking the stored fingerprint/generation against the sandbox's live view — the fingerprint VALUE itself is already defined and computed by P3b/Decision #114) is owned by **P4b/P5a** below; reaper reconciliation over Table/platform truth and lifecycle repair is owned by **P6** below.
 * **P4a:** six-verb port, only real adapter, group binding, no ports, direct journal file ops, safe defaults, test-only double; double conformance plus real ACA create→file ops→exec→stop→resume→delete smoke.
-* **P4b:** controller capture/zip/digest/delivery; deterministic digest, large package exemption, partial-delivery digest gate/retry; also owns live sandbox-manifest capture and verification against the Table-stored digest.
+* **P4b:** controller capture/zip/digest/delivery; deterministic digest, large package exemption, partial-delivery digest gate/retry; also owns live sandbox-manifest capture and verification against the Table-stored digest. **Complete** — see Decisions #119–126: `controller/package.py`'s deterministic, Linux-only script-root capture (one root fd spanning scan/write/rescan, contained-symlink dereference, exact 256 MiB bound), a once-per-worker single-flight package cache behind an async `get_content_package()`, digest-gated delivery of the archive plus a strict manifest seed with narrow operational-failure propagation, capture/verification of the harness-authored live manifest, and a Linux CI job exercising the real security path. Live region, current-storage-epoch freshness, and generation interpretation before serving remain **P5a** below.
 * **P5a/P5b:** ACA backend then sync/async/SSE/budgets/idempotency; seven states, cursor error, 504 reason, all idempotency cases, disconnect safety, snapshot-restart, async failure 200; P5a also owns live region/generation/state-store-fingerprint/epoch cross-verification against the Table row before serving a request.
 * **P6:** atomic commit, readiness, watchdog, reconciler, crash injection, result retention, Table/platform divergence, snapshot pruning, disk/OOM, clock skew, drain while stopped.
 * **P7:** image build/register/boot; stdlib bootstrap/ABI and golden conformance every CI; fail-closed capability/ABI/protocol/digest/workflow/execute-python/ingress cases.

@@ -10,7 +10,7 @@ from typing import Any
 
 import aiohttp
 import pytest
-from azure.core.exceptions import HttpResponseError, ServiceRequestError
+from azure.core.exceptions import HttpResponseError, ResourceNotFoundError, ServiceRequestError
 
 from azure_functions_agents.transport import aca_sdk
 from azure_functions_agents.transport.manifest import (
@@ -26,6 +26,8 @@ from azure_functions_agents.transport.transport_models import (
     PresetSource,
     SandboxCreateRequest,
     SandboxEgressPolicy,
+    SandboxFileNotFoundError,
+    SandboxFileOperationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxProvisioningError,
@@ -62,6 +64,7 @@ def _expected(sandbox_id: str) -> ExpectedSandboxManifestBinding:
         generation=1,
         digest_kind="funcs_zip",
         digest="sha256:content-fingerprint",
+        state_store_fingerprint="s1-" + ("c" * 52),
     )
 
 
@@ -395,6 +398,69 @@ async def test_adapter_maps_all_six_file_operations_directly_and_keeps_exec_sepa
         "delete_file",
         "exec",
     ]
+
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_translate_file_errors_maps_resource_not_found_to_sandbox_file_not_found() -> None:
+    """The pinned SDK raises ``ResourceNotFoundError`` for a missing path, not ``FileNotFoundError``."""
+
+    async def _raise_resource_not_found() -> None:
+        raise ResourceNotFoundError("no such file")
+
+    with pytest.raises(SandboxFileNotFoundError):
+        await aca_sdk._translate_file_errors(_raise_resource_not_found())
+
+
+@pytest.mark.asyncio
+async def test_translate_file_errors_maps_http_response_error_to_sandbox_file_operation_error() -> (
+    None
+):
+    async def _raise_http_response_error() -> None:
+        error = HttpResponseError("service rejected the request")
+        error.status_code = 503
+        raise error
+
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await aca_sdk._translate_file_errors(_raise_http_response_error())
+
+    assert exc_info.value.status_code == 503
+
+
+@pytest.mark.asyncio
+async def test_translate_file_errors_maps_service_request_error_to_sandbox_file_operation_error() -> (
+    None
+):
+    async def _raise_service_request_error() -> None:
+        raise ServiceRequestError("network failure before any response")
+
+    with pytest.raises(SandboxFileOperationError) as exc_info:
+        await aca_sdk._translate_file_errors(_raise_service_request_error())
+
+    assert exc_info.value.status_code is None
+
+
+@pytest.mark.asyncio
+async def test_read_file_surfaces_a_resource_not_found_error_as_sandbox_file_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An end-to-end proof through the real handle, not just the translator helper."""
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+
+    async def _raise_resource_not_found(_path: str) -> bytes:
+        raise ResourceNotFoundError("no such file")
+
+    monkeypatch.setattr(
+        environment.sandboxes[handle.identity.sandbox_id], "read_file", _raise_resource_not_found
+    )
+
+    with pytest.raises(SandboxFileNotFoundError):
+        await handle.read_file("/missing.txt")
 
     await handle.close()
     await adapter.close()
