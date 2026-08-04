@@ -19,6 +19,12 @@ from azure_functions_agents.execution.backend import (
     StartRunRequest,
 )
 from azure_functions_agents.execution.binding import AgentBinding
+from azure_functions_agents.execution.run_control import (
+    RunSubmissionDefinitiveFailureError,
+    RunSubmissionIndeterminateError,
+    SandboxRunControl,
+)
+from azure_functions_agents.execution.setup_budget import SetupBudget
 from azure_functions_agents.session_state import (
     AdmissionOutcome,
     AdmissionRecords,
@@ -28,7 +34,10 @@ from azure_functions_agents.session_state import (
     FunctionAppOwnerContext,
     owner_partition,
 )
-from azure_functions_agents.transport.transport_models import DiskSource
+from azure_functions_agents.transport.transport_models import (
+    DiskSource,
+    SandboxFileOperationError,
+)
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
     DEFAULT_GROUP_RESOURCE_ID,
@@ -274,6 +283,71 @@ async def test_backend_does_not_submit_after_a_concurrent_quarantine(tmp_path: P
     assert store.session.active_run_id is None
     durable_run = store.runs[store.adopted[0].run_id]
     assert durable_run.status_reason == "sandbox_manifest_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_backend_retains_admitted_slot_when_acceptance_times_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    original_start = SetupBudget.start
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
+        lambda: original_start(setup_seconds=0.05),
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        run_control=SandboxRunControl(event_poll_interval_seconds=0.001),
+    )
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
+
+    assert [call.operation for call in handle.calls[:3]] == [
+        "read_file",
+        "write_file",
+        "exec",
+    ]
+    assert store.adopted == []
+    assert store.session is not None
+    assert store.session.status == "running"
+    assert len(store.runs) == 1
+    admitted_run = next(iter(store.runs.values()))
+    assert admitted_run.status == "accepted"
+    assert store.session.active_run_id == admitted_run.run_id
+
+
+@pytest.mark.asyncio
+async def test_backend_releases_admitted_slot_when_request_write_fails(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    handle.write_errors.append(SandboxFileOperationError("request write failed"))
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(RunSubmissionDefinitiveFailureError):
+        await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
+
+    assert [call.operation for call in handle.calls] == ["read_file", "write_file"]
+    assert len(store.adopted) == 1
+    assert store.adopted[0].status == "failed"
+    assert store.adopted[0].status_reason == "submission_failed"
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.active_run_id is None
 
 
 @pytest.mark.asyncio

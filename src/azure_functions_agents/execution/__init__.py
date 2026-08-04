@@ -28,7 +28,13 @@ from .factory import (
 )
 from .in_lang_worker import LanguageWorkerExecutionBackend
 from .result import AgentResult
-from .run_control import RunControlError, RunEnvelope, SandboxRunControl
+from .run_control import (
+    RunControlError,
+    RunEnvelope,
+    RunSubmissionDefinitiveFailureError,
+    RunSubmissionIndeterminateError,
+    SandboxRunControl,
+)
 from .setup_budget import SetupBudget, SetupBudgetExpiredError
 from .unavailable import BackendUnavailableError, UnavailableBackend, unavailable_backend_message
 
@@ -51,6 +57,8 @@ __all__ = [
     "RunResult",
     "RunState",
     "RunStatus",
+    "RunSubmissionDefinitiveFailureError",
+    "RunSubmissionIndeterminateError",
     "SandboxRunControl",
     "SetupBudget",
     "SetupBudgetExpiredError",

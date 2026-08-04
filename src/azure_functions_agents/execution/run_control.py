@@ -53,6 +53,14 @@ class RunControlTimeoutError(TimeoutError):
     """A bounded run-control operation did not reach its required journal state."""
 
 
+class RunSubmissionDefinitiveFailureError(RunControlError):
+    """Submission failed before a harness process could start."""
+
+
+class RunSubmissionIndeterminateError(RunControlError):
+    """A harness launch may have started but journal acceptance was not confirmed."""
+
+
 @dataclass(frozen=True, slots=True)
 class RunEnvelope:
     """The serializable, credential-free input submitted to the sandbox harness."""
@@ -174,28 +182,66 @@ class SandboxRunControl:
         timeout_seconds: float,
     ) -> RunStatus:
         """Write one inbox envelope, launch once, and wait for journal acceptance."""
-        normalized_run_id = validate_run_id(run_id)
-        if envelope.run_id != normalized_run_id:
-            raise RunControlError("Run envelope does not match the requested run.")
-        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
-            raise ValueError("timeout_seconds must be positive and finite")
+        try:
+            normalized_run_id = _validate_submission_inputs(
+                run_id,
+                envelope,
+                timeout_seconds,
+            )
+        except Exception as exc:
+            raise RunSubmissionDefinitiveFailureError(
+                "Run submission could not be prepared before launch."
+            ) from exc
 
         context = RunContext(run_id=normalized_run_id, session_id=envelope.session_id)
         try:
             return await self.get_status(handle, context)
         except SandboxFileNotFoundError:
             pass
+        except Exception as exc:
+            raise RunSubmissionIndeterminateError(
+                "Existing run state could not be confirmed before launch."
+            ) from exc
 
         deadline = time.monotonic() + timeout_seconds
-        await self._with_deadline(
-            handle.write_file(_inbox_path(normalized_run_id), envelope.render(), create_dirs=True),
-            deadline,
-        )
-        await self._with_deadline(
-            handle.exec(_launch_command(normalized_run_id), timeout_seconds=_remaining_seconds(deadline)),
-            deadline,
-        )
-        return await self._wait_for_acceptance(handle, context, deadline)
+        try:
+            await self._with_deadline(
+                handle.write_file(
+                    _inbox_path(normalized_run_id),
+                    envelope.render(),
+                    create_dirs=True,
+                ),
+                deadline,
+            )
+            launch_timeout_seconds = _remaining_seconds(deadline)
+        except Exception as exc:
+            raise RunSubmissionDefinitiveFailureError(
+                "Run request could not be written before launch."
+            ) from exc
+
+        try:
+            launch_result = await self._with_deadline(
+                handle.exec(
+                    _launch_command(normalized_run_id),
+                    timeout_seconds=launch_timeout_seconds,
+                ),
+                deadline,
+            )
+        except Exception as exc:
+            raise RunSubmissionIndeterminateError(
+                "Run launch may have started but could not be confirmed."
+            ) from exc
+        if launch_result.exit_code != 0:
+            raise RunSubmissionDefinitiveFailureError(
+                "Run launch failed before harness acceptance."
+            )
+
+        try:
+            return await self._wait_for_acceptance(handle, context, deadline)
+        except Exception as exc:
+            raise RunSubmissionIndeterminateError(
+                "Run launch may have started but journal acceptance was not confirmed."
+            ) from exc
 
     async def get_status(
         self,
@@ -380,6 +426,19 @@ class SandboxRunControl:
 
 def _inbox_path(run_id: str) -> str:
     return f"{INBOX_PATH}/{validate_run_id(run_id)}.json"
+
+
+def _validate_submission_inputs(
+    run_id: str,
+    envelope: RunEnvelope,
+    timeout_seconds: float,
+) -> str:
+    normalized_run_id = validate_run_id(run_id)
+    if envelope.run_id != normalized_run_id:
+        raise RunControlError("Run envelope does not match the requested run.")
+    if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+        raise ValueError("timeout_seconds must be positive and finite")
+    return normalized_run_id
 
 
 def _run_path(run_id: str) -> str:

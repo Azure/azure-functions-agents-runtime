@@ -10,8 +10,11 @@ from azure_functions_agents.execution.run_control import (
     RUNS_PATH,
     RunControlError,
     RunEnvelope,
+    RunSubmissionDefinitiveFailureError,
+    RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
+from azure_functions_agents.transport.transport_models import SandboxExecResult
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
 
@@ -105,6 +108,36 @@ async def test_submit_reuses_existing_run_status_without_a_second_launch() -> No
 
     assert status.state == "running"
     assert [call.operation for call in transport.calls] == ["read_file"]
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_launch_indeterminate_when_acceptance_times_out() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert [call.operation for call in transport.calls[:3]] == [
+        "read_file",
+        "write_file",
+        "exec",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_submit_marks_nonzero_launch_exit_as_definitive_failure() -> None:
+    transport = FakeSandboxTransport()
+    transport.next_exec_result = SandboxExecResult(exit_code=1, stdout="", stderr="")
+
+    with pytest.raises(RunSubmissionDefinitiveFailureError):
+        await SandboxRunControl().submit(transport, "run-1", _envelope(), timeout_seconds=1.0)
+
+    assert [call.operation for call in transport.calls] == [
+        "read_file",
+        "write_file",
+        "exec",
+    ]
 
 
 @pytest.mark.asyncio

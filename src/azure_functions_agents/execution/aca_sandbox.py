@@ -10,7 +10,6 @@ from ..config import DEFAULT_TIMEOUT
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationError,
-    SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
     activate_session,
     revalidate_before_submit,
@@ -37,7 +36,11 @@ from .backend import (
     StartRunRequest,
 )
 from .binding import AgentBinding
-from .run_control import RunEnvelope, SandboxRunControl
+from .run_control import (
+    RunEnvelope,
+    RunSubmissionDefinitiveFailureError,
+    SandboxRunControl,
+)
 from .setup_budget import SetupBudget
 
 
@@ -93,9 +96,8 @@ class AcaSandboxExecutionBackend:
                         created_at=outcome.run.created_at,
                     )
 
-                submitted = False
+                await revalidate_before_submit(activated, outcome.run)
                 try:
-                    await revalidate_before_submit(activated, outcome.run)
                     status = await self._run_control.submit(
                         activated.handle,
                         run_id,
@@ -108,12 +110,8 @@ class AcaSandboxExecutionBackend:
                         ),
                         timeout_seconds=setup_budget.remaining_setup_seconds(),
                     )
-                    submitted = True
-                except SessionRunOwnershipChangedError:
-                    raise
-                except Exception:
-                    if not submitted:
-                        await _adopt_failed_submission(activated, outcome.run)
+                except RunSubmissionDefinitiveFailureError:
+                    await _adopt_failed_submission(activated, outcome.run)
                     raise
                 await _adopt_if_terminal(activated, outcome.run, status)
                 return RunHandle(
