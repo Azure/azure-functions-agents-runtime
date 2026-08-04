@@ -462,6 +462,39 @@
 
 		.status.error { color: var(--danger); }
 
+		.session-bar {
+			display: flex;
+			align-items: center;
+			gap: 8px;
+			padding: 0 12px 10px 12px;
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.session-bar[hidden] { display: none; }
+
+		.session-bar-label { flex: none; }
+
+		.session-id-value {
+			font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+			font-size: 12px;
+			color: var(--text);
+			background: #f3f4f6;
+			border: 1px solid var(--border);
+			border-radius: 6px;
+			padding: 2px 6px;
+			max-width: 260px;
+			overflow: hidden;
+			text-overflow: ellipsis;
+			white-space: nowrap;
+		}
+
+		.session-copy-btn {
+			flex: none;
+			padding: 3px 8px;
+			font-size: 12px;
+		}
+
 		.typing {
 			display: inline-flex;
 			gap: 4px;
@@ -534,6 +567,15 @@
 		}
 
 		input:focus { border-color: #93c5fd; }
+		input.input-error { border-color: var(--danger); }
+
+		.field-error {
+			margin: 0;
+			font-size: 12px;
+			color: var(--danger);
+		}
+
+		.field-error[hidden] { display: none; }
 
 		.settings-actions {
 			display: flex;
@@ -642,6 +684,11 @@
 		</form>
 
 		<div id="status" class="status"></div>
+		<div id="sessionBar" class="session-bar" hidden>
+			<span class="session-bar-label">Session</span>
+			<code id="sessionIdValue" class="session-id-value" title="Active session ID"></code>
+			<button id="copySessionBtn" class="session-copy-btn" type="button" aria-label="Copy session ID">Copy</button>
+		</div>
 	</main>
 
 	<div id="settingsBackdrop" class="settings-backdrop" role="dialog" aria-modal="true" aria-labelledby="settingsTitle">
@@ -655,6 +702,11 @@
 			<div class="field">
 				<label for="keyInput">Function key</label>
 				<input id="keyInput" type="password" placeholder="Enter your key (optional on localhost)" />
+			</div>
+			<div class="field">
+				<label for="sessionIdInput">Session ID (optional)</label>
+				<input id="sessionIdInput" type="text" placeholder="Paste an ID to resume a conversation" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
+				<p id="sessionIdError" class="field-error" hidden></p>
 			</div>
 			<div class="settings-actions">
 				<button id="cancelSettingsBtn" type="button">Cancel</button>
@@ -677,7 +729,8 @@
 		const STORAGE_KEYS = {
 			baseUrl: "chat.baseUrl",
 			key: "chat.key",
-			sessionId: "chat.sessionId"
+			sessionId: "chat.sessionId",
+			sessionIdSource: "chat.sessionIdSource"
 		};
 
 		const chatEl = document.getElementById("chat");
@@ -687,10 +740,15 @@
 		const statusEl = document.getElementById("status");
 		const newSessionBtnEl = document.getElementById("newSessionBtn");
 		const settingsBtnEl = document.getElementById("settingsBtn");
+		const sessionBarEl = document.getElementById("sessionBar");
+		const sessionIdValueEl = document.getElementById("sessionIdValue");
+		const copySessionBtnEl = document.getElementById("copySessionBtn");
 
 		const settingsBackdropEl = document.getElementById("settingsBackdrop");
 		const baseUrlInputEl = document.getElementById("baseUrlInput");
 		const keyInputEl = document.getElementById("keyInput");
+		const sessionIdInputEl = document.getElementById("sessionIdInput");
+		const sessionIdErrorEl = document.getElementById("sessionIdError");
 		const saveSettingsBtnEl = document.getElementById("saveSettingsBtn");
 		const cancelSettingsBtnEl = document.getElementById("cancelSettingsBtn");
 		const detailsBackdropEl = document.getElementById("detailsBackdrop");
@@ -759,16 +817,34 @@
 		// previous auto-notification still streaming.
 		const pendingCompletionQueue = [];   // Array<{epoch, baseUrl, sessionId, workflowId, status}>
 		let completionDrainInFlight = false;
-		// Restored sessionStorage value held separately from state.sessionId
+		// Restored localStorage value held separately from state.sessionId
 		// so it doesn't ride along on chat requests for non-workflow apps
 		// (where the probe will eventually return 404 and we drop it). Only
 		// promoted into state.sessionId after the probe confirms support.
 		let restoredSessionIdCandidate = null;
 		// Tracks whether the current state.sessionId came from a fresh
-		// chatstream `session` event vs. being restored from sessionStorage.
+		// chatstream `session` event vs. being restored from localStorage.
 		// The "Reconnected" greeting / persistence guards branch on this.
 		let sessionWasFromServer = false;
+		// Set when the user supplies/resumes a session id via Settings.
+		// Explicit ids are authoritative: persisted to localStorage
+		// unconditionally and restored on reload without waiting for the
+		// workflow probe, so resume works for plain (non-workflow) apps too.
+		let sessionIdIsExplicit = false;
+		// The session id prefilled into Settings the last time it opened,
+		// used on save to tell an untouched field from a real resume.
+		let settingsSessionIdPrefill = "";
 		let restoredGreetingContent = null;
+
+		// Mirror the server-side rule enforced by _validate_session_id in
+		// runner.py (SESSION_ID_PATTERN in _session_id.py) so the UI never
+		// sends an id the server would reject with a 400.
+		const SESSION_ID_MAX_LENGTH = 128;
+		const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]{1,128}$/;
+
+		function isValidSessionId(value) {
+			return typeof value === "string" && SESSION_ID_PATTERN.test(value);
+		}
 
 		function buildAuthQuery() {
 			return state.key ? `?code=${encodeURIComponent(state.key)}` : "";
@@ -782,11 +858,15 @@
 			if (workflowsCapability === "unsupported") return;
 			workflowsCapability = "unsupported";
 			stopWorkflowPolling();
+			// An explicitly-resumed id stays active even without workflow
+			// support — plain chat apps honor x-ms-session-id too — so keep
+			// it and its stored copy intact.
+			if (sessionIdIsExplicit) return;
 			restoredSessionIdCandidate = null;
 			// Drop any speculatively-restored session id from storage so we
 			// don't claim reconnect on the next reload of an app that has
 			// no workflow endpoint.
-			try { sessionStorage.removeItem(sessionStorageKeyForSessionId()); } catch (_e) {}
+			try { localStorage.removeItem(storageKeyForSessionId()); } catch (_e) {}
 		}
 
 		function markWorkflowsSupported() {
@@ -800,6 +880,7 @@
 			}
 			restoredSessionIdCandidate = null;
 			persistSessionId();
+			updateSessionBar();
 			startWorkflowPolling();
 		}
 
@@ -814,9 +895,14 @@
 			return (h >>> 0).toString(36);
 		}
 
-		function sessionStorageKeyForSessionId() {
+		function storageKeyForSessionId() {
 			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
 			return `${STORAGE_KEYS.sessionId}.${ns}`;
+		}
+
+		function storageKeyForSessionIdSource() {
+			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
+			return `${STORAGE_KEYS.sessionIdSource}.${ns}`;
 		}
 
 		function loadRestoredSessionCandidate() {
@@ -824,11 +910,74 @@
 			// have finalized state.baseUrl, so the namespace key matches
 			// the app we're actually about to talk to.
 			try {
-				const stored = (sessionStorage.getItem(sessionStorageKeyForSessionId()) || "").trim();
-				restoredSessionIdCandidate = stored || null;
+				const stored = (localStorage.getItem(storageKeyForSessionId()) || "").trim();
+				const source = localStorage.getItem(storageKeyForSessionIdSource());
+				if (stored && source === "explicit" && isValidSessionId(stored)) {
+					// A user-supplied id is authoritative and durable for
+					// every app type, so activate it immediately instead of
+					// waiting for the workflow probe to promote a candidate.
+					state.sessionId = stored;
+					sessionIdIsExplicit = true;
+					sessionWasFromServer = false;
+					restoredSessionIdCandidate = null;
+				} else {
+					restoredSessionIdCandidate = stored && isValidSessionId(stored) ? stored : null;
+				}
 			} catch (_e) {
 				restoredSessionIdCandidate = null;
 			}
+			updateSessionBar();
+		}
+
+		// Reflect the active session id in the always-visible bar under the
+		// status line so users can see and copy the id at any time.
+		function updateSessionBar() {
+			if (!sessionBarEl) return;
+			if (state.sessionId) {
+				sessionIdValueEl.textContent = state.sessionId;
+				sessionIdValueEl.title = state.sessionId;
+				sessionBarEl.hidden = false;
+			} else {
+				sessionIdValueEl.textContent = "";
+				sessionBarEl.hidden = true;
+			}
+		}
+
+		async function copySessionId() {
+			if (!state.sessionId) return;
+			const id = state.sessionId;
+			let copied = false;
+			try {
+				if (navigator.clipboard && navigator.clipboard.writeText) {
+					await navigator.clipboard.writeText(id);
+					copied = true;
+				}
+			} catch (_e) {
+				copied = false;
+			}
+			if (!copied) {
+				// Fallback for non-secure contexts / older browsers where
+				// the async clipboard API is unavailable.
+				try {
+					const ta = document.createElement("textarea");
+					ta.value = id;
+					ta.setAttribute("readonly", "");
+					ta.style.position = "absolute";
+					ta.style.left = "-9999px";
+					document.body.appendChild(ta);
+					ta.select();
+					copied = document.execCommand("copy");
+					document.body.removeChild(ta);
+				} catch (_e) {
+					copied = false;
+				}
+			}
+			setStatus(
+				copied
+					? "Session ID copied to clipboard."
+					: "Copy failed — select the ID and copy it manually.",
+				!copied
+			);
 		}
 
 		// Per-{baseUrl, sessionId} record of workflow ids we've already
@@ -1767,9 +1916,26 @@
 			}
 		}
 
+		function clearSessionIdError() {
+			if (!sessionIdErrorEl) return;
+			sessionIdErrorEl.textContent = "";
+			sessionIdErrorEl.hidden = true;
+			if (sessionIdInputEl) sessionIdInputEl.classList.remove("input-error");
+		}
+
+		function showSessionIdError(message) {
+			if (!sessionIdErrorEl) return;
+			sessionIdErrorEl.textContent = message;
+			sessionIdErrorEl.hidden = false;
+			if (sessionIdInputEl) sessionIdInputEl.classList.add("input-error");
+		}
+
 		function showSettings(force = false) {
 			baseUrlInputEl.value = state.baseUrl || defaultBaseUrl;
 			keyInputEl.value = state.key || "";
+			settingsSessionIdPrefill = state.sessionId || "";
+			if (sessionIdInputEl) sessionIdInputEl.value = settingsSessionIdPrefill;
+			clearSessionIdError();
 			cancelSettingsBtnEl.style.display = force ? "none" : "inline-block";
 			settingsBackdropEl.classList.add("open");
 			baseUrlInputEl.focus();
@@ -1783,24 +1949,33 @@
 			state.baseUrl = (localStorage.getItem(STORAGE_KEYS.baseUrl) || "").trim();
 			state.key = (localStorage.getItem(STORAGE_KEYS.key) || "").trim();
 			// IMPORTANT: do NOT restore state.sessionId here. We can't read
-			// the right namespaced key until loadSettingsFromHash() has had
-			// a chance to override baseUrl, and we must not let a restored
-			// id ride along on chat requests for an app whose workflow
-			// support hasn't been confirmed yet (would break the "non-
-			// workflow apps unchanged" invariant). The candidate is loaded
-			// later via loadRestoredSessionCandidate().
+			// the right namespaced localStorage key until
+			// loadSettingsFromHash() has had a chance to override baseUrl,
+			// and an auto-assigned id must not ride along on chat requests
+			// for an app whose workflow support hasn't been confirmed yet
+			// (would break the "non-workflow apps unchanged" invariant).
+			// loadRestoredSessionCandidate() runs later to load that
+			// candidate — and to immediately re-activate a user-supplied
+			// (explicit) id, which is durable for every app type.
 		}
 
-		function persistSessionId() {
-			// Only persist when workflow support has been confirmed for
-			// this base URL; otherwise we'd be silently introducing
-			// session continuity for plain (non-workflow) chat apps.
-			if (!workflowsAreSupported()) return;
+		function persistSessionId(force = false) {
+			// Only persist auto-assigned ids once workflow support has been
+			// confirmed for this base URL; otherwise we'd be silently
+			// introducing session continuity for plain (non-workflow) chat
+			// apps. Explicit resumes pass force=true to bypass that gate.
+			if (!force && !workflowsAreSupported()) return;
 			try {
 				if (state.sessionId) {
-					sessionStorage.setItem(sessionStorageKeyForSessionId(), state.sessionId);
+					localStorage.setItem(storageKeyForSessionId(), state.sessionId);
+					if (sessionIdIsExplicit) {
+						localStorage.setItem(storageKeyForSessionIdSource(), "explicit");
+					} else {
+						localStorage.removeItem(storageKeyForSessionIdSource());
+					}
 				} else {
-					sessionStorage.removeItem(sessionStorageKeyForSessionId());
+					localStorage.removeItem(storageKeyForSessionId());
+					localStorage.removeItem(storageKeyForSessionIdSource());
 				}
 			} catch (_e) {
 				// Storage quota or disabled — non-fatal.
@@ -1858,21 +2033,35 @@
 
 		function saveSettings() {
 			const previousBaseUrl = state.baseUrl;
-			state.baseUrl = baseUrlInputEl.value.trim().replace(/\/+$/, "");
-			state.key = keyInputEl.value.trim();
+			const nextBaseUrl = baseUrlInputEl.value.trim().replace(/\/+$/, "");
+			const nextKey = keyInputEl.value.trim();
 
-			if (!state.baseUrl) {
+			if (!nextBaseUrl) {
 				setStatus("Base URL is required.", true);
 				baseUrlInputEl.focus();
 				return false;
 			}
 
-			if (requiresFunctionKey(state.baseUrl) && !state.key) {
+			if (requiresFunctionKey(nextBaseUrl) && !nextKey) {
 				setStatus("Key is required for non-localhost URLs.", true);
 				keyInputEl.focus();
 				return false;
 			}
 
+			// Validate the optional session id BEFORE mutating any state so
+			// an invalid value blocks the whole save with an inline error.
+			const sessionIdRaw = sessionIdInputEl ? sessionIdInputEl.value.trim() : "";
+			if (sessionIdRaw && !isValidSessionId(sessionIdRaw)) {
+				showSessionIdError(
+					`Use 1–${SESSION_ID_MAX_LENGTH} characters: letters, digits, dot (.), underscore (_) or hyphen (-).`
+				);
+				if (sessionIdInputEl) sessionIdInputEl.focus();
+				return false;
+			}
+			clearSessionIdError();
+
+			state.baseUrl = nextBaseUrl;
+			state.key = nextKey;
 			localStorage.setItem(STORAGE_KEYS.baseUrl, state.baseUrl);
 			localStorage.setItem(STORAGE_KEYS.key, state.key);
 
@@ -1882,10 +2071,12 @@
 			// silently authenticated against the new app at worst. The
 			// epoch bump invalidates any in-flight probe/poll responses
 			// that haven't resolved yet so they can't mutate new-app state.
-			if (previousBaseUrl && previousBaseUrl !== state.baseUrl) {
+			const baseUrlChanged = previousBaseUrl && previousBaseUrl !== state.baseUrl;
+			if (baseUrlChanged) {
 				workflowEpoch += 1;
 				state.sessionId = null;
 				sessionWasFromServer = false;
+				sessionIdIsExplicit = false;
 				restoredSessionIdCandidate = null;
 				stopWorkflowPolling();
 				resetWorkflowCards();
@@ -1895,7 +2086,24 @@
 				probeWorkflowsCapability();
 			}
 
-			setStatus("Settings saved.");
+			// Apply an explicit resume. An empty field is left as-is (the
+			// New session button is the way to clear an id). An untouched
+			// field is ignored so simply re-saving settings never relabels
+			// an auto-assigned id — and never carries the previous app's id
+			// onto a newly-entered base URL.
+			const sessionFieldUntouched = sessionIdRaw === (settingsSessionIdPrefill || "").trim();
+			let statusMessage = "Settings saved.";
+			if (sessionIdRaw && !sessionFieldUntouched && sessionIdRaw !== state.sessionId) {
+				state.sessionId = sessionIdRaw;
+				sessionIdIsExplicit = true;
+				sessionWasFromServer = false;
+				restoredSessionIdCandidate = null;
+				persistSessionId(true);
+				statusMessage = `Resuming session ${sessionIdRaw}. Your next message will continue it.`;
+			}
+
+			updateSessionBar();
+			setStatus(statusMessage);
 			hideSettings();
 			promptInputEl.focus();
 			return true;
@@ -2014,12 +2222,20 @@
 				const type = event?.type;
 
 				if (type === "session" && typeof event.session_id === "string" && event.session_id.trim()) {
-					state.sessionId = event.session_id;
-					sessionWasFromServer = true;
+					if (sessionIdIsExplicit && event.session_id === state.sessionId) {
+						// The server echoed back the id we resumed with — keep
+						// it flagged explicit so it stays durable and isn't
+						// dropped if this app has no workflow endpoint.
+					} else {
+						state.sessionId = event.session_id;
+						sessionWasFromServer = true;
+						sessionIdIsExplicit = false;
+					}
 					// Drop any restore-candidate now that we have a real
 					// server session — they may not match.
 					restoredSessionIdCandidate = null;
 					persistSessionId();
+					updateSessionBar();
 					// If we already know workflows are supported, start
 					// polling now. If still "unknown", trigger the probe
 					// instead — never blindly fire polling against an
@@ -2285,9 +2501,15 @@
 		newSessionBtnEl.addEventListener("click", () => {
 			state.sessionId = null;
 			sessionWasFromServer = false;
+			sessionIdIsExplicit = false;
 			restoredSessionIdCandidate = null;
-			// Always clear stored session id, regardless of capability.
-			try { sessionStorage.removeItem(sessionStorageKeyForSessionId()); } catch (_e) {}
+			// Always clear the stored session id + source marker, regardless
+			// of capability, and reset the resume input.
+			try { localStorage.removeItem(storageKeyForSessionId()); } catch (_e) {}
+			try { localStorage.removeItem(storageKeyForSessionIdSource()); } catch (_e) {}
+			if (sessionIdInputEl) sessionIdInputEl.value = "";
+			clearSessionIdError();
+			updateSessionBar();
 			stopWorkflowPolling();
 			resetWorkflowCards();
 			chatEl.innerHTML = "";
@@ -2300,6 +2522,16 @@
 			showSettings(false);
 			setStatus("Editing connection settings.");
 		});
+
+		copySessionBtnEl.addEventListener("click", () => {
+			copySessionId();
+		});
+
+		if (sessionIdInputEl) {
+			sessionIdInputEl.addEventListener("input", () => {
+				clearSessionIdError();
+			});
+		}
 
 		saveSettingsBtnEl.addEventListener("click", () => {
 			saveSettings();

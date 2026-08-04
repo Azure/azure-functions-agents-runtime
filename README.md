@@ -440,6 +440,8 @@ A built-in single-page chat interface served at `/agents/{slug}/` when `builtin_
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
+The chat UI manages the session id for you. The active id is shown beneath the status line with a **Copy** button, and you can resume an existing conversation by pasting its id into the **Session ID (optional)** field in the settings dialog. Pasted ids are validated client-side against the same rule the server enforces (`^[A-Za-z0-9._-]{1,128}$`) and persist in browser local storage per base URL, so a resumed conversation survives page reloads and new tabs. Use **New session** to clear the id and start fresh.
+
 ### HTTP Chat API
 
 POST endpoints for programmatic access:
