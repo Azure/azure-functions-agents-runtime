@@ -127,7 +127,7 @@ class TriggerSpec(BaseModel):
 class _SubagentRefBase(BaseModel):
     """Shared fields and normalization for Sub Agent capability grants."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     agent: str
     when: str | None = None
@@ -161,8 +161,6 @@ class SubagentRef(_SubagentRefBase):
 
 class WorkflowSubagentRef(_SubagentRefBase):
     """A workflow owner's authorization grant for one leaf specialist."""
-
-    model_config = ConfigDict(extra="forbid", frozen=True)
 
 
 class WorkflowConfig(BaseModel):

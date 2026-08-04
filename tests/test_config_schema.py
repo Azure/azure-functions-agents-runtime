@@ -186,6 +186,16 @@ def test_subagent_ref_normalizes_blank_when_to_none(
     assert ref.when is None
 
 
+@pytest.mark.parametrize("ref_type", [SubagentRef, WorkflowSubagentRef])
+def test_subagent_ref_is_immutable(
+    ref_type: type[SubagentRef] | type[WorkflowSubagentRef],
+) -> None:
+    ref = ref_type(agent="billing-specialist")
+
+    with pytest.raises(ValidationError, match="Instance is frozen"):
+        ref.agent = "shipping-specialist"
+
+
 def test_subagent_ref_rejects_empty_agent() -> None:
     with pytest.raises(ValidationError):
         SubagentRef(agent="   ")
