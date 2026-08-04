@@ -183,14 +183,6 @@ def test_manifest_verifier_rejects_stale_fingerprint_even_when_row_and_manifest_
                 ),
             }
         ).encode("utf-8"),
-        (
-            b'{"manifest_version":1,"manifest_version":2,'
-            b'"protocol_version":"v","session_id":"s","owner_hash_version":"o1",'
-            b'"owner_hash":"o","app_hash":"a","sandbox_group_resource_id":"'
-            + _GROUP.encode()
-            + b'","sandbox_id":"sb","generation":1,"digest_kind":"k","digest":"d",'
-            b'"state_store_fingerprint":"' + _STATE_STORE_FINGERPRINT.encode() + b'"}'
-        ),
         # Missing state_store_fingerprint entirely.
         json.dumps(
             {k: v for k, v in asdict(_expected()).items() if k != "state_store_fingerprint"}

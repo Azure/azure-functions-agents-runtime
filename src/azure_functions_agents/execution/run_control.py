@@ -15,6 +15,7 @@ from typing import Annotated
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
 from ..session_state import validate_run_id, validate_session_id
+from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.ports import SandboxSessionHandle
 from ..transport.transport_models import SandboxFileNotFoundError
 from .backend import (
@@ -555,7 +556,7 @@ def _parse_model[T: BaseModel](payload: bytes, model: type[T], document_name: st
     try:
         decoded = _decode_json_object(payload)
         return model.model_validate(decoded)
-    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, _DuplicateJsonKeyError):
+    except (UnicodeDecodeError, json.JSONDecodeError, ValidationError, DuplicateJsonKeyError):
         raise RunJournalProtocolError(
             f"Sandbox run journal {document_name} document is invalid."
         ) from None
@@ -573,7 +574,7 @@ def _parse_event_lines(payload: bytes) -> list[RunEvent]:
         try:
             parsed = _JournalRunEvent.model_validate(_decode_json_object(line.encode("utf-8")))
             timestamp = _parse_timestamp(parsed.timestamp)
-        except (json.JSONDecodeError, ValidationError, _DuplicateJsonKeyError, ValueError):
+        except (json.JSONDecodeError, ValidationError, DuplicateJsonKeyError, ValueError):
             raise RunJournalProtocolError(
                 "Sandbox run journal event segment is invalid."
             ) from None
@@ -611,21 +612,8 @@ def _event_history_matches_status(
     )
 
 
-class _DuplicateJsonKeyError(ValueError):
-    """A journal JSON document contained more than one value for one key."""
-
-
 def _decode_json_object(payload: bytes) -> dict[str, object]:
-    decoded: object = json.loads(payload.decode("utf-8"), object_pairs_hook=_json_object)
-    if not isinstance(decoded, dict):
-        raise RunJournalProtocolError("Sandbox run journal document must be an object.")
-    return decoded
-
-
-def _json_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            raise _DuplicateJsonKeyError
-        result[key] = value
-    return result
+    try:
+        return decode_json_object(payload)
+    except TypeError:
+        raise RunJournalProtocolError("Sandbox run journal document must be an object.") from None
