@@ -442,6 +442,8 @@ On first load, you'll be prompted for the base URL and a function key (for deplo
 
 The chat UI manages the session id for you. The active id is shown beneath the status line with a **Copy** button, and you can resume an existing conversation by pasting its id into the **Session ID (optional)** field in the settings dialog. Pasted ids are validated client-side against the same rule the server enforces (`^[A-Za-z0-9._-]{1,128}$`) and persist in browser local storage per base URL, so a resumed conversation survives page reloads and new tabs. Use **New session** to clear the id and start fresh.
 
+The settings dialog also keeps a **Recent sessions** list (most-recent first, up to 8 per base URL). Each turn adds or updates an entry, auto-titling it with your first message (renameable via **Rename**); pick one to fill the Session ID field and **Save** to resume it, or use **Remove** / **Clear recent** to prune the list. This list is a per-browser convenience stored in local storage — it is **not** synced across devices or browsers, and it does not include sessions created through the raw HTTP API from other clients.
+
 ### HTTP Chat API
 
 POST endpoints for programmatic access:

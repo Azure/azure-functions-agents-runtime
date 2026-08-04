@@ -145,7 +145,7 @@ See [`front-matter-spec.md`](front-matter-spec.md#http_auth--endpoint-authentica
 
 By default, the handler returns the agent response as `text/plain`. When `response_example` or `response_schema` is configured at the top level, the runtime instructs the model to return JSON, validates the result, and returns `application/json`.
 
-HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header. The built-in debug chat UI surfaces this id (with a copy button) and lets you paste one into its settings dialog to resume an existing conversation.
+HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a session id and returns it in the response header. The built-in debug chat UI surfaces this id (with a copy button) and lets you paste one into its settings dialog to resume an existing conversation. The dialog also keeps a per-browser **Recent sessions** list with auto-derived titles (from the first message) and optional rename, so you can pick a previous conversation to resume. That list is stored in browser local storage only — it is not synced across devices/browsers or aware of sessions created through the raw HTTP API by other clients.
 
 An HTTP request receives the agent's immediate response, not the eventual
 workflow result. The configured response schema/example continues to govern the

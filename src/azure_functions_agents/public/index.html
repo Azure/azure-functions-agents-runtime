@@ -577,6 +577,41 @@
 
 		.field-error[hidden] { display: none; }
 
+		.recent-sessions {
+			display: grid;
+			gap: 6px;
+		}
+
+		.recent-sessions[hidden] { display: none; }
+
+		.recent-sessions select {
+			width: 100%;
+			border: 1px solid var(--border);
+			border-radius: 10px;
+			padding: 9px 10px;
+			font-size: 14px;
+			background: #fff;
+			outline: none;
+		}
+
+		.recent-sessions select:focus { border-color: #93c5fd; }
+
+		.recent-actions {
+			display: flex;
+			flex-wrap: wrap;
+			gap: 8px;
+		}
+
+		.recent-actions button { padding: 5px 10px; font-size: 12px; }
+
+		.recent-empty {
+			margin: 0;
+			font-size: 12px;
+			color: var(--muted);
+		}
+
+		.recent-empty[hidden] { display: none; }
+
 		.settings-actions {
 			display: flex;
 			justify-content: flex-end;
@@ -708,6 +743,18 @@
 				<input id="sessionIdInput" type="text" placeholder="Paste an ID to resume a conversation" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" />
 				<p id="sessionIdError" class="field-error" hidden></p>
 			</div>
+			<div class="field" id="recentSessionsField">
+				<label for="recentSessionsSelect">Recent sessions</label>
+				<div class="recent-sessions" id="recentSessionsControls" hidden>
+					<select id="recentSessionsSelect" aria-label="Recent sessions"></select>
+					<div class="recent-actions">
+						<button id="recentRenameBtn" type="button">Rename</button>
+						<button id="recentRemoveBtn" type="button">Remove</button>
+						<button id="recentClearBtn" type="button">Clear recent</button>
+					</div>
+				</div>
+				<p id="recentEmpty" class="recent-empty">No recent sessions.</p>
+			</div>
 			<div class="settings-actions">
 				<button id="cancelSettingsBtn" type="button">Cancel</button>
 				<button id="saveSettingsBtn" type="button">Save</button>
@@ -730,7 +777,8 @@
 			baseUrl: "chat.baseUrl",
 			key: "chat.key",
 			sessionId: "chat.sessionId",
-			sessionIdSource: "chat.sessionIdSource"
+			sessionIdSource: "chat.sessionIdSource",
+			recentSessions: "chat.recentSessions"
 		};
 
 		const chatEl = document.getElementById("chat");
@@ -749,6 +797,13 @@
 		const keyInputEl = document.getElementById("keyInput");
 		const sessionIdInputEl = document.getElementById("sessionIdInput");
 		const sessionIdErrorEl = document.getElementById("sessionIdError");
+		const recentSessionsFieldEl = document.getElementById("recentSessionsField");
+		const recentSessionsControlsEl = document.getElementById("recentSessionsControls");
+		const recentSessionsSelectEl = document.getElementById("recentSessionsSelect");
+		const recentRenameBtnEl = document.getElementById("recentRenameBtn");
+		const recentRemoveBtnEl = document.getElementById("recentRemoveBtn");
+		const recentClearBtnEl = document.getElementById("recentClearBtn");
+		const recentEmptyEl = document.getElementById("recentEmpty");
 		const saveSettingsBtnEl = document.getElementById("saveSettingsBtn");
 		const cancelSettingsBtnEl = document.getElementById("cancelSettingsBtn");
 		const detailsBackdropEl = document.getElementById("detailsBackdrop");
@@ -835,6 +890,10 @@
 		// used on save to tell an untouched field from a real resume.
 		let settingsSessionIdPrefill = "";
 		let restoredGreetingContent = null;
+		// The most recent user message text, captured on submit so the
+		// server-assigned `session` SSE event can title a fresh id after
+		// the fact (the id doesn't exist yet when the message is sent).
+		let lastSentUserMessage = "";
 
 		// Mirror the server-side rule enforced by _validate_session_id in
 		// runner.py (SESSION_ID_PATTERN in _session_id.py) so the UI never
@@ -881,6 +940,7 @@
 			restoredSessionIdCandidate = null;
 			persistSessionId();
 			updateSessionBar();
+			if (state.sessionId) recordSessionActivity(state.sessionId, "");
 			startWorkflowPolling();
 		}
 
@@ -905,6 +965,158 @@
 			return `${STORAGE_KEYS.sessionIdSource}.${ns}`;
 		}
 
+		// ---- Recent sessions (per-{baseUrl, agent} MRU list) -------------
+		// A purely client-side convenience: the runtime has no session
+		// directory or title concept, so this list lives only in this
+		// browser's localStorage, namespaced like the active-id keys above.
+		const RECENT_SESSIONS_MAX = 8;
+		const SESSION_TITLE_MAX_LENGTH = 40;
+		// Defensive cap so a corrupt/oversized value can't be parsed.
+		const RECENT_SESSIONS_MAX_BYTES = 50000;
+
+		function storageKeyForRecentSessions() {
+			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
+			return `${STORAGE_KEYS.recentSessions}.${ns}`;
+		}
+
+		function collapseWhitespace(text) {
+			return String(text == null ? "" : text).replace(/\s+/g, " ").trim();
+		}
+
+		function deriveSessionTitle(text) {
+			const clean = collapseWhitespace(text);
+			if (!clean) return "";
+			if (clean.length <= SESSION_TITLE_MAX_LENGTH) return clean;
+			return `${clean.slice(0, SESSION_TITLE_MAX_LENGTH - 1).trimEnd()}\u2026`;
+		}
+
+		function shortSessionId(id) {
+			return id.length > 8 ? `${id.slice(0, 8)}\u2026` : id;
+		}
+
+		function recentSessionLabel(entry) {
+			const title = entry && typeof entry.title === "string" ? entry.title : "";
+			return title ? `${title} \u2014 ${shortSessionId(entry.id)}` : shortSessionId(entry.id);
+		}
+
+		// Read + sanitize the MRU list. Never throws: malformed, oversized,
+		// or wrong-shape data yields an empty list. Every id must pass the
+		// same validator we use before an id can enter state.
+		function readRecentSessions() {
+			try {
+				const raw = localStorage.getItem(storageKeyForRecentSessions());
+				if (!raw || raw.length > RECENT_SESSIONS_MAX_BYTES) return [];
+				const parsed = JSON.parse(raw);
+				if (!Array.isArray(parsed)) return [];
+				const seen = new Set();
+				const list = [];
+				for (const item of parsed) {
+					if (!item || typeof item !== "object") continue;
+					const id = item.id;
+					if (!isValidSessionId(id) || seen.has(id)) continue;
+					seen.add(id);
+					list.push({
+						id,
+						title: typeof item.title === "string" ? item.title : "",
+						lastUsed: Number.isFinite(item.lastUsed) ? item.lastUsed : 0
+					});
+				}
+				list.sort((a, b) => b.lastUsed - a.lastUsed);
+				return list.slice(0, RECENT_SESSIONS_MAX);
+			} catch (_e) {
+				return [];
+			}
+		}
+
+		function writeRecentSessions(list) {
+			try {
+				const trimmed = list.slice(0, RECENT_SESSIONS_MAX);
+				localStorage.setItem(storageKeyForRecentSessions(), JSON.stringify(trimmed));
+			} catch (_e) {
+				// Storage full / disabled — the MRU list is best-effort.
+			}
+		}
+
+		// Record that `id` is active or just took a turn. Local only: this
+		// never promotes an id into state or bypasses the workflow probe.
+		// Titles are set from the first message and never overwritten, so
+		// an explicit rename sticks.
+		function recordSessionActivity(id, messageText) {
+			if (!isValidSessionId(id)) return;
+			const list = readRecentSessions();
+			const now = Date.now();
+			const idx = list.findIndex((e) => e.id === id);
+			if (idx === -1) {
+				list.unshift({ id, title: deriveSessionTitle(messageText), lastUsed: now });
+			} else {
+				const entry = list[idx];
+				if (!entry.title) {
+					const title = deriveSessionTitle(messageText);
+					if (title) entry.title = title;
+				}
+				entry.lastUsed = now;
+			}
+			list.sort((a, b) => b.lastUsed - a.lastUsed);
+			writeRecentSessions(list);
+			renderRecentSessions();
+		}
+
+		function renameRecentSession(id, title) {
+			const list = readRecentSessions();
+			const entry = list.find((e) => e.id === id);
+			if (!entry) return;
+			entry.title = collapseWhitespace(title).slice(0, 80);
+			writeRecentSessions(list);
+		}
+
+		function removeRecentSession(id) {
+			writeRecentSessions(readRecentSessions().filter((e) => e.id !== id));
+		}
+
+		function clearRecentSessions() {
+			try {
+				localStorage.removeItem(storageKeyForRecentSessions());
+			} catch (_e) {}
+		}
+
+		// One-time seed: if the active-id keys exist from before this list
+		// was introduced (or from Phase 1), surface that id in the list so
+		// it isn't invisible. Leaves the active-id keys untouched.
+		function migrateRecentSessions() {
+			try {
+				if (localStorage.getItem(storageKeyForRecentSessions()) != null) return;
+				const stored = (localStorage.getItem(storageKeyForSessionId()) || "").trim();
+				if (isValidSessionId(stored)) {
+					writeRecentSessions([{ id: stored, title: "", lastUsed: Date.now() }]);
+				}
+			} catch (_e) {}
+		}
+
+		// Rebuild the Recent-sessions <select>. `selectedId` keeps a given
+		// entry highlighted (used after rename); otherwise it resets to the
+		// placeholder so a re-open doesn't silently re-arm a resume.
+		function renderRecentSessions(selectedId = "") {
+			if (!recentSessionsSelectEl) return;
+			const list = readRecentSessions();
+			recentSessionsSelectEl.textContent = "";
+			const placeholder = document.createElement("option");
+			placeholder.value = "";
+			placeholder.textContent = "Select a recent session\u2026";
+			recentSessionsSelectEl.appendChild(placeholder);
+			for (const entry of list) {
+				const option = document.createElement("option");
+				option.value = entry.id;
+				option.textContent = recentSessionLabel(entry);
+				recentSessionsSelectEl.appendChild(option);
+			}
+			const hasEntries = list.length > 0;
+			if (recentSessionsControlsEl) recentSessionsControlsEl.hidden = !hasEntries;
+			if (recentEmptyEl) recentEmptyEl.hidden = hasEntries;
+			recentSessionsSelectEl.value = selectedId && list.some((e) => e.id === selectedId)
+				? selectedId
+				: "";
+		}
+
 		function loadRestoredSessionCandidate() {
 			// Called after BOTH loadSettings() and loadSettingsFromHash()
 			// have finalized state.baseUrl, so the namespace key matches
@@ -920,6 +1132,7 @@
 					sessionIdIsExplicit = true;
 					sessionWasFromServer = false;
 					restoredSessionIdCandidate = null;
+					recordSessionActivity(stored, "");
 				} else {
 					restoredSessionIdCandidate = stored && isValidSessionId(stored) ? stored : null;
 				}
@@ -1936,6 +2149,7 @@
 			settingsSessionIdPrefill = state.sessionId || "";
 			if (sessionIdInputEl) sessionIdInputEl.value = settingsSessionIdPrefill;
 			clearSessionIdError();
+			renderRecentSessions();
 			cancelSettingsBtnEl.style.display = force ? "none" : "inline-block";
 			settingsBackdropEl.classList.add("open");
 			baseUrlInputEl.focus();
@@ -2082,6 +2296,7 @@
 				resetWorkflowCards();
 				workflowsCapability = "unknown";
 				workflowPollFailureCount = 0;
+				migrateRecentSessions();
 				loadRestoredSessionCandidate();
 				probeWorkflowsCapability();
 			}
@@ -2099,6 +2314,7 @@
 				sessionWasFromServer = false;
 				restoredSessionIdCandidate = null;
 				persistSessionId(true);
+				recordSessionActivity(state.sessionId, "");
 				statusMessage = `Resuming session ${sessionIdRaw}. Your next message will continue it.`;
 			}
 
@@ -2236,6 +2452,7 @@
 					restoredSessionIdCandidate = null;
 					persistSessionId();
 					updateSessionBar();
+					recordSessionActivity(state.sessionId, lastSentUserMessage);
 					// If we already know workflows are supported, start
 					// polling now. If still "unknown", trigger the probe
 					// instead — never blindly fire polling against an
@@ -2415,6 +2632,13 @@
 			const prompt = promptInputEl.value.trim();
 			if (!prompt || state.loading) return;
 
+			// Capture for the title-on-first-message logic. If an id is
+			// already active (continuing/resumed), record now; a brand-new
+			// id is titled from this text when the server assigns it in the
+			// `session` SSE event.
+			lastSentUserMessage = prompt;
+			if (state.sessionId) recordSessionActivity(state.sessionId, prompt);
+
 			renderBubble("you", prompt, "You");
 			promptInputEl.value = "";
 			setLoading(true, { showWaitingBubble: false });
@@ -2533,6 +2757,59 @@
 			});
 		}
 
+		if (recentSessionsSelectEl) {
+			// Selecting an entry fills the resume input; Save then applies
+			// it through the existing explicit-resume path (no second path).
+			recentSessionsSelectEl.addEventListener("change", () => {
+				const id = recentSessionsSelectEl.value;
+				if (!id || !sessionIdInputEl) return;
+				sessionIdInputEl.value = id;
+				clearSessionIdError();
+			});
+		}
+
+		if (recentRenameBtnEl) {
+			recentRenameBtnEl.addEventListener("click", () => {
+				const id = recentSessionsSelectEl ? recentSessionsSelectEl.value : "";
+				if (!id) {
+					setStatus("Pick a recent session to rename.", true);
+					return;
+				}
+				const entry = readRecentSessions().find((e) => e.id === id);
+				const next = window.prompt("Rename session", entry && entry.title ? entry.title : "");
+				if (next === null) return;
+				renameRecentSession(id, next);
+				renderRecentSessions(id);
+			});
+		}
+
+		if (recentRemoveBtnEl) {
+			recentRemoveBtnEl.addEventListener("click", () => {
+				const id = recentSessionsSelectEl ? recentSessionsSelectEl.value : "";
+				if (!id) {
+					setStatus("Pick a recent session to remove.", true);
+					return;
+				}
+				removeRecentSession(id);
+				if (sessionIdInputEl && sessionIdInputEl.value === id) sessionIdInputEl.value = "";
+				renderRecentSessions();
+				setStatus("Removed session from the recent list.");
+			});
+		}
+
+		if (recentClearBtnEl) {
+			recentClearBtnEl.addEventListener("click", () => {
+				if (!readRecentSessions().length) {
+					setStatus("No recent sessions to clear.");
+					return;
+				}
+				if (!window.confirm("Clear the list of recent sessions in this browser?")) return;
+				clearRecentSessions();
+				renderRecentSessions();
+				setStatus("Cleared recent sessions.");
+			});
+		}
+
 		saveSettingsBtnEl.addEventListener("click", () => {
 			saveSettings();
 		});
@@ -2568,6 +2845,7 @@
 		loadSettingsFromHash();
 		// Read the per-baseUrl namespaced session candidate AFTER both
 		// settings sources have had their say.
+		migrateRecentSessions();
 		loadRestoredSessionCandidate();
 		if (!state.baseUrl || (requiresFunctionKey(state.baseUrl) && !state.key)) {
 			state.baseUrl = state.baseUrl || defaultBaseUrl;
