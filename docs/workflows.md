@@ -238,7 +238,7 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`tool`** — call a discovered `@workflow_tool` by name with args.
 - **`wait`** — durable timer. Accepts `duration` (ISO-8601, e.g. `PT30S`)
   or `until` (absolute ISO-8601 timestamp).
-- **`sub_agent`** — invoke one leaf specialist authorized by
+- **`subagent`** — invoke one leaf specialist authorized by
   `workflows.subagents`, using `agent` and a self-contained `task`.
 
 v1 does not support per-task timeout or retry fields yet. Those are v2
