@@ -263,15 +263,104 @@ export async function resolveRollingBranch(token, owner, repo, base, prefix) {
   const b = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
   try {
     const open = await gh(token, `${b}/pulls?state=open&base=${encodeURIComponent(base)}&per_page=100`)
-    const match = (Array.isArray(open) ? open : []).find((p) =>
-      String(p.head?.ref || '').startsWith(`${prefix}/`),
-    )
+    const match = (Array.isArray(open) ? open : []).find((p) => {
+      const ref = String(p.head?.ref || '')
+      // Reuse this app's rolling PR: a stamped/suffixed branch, or a legacy branch
+      // named exactly for the prefix (created before the stamped scheme).
+      return ref === prefix || ref.startsWith(`${prefix}/`) || ref.startsWith(`${prefix}-`)
+    })
     if (match?.head?.ref) return match.head.ref
   } catch {
     /* fall through to a fresh branch */
   }
+  // Separate the stamp with a hyphen (not a slash) so the branch never collides
+  // with a branch named exactly `${prefix}`: Git forbids a ref being both a leaf
+  // and a directory, which otherwise surfaces as 422 "Reference update failed".
   const stamp = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '')
-  return `${prefix}/${stamp}`
+  return `${prefix}-${stamp}`
+}
+
+// Create or update a single file on a branch (upsert via the Contents API).
+export async function putRepoContent(token, owner, repo, filePath, contentBuffer, message, branch) {
+  const b = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+  const p = String(filePath)
+    .split('/')
+    .map(encodeURIComponent)
+    .join('/')
+  let sha
+  try {
+    const existing = await gh(token, `${b}/contents/${p}?ref=${encodeURIComponent(branch)}`)
+    sha = existing?.sha
+  } catch (e) {
+    if (e.status !== 404) throw e // 404 = file doesn't exist yet (create)
+  }
+  return gh(token, `${b}/contents/${p}`, {
+    method: 'PUT',
+    body: {
+      message,
+      content: Buffer.from(contentBuffer).toString('base64'),
+      branch,
+      ...(sha ? { sha } : {}),
+    },
+  })
+}
+
+// Upsert an Actions repository *variable* (plain, non-secret — no encryption).
+export async function setRepoVariable(token, owner, repo, name, value) {
+  const b = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/actions/variables`
+  try {
+    await gh(token, b, { method: 'POST', body: { name, value: String(value) } })
+  } catch (e) {
+    if (e.status !== 409) throw e // 409 = variable already exists (update it)
+    await gh(token, `${b}/${encodeURIComponent(name)}`, { method: 'PATCH', body: { name, value: String(value) } })
+  }
+}
+
+// Build a GitHub Actions workflow that deploys the function under `packagePath`
+// to a Flex Consumption Function App using OIDC (azure/login + functions-action).
+export function functionsWorkflowYaml({ appName, branch, packagePath = 'src', pythonVersion = '3.11' }) {
+  return `name: Deploy to Azure Functions
+
+on:
+  push:
+    branches: ["${branch}"]
+  workflow_dispatch:
+
+permissions:
+  id-token: write
+  contents: read
+
+env:
+  AZURE_FUNCTIONAPP_NAME: "${appName}"
+  PACKAGE_PATH: "${packagePath}"
+  PYTHON_VERSION: "${pythonVersion}"
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: \${{ env.PYTHON_VERSION }}
+
+      - name: Azure login (OIDC)
+        uses: azure/login@v2
+        with:
+          client-id: \${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: \${{ vars.AZURE_TENANT_ID }}
+          subscription-id: \${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Deploy to Azure Functions (Flex Consumption)
+        uses: Azure/functions-action@v1
+        with:
+          app-name: \${{ env.AZURE_FUNCTIONAPP_NAME }}
+          package: \${{ env.PACKAGE_PATH }}
+          sku: flexconsumption
+          remote-build: true
+`
 }
 
 // Push a set of { name, data } text files as a single commit. Handles both an

@@ -1035,10 +1035,19 @@ app.post(
     const mode = String(req.body?.mode ?? 'new')
     if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
 
-    // Read the portal-managed source tree for this app.
+    // Assemble this app's source: the portal-managed working copy if present,
+    // else the app's deployed package — then overlay any saved (unpublished)
+    // drafts so the PR includes edits the user hasn't deployed yet.
     const dir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
-    if (!(await pathExists(dir))) throw new HttpError(404, 'No stored source for this app to push.')
-    const appFiles = await readDirFiles(dir)
+    let baseFiles = (await pathExists(dir)) ? await readDirFiles(dir) : null
+    if (!baseFiles || baseFiles.length === 0) {
+      const site = await azure.getSite(token, subscription, resourceGroup, appName)
+      if (site) baseFiles = await azure.readPackageFiles(token, subscription, site)
+    }
+    if (!baseFiles || baseFiles.length === 0) {
+      throw new HttpError(404, 'No source found for this app to push. Deploy or save a draft first.')
+    }
+    const appFiles = await overlayDrafts(subscription, appName, baseFiles)
     if (!appFiles.length) throw new HttpError(404, 'No files to push for this app.')
 
     try {
@@ -1122,6 +1131,27 @@ app.post(
         stored = false
       }
 
+      // Best-effort: also reflect the repo in the Function App's Deployment Center
+      // so it shows there. Never clobber an existing connection to a DIFFERENT repo
+      // (which may be a live GitHub Actions pipeline) — to repoint that, disconnect
+      // it first. If the DC already points at this repo, report it as recorded.
+      let deploymentCenter = false
+      try {
+        const existing = await azure.readDeploymentSource(token, subscription, resourceGroup, appName)
+        if (existing && existing.repoUrl === repoUrl) {
+          deploymentCenter = true
+        } else if (!existing) {
+          const dc = await azure.setGithubActionSource(token, subscription, resourceGroup, appName, {
+            repoUrl,
+            branch: base,
+            githubToken: entry.token,
+          })
+          deploymentCenter = dc.ok
+        }
+      } catch {
+        /* non-fatal */
+      }
+
       res.json({
         htmlUrl: repo.htmlUrl || repoUrl,
         repoUrl,
@@ -1132,12 +1162,127 @@ app.post(
         prUrl: pr.prUrl,
         prNumber: pr.prNumber,
         stored,
+        deploymentCenter,
         pushed: files.map((f) => f.name).sort(),
       })
     } catch (err) {
       if (err instanceof HttpError) throw err
       console.error('[github/connect] FAILED:', err?.status ?? '', String(err?.message ?? err))
       throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
+// Provision passwordless GitHub Actions CI/CD (OIDC) from a connected repo to the
+// Function App and re-point the Deployment Center to it: a user-assigned managed
+// identity + federated credential + Contributor role assignment, a committed
+// workflow, and repo variables. Infra-mutating — the UI gates it behind a confirm.
+app.post(
+  '/api/github/provision-deployment',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const { oid, tenantId } = azure.getSignedInIdentity(token)
+    const entry = github.tokenStore.get(oid)
+    if (!entry) throw new HttpError(401, 'Not connected to GitHub.')
+
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    const fullName = String(req.body?.repo ?? '').trim()
+    const branch = String(req.body?.branch ?? '').trim() || 'main'
+    const [owner, name] = fullName.split('/')
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    if (!owner || !name) throw new HttpError(400, 'A repo "owner/name" is required.')
+    if (!tenantId) throw new HttpError(400, 'Could not resolve the tenant from the access token.')
+
+    const site = await azure.getSite(token, subscription, resourceGroup, appName)
+    const location = site?.location
+    if (!location) throw new HttpError(404, 'Could not resolve the Function App location.')
+
+    const steps = {}
+    try {
+      // 1) Commit the workflow FIRST so we fail fast if the GitHub App lacks the
+      //    dedicated "Workflows" write permission (required for .github/workflows).
+      const workflow = github.functionsWorkflowYaml({ appName, branch, packagePath: 'src' })
+      try {
+        await github.putRepoContent(
+          entry.token,
+          owner,
+          name,
+          '.github/workflows/deploy.yml',
+          Buffer.from(workflow, 'utf-8'),
+          'Add Azure Functions deploy workflow (Serverless Agent Portal)',
+          branch,
+        )
+      } catch (e) {
+        // GitHub returns 404 (or 403) when writing under .github/workflows without
+        // the App's "Workflows" permission, even though Contents:write is present.
+        if (e.status === 404 || e.status === 403) {
+          throw new HttpError(
+            403,
+            'The GitHub App needs the "Workflows" (read & write) permission to commit ' +
+              '.github/workflows/deploy.yml. Add it in the GitHub App settings, approve the updated ' +
+              'permission on the installation, then retry.',
+          )
+        }
+        throw e
+      }
+      steps.workflow = '.github/workflows/deploy.yml'
+
+      // 2) User-assigned managed identity for GitHub to assume via OIDC.
+      const idName = `id-${appName}-gha`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 120)
+      const identity = await azure.ensureUserAssignedIdentity(token, subscription, resourceGroup, idName, location)
+      if (!identity.clientId || !identity.principalId)
+        throw new HttpError(502, 'Managed identity created but its client/principal id did not populate.')
+      steps.identity = idName
+
+      // 3) Federated credential binding the repo+branch to that identity.
+      const subject = `repo:${owner}/${name}:ref:refs/heads/${branch}`
+      const ficName = `gh-${branch}`.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 120)
+      await azure.ensureFederatedCredential(token, subscription, resourceGroup, idName, ficName, subject)
+      steps.federatedCredential = subject
+
+      // 4) Contributor on the resource group so the workflow can deploy.
+      await azure.ensureRoleAssignment(token, subscription, resourceGroup, identity.principalId)
+      steps.roleAssignment = `Contributor @ ${resourceGroup}`
+
+      // 5) Repo variables the workflow's azure/login reads (not secrets).
+      await github.setRepoVariable(entry.token, owner, name, 'AZURE_CLIENT_ID', identity.clientId)
+      await github.setRepoVariable(entry.token, owner, name, 'AZURE_TENANT_ID', tenantId)
+      await github.setRepoVariable(entry.token, owner, name, 'AZURE_SUBSCRIPTION_ID', subscription)
+      steps.variables = ['AZURE_CLIENT_ID', 'AZURE_TENANT_ID', 'AZURE_SUBSCRIPTION_ID']
+
+      // 6) Best-effort: light up the Deployment Center blade for the new repo.
+      const dc = await azure.setGithubActionSource(token, subscription, resourceGroup, appName, {
+        repoUrl: `https://github.com/${owner}/${name}`,
+        branch,
+        githubToken: entry.token,
+      })
+      steps.deploymentCenter = dc.ok
+
+      // Record the repo link on the app settings too (UI source of truth).
+      try {
+        await azure.setAppSettings(token, subscription, resourceGroup, appName, {
+          GITHUB_REPO_URL: `https://github.com/${owner}/${name}`,
+          GITHUB_BRANCH: branch,
+          GITHUB_CONNECTED_BY: entry.login,
+        })
+      } catch {
+        /* non-fatal */
+      }
+
+      res.json({
+        ok: true,
+        steps,
+        clientId: identity.clientId,
+        workflowUrl: `https://github.com/${owner}/${name}/blob/${branch}/.github/workflows/deploy.yml`,
+        runsUrl: `https://github.com/${owner}/${name}/actions`,
+      })
+    } catch (err) {
+      if (err instanceof HttpError) throw err
+      const at = Object.keys(steps).pop() || 'start'
+      console.error('[github/provision] FAILED after', at, ':', err?.status ?? '', String(err?.message ?? err))
+      throw new HttpError(err.status ?? 502, `Provisioning failed after ${at}: ${String(err?.message ?? err)}`)
     }
   }),
 )

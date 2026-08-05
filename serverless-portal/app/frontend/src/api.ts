@@ -159,6 +159,7 @@ export interface GitHubConnectResult {
   prUrl?: string
   prNumber?: number
   stored: boolean
+  deploymentCenter?: boolean
   pushed: string[]
 }
 export interface GitHubAppConnection {
@@ -374,4 +375,18 @@ export const api = {
     repo?: string
     branch?: string
   }) => req<GitHubConnectResult>('POST', '/api/github/connect', p),
+  githubProvisionDeployment: (p: {
+    subscription: string
+    resourceGroup: string
+    app: string
+    repo: string
+    branch?: string
+  }) =>
+    req<{
+      ok: boolean
+      steps: Record<string, unknown>
+      clientId: string
+      workflowUrl: string
+      runsUrl: string
+    }>('POST', '/api/github/provision-deployment', p),
 }
