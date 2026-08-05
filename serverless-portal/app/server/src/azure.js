@@ -823,19 +823,68 @@ export async function setAppSettings(accessToken, subscriptionId, resourceGroup,
   return properties
 }
 
-// Read the GitHub connection recorded on a Function App (if any) from the app
-// settings written at connect time.
+// Read the GitHub repo connected via the Function App's Deployment Center
+// (Microsoft.Web/sites/sourcecontrols/web). Returns {repoUrl, branch} or null.
+export async function readDeploymentSource(accessToken, subscriptionId, resourceGroup, appName) {
+  const url = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}/sourcecontrols/web?api-version=2023-12-01`
+  const res = await armJson(accessToken, url, { timeoutMs: 15000 })
+  const repoUrl = res.json?.properties?.repoUrl || ''
+  if (!res.ok || !repoUrl) return null
+  return { repoUrl, branch: res.json.properties.branch || 'main' }
+}
+
+// Record a GitHub repo on the Function App's Deployment Center as a manual
+// integration (no CI/CD webhook — the portal keeps deploying directly). This is
+// what makes the connection visible in the portal's Deployment Center blade and
+// readable back. Best-effort: returns true when Azure accepted it.
+// NOTE: not wired into the connect flow — on Flex Consumption the Deployment
+// Center uses GitHub Actions, so a manual-integration PUT is rejected (400) or
+// would overwrite an existing GitHub Actions connection.
+async function setDeploymentSource(accessToken, subscriptionId, resourceGroup, appName, { repoUrl, branch }) {
+  const url = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}/sourcecontrols/web?api-version=2023-12-01`
+  const body = {
+    properties: {
+      repoUrl,
+      branch: branch || 'main',
+      isManualIntegration: true,
+      isGitHubAction: false,
+      deploymentRollbackEnabled: false,
+    },
+  }
+  const res = await armJson(accessToken, url, { method: 'PUT', body, timeoutMs: 60000 })
+  return res.ok
+}
+
+// Read the GitHub connection recorded on a Function App. Prefers the Deployment
+// Center source control (the source of truth — also set when connected outside
+// this portal), then falls back to the portal's app-setting metadata.
 export async function getAppGithubLink(accessToken, subscriptionId, resourceGroup, appName) {
+  try {
+    const dc = await readDeploymentSource(accessToken, subscriptionId, resourceGroup, appName)
+    if (dc?.repoUrl) {
+      return { connected: true, repoUrl: dc.repoUrl, branch: dc.branch, source: 'deploymentCenter' }
+    }
+  } catch {
+    /* fall back to app settings */
+  }
   try {
     const client = webClient(accessToken, subscriptionId)
     const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
     const p = current?.properties || {}
     const repoUrl = p.GITHUB_REPO_URL || ''
-    if (!repoUrl) return { connected: false }
-    return { connected: true, repoUrl, branch: p.GITHUB_BRANCH || 'main', connectedBy: p.GITHUB_CONNECTED_BY || '' }
+    if (repoUrl) {
+      return {
+        connected: true,
+        repoUrl,
+        branch: p.GITHUB_BRANCH || 'main',
+        connectedBy: p.GITHUB_CONNECTED_BY || '',
+        source: 'appSettings',
+      }
+    }
   } catch {
-    return { connected: false }
+    /* ignore */
   }
+  return { connected: false }
 }
 
 // Fetch a host-level function key for invoking an app's functions (the built-in

@@ -12,6 +12,9 @@
 // their own connection).
 
 import crypto from 'node:crypto'
+import fs from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 const GH_API = 'https://api.github.com'
 const GH_OAUTH = 'https://github.com/login/oauth'
@@ -69,11 +72,40 @@ export function readState(state) {
 
 // --- token store (in-memory; swap for Key Vault in prod) -------------------
 
-const tokens = new Map() // oid -> { token, login, avatarUrl, connectedAt }
+// Dev-only persistence: keep the token map in a gitignored file so backend
+// reloads (node --watch) don't drop the connection. Prod should use Key Vault.
+const TOKENS_FILE = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '..',
+  '.data',
+  'github-tokens.json',
+)
+function loadTokens() {
+  try {
+    return new Map(Object.entries(JSON.parse(fs.readFileSync(TOKENS_FILE, 'utf-8'))))
+  } catch {
+    return new Map()
+  }
+}
+function saveTokens(map) {
+  try {
+    fs.mkdirSync(path.dirname(TOKENS_FILE), { recursive: true })
+    fs.writeFileSync(TOKENS_FILE, JSON.stringify(Object.fromEntries(map)), 'utf-8')
+  } catch {
+    /* best-effort */
+  }
+}
+const tokens = loadTokens() // oid -> { token, login, avatarUrl, connectedAt }
 export const tokenStore = {
   get: (oid) => tokens.get(oid) || null,
-  set: (oid, data) => tokens.set(oid, { ...data, connectedAt: Date.now() }),
-  clear: (oid) => tokens.delete(oid),
+  set: (oid, data) => {
+    tokens.set(oid, { ...data, connectedAt: Date.now() })
+    saveTokens(tokens)
+  },
+  clear: (oid) => {
+    tokens.delete(oid)
+    saveTokens(tokens)
+  },
 }
 
 // --- OAuth flow ------------------------------------------------------------
@@ -223,6 +255,25 @@ export async function getRepo(token, owner, name) {
   }
 }
 
+// Rolling-branch resolution (one PR per app until merged): reuse the branch of an
+// OPEN PR under `${prefix}/` so edits accumulate into a single PR; start a fresh
+// timestamped branch when there's no open PR (first connect, or the last PR was
+// merged/closed).
+export async function resolveRollingBranch(token, owner, repo, base, prefix) {
+  const b = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+  try {
+    const open = await gh(token, `${b}/pulls?state=open&base=${encodeURIComponent(base)}&per_page=100`)
+    const match = (Array.isArray(open) ? open : []).find((p) =>
+      String(p.head?.ref || '').startsWith(`${prefix}/`),
+    )
+    if (match?.head?.ref) return match.head.ref
+  } catch {
+    /* fall through to a fresh branch */
+  }
+  const stamp = new Date().toISOString().slice(0, 16).replace(/[-T:]/g, '')
+  return `${prefix}/${stamp}`
+}
+
 // Push a set of { name, data } text files as a single commit. Handles both an
 // empty repo (first commit: no base tree / no parent, then create the ref) and
 // an existing branch (add a commit on top, then fast-forward the ref).
@@ -292,29 +343,22 @@ export async function openPullRequest(token, { owner, repo, base, head, files, m
     baseTreeSha = (await gh(token, `${b}/git/commits/${baseSha}`)).tree.sha
   } catch (e) {
     if (e.status !== 404 && e.status !== 409) throw e // 404/409 = empty repo / no base branch
-    const readme = await gh(token, `${b}/git/blobs`, {
-      method: 'POST',
+    // Seed the first commit via the Contents API. The low-level Git Data API
+    // (blobs/trees/commits) returns 409 "Git Repository is empty" on a repo with
+    // no commits, whereas PUT /contents creates the first commit + base branch
+    // in a single call and works on an empty repo.
+    const seeded = await gh(token, `${b}/contents/README.md`, {
+      method: 'PUT',
       body: {
+        message: 'Initial commit',
         content: Buffer.from(`# ${repo}\n\nManaged by the Serverless Agent Portal.\n`, 'utf-8').toString(
           'base64',
         ),
-        encoding: 'base64',
+        branch: base,
       },
     })
-    const initTree = await gh(token, `${b}/git/trees`, {
-      method: 'POST',
-      body: { tree: [{ path: 'README.md', mode: '100644', type: 'blob', sha: readme.sha }] },
-    })
-    const initCommit = await gh(token, `${b}/git/commits`, {
-      method: 'POST',
-      body: { message: 'Initial commit', tree: initTree.sha },
-    })
-    await gh(token, `${b}/git/refs`, {
-      method: 'POST',
-      body: { ref: `refs/heads/${base}`, sha: initCommit.sha },
-    })
-    baseSha = initCommit.sha
-    baseTreeSha = initTree.sha
+    baseSha = seeded.commit.sha
+    baseTreeSha = (await gh(token, `${b}/git/commits/${baseSha}`)).tree.sha
   }
 
   // If the head branch already exists, commit onto its tip; else branch off base.

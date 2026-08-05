@@ -166,6 +166,7 @@ export interface GitHubAppConnection {
   repoUrl?: string
   branch?: string
   connectedBy?: string
+  source?: 'deploymentCenter' | 'appSettings'
 }
 
 export type DeployTarget =

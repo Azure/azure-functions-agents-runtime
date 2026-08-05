@@ -322,12 +322,28 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
               <a className="btn sm" href={appConn.repoUrl} target="_blank" rel="noreferrer">
                 🔗 {repoShort || appConn.repoUrl}
               </a>
+              {repoShort && (
+                <a
+                  className="btn sm"
+                  href={`https://vscode.dev/github/${repoShort}`}
+                  target="_blank"
+                  rel="noreferrer"
+                >
+                  🧩 Open in VS Code ↗
+                </a>
+              )}
               {appConn.branch && <span className="badge gray mono">{appConn.branch}</span>}
+              {appConn.source === 'deploymentCenter' && <span className="badge blue">Deployment Center</span>}
               {appConn.connectedBy && (
                 <span className="muted" style={{ fontSize: 12 }}>
                   connected by @{appConn.connectedBy}
                 </span>
               )}
+            </div>
+            <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
+              {appConn.source === 'deploymentCenter'
+                ? 'Read from the Function App’s Deployment Center. Further edits open new branches in this repo.'
+                : 'Recorded on the Function App. Further edits open new branches in this repo.'}
             </div>
           </div>
         ) : result ? (
@@ -348,6 +364,14 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
                 rel="noreferrer"
               >
                 View pull request →
+              </a>
+              <a
+                className="btn sm"
+                href={`https://vscode.dev/github/${result.owner}/${result.name}/tree/${result.branch}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                🧩 Open in VS Code ↗
               </a>
               <span className="badge gray mono">
                 {result.branch}
