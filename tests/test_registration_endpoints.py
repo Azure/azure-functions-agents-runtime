@@ -256,9 +256,11 @@ def test_register_builtin_endpoints_uses_filename_slug_for_duplicate_display_nam
         "agents/daily_report_a/",
         "agents/daily_report_a/chat",
         "agents/daily_report_a/chatstream",
+        "agents/daily_report_a/history",
         "agents/daily_report_b/",
         "agents/daily_report_b/chat",
         "agents/daily_report_b/chatstream",
+        "agents/daily_report_b/history",
     ]
 
 
@@ -376,6 +378,7 @@ def test_register_builtin_endpoints_chat_also_registers_http_routes_for_non_main
         "agents/secondary_agent/",
         "agents/secondary_agent/chat",
         "agents/secondary_agent/chatstream",
+        "agents/secondary_agent/history",
     ]
 
 
@@ -398,6 +401,7 @@ def test_register_builtin_endpoints_chat_and_http_do_not_double_register_routes(
         "agents/secondary_agent/",
         "agents/secondary_agent/chat",
         "agents/secondary_agent/chatstream",
+        "agents/secondary_agent/history",
     ]
 
 
@@ -420,11 +424,13 @@ def test_register_builtin_endpoints_main_agent_uses_regular_agent_routes(
         "agents/main/",
         "agents/main/chat",
         "agents/main/chatstream",
+        "agents/main/history",
     ]
     assert [route["function_name"] for route in app.routes] == [
         "agent_main_builtin_chat_page",
         "agent_main_builtin_chat",
         "agent_main_builtin_chatstream",
+        "agent_main_builtin_history",
     ]
 
 
@@ -921,6 +927,154 @@ def _chat_api_agent(tmp_path: Path, auth: EndpointAuthConfig) -> ResolvedAgent:
         builtin_endpoints=BuiltinEndpointsConfig(chat_api=True, http_auth=auth),
         source_file=source_file,
     )
+
+
+class _FakeHistoryProvider:
+    def __init__(self, messages: list[Any]) -> None:
+        self._messages = messages
+        self.skip_excluded = False
+        self.captured_session_id: str | None = None
+
+    async def get_messages(self, session_id: str, **kwargs: Any) -> list[Any]:
+        self.captured_session_id = session_id
+        return self._messages
+
+
+def _history_route(app: FakeFunctionApp) -> dict[str, Any]:
+    return next(route for route in app.routes if route["route"] == "agents/test_agent/history")
+
+
+def test_history_endpoint_registered_under_chat_api(tmp_path: Path) -> None:
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    route = _history_route(app)
+
+    assert route["methods"] == ["GET"]
+    assert route["function_name"] == "agent_test_agent_builtin_history"
+    assert route["auth_level"] == func.AuthLevel.FUNCTION
+
+
+def test_history_endpoint_returns_empty_without_session_header(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    build_calls = {"count": 0}
+
+    def fake_build(**kwargs: Any) -> Any:
+        build_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        fake_build,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    response = asyncio.run(_history_route(app)["handler"](DummyRequest({}, headers={})))
+
+    assert response.status_code == 200
+    assert json.loads(_response_text(response)) == {"messages": []}
+    # No session id: must short-circuit before touching storage.
+    assert build_calls["count"] == 0
+
+
+def test_history_endpoint_rejects_invalid_session_id(tmp_path: Path) -> None:
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "bad id!"})
+    response = asyncio.run(_history_route(app)["handler"](request))
+
+    assert response.status_code == 400
+    assert json.loads(_response_text(response)) == {"error": "invalid session id"}
+
+
+def test_history_endpoint_returns_empty_when_storage_unconfigured(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda **kwargs: None,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "abc123"})
+    response = asyncio.run(_history_route(app)["handler"](request))
+
+    assert response.status_code == 200
+    assert json.loads(_response_text(response)) == {"messages": []}
+
+
+def test_history_endpoint_filters_to_user_and_assistant_text(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    provider = _FakeHistoryProvider(
+        [
+            SimpleNamespace(role="user", text="hi"),
+            SimpleNamespace(role="assistant", text="hello"),
+            SimpleNamespace(role="tool", text="tool output"),
+            SimpleNamespace(role="assistant", text=""),
+            SimpleNamespace(role="user", text="bye"),
+        ]
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda **kwargs: provider,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "abc123"})
+    response = asyncio.run(_history_route(app)["handler"](request))
+
+    assert response.status_code == 200
+    assert json.loads(_response_text(response)) == {
+        "messages": [
+            {"role": "user", "text": "hi"},
+            {"role": "assistant", "text": "hello"},
+            {"role": "user", "text": "bye"},
+        ]
+    }
+    # The endpoint asks for a clean transcript and forwards the exact session id.
+    assert provider.skip_excluded is True
+    assert provider.captured_session_id == "abc123"
+
+
+def test_history_endpoint_returns_500_on_provider_error(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    class _BoomProvider:
+        skip_excluded = False
+
+        async def get_messages(self, session_id: str, **kwargs: Any) -> list[Any]:
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda **kwargs: _BoomProvider(),
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "abc123"})
+    response = asyncio.run(_history_route(app)["handler"](request))
+
+    assert response.status_code == 500
+    assert json.loads(_response_text(response)) == {"error": "failed to load history"}
 
 
 def test_chat_routes_default_to_function_auth_level(tmp_path: Path) -> None:

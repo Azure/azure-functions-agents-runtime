@@ -2087,6 +2087,66 @@
 			return { wrap, bubble, contentEl, intermediatesEl };
 		}
 
+		// Fetch and repaint a session's prior transcript from the server so a
+		// resumed/restored session shows its history instead of an empty
+		// window. Best-effort: older servers (no /history route), storage that
+		// isn't configured, and network errors all leave the window as-is.
+		async function loadSessionHistory(sessionId, options = {}) {
+			const { announce = true, replaceView = false } = options;
+			const requestedId = typeof sessionId === "string" ? sessionId.trim() : "";
+			if (!requestedId || !isValidSessionId(requestedId) || !state.baseUrl) return;
+
+			// Optionally blank the transcript up-front so a resumed session
+			// never shows the previous session's bubbles while the request is
+			// in flight. On empty/failed history the greeting is re-shown by
+			// the caller path (Hook 2 keeps it; Hook 1 leaves the "Resuming…"
+			// status and an empty pane, which the next turn fills).
+			if (replaceView) {
+				chatEl.innerHTML = "";
+				restoredGreetingContent = null;
+				hideDetails();
+			}
+
+			const endpoint = `${state.baseUrl}${getApiBasePath()}/history${buildAuthQuery()}`;
+			let payload;
+			try {
+				const resp = await fetch(endpoint, {
+					method: "GET",
+					headers: { "x-ms-session-id": requestedId, "Accept": "application/json" },
+				});
+				// A 404 means this server predates the history endpoint — stay
+				// silent and leave whatever is already on screen.
+				if (!resp.ok) return;
+				payload = await resp.json();
+			} catch (_e) {
+				return;
+			}
+
+			// The active session may have changed while awaiting the fetch
+			// (New session, a different resume) — don't clobber the newer view.
+			if (state.sessionId !== requestedId) return;
+
+			const messages = Array.isArray(payload && payload.messages) ? payload.messages : [];
+			const rendered = messages.filter(
+				(m) => m && (m.role === "user" || m.role === "assistant")
+					&& typeof m.text === "string" && m.text.length > 0
+			);
+			if (rendered.length === 0) return;
+
+			chatEl.innerHTML = "";
+			restoredGreetingContent = null;
+			hideDetails();
+			for (const message of rendered) {
+				const isUser = message.role === "user";
+				renderBubble(isUser ? "you" : "assistant", message.text, isUser ? "You" : "Assistant");
+			}
+			scrollChatToBottom();
+			if (announce) {
+				const count = rendered.length;
+				setStatus(`Loaded ${count} previous message${count === 1 ? "" : "s"} for session ${shortSessionId(requestedId)}.`);
+			}
+		}
+
 		function renderWaitingBubble() {
 			const wrap = document.createElement("div");
 			wrap.className = "bubble-wrap assistant";
@@ -2322,6 +2382,11 @@
 				restoredSessionIdCandidate = null;
 				persistSessionId(true);
 				recordSessionActivity(state.sessionId, "");
+				// Repaint the resumed session's prior transcript. Covers both a
+				// pasted id and a Recent-sessions pick (which fills this field
+				// and re-runs this branch on Save). replaceView clears the pane
+				// immediately so the old session's bubbles don't linger.
+				void loadSessionHistory(state.sessionId, { announce: true, replaceView: true });
 				statusMessage = `Resuming session ${sessionIdRaw}. Your next message will continue it.`;
 			}
 
@@ -2865,6 +2930,12 @@
 			setStatus("Ready.");
 			const greeting = renderBubble("copilot", "Hi! Send a message to start chatting.", "Copilot");
 			restoredGreetingContent = greeting?.contentEl || null;
+			// If this reload restored an explicitly-resumed session, repaint its
+			// transcript. The greeting stays as a fallback (replaceView:false)
+			// until — and only if — history actually arrives.
+			if (state.sessionId && sessionIdIsExplicit) {
+				void loadSessionHistory(state.sessionId, { announce: false, replaceView: false });
+			}
 			// Probe asynchronously; this is the gate on persistence + polling.
 			probeWorkflowsCapability();
 			promptInputEl.focus();

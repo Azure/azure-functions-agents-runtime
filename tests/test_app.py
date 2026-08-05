@@ -235,12 +235,14 @@ def test_create_function_app_allows_endpoint_agent_without_trigger(
         "agent_main_builtin_chat_page",
         "agent_main_builtin_chat",
         "agent_main_builtin_chatstream",
+        "agent_main_builtin_history",
         "agent_main_builtin_mcp",
     ]
     assert _http_routes(functions) == [
         "agents/main/",
         "agents/main/chat",
         "agents/main/chatstream",
+        "agents/main/history",
     ]
 
 
@@ -336,15 +338,19 @@ def test_create_function_app_accepts_endpoint_less_specialist_referenced_only_vi
     assert _function_names(functions) == [
         "agent_billing_builtin_chat",
         "agent_billing_builtin_chatstream",
+        "agent_billing_builtin_history",
         "agent_coordinator_builtin_chat",
         "agent_coordinator_builtin_chatstream",
+        "agent_coordinator_builtin_history",
     ]
     assert not any("shipping" in name for name in _function_names(functions))
     assert _http_routes(functions) == [
         "agents/billing/chat",
         "agents/billing/chatstream",
+        "agents/billing/history",
         "agents/coordinator/chat",
         "agents/coordinator/chatstream",
+        "agents/coordinator/history",
     ]
 
 
@@ -384,6 +390,7 @@ def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffec
         "agent_main_builtin_chat_page",
         "agent_main_builtin_chat",
         "agent_main_builtin_chatstream",
+        "agent_main_builtin_history",
         "agent_main_builtin_mcp",
         "nightly_report",
         "resource_summary",
@@ -392,6 +399,7 @@ def test_create_function_app_regression_pre_existing_multi_agent_fixture_unaffec
         "agents/main/",
         "agents/main/chat",
         "agents/main/chatstream",
+        "agents/main/history",
         "resource-summary",
     ]
 
