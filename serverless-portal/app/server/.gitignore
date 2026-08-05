@@ -4,3 +4,4 @@ npm-debug.log*
 .data/agent-drafts/
 .data/source-drafts/
 .data/app-sources/
+.data/github-tokens.json

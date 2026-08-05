@@ -317,6 +317,7 @@ app.put(
 // ---------------------------------------------------------------------------
 
 const APP_SOURCES_DIR = path.join(__dirname, '..', '.data', 'app-sources')
+const SCAFFOLD_DIR = path.join(__dirname, '..', 'scaffold')
 
 const SCAFFOLD = {
   'function_app.py': 'from azure_functions_agents import create_function_app\n\napp = create_function_app()\n',
@@ -404,6 +405,54 @@ async function readDirFiles(dir) {
   return Promise.all(
     names.sort().map(async (name) => ({ name, data: await fs.promises.readFile(path.join(dir, name)) })),
   )
+}
+
+// Read a directory tree into `[{ name, data }]` with forward-slash relative paths.
+async function readDirRecursive(dir, base = dir) {
+  const out = []
+  let entries
+  try {
+    entries = await fs.promises.readdir(dir, { withFileTypes: true })
+  } catch {
+    return out
+  }
+  for (const e of entries) {
+    const full = path.join(dir, e.name)
+    if (e.isDirectory()) out.push(...(await readDirRecursive(full, base)))
+    else
+      out.push({
+        name: path.relative(base, full).split(path.sep).join('/'),
+        data: await fs.promises.readFile(full),
+      })
+  }
+  return out
+}
+
+const REPO_GITIGNORE = `.venv/
+__pycache__/
+*.pyc
+.python_packages/
+local.settings.json
+.azure/
+.DS_Store
+`
+
+// Assemble a complete, azd-deployable repo from the app's function files: the
+// bundled scaffold (azure.yaml, infra/**, README, src templates) at the root,
+// the function app under src/, and a .gitignore. azure.yaml's project name is
+// set to the app so `azd up` works from a clone.
+async function buildRepoFiles(appFiles, appName) {
+  const files = new Map()
+  for (const f of await readDirRecursive(SCAFFOLD_DIR)) {
+    let data = f.data
+    if (f.name === 'azure.yaml') {
+      data = Buffer.from(f.data.toString('utf-8').replace(/^name:.*$/m, `name: ${appName}`), 'utf-8')
+    }
+    files.set(f.name, data)
+  }
+  for (const f of appFiles) files.set(`src/${f.name}`, f.data)
+  files.set('.gitignore', Buffer.from(REPO_GITIGNORE, 'utf-8'))
+  return [...files].map(([name, data]) => ({ name, data }))
 }
 
 // Overlay this app's saved portal drafts (edited `*.agent.md` and source files)
@@ -944,8 +993,8 @@ app.post(
     // Read the portal-managed source tree for this app.
     const dir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
     if (!(await pathExists(dir))) throw new HttpError(404, 'No stored source for this app to push.')
-    const files = await readDirFiles(dir)
-    if (!files.length) throw new HttpError(404, 'No files to push for this app.')
+    const appFiles = await readDirFiles(dir)
+    if (!appFiles.length) throw new HttpError(404, 'No files to push for this app.')
 
     try {
       // Resolve the target repo (create new, or use an existing one).
@@ -985,27 +1034,37 @@ app.post(
         }
       }
 
-      // Always contribute via a pull request on a customer-named branch (never
-      // a direct push to the default branch), for both new and existing repos.
+      // Assemble the complete, azd-deployable repo (azure.yaml + infra/** +
+      // README + the function app under src/) to push.
+      const files = await buildRepoFiles(appFiles, appName)
+
+      // Option B — one rolling PR per app: reuse the open PR's branch so edits
+      // accumulate into a single PR; a fresh branch starts once it's merged.
       const base = repo.defaultBranch || 'main'
       const seg = (s) =>
         String(s)
           .replace(/[^A-Za-z0-9._-]/g, '-')
           .replace(/^-+|-+$/g, '') || 'x'
-      const head = `agents/${seg(entry.login)}/${seg(appName)}`
+      const prefix = `agents/${seg(entry.login)}/${seg(appName)}`
+      const head = await github.resolveRollingBranch(entry.token, repo.owner, repo.name, base, prefix)
       const pr = await github.openPullRequest(entry.token, {
         owner: repo.owner,
         repo: repo.name,
         base,
         head,
         files,
-        message: `Agent source for ${appName} (via Serverless Agent Portal)`,
-        title: `Add agent "${appName}" via Serverless Agent Portal`,
-        body: `Opened by the Serverless Agent Portal on behalf of @${entry.login}.\n\nThis PR adds the source for agent app \`${appName}\` on branch \`${head}\`.`,
+        message: `Update agent "${appName}" (via Serverless Agent Portal)`,
+        title: `Agent "${appName}" via Serverless Agent Portal`,
+        body: `Opened by the Serverless Agent Portal on behalf of @${entry.login}.\n\nAdds/updates the source for agent app \`${appName}\` on branch \`${head}\`. Edits roll into this PR until it's merged.`,
       })
 
-      // Record the connection on the Function App (light "deployment metadata"
-      // so a return visit / edit knows where to open PRs). Non-fatal on failure.
+      // Persist the connection as app-setting metadata (the reliable store that
+      // later visits/edits read back). We intentionally do NOT write the Function
+      // App's Deployment Center source control here: on Flex Consumption that's a
+      // GitHub Actions integration (set up via the Azure portal), and a plain PUT
+      // would be rejected or could overwrite an existing GitHub Actions
+      // connection. getAppGithubLink still READS the Deployment Center and
+      // prefers a repo connected there.
       const repoUrl = `https://github.com/${repo.owner}/${repo.name}`
       let stored = true
       try {
