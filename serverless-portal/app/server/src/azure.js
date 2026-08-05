@@ -823,6 +823,26 @@ export async function setAppSettings(accessToken, subscriptionId, resourceGroup,
   return properties
 }
 
+// Remove the portal-recorded GitHub repo link from a Function App's application
+// settings (read-modify-write; the ARM update replaces the whole dictionary, so
+// we delete the keys and write the rest back). Returns true when a link was
+// present and cleared. Intentionally does NOT touch the Deployment Center source
+// control — that may be a live GitHub Actions CI/CD set up in the Azure portal.
+export async function clearAppGithubLink(accessToken, subscriptionId, resourceGroup, appName) {
+  const client = webClient(accessToken, subscriptionId)
+  const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
+  const properties = { ...(current?.properties || {}) }
+  let removed = false
+  for (const key of ['GITHUB_REPO_URL', 'GITHUB_BRANCH', 'GITHUB_CONNECTED_BY']) {
+    if (key in properties) {
+      delete properties[key]
+      removed = true
+    }
+  }
+  if (removed) await client.webApps.updateApplicationSettings(resourceGroup, appName, { properties })
+  return removed
+}
+
 // Read the GitHub repo connected via the Function App's Deployment Center
 // (Microsoft.Web/sites/sourcecontrols/web). Returns {repoUrl, branch} or null.
 export async function readDeploymentSource(accessToken, subscriptionId, resourceGroup, appName) {
@@ -853,6 +873,16 @@ async function setDeploymentSource(accessToken, subscriptionId, resourceGroup, a
   }
   const res = await armJson(accessToken, url, { method: 'PUT', body, timeoutMs: 60000 })
   return res.ok
+}
+
+// Disconnect the Function App's Deployment Center source control (removes the
+// Azure-side GitHub link — the ARM DELETE the portal's "Disconnect" button
+// performs). Does NOT delete the workflow file in the repo or any federated
+// credentials. Returns { ok, status }. Best-effort.
+export async function deleteDeploymentSource(accessToken, subscriptionId, resourceGroup, appName) {
+  const url = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}/sourcecontrols/web?api-version=2023-12-01`
+  const res = await armJson(accessToken, url, { method: 'DELETE', timeoutMs: 60000 })
+  return { ok: res.ok, status: res.status }
 }
 
 // Read the GitHub connection recorded on a Function App. Prefers the Deployment
