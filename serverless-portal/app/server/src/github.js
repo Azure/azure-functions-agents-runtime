@@ -24,7 +24,9 @@ export function githubConfig() {
   return {
     clientId: process.env.GITHUB_OAUTH_CLIENT_ID || '',
     clientSecret: process.env.GITHUB_OAUTH_CLIENT_SECRET || '',
-    callback: process.env.GITHUB_OAUTH_CALLBACK || 'http://localhost:8080/api/github/callback',
+    // Empty by default: when unset, the portal omits redirect_uri so GitHub
+    // uses the app's own registered Callback URL (simplest for GitHub Apps).
+    callback: process.env.GITHUB_OAUTH_CALLBACK || '',
   }
 }
 
@@ -80,11 +82,15 @@ export function authorizeUrl(oid) {
   const c = githubConfig()
   const params = new URLSearchParams({
     client_id: c.clientId,
-    redirect_uri: c.callback,
     scope: SCOPE,
     state: makeState(oid),
     allow_signup: 'false',
   })
+  // Only pin redirect_uri when explicitly configured. Omitting it lets GitHub
+  // fall back to the app's registered Callback URL, avoiding the strict
+  // "redirect_uri is not associated with this application" match (GitHub Apps
+  // require an EXACT match to a registered Callback URL).
+  if (c.callback) params.set('redirect_uri', c.callback)
   return `${GH_OAUTH}/authorize?${params.toString()}`
 }
 
@@ -97,7 +103,7 @@ export async function exchangeCode(code) {
       client_id: c.clientId,
       client_secret: c.clientSecret,
       code,
-      redirect_uri: c.callback,
+      ...(c.callback ? { redirect_uri: c.callback } : {}),
     }),
     signal: AbortSignal.timeout(15000),
   })
@@ -143,8 +149,17 @@ async function gh(token, apiPath, { method = 'GET', body } = {}) {
     json = { raw: text }
   }
   if (!res.ok) {
-    const msg = json?.message || `${res.status} ${res.statusText}`
-    const err = new Error(String(msg).slice(0, 500))
+    // Surface GitHub's per-field validation detail (the errors[] array), which
+    // carries the real reason behind generic messages like "Repository creation
+    // failed." or "Validation Failed".
+    const detail = Array.isArray(json?.errors)
+      ? json.errors
+          .map((e) => e?.message || [e?.resource, e?.field, e?.code].filter(Boolean).join(' '))
+          .filter(Boolean)
+          .join('; ')
+      : ''
+    const msg = [json?.message || `${res.status} ${res.statusText}`, detail].filter(Boolean).join(' — ')
+    const err = new Error(String(msg).slice(0, 600))
     err.status = res.status
     throw err
   }
@@ -178,13 +193,29 @@ export async function createRepo(token, { name, private: priv = true, org = '' }
     body: {
       name,
       private: priv,
-      auto_init: false,
+      // Seed the default branch (a README commit) so we can immediately open a
+      // PR against it — the portal always contributes via a PR, never a direct
+      // push to the default branch.
+      auto_init: true,
       description: 'Serverless agent app — managed by the Serverless Agent Portal',
     },
   })
   return {
     fullName: r.full_name,
     owner: r.owner?.login || '',
+    name: r.name,
+    defaultBranch: r.default_branch || 'main',
+    htmlUrl: r.html_url,
+    private: Boolean(r.private),
+  }
+}
+
+// Fetch a single repo (used to reuse an already-existing repo on retry).
+export async function getRepo(token, owner, name) {
+  const r = await gh(token, `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(name)}`)
+  return {
+    fullName: r.full_name,
+    owner: r.owner?.login || owner,
     name: r.name,
     defaultBranch: r.default_branch || 'main',
     htmlUrl: r.html_url,
@@ -239,4 +270,112 @@ export async function pushFiles(token, { owner, repo, branch, files, message }) 
     })
   }
   return { commitSha: commit.sha }
+}
+
+// Commit the given files onto a customer-named branch (created off the repo's
+// base branch if it doesn't exist) and open a pull request against the base.
+// If an open PR already exists for head->base, it's reused (the branch is
+// fast-forwarded to the new commit). Commits are authored by the token's user
+// (the customer), so the branch + commits + PR are all under their alias.
+// Returns { prUrl, prNumber, branch, base }.
+export async function openPullRequest(token, { owner, repo, base, head, files, message, title, body }) {
+  const b = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}`
+
+  // Resolve the base branch head + tree. If the repo is empty (no commits yet —
+  // e.g. a repo created without auto_init), seed the base branch with an initial
+  // README commit so we have something to branch + PR against.
+  let baseSha
+  let baseTreeSha
+  try {
+    const baseRef = await gh(token, `${b}/git/ref/heads/${encodeURIComponent(base)}`)
+    baseSha = baseRef.object.sha
+    baseTreeSha = (await gh(token, `${b}/git/commits/${baseSha}`)).tree.sha
+  } catch (e) {
+    if (e.status !== 404 && e.status !== 409) throw e // 404/409 = empty repo / no base branch
+    const readme = await gh(token, `${b}/git/blobs`, {
+      method: 'POST',
+      body: {
+        content: Buffer.from(`# ${repo}\n\nManaged by the Serverless Agent Portal.\n`, 'utf-8').toString(
+          'base64',
+        ),
+        encoding: 'base64',
+      },
+    })
+    const initTree = await gh(token, `${b}/git/trees`, {
+      method: 'POST',
+      body: { tree: [{ path: 'README.md', mode: '100644', type: 'blob', sha: readme.sha }] },
+    })
+    const initCommit = await gh(token, `${b}/git/commits`, {
+      method: 'POST',
+      body: { message: 'Initial commit', tree: initTree.sha },
+    })
+    await gh(token, `${b}/git/refs`, {
+      method: 'POST',
+      body: { ref: `refs/heads/${base}`, sha: initCommit.sha },
+    })
+    baseSha = initCommit.sha
+    baseTreeSha = initTree.sha
+  }
+
+  // If the head branch already exists, commit onto its tip; else branch off base.
+  let parentSha = baseSha
+  let parentTreeSha = baseTreeSha
+  let headExists = false
+  try {
+    const headRef = await gh(token, `${b}/git/ref/heads/${encodeURIComponent(head)}`)
+    parentSha = headRef.object.sha
+    const headCommit = await gh(token, `${b}/git/commits/${parentSha}`)
+    parentTreeSha = headCommit.tree.sha
+    headExists = true
+  } catch (e) {
+    if (e.status !== 404 && e.status !== 409) throw e
+  }
+
+  // Blobs -> tree (on top of the parent) -> commit.
+  const treeItems = []
+  for (const f of files) {
+    const blob = await gh(token, `${b}/git/blobs`, {
+      method: 'POST',
+      body: { content: Buffer.from(f.data, 'utf-8').toString('base64'), encoding: 'base64' },
+    })
+    treeItems.push({ path: f.name, mode: '100644', type: 'blob', sha: blob.sha })
+  }
+  const tree = await gh(token, `${b}/git/trees`, {
+    method: 'POST',
+    body: { base_tree: parentTreeSha, tree: treeItems },
+  })
+  const commit = await gh(token, `${b}/git/commits`, {
+    method: 'POST',
+    body: { message, tree: tree.sha, parents: [parentSha] },
+  })
+
+  // Create or fast-forward the head branch.
+  if (headExists) {
+    await gh(token, `${b}/git/refs/heads/${encodeURIComponent(head)}`, {
+      method: 'PATCH',
+      body: { sha: commit.sha, force: true },
+    })
+  } else {
+    await gh(token, `${b}/git/refs`, {
+      method: 'POST',
+      body: { ref: `refs/heads/${head}`, sha: commit.sha },
+    })
+  }
+
+  // Open a PR, or reuse the existing open one for head->base.
+  try {
+    const pr = await gh(token, `${b}/pulls`, { method: 'POST', body: { title, head, base, body } })
+    return { prUrl: pr.html_url, prNumber: pr.number, branch: head, base }
+  } catch (e) {
+    if (e.status === 422) {
+      const existing = await gh(
+        token,
+        `${b}/pulls?head=${encodeURIComponent(`${owner}:${head}`)}&base=${encodeURIComponent(base)}&state=open`,
+      )
+      if (Array.isArray(existing) && existing[0]) {
+        return { prUrl: existing[0].html_url, prNumber: existing[0].number, branch: head, base }
+      }
+    }
+    throw e
+  }
 }

@@ -823,6 +823,21 @@ export async function setAppSettings(accessToken, subscriptionId, resourceGroup,
   return properties
 }
 
+// Read the GitHub connection recorded on a Function App (if any) from the app
+// settings written at connect time.
+export async function getAppGithubLink(accessToken, subscriptionId, resourceGroup, appName) {
+  try {
+    const client = webClient(accessToken, subscriptionId)
+    const current = await client.webApps.listApplicationSettings(resourceGroup, appName)
+    const p = current?.properties || {}
+    const repoUrl = p.GITHUB_REPO_URL || ''
+    if (!repoUrl) return { connected: false }
+    return { connected: true, repoUrl, branch: p.GITHUB_BRANCH || 'main', connectedBy: p.GITHUB_CONNECTED_BY || '' }
+  } catch {
+    return { connected: false }
+  }
+}
+
 // Fetch a host-level function key for invoking an app's functions (the built-in
 // chat endpoint defaults to FUNCTION auth). Best-effort: '' when unavailable.
 export async function functionHostKey(accessToken, subscriptionId, resourceGroup, appName) {

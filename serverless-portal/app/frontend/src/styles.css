@@ -231,3 +231,42 @@ pre.code { margin: 0; white-space: pre; overflow-x: auto; max-height: 460px; }
 .span-detail pre { margin: 0; font-family: "Cascadia Code", Consolas, monospace; font-size: 11.5px;
   white-space: pre-wrap; word-break: break-word; max-height: 180px; overflow: auto; color: var(--text); }
 @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .4 } }
+
+/* GitHub connect panel */
+.gh { margin-top: 14px; border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); box-shadow: var(--shadow); overflow: hidden; }
+.gh-head { display: flex; align-items: center; gap: 10px; padding: 10px 14px;
+  border-bottom: 1px solid var(--border); background: var(--surface-2); }
+.gh-mark { width: 26px; height: 26px; border-radius: 7px; background: #1b1f24; color: #fff;
+  display: grid; place-items: center; font-size: 14px; }
+.gh-title { font-weight: 600; font-size: 13.5px; }
+.gh-user { display: inline-flex; align-items: center; gap: 7px; font-size: 12px; color: var(--text-muted);
+  background: var(--surface); border: 1px solid var(--border); border-radius: 999px; padding: 3px 5px 3px 10px; }
+.gh-user img { width: 20px; height: 20px; border-radius: 50%; }
+.gh-user .btn { padding: 2px 6px; }
+.gh-body { padding: 14px; }
+.gh-cta { text-align: center; padding: 6px 4px 2px; }
+.gh-cta p { color: var(--text-muted); font-size: 12.5px; margin: 0 auto 12px; max-width: 340px; }
+.gh-cta .btn.primary { padding: 9px 18px; font-size: 13.5px; }
+.gh-seg { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 12px; }
+.gh-opt { border: 1px solid var(--border-strong); border-radius: 7px; padding: 9px 11px; cursor: pointer;
+  background: var(--surface); text-align: left; font-family: inherit; color: var(--text); }
+.gh-opt:hover { background: var(--surface-2); }
+.gh-opt.active { border-color: var(--brand); background: var(--brand-soft); box-shadow: inset 0 0 0 1px var(--brand); }
+.gh-opt .t { font-weight: 600; font-size: 13px; display: block; }
+.gh-opt .d { color: var(--text-muted); font-size: 11px; }
+.gh-field { margin-bottom: 10px; }
+.gh-field > label { display: block; font-size: 11px; text-transform: uppercase; letter-spacing: .4px;
+  color: var(--text-faint); font-weight: 700; margin-bottom: 5px; }
+.gh-field input, .gh-field select { width: 100%; font-size: 13px; border: 1px solid var(--border-strong);
+  border-radius: 6px; padding: 8px 10px; font-family: inherit; background: var(--surface); color: var(--text); }
+.gh-vis { display: flex; gap: 8px; }
+.gh-vis .gh-opt { flex: 1; text-align: center; padding: 7px 10px; }
+.gh-success { border: 1px solid var(--green); background: var(--green-soft); border-radius: 8px; padding: 12px 14px; }
+.gh-success .h { font-weight: 600; color: var(--green); }
+.gh-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+.gh-err { color: var(--red); background: var(--red-soft); border: 1px solid var(--red); border-radius: 6px;
+  padding: 8px 10px; font-size: 12px; margin-top: 10px; word-break: break-word; }
+.gh-spin { width: 13px; height: 13px; border: 2px solid rgba(255,255,255,.5); border-top-color: #fff;
+  border-radius: 50%; display: inline-block; animation: gh-spin .7s linear infinite; }
+@keyframes gh-spin { to { transform: rotate(360deg); } }

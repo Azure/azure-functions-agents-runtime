@@ -155,8 +155,17 @@ export interface GitHubConnectResult {
   owner: string
   name: string
   branch: string
+  base?: string
+  prUrl?: string
+  prNumber?: number
   stored: boolean
   pushed: string[]
+}
+export interface GitHubAppConnection {
+  connected: boolean
+  repoUrl?: string
+  branch?: string
+  connectedBy?: string
 }
 
 export type DeployTarget =
@@ -339,6 +348,11 @@ export const api = {
 
   // GitHub connection (Phase 1): OAuth status, sign-in URL, repo list, connect.
   githubStatus: () => req<GitHubStatus>('GET', '/api/github/status'),
+  githubAppConnection: (p: { subscription: string; resourceGroup: string; app: string }) =>
+    req<GitHubAppConnection>(
+      'GET',
+      `/api/github/app-connection?subscription=${enc(p.subscription)}&resourceGroup=${enc(p.resourceGroup)}&app=${enc(p.app)}`,
+    ),
   githubLoginUrl: () => req<{ authorizeUrl: string }>('POST', '/api/github/login-url'),
   githubDisconnect: () => req<GitHubStatus>('POST', '/api/github/disconnect'),
   githubRepos: () => req<{ repos: GitHubRepo[] }>('GET', '/api/github/repos'),

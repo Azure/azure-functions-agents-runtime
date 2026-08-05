@@ -11,6 +11,8 @@ import path from 'node:path'
 import fs from 'node:fs'
 import { randomUUID } from 'node:crypto'
 
+import './env.js' // load .env into process.env before anything reads config
+
 import express from 'express'
 import cors from 'cors'
 
@@ -841,6 +843,21 @@ app.get(
   }),
 )
 
+// Whether a specific app already has a GitHub repo recorded on it (from the app
+// settings written at connect time). Used by the create + detail flows to show
+// the connected state instead of the connect form.
+app.get(
+  '/api/github/app-connection',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.query.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.query.resourceGroup ?? '').trim()
+    const appName = String(req.query.app ?? '').trim()
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    res.json(await azure.getAppGithubLink(token, subscription, resourceGroup, appName))
+  }),
+)
+
 // Mint the GitHub authorize URL bound to this user (opened by the SPA in a popup).
 app.post(
   '/api/github/login-url',
@@ -854,20 +871,28 @@ app.post(
 
 // OAuth callback — a top-level browser navigation, so it carries no ARM token;
 // the signed `state` binds it to the user. Returns a tiny self-closing page.
+// Registered at both paths so it works whether the app's registered Callback URL
+// is /api/github/callback or /oauth/github/callback.
 app.get(
-  '/api/github/callback',
+  ['/api/github/callback', '/oauth/github/callback'],
   wrap(async (req, res) => {
     const code = String(req.query.code || '')
     const state = github.readState(req.query.state)
     if (!code || !state) {
+      console.error('[github/callback] missing code or invalid/expired state', {
+        hasCode: Boolean(code),
+        validState: Boolean(state),
+      })
       return res.status(400).send(github.closePage('GitHub sign-in failed (invalid or expired state).', false))
     }
     try {
       const accessToken = await github.exchangeCode(code)
       const user = await github.getUser(accessToken)
       github.tokenStore.set(state.oid, { token: accessToken, login: user.login, avatarUrl: user.avatarUrl })
+      console.log('[github/callback] connected as', user.login, 'for oid', state.oid)
       res.send(github.closePage(`Connected as ${user.login}. You can close this window.`, true))
     } catch (err) {
+      console.error('[github/callback] FAILED:', String(err?.message ?? err))
       res.status(502).send(github.closePage(`GitHub sign-in failed: ${String(err?.message ?? err).slice(0, 200)}`, false))
     }
   }),
@@ -900,7 +925,8 @@ app.get(
   }),
 )
 
-// Create (or connect) a repo, push the app's source, and record the link on the app.
+// Create (or connect) a repo, open a PR with the app's source on a customer
+// branch, and record the repo link on the Function App.
 app.post(
   '/api/github/connect',
   wrap(async (req, res) => {
@@ -938,7 +964,19 @@ app.post(
         const name = safeSegment(String(req.body?.repoName ?? appName).trim() || appName)
         const priv = req.body?.private !== false
         const org = String(req.body?.org ?? '').trim()
-        const created = await github.createRepo(entry.token, { name, private: priv, org })
+        let created
+        try {
+          created = await github.createRepo(entry.token, { name, private: priv, org })
+        } catch (e) {
+          // Common on retries: the repo already exists. Reuse it instead of failing.
+          if (e.status === 422 || e.status === 404) {
+            const owner = org || entry.login
+            created = await github.getRepo(entry.token, owner, name).catch(() => null)
+            if (!created) throw e
+          } else {
+            throw e
+          }
+        }
         repo = {
           owner: created.owner,
           name: created.name,
@@ -947,13 +985,23 @@ app.post(
         }
       }
 
-      const branch = repo.defaultBranch || 'main'
-      await github.pushFiles(entry.token, {
+      // Always contribute via a pull request on a customer-named branch (never
+      // a direct push to the default branch), for both new and existing repos.
+      const base = repo.defaultBranch || 'main'
+      const seg = (s) =>
+        String(s)
+          .replace(/[^A-Za-z0-9._-]/g, '-')
+          .replace(/^-+|-+$/g, '') || 'x'
+      const head = `agents/${seg(entry.login)}/${seg(appName)}`
+      const pr = await github.openPullRequest(entry.token, {
         owner: repo.owner,
         repo: repo.name,
-        branch,
+        base,
+        head,
         files,
-        message: 'Initial agent source from the Serverless Agent Portal',
+        message: `Agent source for ${appName} (via Serverless Agent Portal)`,
+        title: `Add agent "${appName}" via Serverless Agent Portal`,
+        body: `Opened by the Serverless Agent Portal on behalf of @${entry.login}.\n\nThis PR adds the source for agent app \`${appName}\` on branch \`${head}\`.`,
       })
 
       // Record the connection on the Function App (light "deployment metadata"
@@ -963,7 +1011,7 @@ app.post(
       try {
         await azure.setAppSettings(token, subscription, resourceGroup, appName, {
           GITHUB_REPO_URL: repoUrl,
-          GITHUB_BRANCH: branch,
+          GITHUB_BRANCH: base,
           GITHUB_CONNECTED_BY: entry.login,
         })
       } catch {
@@ -975,12 +1023,16 @@ app.post(
         repoUrl,
         owner: repo.owner,
         name: repo.name,
-        branch,
+        base,
+        branch: head,
+        prUrl: pr.prUrl,
+        prNumber: pr.prNumber,
         stored,
         pushed: files.map((f) => f.name).sort(),
       })
     } catch (err) {
       if (err instanceof HttpError) throw err
+      console.error('[github/connect] FAILED:', err?.status ?? '', String(err?.message ?? err))
       throw new HttpError(err.status ?? 502, String(err?.message ?? err))
     }
   }),

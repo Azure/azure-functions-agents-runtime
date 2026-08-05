@@ -11,6 +11,7 @@ import {
   type GitHubStatus,
   type GitHubRepo,
   type GitHubConnectResult,
+  type GitHubAppConnection,
 } from './api'
 
 export type DeployPhase = 'idle' | 'running' | 'deployed' | 'error'
@@ -147,25 +148,31 @@ function GrantAccess({
   )
 }
 
-function GitHubConnect({ github }: { github: { subscription: string; resourceGroup: string; app: string } }) {
+export function GitHubConnect({ github }: { github: { subscription: string; resourceGroup: string; app: string } }) {
+  const { subscription, resourceGroup, app } = github
   const [status, setStatus] = useState<GitHubStatus | null>(null)
+  const [appConn, setAppConn] = useState<GitHubAppConnection | null>(null)
   const [busy, setBusy] = useState(false)
   const [mode, setMode] = useState<'new' | 'existing'>('new')
-  const [repoName, setRepoName] = useState(github.app)
+  const [repoName, setRepoName] = useState(app)
   const [priv, setPriv] = useState(true)
   const [repos, setRepos] = useState<GitHubRepo[] | null>(null)
   const [existingRepo, setExistingRepo] = useState('')
   const [pushing, setPushing] = useState(false)
   const [result, setResult] = useState<GitHubConnectResult | null>(null)
   const [error, setError] = useState('')
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refreshStatus = useCallback(async () => {
-    try {
-      setStatus(await api.githubStatus())
-    } catch {
-      setStatus({ configured: false, connected: false })
-    }
-  }, [])
+    const [s, c] = await Promise.all([
+      api.githubStatus().catch(() => ({ configured: false, connected: false }) as GitHubStatus),
+      api
+        .githubAppConnection({ subscription, resourceGroup, app })
+        .catch(() => ({ connected: false }) as GitHubAppConnection),
+    ])
+    setStatus(s)
+    setAppConn(c)
+  }, [subscription, resourceGroup, app])
 
   useEffect(() => {
     void refreshStatus()
@@ -181,20 +188,69 @@ function GitHubConnect({ github }: { github: { subscription: string; resourceGro
     return () => window.removeEventListener('message', onMsg)
   }, [refreshStatus])
 
+  // Stop any in-flight sign-in poll when the component unmounts.
+  useEffect(
+    () => () => {
+      if (pollRef.current) clearInterval(pollRef.current)
+    },
+    [],
+  )
+
   const connect = async () => {
     setError('')
     setBusy(true)
     // Open the popup synchronously (avoids blockers), then point it at GitHub.
     const popup = window.open('', 'github-oauth', 'width=760,height=820')
+    let authorizeUrl = ''
     try {
-      const { authorizeUrl } = await api.githubLoginUrl()
-      if (popup) popup.location.href = authorizeUrl
+      const resp = await api.githubLoginUrl()
+      authorizeUrl = resp.authorizeUrl
     } catch (e) {
-      if (popup) popup.close()
+      try {
+        popup?.close()
+      } catch {
+        /* ignore */
+      }
       setError((e as Error).message)
-    } finally {
       setBusy(false)
+      return
     }
+    if (!popup) {
+      setError('The sign-in popup was blocked. Allow pop-ups for this site, then try again.')
+      setBusy(false)
+      return
+    }
+    popup.location.href = authorizeUrl
+
+    // Finish by polling the server for the stored connection. This is robust
+    // even when the provider page severs the popup's opener link (COOP), which
+    // stops the popup's postMessage/self-close from reaching this tab.
+    if (pollRef.current) clearInterval(pollRef.current)
+    const deadline = Date.now() + 2 * 60 * 1000
+    pollRef.current = setInterval(async () => {
+      let connected = false
+      try {
+        connected = (await api.githubStatus()).connected
+      } catch {
+        /* transient — keep polling */
+      }
+      if (connected) {
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
+        setBusy(false)
+        try {
+          popup.close()
+        } catch {
+          /* opener link may be severed — the popup shows a “you can close this” note */
+        }
+        void refreshStatus()
+      } else if (Date.now() > deadline) {
+        if (pollRef.current) clearInterval(pollRef.current)
+        pollRef.current = null
+        setBusy(false)
+        setError('GitHub sign-in timed out. Please try again.')
+      }
+    }, 1500)
   }
 
   const loadRepos = async () => {
@@ -212,9 +268,9 @@ function GitHubConnect({ github }: { github: { subscription: string; resourceGro
     setResult(null)
     try {
       const r = await api.githubConnect({
-        subscription: github.subscription,
-        resourceGroup: github.resourceGroup,
-        app: github.app,
+        subscription,
+        resourceGroup,
+        app,
         mode,
         ...(mode === 'new' ? { repoName, private: priv } : { repo: existingRepo }),
       })
@@ -227,106 +283,190 @@ function GitHubConnect({ github }: { github: { subscription: string; resourceGro
   }
 
   if (!status) return null
+
   if (!status.configured) {
     return (
-      <div className="muted" style={{ marginTop: 10, fontSize: 12 }}>
-        🐙 GitHub sign-in isn’t configured on the server yet. Set{' '}
+      <div className="note" style={{ marginTop: 12 }}>
+        🐙 GitHub isn’t configured on the server yet. Set{' '}
         <span className="mono">GITHUB_OAUTH_CLIENT_ID</span> and{' '}
         <span className="mono">GITHUB_OAUTH_CLIENT_SECRET</span> to connect this agent to a repo.
       </div>
     )
   }
 
+  const disconnect = () => void api.githubDisconnect().then(refreshStatus)
+  const repoShort = (appConn?.repoUrl || '').replace('https://github.com/', '')
+
   return (
-    <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
-      <div style={{ fontWeight: 600, fontSize: 13, marginBottom: 6 }}>🐙 Connect to GitHub</div>
-      {!status.connected ? (
-        <>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            Sign in to push this agent’s source to a repo for history and pull-request edits.
+    <div className="gh">
+      <div className="gh-head">
+        <span className="gh-mark">🐙</span>
+        <span className="gh-title">GitHub</span>
+        <span style={{ flex: 1 }} />
+        {status.connected && (
+          <span className="gh-user">
+            {status.avatarUrl && <img src={status.avatarUrl} alt="" />}
+            @{status.login}
+            <button className="btn ghost sm" title="Disconnect GitHub" onClick={disconnect}>
+              ✕
+            </button>
+          </span>
+        )}
+      </div>
+
+      <div className="gh-body">
+        {appConn?.connected && !result ? (
+          <div className="gh-success">
+            <div className="h">✓ Connected to a repository</div>
+            <div className="gh-row">
+              <a className="btn sm" href={appConn.repoUrl} target="_blank" rel="noreferrer">
+                🔗 {repoShort || appConn.repoUrl}
+              </a>
+              {appConn.branch && <span className="badge gray mono">{appConn.branch}</span>}
+              {appConn.connectedBy && (
+                <span className="muted" style={{ fontSize: 12 }}>
+                  connected by @{appConn.connectedBy}
+                </span>
+              )}
+            </div>
           </div>
-          <button className="btn sm primary" disabled={busy} onClick={() => void connect()}>
-            {busy ? 'Opening…' : '🐙 Connect GitHub'}
-          </button>
-        </>
-      ) : result ? (
-        <div style={{ fontSize: 13 }}>
-          ✓ Pushed to{' '}
-          <a href={result.htmlUrl} target="_blank" rel="noreferrer">
-            {result.owner}/{result.name}
-          </a>{' '}
-          <span className="muted">({result.branch})</span>
-          {!result.stored && (
+        ) : result ? (
+          <div className="gh-success">
+            <div className="h">✓ Pull request opened{result.prNumber ? ` · #${result.prNumber}` : ''}</div>
             <div className="muted" style={{ fontSize: 12, marginTop: 4 }}>
-              Couldn’t save the repo link on the app (permission) — the push still succeeded.
+              Review &amp; merge to update{' '}
+              <span className="mono">
+                {result.owner}/{result.name}
+              </span>
+              .
             </div>
-          )}
-        </div>
-      ) : (
-        <>
-          <div className="muted" style={{ fontSize: 12, marginBottom: 6 }}>
-            Connected as <strong>{status.login}</strong>.
-          </div>
-          <div style={{ display: 'flex', gap: 6, marginBottom: 8 }}>
-            <button className={`btn sm ${mode === 'new' ? 'primary' : ''}`} onClick={() => setMode('new')}>
-              New repo
-            </button>
-            <button
-              className={`btn sm ${mode === 'existing' ? 'primary' : ''}`}
-              onClick={() => {
-                setMode('existing')
-                void loadRepos()
-              }}
-            >
-              Existing repo
-            </button>
-          </div>
-          {mode === 'new' ? (
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-              <input
-                value={repoName}
-                onChange={(e) => setRepoName(e.target.value)}
-                placeholder="repo-name"
-                style={{ minWidth: 200 }}
-              />
-              <label style={{ fontSize: 12, display: 'flex', gap: 4, alignItems: 'center' }}>
-                <input type="checkbox" checked={priv} onChange={(e) => setPriv(e.target.checked)} /> Private
-              </label>
+            <div className="gh-row">
+              <a
+                className="btn sm primary"
+                href={result.prUrl || result.htmlUrl}
+                target="_blank"
+                rel="noreferrer"
+              >
+                View pull request →
+              </a>
+              <span className="badge gray mono">
+                {result.branch}
+                {result.base ? ` → ${result.base}` : ''}
+              </span>
             </div>
-          ) : (
-            <select
-              value={existingRepo}
-              onChange={(e) => setExistingRepo(e.target.value)}
-              style={{ minWidth: 260 }}
-            >
-              <option value="">{repos ? 'Select a repo…' : 'Loading…'}</option>
-              {repos?.map((r) => (
-                <option key={r.fullName} value={r.fullName}>
-                  {r.fullName}
-                  {r.private ? ' (private)' : ''}
-                </option>
-              ))}
-            </select>
-          )}
-          <div style={{ marginTop: 8 }}>
+            {!result.stored && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                Couldn’t save the repo link on the app (permission) — the PR was still opened.
+              </div>
+            )}
+          </div>
+        ) : !status.connected ? (
+          <div className="gh-cta">
+            <p>
+              Open a pull request with this agent’s source — on a new branch named for you. Review &amp; merge
+              to publish.
+            </p>
+            <button className="btn primary" disabled={busy} onClick={() => void connect()}>
+              {busy ? (
+                <>
+                  <span className="gh-spin" /> Waiting for GitHub…
+                </>
+              ) : (
+                <>🐙 Connect GitHub</>
+              )}
+            </button>
+            {busy && (
+              <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+                Complete sign-in in the popup — this tab updates automatically.
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            <div className="gh-seg">
+              <button
+                type="button"
+                className={`gh-opt${mode === 'new' ? ' active' : ''}`}
+                onClick={() => setMode('new')}
+              >
+                <span className="t">✨ New repository</span>
+                <span className="d">Create a repo &amp; open a PR</span>
+              </button>
+              <button
+                type="button"
+                className={`gh-opt${mode === 'existing' ? ' active' : ''}`}
+                onClick={() => {
+                  setMode('existing')
+                  void loadRepos()
+                }}
+              >
+                <span className="t">📁 Existing repository</span>
+                <span className="d">Open a PR into a repo you pick</span>
+              </button>
+            </div>
+
+            {mode === 'new' ? (
+              <>
+                <div className="gh-field">
+                  <label>Repository name</label>
+                  <input value={repoName} onChange={(e) => setRepoName(e.target.value)} placeholder="my-agent" />
+                </div>
+                <div className="gh-field">
+                  <label>Visibility</label>
+                  <div className="gh-vis">
+                    <button
+                      type="button"
+                      className={`gh-opt${priv ? ' active' : ''}`}
+                      onClick={() => setPriv(true)}
+                    >
+                      <span className="t">🔒 Private</span>
+                    </button>
+                    <button
+                      type="button"
+                      className={`gh-opt${!priv ? ' active' : ''}`}
+                      onClick={() => setPriv(false)}
+                    >
+                      <span className="t">🌐 Public</span>
+                    </button>
+                  </div>
+                </div>
+              </>
+            ) : (
+              <div className="gh-field">
+                <label>Repository</label>
+                <select value={existingRepo} onChange={(e) => setExistingRepo(e.target.value)}>
+                  <option value="">{repos ? 'Select a repository…' : 'Loading your repositories…'}</option>
+                  {repos?.map((r) => (
+                    <option key={r.fullName} value={r.fullName}>
+                      {r.fullName}
+                      {r.private ? ' (private)' : ''}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
+
             <button
-              className="btn sm primary"
+              className="btn primary"
+              style={{ width: '100%', justifyContent: 'center', marginTop: 4 }}
               disabled={pushing || (mode === 'new' ? !repoName.trim() : !existingRepo)}
               onClick={() => void createAndPush()}
             >
-              {pushing ? 'Pushing…' : mode === 'new' ? 'Create & push' : 'Push to repo'}
-            </button>{' '}
-            <button className="btn sm" onClick={() => void api.githubDisconnect().then(refreshStatus)}>
-              Disconnect
+              {pushing ? (
+                <>
+                  <span className="gh-spin" /> Opening pull request…
+                </>
+              ) : mode === 'new' ? (
+                'Create repository & open PR'
+              ) : (
+                'Open pull request'
+              )}
             </button>
-          </div>
-        </>
-      )}
-      {error && (
-        <div className="muted" style={{ color: 'var(--red)', fontSize: 12, marginTop: 6 }}>
-          {error}
-        </div>
-      )}
+          </>
+        )}
+
+        {error && <div className="gh-err">{error}</div>}
+      </div>
     </div>
   )
 }
