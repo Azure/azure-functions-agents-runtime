@@ -356,6 +356,12 @@ export const api = {
     ),
   githubLoginUrl: () => req<{ authorizeUrl: string }>('POST', '/api/github/login-url'),
   githubDisconnect: () => req<GitHubStatus>('POST', '/api/github/disconnect'),
+  githubUnlink: (p: { subscription: string; resourceGroup: string; app: string; deploymentCenter?: boolean }) =>
+    req<{ ok: boolean; cleared: boolean; deploymentCenter: boolean; deploymentCenterCleared: boolean }>(
+      'POST',
+      '/api/github/unlink',
+      p,
+    ),
   githubRepos: () => req<{ repos: GitHubRepo[] }>('GET', '/api/github/repos'),
   githubConnect: (p: {
     subscription: string

@@ -66,6 +66,8 @@ a:hover { text-decoration: underline; }
 .btn.primary:hover { background: var(--brand-dark); }
 .btn.ghost { border-color: transparent; background: transparent; }
 .btn.sm { padding: 4px 9px; font-size: 12px; }
+.btn.danger { border-color: var(--red); color: var(--red); background: var(--red-soft); }
+.btn.danger:hover { background: #f7d6d9; }
 .btn:disabled { opacity: .55; cursor: not-allowed; }
 
 .login { min-height: 100vh; display: grid; place-items: center; padding: 24px;

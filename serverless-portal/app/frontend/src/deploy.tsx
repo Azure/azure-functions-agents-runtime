@@ -161,6 +161,9 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
   const [pushing, setPushing] = useState(false)
   const [result, setResult] = useState<GitHubConnectResult | null>(null)
   const [error, setError] = useState('')
+  const [changingRepo, setChangingRepo] = useState(false)
+  const [unlinking, setUnlinking] = useState(false)
+  const [changeNote, setChangeNote] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refreshStatus = useCallback(async () => {
@@ -275,11 +278,70 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
         ...(mode === 'new' ? { repoName, private: priv } : { repo: existingRepo }),
       })
       setResult(r)
+      setChangingRepo(false)
     } catch (e) {
       setError((e as Error).message)
     } finally {
       setPushing(false)
     }
+  }
+
+  // Delete the recorded repo link so the agent can be connected to a different
+  // repository, then drop into the New/Existing chooser. Best-effort: even if the
+  // clear fails we still let the user pick a new repo (the next connect overwrites
+  // the recorded link).
+  const changeRepo = async () => {
+    setError('')
+    setChangeNote('')
+    setUnlinking(true)
+    try {
+      const r = await api.githubUnlink({ subscription, resourceGroup, app })
+      if (r.deploymentCenter)
+        setChangeNote(
+          'The current repository is connected through the Function App’s Deployment Center. ' +
+            'Use “Disconnect Deployment Center” to remove that link (or change it in the Azure portal), ' +
+            'then connect a new repo below — opening a PR alone won’t repoint the Deployment Center.',
+        )
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setUnlinking(false)
+    }
+    setResult(null)
+    setExistingRepo('')
+    setChangingRepo(true)
+    void refreshStatus()
+  }
+
+  // For a repo connected through the Function App's Deployment Center (GitHub
+  // Actions set up in the Azure portal), remove that source link too so the app
+  // stops pointing at the old repo. Destructive — confirm first.
+  const disconnectDeploymentCenter = async () => {
+    const ok = window.confirm(
+      'Disconnect the Function App from its Deployment Center repository?\n\n' +
+        'This removes the GitHub Actions source link on the app so it no longer points at the old repo. ' +
+        'The workflow file in the old repo and any federated credentials are left in place. Continue?',
+    )
+    if (!ok) return
+    setError('')
+    setChangeNote('')
+    setUnlinking(true)
+    try {
+      const r = await api.githubUnlink({ subscription, resourceGroup, app, deploymentCenter: true })
+      setChangeNote(
+        r.deploymentCenterCleared
+          ? 'Deployment Center disconnected. Connect this agent to a different repository below.'
+          : 'Couldn’t remove the Deployment Center link automatically — disconnect it in the Azure portal, then connect a new repo here.',
+      )
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setUnlinking(false)
+    }
+    setResult(null)
+    setExistingRepo('')
+    setChangingRepo(true)
+    void refreshStatus()
   }
 
   if (!status) return null
@@ -315,7 +377,7 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
       </div>
 
       <div className="gh-body">
-        {appConn?.connected && !result ? (
+        {appConn?.connected && !result && !changingRepo ? (
           <div className="gh-success">
             <div className="h">✓ Connected to a repository</div>
             <div className="gh-row">
@@ -344,6 +406,26 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
               {appConn.source === 'deploymentCenter'
                 ? 'Read from the Function App’s Deployment Center. Further edits open new branches in this repo.'
                 : 'Recorded on the Function App. Further edits open new branches in this repo.'}
+            </div>
+            <div className="gh-row" style={{ marginTop: 10 }}>
+              <button className="btn sm ghost" disabled={unlinking} onClick={() => void changeRepo()}>
+                {unlinking ? (
+                  <>
+                    <span className="gh-spin" /> Updating…
+                  </>
+                ) : (
+                  <>🔁 Change repository</>
+                )}
+              </button>
+              {appConn.source === 'deploymentCenter' && (
+                <button
+                  className="btn sm danger"
+                  disabled={unlinking}
+                  onClick={() => void disconnectDeploymentCenter()}
+                >
+                  🔌 Disconnect Deployment Center
+                </button>
+              )}
             </div>
           </div>
         ) : result ? (
@@ -407,6 +489,30 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
           </div>
         ) : (
           <>
+            {changingRepo && (
+              <div className="gh-row" style={{ marginBottom: 8 }}>
+                <span className="muted" style={{ fontSize: 12, flex: 1 }}>
+                  Connect this agent to a different repository.
+                </span>
+                {appConn?.connected && (
+                  <button
+                    type="button"
+                    className="btn sm ghost"
+                    onClick={() => {
+                      setChangingRepo(false)
+                      setChangeNote('')
+                    }}
+                  >
+                    Cancel
+                  </button>
+                )}
+              </div>
+            )}
+            {changeNote && (
+              <div className="note" style={{ marginBottom: 8 }}>
+                {changeNote}
+              </div>
+            )}
             <div className="gh-seg">
               <button
                 type="button"

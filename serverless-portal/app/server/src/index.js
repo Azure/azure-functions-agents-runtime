@@ -958,6 +958,51 @@ app.post(
   }),
 )
 
+// Remove the portal-recorded GitHub repo link from a Function App so it can be
+// connected to a different repository. Clears only the app-setting metadata the
+// portal wrote; a Deployment Center (GitHub Actions) connection set up in the
+// Azure portal is left untouched (flagged in the response so the UI can note it).
+app.post(
+  '/api/github/unlink',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const resourceGroup = String(req.body?.resourceGroup ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    // Opt-in: also disconnect the Function App's Deployment Center source control
+    // (the GitHub Actions link set up in the Azure portal) so it stops pointing at
+    // the old repo. Destructive — the UI gates it behind a confirmation.
+    const disconnectDC = req.body?.deploymentCenter === true
+    if (!resourceGroup || !appName) throw new HttpError(400, 'resourceGroup and app are required.')
+    // Note whether the live link currently comes from the Deployment Center.
+    let deploymentCenter = false
+    try {
+      const link = await azure.getAppGithubLink(token, subscription, resourceGroup, appName)
+      deploymentCenter = link?.source === 'deploymentCenter'
+    } catch {
+      /* best-effort */
+    }
+    let cleared = false
+    try {
+      cleared = await azure.clearAppGithubLink(token, subscription, resourceGroup, appName)
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+    // Best-effort DELETE of the Deployment Center source when explicitly requested.
+    let deploymentCenterCleared = false
+    if (disconnectDC) {
+      try {
+        const r = await azure.deleteDeploymentSource(token, subscription, resourceGroup, appName)
+        deploymentCenterCleared = r.ok
+        if (!r.ok) console.error('[github/unlink] deployment center disconnect failed:', r.status)
+      } catch (err) {
+        console.error('[github/unlink] deployment center disconnect error:', String(err?.message ?? err))
+      }
+    }
+    res.json({ ok: true, cleared, deploymentCenter, deploymentCenterCleared })
+  }),
+)
+
 // List the connected user's repos (for the "existing repo" picker).
 app.get(
   '/api/github/repos',
