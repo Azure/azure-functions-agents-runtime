@@ -885,6 +885,141 @@ export async function deleteDeploymentSource(accessToken, subscriptionId, resour
   return { ok: res.ok, status: res.status }
 }
 
+// --- GitHub Actions (OIDC) provisioning ------------------------------------
+// Set up passwordless CI/CD from a GitHub repo to a Function App using a
+// user-assigned managed identity + a federated identity credential. This is
+// all-ARM (Microsoft.ManagedIdentity + a role assignment) — no Microsoft Graph
+// or app registration is required.
+const MSI_API = '2023-01-31'
+const ROLE_CONTRIBUTOR = 'b24988ac-6180-42a0-ab88-20f7382dd24c'
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
+
+// Create (or update) a user-assigned managed identity; return its ids. Polls
+// briefly for clientId/principalId, which can lag right after creation.
+export async function ensureUserAssignedIdentity(accessToken, subscriptionId, resourceGroup, name, location) {
+  const base = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${name}`
+  const put = await armJson(accessToken, `${base}?api-version=${MSI_API}`, {
+    method: 'PUT',
+    body: { location },
+    timeoutMs: 60000,
+  })
+  if (!put.ok) {
+    const msg = put.json?.error?.message || `HTTP ${put.status}`
+    throw Object.assign(new Error(`managed identity: ${msg}`), { status: put.status })
+  }
+  let clientId = put.json?.properties?.clientId || ''
+  let principalId = put.json?.properties?.principalId || ''
+  for (let i = 0; i < 6 && (!clientId || !principalId); i++) {
+    await sleep(2000)
+    const g = await armJson(accessToken, `${base}?api-version=${MSI_API}`)
+    clientId = g.json?.properties?.clientId || clientId
+    principalId = g.json?.properties?.principalId || principalId
+  }
+  return { id: put.json?.id || base, name, clientId, principalId }
+}
+
+// Create/replace a federated identity credential on a user-assigned identity so
+// GitHub Actions (OIDC) for a specific repo+branch can obtain Azure tokens.
+export async function ensureFederatedCredential(
+  accessToken,
+  subscriptionId,
+  resourceGroup,
+  identityName,
+  ficName,
+  subject,
+) {
+  const url = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${identityName}/federatedIdentityCredentials/${ficName}?api-version=${MSI_API}`
+  const res = await armJson(accessToken, url, {
+    method: 'PUT',
+    body: {
+      properties: {
+        issuer: 'https://token.actions.githubusercontent.com',
+        subject,
+        audiences: ['api://AzureADTokenExchange'],
+      },
+    },
+    timeoutMs: 60000,
+  })
+  if (!res.ok) {
+    const msg = res.json?.error?.message || `HTTP ${res.status}`
+    throw Object.assign(new Error(`federated credential: ${msg}`), { status: res.status })
+  }
+  return { name: ficName, subject }
+}
+
+// Assign a built-in role to a principal at resource-group scope. Idempotent (an
+// existing assignment counts as success), with retries while a freshly created
+// identity's service principal propagates through AAD.
+export async function ensureRoleAssignment(
+  accessToken,
+  subscriptionId,
+  resourceGroup,
+  principalId,
+  roleDefinitionId = ROLE_CONTRIBUTOR,
+) {
+  const scope = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}`
+  const body = {
+    properties: {
+      roleDefinitionId: `/subscriptions/${subscriptionId}/providers/Microsoft.Authorization/roleDefinitions/${roleDefinitionId}`,
+      principalId,
+      principalType: 'ServicePrincipal',
+    },
+  }
+  let last
+  for (let i = 0; i < 6; i++) {
+    const url = `${scope}/providers/Microsoft.Authorization/roleAssignments/${randomUUID()}?api-version=2022-04-01`
+    const res = await armJson(accessToken, url, { method: 'PUT', body, timeoutMs: 30000 })
+    const code = String(res.json?.error?.code ?? '')
+    if (res.ok || res.status === 409 || /RoleAssignmentExists/i.test(code)) {
+      return { scope, roleDefinitionId, existed: !res.ok }
+    }
+    last = res
+    if (!/PrincipalNotFound/i.test(code)) break
+    await sleep(5000)
+  }
+  const msg = last?.json?.error?.message || `HTTP ${last?.status}`
+  throw Object.assign(new Error(`role assignment: ${msg}`), { status: last?.status })
+}
+
+// Best-effort: record the GitHub repo on the Function App's Deployment Center as a
+// GitHub Actions source so the portal blade shows it. We do NOT ask Azure to
+// generate a workflow (generateWorkflowFile:false) — we commit our own. Registers
+// the user's GitHub token at the tenant source-control first. Never throws.
+export async function setGithubActionSource(
+  accessToken,
+  subscriptionId,
+  resourceGroup,
+  appName,
+  { repoUrl, branch, githubToken },
+) {
+  try {
+    if (githubToken) {
+      await armJson(accessToken, `/providers/Microsoft.Web/sourcecontrols/GitHub?api-version=2023-12-01`, {
+        method: 'PUT',
+        body: { properties: { token: githubToken } },
+        timeoutMs: 30000,
+      })
+    }
+    const url = `/subscriptions/${subscriptionId}/resourceGroups/${resourceGroup}/providers/Microsoft.Web/sites/${appName}/sourcecontrols/web?api-version=2023-12-01`
+    const res = await armJson(accessToken, url, {
+      method: 'PUT',
+      body: {
+        properties: {
+          repoUrl,
+          branch: branch || 'main',
+          isManualIntegration: false,
+          isGitHubAction: true,
+          gitHubActionConfiguration: { generateWorkflowFile: false, isLinux: true },
+        },
+      },
+      timeoutMs: 60000,
+    })
+    return { ok: res.ok, status: res.status }
+  } catch {
+    return { ok: false }
+  }
+}
+
 // Read the GitHub connection recorded on a Function App. Prefers the Deployment
 // Center source control (the source of truth — also set when connected outside
 // this portal), then falls back to the portal's app-setting metadata.

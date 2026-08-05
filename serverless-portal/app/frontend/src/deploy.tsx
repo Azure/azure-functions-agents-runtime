@@ -164,6 +164,9 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
   const [changingRepo, setChangingRepo] = useState(false)
   const [unlinking, setUnlinking] = useState(false)
   const [changeNote, setChangeNote] = useState('')
+  const [provisioning, setProvisioning] = useState(false)
+  const [provisionMsg, setProvisionMsg] = useState('')
+  const [provisionRuns, setProvisionRuns] = useState('')
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null)
 
   const refreshStatus = useCallback(async () => {
@@ -344,6 +347,64 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
     void refreshStatus()
   }
 
+  // Provision passwordless GitHub Actions CI/CD (OIDC) from the connected repo to
+  // this Function App and re-point the Deployment Center. Infra-mutating — confirm.
+  const provisionDeploy = async () => {
+    if (!appConn?.repoUrl) return
+    const repo = appConn.repoUrl.replace('https://github.com/', '')
+    const ok = window.confirm(
+      `Set up GitHub Actions deployment from ${repo} to this Function App?\n\n` +
+        'This creates a user-assigned managed identity + federated credential, assigns Contributor on ' +
+        'the resource group, commits a deploy workflow to the repo, and re-points the Deployment Center. Continue?',
+    )
+    if (!ok) return
+    setError('')
+    setProvisionMsg('')
+    setProvisionRuns('')
+    setProvisioning(true)
+    try {
+      const r = await api.githubProvisionDeployment({
+        subscription,
+        resourceGroup,
+        app,
+        repo,
+        branch: appConn.branch || 'main',
+      })
+      setProvisionMsg(`✓ GitHub Actions configured — pushes to ${appConn.branch || 'main'} now deploy this app.`)
+      setProvisionRuns(r.runsUrl)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setProvisioning(false)
+    }
+    void refreshStatus()
+  }
+
+  // Push the app's current saved edits (including unpublished drafts) to the
+  // connected repo, opening or updating the rolling pull request.
+  const pushChanges = async () => {
+    if (!appConn?.repoUrl) return
+    const repo = appConn.repoUrl.replace('https://github.com/', '')
+    setError('')
+    setResult(null)
+    setPushing(true)
+    try {
+      const r = await api.githubConnect({
+        subscription,
+        resourceGroup,
+        app,
+        mode: 'existing',
+        repo,
+        branch: appConn.branch || 'main',
+      })
+      setResult(r)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setPushing(false)
+    }
+  }
+
   if (!status) return null
 
   if (!status.configured) {
@@ -403,11 +464,28 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
               )}
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-              {appConn.source === 'deploymentCenter'
-                ? 'Read from the Function App’s Deployment Center. Further edits open new branches in this repo.'
-                : 'Recorded on the Function App. Further edits open new branches in this repo.'}
+              Use “Push changes &amp; open PR” to commit your latest saved edits (including unpublished
+              drafts) into a pull request on this repo.
             </div>
             <div className="gh-row" style={{ marginTop: 10 }}>
+              <button className="btn sm primary" disabled={pushing} onClick={() => void pushChanges()}>
+                {pushing ? (
+                  <>
+                    <span className="gh-spin" /> Opening pull request…
+                  </>
+                ) : (
+                  <>📤 Push changes &amp; open PR</>
+                )}
+              </button>
+              <button className="btn sm" disabled={provisioning} onClick={() => void provisionDeploy()}>
+                {provisioning ? (
+                  <>
+                    <span className="gh-spin" /> Setting up…
+                  </>
+                ) : (
+                  <>⚙️ Set up GitHub Actions deploy</>
+                )}
+              </button>
               <button className="btn sm ghost" disabled={unlinking} onClick={() => void changeRepo()}>
                 {unlinking ? (
                   <>
@@ -427,6 +505,19 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
                 </button>
               )}
             </div>
+            {provisionMsg && (
+              <div className="gh-row" style={{ marginTop: 8 }}>
+                <span className="badge green">GitHub Actions</span>
+                <span className="muted" style={{ fontSize: 12 }}>
+                  {provisionMsg}
+                </span>
+                {provisionRuns && (
+                  <a className="btn sm" href={provisionRuns} target="_blank" rel="noreferrer">
+                    View Actions ↗
+                  </a>
+                )}
+              </div>
+            )}
           </div>
         ) : result ? (
           <div className="gh-success">
@@ -459,6 +550,14 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
                 {result.branch}
                 {result.base ? ` → ${result.base}` : ''}
               </span>
+              <button className="btn sm ghost" onClick={() => setResult(null)} title="Back to the repository">
+                ← Back
+              </button>
+            </div>
+            <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+              {result.deploymentCenter
+                ? '✓ Also recorded in the Function App’s Deployment Center.'
+                : 'Recorded on the Function App. Use “⚙️ Set up GitHub Actions deploy” to add it to the Deployment Center (disconnect an existing one first).'}
             </div>
             {!result.stored && (
               <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
