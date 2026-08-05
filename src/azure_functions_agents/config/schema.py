@@ -191,9 +191,10 @@ class HarnessAgentConfig(BaseModel):
 
     When an agent opts into harness mode (``harness: true`` in frontmatter or
     ``agents.config.yaml``), the runtime uses MAF's ``create_harness_agent``
-    instead of the plain ``Agent`` constructor.  The harness manages context
-    compaction so the agent's system prompt is **not** re-sent on every turn,
-    reducing token usage for long-running conversations.
+    instead of the plain ``Agent`` constructor. The harness can compact
+    accumulated conversation history before model calls, reducing input-token
+    growth after the configured threshold is reached. Agent instructions are
+    still supplied on every model call.
 
     All fields are optional; an empty object (``harness: true`` short-hand)
     uses the harness defaults with no compaction configured.
@@ -218,7 +219,13 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
-    harness: bool | HarnessAgentConfig | None = None
+    harness: bool | HarnessAgentConfig | None = Field(
+        default=None,
+        description=(
+            "App-wide harness-agent enablement and context-compaction settings. "
+            "Agents inherit this value when their front matter omits harness."
+        ),
+    )
     http_auth: EndpointAuthConfig | None = Field(
         default=None,
         description=(
@@ -256,7 +263,13 @@ class AgentSpec(BaseModel):
     instructions: str = ""
     source_file: str | None = None
     is_main: bool = False
-    harness: bool | HarnessAgentConfig | None = None
+    harness: bool | HarnessAgentConfig | None = Field(
+        default=None,
+        description=(
+            "Per-agent harness override. Omit to inherit global settings, set false to opt out, "
+            "set true to enable harness defaults, or provide an object with compaction settings."
+        ),
+    )
 
 
 class ResolvedAgent(BaseModel):

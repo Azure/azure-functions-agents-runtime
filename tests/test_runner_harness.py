@@ -3,8 +3,17 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping, Sequence
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, ClassVar
+
+from agent_framework import (
+    BaseChatClient,
+    ChatMiddlewareLayer,
+    ChatResponse,
+    HistoryProvider,
+    Message,
+)
 
 from azure_functions_agents import runner
 from azure_functions_agents.config.schema import HarnessAgentConfig
@@ -20,6 +29,56 @@ class _FakeAgent:
 
     async def run(self, _prompt: str, *, session: Any, options: Any = None) -> Any:
         return SimpleNamespace(text=self._response_text, messages=[])
+
+
+class _RecordingStoringChatClient(ChatMiddlewareLayer, BaseChatClient):
+    STORES_BY_DEFAULT: ClassVar[bool] = True
+
+    def __init__(self, response_text: str = "response") -> None:
+        super().__init__()
+        self.calls: list[list[str]] = []
+        self.response_text = response_text
+
+    def _inner_get_response(
+        self,
+        *,
+        messages: Sequence[Message],
+        stream: bool,
+        options: Mapping[str, Any],
+        **kwargs: Any,
+    ) -> Any:
+        assert not stream
+        self.calls.append([message.text for message in messages])
+
+        async def get_response() -> ChatResponse[Any]:
+            return ChatResponse(messages=[Message("assistant", [self.response_text])])
+
+        return get_response()
+
+
+class _SharedHistoryProvider(HistoryProvider):
+    def __init__(self, messages: list[Message]) -> None:
+        super().__init__(source_id="shared_history")
+        self.messages = messages
+
+    async def get_messages(
+        self,
+        session_id: str | None,
+        *,
+        state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> list[Message]:
+        return list(self.messages)
+
+    async def save_messages(
+        self,
+        session_id: str | None,
+        messages: Sequence[Message],
+        *,
+        state: dict[str, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        self.messages.extend(messages)
 
 
 # ---------------------------------------------------------------------------
@@ -66,6 +125,153 @@ def test_build_harness_agent_session_falls_back_on_import_error(monkeypatch: Any
     )
 
     assert len(plain_called) == 1, "plain builder should have been called once as fallback"
+
+
+def test_build_harness_agent_session_forces_provider_managed_history(
+    monkeypatch: Any,
+) -> None:
+    """Fresh request-scoped sessions must reload history from the configured provider."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured.append(kwargs)
+        return _FakeAgent()
+
+    import agent_framework
+
+    monkeypatch.setattr(agent_framework, "create_harness_agent", fake_create_harness_agent)
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client",
+        lambda _model: object(),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
+
+    asyncio.run(
+        runner._build_harness_agent_session(
+            instructions="do stuff",
+            session_id="shared-session",
+            tools=[],
+            mcp_tools=[],
+            skill_paths=None,
+            model=None,
+            sandbox_tools=None,
+            system_addendum=None,
+            workflow_enabled=False,
+            workflow_durable_client=None,
+            agent_name=None,
+            web_request_tools=None,
+            harness_config=HarnessAgentConfig(),
+        )
+    )
+
+    assert captured[0]["default_options"] == {"store": False}
+
+
+def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) -> None:
+    """Turn two receives turn-one history even though both agents and sessions are fresh."""
+    client = _RecordingStoringChatClient()
+    stored_messages: list[Message] = []
+
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client",
+        lambda _model: client,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_build_history_provider",
+        lambda: _SharedHistoryProvider(stored_messages),
+    )
+
+    async def run_two_turns() -> None:
+        common = {
+            "instructions": "",
+            "session_id": "shared-session",
+            "tools": [],
+            "mcp_tools": [],
+            "skill_paths": None,
+            "model": None,
+            "sandbox_tools": None,
+            "system_addendum": None,
+            "workflow_enabled": False,
+            "workflow_durable_client": None,
+            "agent_name": None,
+            "web_request_tools": None,
+            "harness_config": HarnessAgentConfig(),
+        }
+        first_agent, first_session, _ = await runner._build_harness_agent_session(**common)
+        await first_agent.run("Use the Premium plan.", session=first_session)
+        assert [message.text for message in stored_messages] == [
+            "Use the Premium plan.",
+            "response",
+        ]
+
+        second_agent, second_session, _ = await runner._build_harness_agent_session(**common)
+        await second_agent.run("Which plan did I choose?", session=second_session)
+
+    asyncio.run(run_two_turns())
+
+    assert client.calls == [
+        ["Use the Premium plan."],
+        ["Use the Premium plan.", "response", "Which plan did I choose?"],
+    ]
+
+
+def test_fresh_harness_agents_compact_externally_loaded_history(monkeypatch: Any) -> None:
+    """A fresh harness compacts loaded history while retaining the current prompt."""
+    response_text = "prior response detail " * 80
+    first_prompt = "first-turn context " * 80
+    second_prompt = "current-turn question " * 80
+    client = _RecordingStoringChatClient(response_text=response_text)
+    stored_messages: list[Message] = []
+
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client",
+        lambda _model: client,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_build_history_provider",
+        lambda: _SharedHistoryProvider(stored_messages),
+    )
+
+    async def run_two_turns() -> None:
+        common = {
+            "instructions": "",
+            "session_id": "compacted-session",
+            "tools": [],
+            "mcp_tools": [],
+            "skill_paths": None,
+            "model": None,
+            "sandbox_tools": None,
+            "system_addendum": None,
+            "workflow_enabled": False,
+            "workflow_durable_client": None,
+            "agent_name": None,
+            "web_request_tools": None,
+            "harness_config": HarnessAgentConfig(
+                max_context_window_tokens=500,
+                max_output_tokens=100,
+            ),
+        }
+        first_agent, first_session, _ = await runner._build_harness_agent_session(**common)
+        await first_agent.run(first_prompt, session=first_session)
+
+        second_agent, second_session, _ = await runner._build_harness_agent_session(**common)
+        await second_agent.run(second_prompt, session=second_session)
+
+    asyncio.run(run_two_turns())
+
+    assert client.calls[0] == [first_prompt]
+    assert client.calls[1] == [second_prompt]
+    assert [message.text for message in stored_messages] == [
+        first_prompt,
+        response_text,
+        second_prompt,
+        response_text,
+    ]
 
 
 # ---------------------------------------------------------------------------

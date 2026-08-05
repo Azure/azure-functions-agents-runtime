@@ -12,7 +12,7 @@ requires-python = ">=3.13"
 dependencies = [
     "azure-functions>=2.1.0,<3",
     "azure-functions-durable>=1.2.10,<2",
-    "agent-framework-core>=1.9.0,<2",
+    "agent-framework-core>=1.12.1,<2",
     "agent-framework-openai>=1.9.0,<2",
     "agent-framework-foundry>=1.9.0,<2",
     "pydantic>=2.13.4,<3",

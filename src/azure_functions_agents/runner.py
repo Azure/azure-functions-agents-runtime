@@ -747,7 +747,7 @@ async def _build_harness_agent_session(
     import warnings
 
     try:
-        from agent_framework import create_harness_agent  # type: ignore[attr-defined]
+        from agent_framework import create_harness_agent
         from agent_framework._feature_stage import ExperimentalWarning
     except ImportError:
         logger.warning(
@@ -822,11 +822,11 @@ async def _build_harness_agent_session(
     # create_harness_agent takes skills_paths natively; no SkillsProvider in context_providers.
     # history_provider is passed directly (not via context_providers) so that the harness can
     # call before_run/after_run on it for both context injection and per-service-call persistence.
-    # NOTE: ContextWindowCompactionStrategy (enabled by max_context_window_tokens) does not yet
-    # support stateless per-request agents — each new agent instance starts with an empty
-    # InMemoryHistoryProvider, causing the CompactionProvider to overwrite externally-injected
-    # blob history. Until MAF supports persistent compaction state across requests, compaction
-    # must be disabled (max_context_window_tokens=None) for serverless deployments.
+    # Force provider-managed storage because request-scoped AgentSession instances do not retain
+    # the service-managed conversation ID returned by clients that store history by default.
+    # MAF >= 1.12.1 applies before-call compaction after the external provider loads history, so
+    # request-scoped agents can compact Blob-backed conversations without persisting in-memory
+    # compaction state between requests.
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         agent = create_harness_agent(
@@ -843,6 +843,7 @@ async def _build_harness_agent_session(
             max_context_window_tokens=resolved_config.max_context_window_tokens,
             max_output_tokens=resolved_config.max_output_tokens,
             disable_file_memory=resolved_config.disable_file_memory,
+            default_options={"store": False},
         )
 
     return agent, session, resolved_id
