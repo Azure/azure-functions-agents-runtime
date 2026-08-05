@@ -7,11 +7,10 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
-
 from azure_functions_agents._logger import logger as _logger
 
-from .schema import EndpointAuthConfig, GlobalConfig, ResolvedAgent
+from .http_auth import resolve_http_trigger_auth
+from .schema import GlobalConfig, ResolvedAgent
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -189,7 +188,7 @@ _FRD_0008_LINK = "docs/frds/0008-aca-sandbox-session-runtime.md"
 # Row 9: the platform's documented idle auto-suspend values.
 _ALLOWED_AUTO_SUSPEND_IDLE_SECONDS: tuple[int, ...] = (60, 120, 300, 600, 1800, 3600)
 
-# Row 13's arithmetic-only defaults (see `auto_delete_backstop_violated`).
+# Legacy arithmetic defaults retained for the pure compatibility helper below.
 _RECONCILER_CADENCE_SECONDS_DEFAULT = 3600
 _AUTO_DELETE_GRACE_SECONDS_DEFAULT = 300
 
@@ -235,10 +234,12 @@ def auto_delete_backstop_violated(
     reconciler_cadence_seconds: int = _RECONCILER_CADENCE_SECONDS_DEFAULT,
     grace_seconds: int = _AUTO_DELETE_GRACE_SECONDS_DEFAULT,
 ) -> bool:
-    """Row 13: True if `reclaim_idle` leaves no margin before the ACA
-    platform's own auto-delete backstop. Not yet wired into
-    `validate_session_runtime` -- needs a live SDK value (a later phase);
-    row 13's hard-fail is met today by the unconditional capability gate.
+    """Return whether a supplied lifecycle policy leaves insufficient reclaim margin.
+
+    The runtime now writes a complete per-sandbox policy after create, using
+    ``reclaim + 3600 + 300`` for auto-delete. It no longer reads or validates a
+    Sandbox Group default. This helper remains a pure compatibility utility for
+    callers that explicitly supply a policy value.
     """
     return reclaim_idle_seconds > (
         auto_delete_seconds - reconciler_cadence_seconds - grace_seconds
@@ -346,16 +347,10 @@ def _resolve_http_trigger_auth_mode(trigger_args: dict[str, Any]) -> str:
     treated as anonymous here; ``registration.triggers`` reports that error
     independently at registration time.
     """
-    raw_auth = trigger_args.get("http_auth")
-    if raw_auth is not None:
-        try:
-            return EndpointAuthConfig.model_validate(raw_auth).mode
-        except ValidationError:
-            return "function"
-    raw_level = trigger_args.get("auth_level")
-    if raw_level is not None:
-        return str(raw_level).strip().lower()
-    return "function"
+    try:
+        return resolve_http_trigger_auth(trigger_args).mode
+    except ValueError:
+        return "function"
 
 
 def _agent_has_anonymous_http_surface(resolved: ResolvedAgent) -> bool:
@@ -390,6 +385,33 @@ def _validate_agent_endpoint_auth_configured(resolved: ResolvedAgent) -> None:
         )
 
 
+def _validate_aca_http_auth_parity(resolved: ResolvedAgent) -> None:
+    """Require one complete policy when both ACA submission surfaces are enabled."""
+    trigger = resolved.trigger
+    if (
+        trigger is None
+        or trigger.type != "http_trigger"
+        or not resolved.builtin_endpoints.chat_api
+    ):
+        return
+    try:
+        trigger_auth = resolve_http_trigger_auth(trigger.args)
+    except ValueError as exc:
+        raise _session_runtime_error(
+            "trigger.args.http_auth",
+            str(exc),
+            source_file=resolved.source_file,
+        ) from exc
+    builtin_auth = resolved.builtin_endpoints.http_auth
+    if trigger_auth.model_dump() != builtin_auth.model_dump():
+        raise _session_runtime_error(
+            "trigger.args.http_auth",
+            "Custom http_trigger and built-in chat require identical resolved auth policies "
+            "when session_runtime.aca_sandbox is configured",
+            source_file=resolved.source_file,
+        )
+
+
 def validate_session_runtime(
     global_config: GlobalConfig,
     resolved_agents: list[ResolvedAgent],
@@ -410,8 +432,7 @@ def validate_session_runtime(
     once all other rows pass, this function still unconditionally raises a
     final capability-gate error so a well-formed ``aca_sandbox`` config fails
     **application startup** with a clear, typed diagnostic rather than a
-    confusing runtime error at first request. That same unconditional final
-    raise also satisfies row 13 (see :func:`auto_delete_backstop_violated`).
+    confusing runtime error at first request.
     """
     session_runtime = global_config.session_runtime
     if session_runtime is None:
@@ -462,9 +483,8 @@ def validate_session_runtime(
                 f"retention.auto_suspend_idle ({retention.auto_suspend_idle}); "
                 f"got {retention.reclaim_idle}",
             )
-        # Row 13 (owning rule: 0008.12 + 0008.10) is always a hard fail in
-        # this build -- see auto_delete_backstop_violated's docstring.
-        # Satisfied unconditionally by the capability gate below.
+        # Per-sandbox lifecycle policy is applied lazily by the controller.
+        # Group auto-delete readback is deliberately not a startup dependency.
 
     # Rows 6 and 7 (session state storage auth-mode / dedicated-account
     # checks) are removed. Session state always reuses `AzureWebJobsStorage`,
@@ -477,6 +497,7 @@ def validate_session_runtime(
         _validate_agent_no_sandbox_config(resolved, global_config)
         _validate_agent_http_trigger_only(resolved)
         _validate_agent_endpoint_auth_configured(resolved)
+        _validate_aca_http_auth_parity(resolved)
 
     # Row 12 (owning rule: 0008.7 + 0008.10): Function App host ABI gate.
     # Deliberately checked last among the fail-closed rows (not in FRD table
@@ -489,9 +510,6 @@ def validate_session_runtime(
 
     # Capability gate: all other rows passed, but aca_sandbox execution is
     # not implemented in this build (see execution/unavailable.py). This
-    # also vacuously satisfies row 13's "always a hard fail" -- no
-    # aca_sandbox session can ever run in this build regardless of
-    # retention/backstop math.
     raise _session_runtime_error(
         "session_runtime.aca_sandbox",
         "aca_sandbox backend not available in this build",

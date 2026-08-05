@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import json
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
+from azure_functions_agents.controller.http import read_result, read_status
 from azure_functions_agents.controller.readiness import (
     SessionActivationSetupTimeoutError,
     SessionRunOwnershipChangedError,
@@ -15,9 +17,11 @@ from azure_functions_agents.controller.readiness import (
 )
 from azure_functions_agents.execution.aca_sandbox import AcaSandboxExecutionBackend
 from azure_functions_agents.execution.backend import (
+    SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
     EventCursorExpiredError,
     RunContext,
+    RunError,
     StartRunRequest,
 )
 from azure_functions_agents.execution.binding import AgentBinding
@@ -32,9 +36,11 @@ from azure_functions_agents.session_state import (
     AdmissionOutcome,
     AdmissionRecords,
     AppIdentity,
+    ConcurrencyConflictError,
     DurableRunRecord,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    IdempotencyConflictError,
     OwnerPartition,
     SessionRead,
     owner_partition,
@@ -290,9 +296,11 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     assert store.session is not None
     assert store.session.status == "running"
     assert store.session.active_run_id == run_handle.run_id
-    assert store.admission_expected_session_etags == ["etag-5"]
+    assert store.admission_expected_session_etags == ["etag-6"]
     assert provider.create_calls
     assert handle.closed
+    assert handle.lifecycle_policy.auto_suspend_seconds is None
+    assert store.session.idle_policy_armed is False
 
 
 @pytest.mark.asyncio
@@ -388,6 +396,84 @@ async def test_backend_releases_admitted_slot_when_request_write_fails(tmp_path:
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.session.active_run_id is None
+    assert store.session.idle_policy_armed
+    assert handle.lifecycle_policy.auto_suspend_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_admission_conflict_restores_idle_policy_when_no_slot_is_held(tmp_path: Path) -> None:
+    class ConflictingStore(FakeSessionStateStore):
+        async def admit_run(
+            self,
+            records: AdmissionRecords,
+            *,
+            expected_session_etag: str | None = None,
+        ) -> AdmissionOutcome:
+            del records, expected_session_etag
+            raise ConcurrencyConflictError("admission lost")
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = ConflictingStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(ConcurrencyConflictError):
+        await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.idle_policy_armed
+    assert handle.lifecycle_policy_history[-2].auto_suspend_seconds is None
+    assert handle.lifecycle_policy_history[-1].auto_suspend_seconds == 300
+
+
+@pytest.mark.asyncio
+async def test_replayed_admission_restores_idle_policy_when_winner_is_terminal(tmp_path: Path) -> None:
+    class ReplayingStore(FakeSessionStateStore):
+        async def admit_run(
+            self,
+            records: AdmissionRecords,
+            *,
+            expected_session_etag: str | None = None,
+        ) -> AdmissionOutcome:
+            del records, expected_session_etag
+            return AdmissionOutcome(
+                run=self.runs["run-1"],
+                run_etag="run-etag",
+                session_etag=None,
+                replayed=True,
+            )
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = ReplayingStore(session)
+    store.runs["run-1"] = replace(
+        _run(session, state="succeeded"),
+        result_available=True,
+    )
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    replay = await backend.start_run(
+        StartRunRequest(prompt="hello", session_id=session.session_id)
+    )
+
+    assert replay.run_id == "run-1"
+    assert store.session is not None
+    assert store.session.idle_policy_armed
+    assert handle.lifecycle_policy_history[-2].auto_suspend_seconds is None
+    assert handle.lifecycle_policy_history[-1].auto_suspend_seconds == 300
 
 
 @pytest.mark.asyncio
@@ -776,3 +862,121 @@ async def test_backend_cancels_through_the_live_handle_and_adopts_the_terminal_r
 
     assert status.state == "canceled"
     assert store.adopted[-1].status == "canceled"
+
+
+@pytest.mark.asyncio
+async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_reuse(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(
+            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+        )
+        handle.seed_file(
+            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    winner = await backend.start_run(
+        StartRunRequest(prompt="hello", idempotency_key="caller-key")
+    )
+    replay = await backend.start_run(
+        StartRunRequest(prompt="hello", idempotency_key="caller-key")
+    )
+
+    assert replay.run_id == winner.run_id
+    assert len(provider.create_calls) == 1
+    with pytest.raises(IdempotencyConflictError):
+        await backend.start_run(
+            StartRunRequest(prompt="different", idempotency_key="caller-key")
+        )
+
+
+@pytest.mark.asyncio
+async def test_controller_output_validation_terminalizes_async_success_as_failed(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    run = _run(session)
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    handle.seed_file(
+        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        _status(state="succeeded", result_available=True),
+    )
+    handle.seed_file(
+        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        json.dumps(
+            {
+                "content": "not-json",
+                "content_intermediate": [],
+                "tool_calls": [],
+                "reasoning": None,
+                "delegate_error_count": 0,
+            }
+        ).encode("utf-8"),
+    )
+    backend = AcaSandboxExecutionBackend(
+        AgentBinding(
+            agent_name="main",
+            output_validator=lambda _: RunError(
+                code="response_validation_failed",
+                message="invalid",
+                fault_domain="app",
+            ),
+        ),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    status = await backend.get_run(RunContext(run_id="run-1", session_id="session-1"))
+
+    assert status.state == "failed"
+    assert status.error is not None
+    assert status.error.code == "response_validation_failed"
+    assert store.runs["run-1"].status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_tombstoned_abandoned_run_keeps_status_but_result_route_is_gone(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = replace(
+        _session(script_root),
+        status="tombstoned",
+        tombstone_reason="sandbox_backing_lost",
+    )
+    run = _run(session, state="abandoned")
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(FakeSandboxSessionHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+    context = RunContext(run_id=run.run_id, session_id=session.session_id)
+
+    status_response = await read_status(backend, context)
+    result_response = await read_result(backend, context)
+
+    assert status_response.status_code == 200
+    assert isinstance(status_response.body, dict)
+    assert status_response.body["error"]["code"] == SESSION_TOMBSTONED_ERROR_CODE
+    assert result_response.status_code == 410

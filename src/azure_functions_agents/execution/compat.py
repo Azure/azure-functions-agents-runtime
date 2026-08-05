@@ -57,6 +57,7 @@ def split_runner_call(
         web_request_tools=cast(list[Any] | None, values.pop("web_request_tools", None)),
         subagents=cast(list[Any] | None, values.pop("subagents", None)),
         catalog=values.pop("catalog", None),
+        output_validator=values.pop("output_validator", None),
     )
     if values:
         unexpected = ", ".join(sorted(values))

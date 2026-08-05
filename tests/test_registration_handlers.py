@@ -17,6 +17,7 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.controller.http import ControllerResponse
 from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
 from azure_functions_agents.registration._handlers import (
     _tool_error_count,
@@ -431,13 +432,24 @@ def test_http_handler_binds_the_authenticated_owner_for_sandbox_execution(
 ) -> None:
     captured: dict[str, Any] = {}
 
-    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+    def fake_create_execution_backend(*args: Any, **kwargs: Any) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(content="plain text", session_id="runtime-created")
+        return object()
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration._handlers._run_agent",
-        fake_run_agent,
+        "azure_functions_agents.registration._handlers.create_execution_backend",
+        fake_create_execution_backend,
+    )
+    async def fake_submit_run(*args: Any, **kwargs: Any) -> ControllerResponse:
+        captured["request"] = args[1]
+        return ControllerResponse(
+            status_code=200,
+            body={"session_id": "runtime-created", "response": "plain text"},
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.submit_run",
+        fake_submit_run,
     )
     runtime = _runtime(tmp_path)
     handler = make_http_agent_handler(
@@ -453,7 +465,55 @@ def test_http_handler_binds_the_authenticated_owner_for_sandbox_execution(
     assert response.headers["x-ms-session-id"] == "runtime-created"
     assert captured["session_runtime"] is runtime
     assert captured["owner"] == FunctionAppPrincipal()
-    assert captured["session_id"] is None
+    assert captured["request"].session_id is None
+
+
+def test_http_handler_honors_respond_async_for_sandbox_submission(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create_execution_backend(*args: Any, **kwargs: Any) -> object:
+        del args
+        captured.update(kwargs)
+        return object()
+
+    async def fake_submit_run(*args: Any, **kwargs: Any) -> ControllerResponse:
+        del args
+        captured["respond_async"] = kwargs["respond_async"]
+        return ControllerResponse(
+            status_code=202,
+            body={"session_id": "session-1", "run_id": "run-1", "status": "accepted"},
+            headers={"Location": "/status", "Retry-After": "2", "x-ms-session-id": "session-1"},
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.create_execution_backend",
+        fake_create_execution_backend,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.submit_run",
+        fake_submit_run,
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"Prefer": "wait, RESPOND-ASYNC; wait=5"},
+            )
+        )
+    )
+
+    assert response.status_code == 202
+    assert captured["respond_async"] is True
 
 
 def test_http_handler_rejects_unresolvable_runtime_owner_before_execution(

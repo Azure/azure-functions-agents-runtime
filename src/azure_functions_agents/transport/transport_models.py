@@ -77,6 +77,90 @@ class SandboxExecResult:
 
 
 @dataclass(frozen=True, slots=True)
+class SandboxLifecyclePolicy:
+    """Complete per-sandbox lifecycle policy projected without provider SDK types."""
+
+    auto_suspend_seconds: int | None
+    auto_suspend_mode: SandboxAutoSuspendMode = "Disk"
+    auto_delete_seconds: int = 1
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        auto_suspend_seconds: int | None,
+        auto_delete_seconds: int,
+        auto_suspend_mode: SandboxAutoSuspendMode = "Disk",
+    ) -> SandboxLifecyclePolicy:
+        if auto_suspend_seconds is not None and auto_suspend_seconds < 60:
+            raise SandboxProvisioningError(
+                "Sandbox auto_suspend_seconds must be at least 60 when enabled."
+            )
+        if auto_delete_seconds <= 0:
+            raise SandboxProvisioningError("Sandbox auto_delete_seconds must be positive.")
+        if auto_suspend_mode not in {"Memory", "Disk"}:
+            raise SandboxProvisioningError("Sandbox auto_suspend_mode must be Memory or Disk.")
+        return cls(
+            auto_suspend_seconds=auto_suspend_seconds,
+            auto_suspend_mode=auto_suspend_mode,
+            auto_delete_seconds=auto_delete_seconds,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSummary:
+    """A label-filterable platform inventory projection for one sandbox."""
+
+    sandbox_id: str
+    labels: Mapping[str, str]
+    created_at: str | None = None
+    modified_at: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        sandbox_id: str,
+        labels: Mapping[str, str],
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> SandboxSummary:
+        return cls(
+            sandbox_id=_require_nonempty_string(sandbox_id, "sandbox_id"),
+            labels=MappingProxyType(_validate_labels(labels)),
+            created_at=_optional_timestamp(created_at, "created_at"),
+            modified_at=_optional_timestamp(modified_at, "modified_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSnapshot:
+    """A provider-neutral projection for a retained sandbox snapshot."""
+
+    snapshot_id: str
+    sandbox_id: str | None
+    created_at: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        snapshot_id: str,
+        sandbox_id: str | None,
+        created_at: str | None = None,
+    ) -> SandboxSnapshot:
+        return cls(
+            snapshot_id=_require_nonempty_string(snapshot_id, "snapshot_id"),
+            sandbox_id=(
+                None
+                if sandbox_id is None
+                else _require_nonempty_string(sandbox_id, "sandbox_id")
+            ),
+            created_at=_optional_timestamp(created_at, "created_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class SandboxGroupResourceId:
     """The normalized, controller-configured ARM identity of a Sandbox Group."""
 
@@ -459,3 +543,19 @@ def _validate_create_environment(environment: Mapping[str, str]) -> Mapping[str,
             )
         validated[key] = value
     return MappingProxyType(validated)
+
+
+def _validate_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    validated: dict[str, str] = {}
+    for key, value in labels.items():
+        validated[_require_nonempty_string(key, "label key")] = _require_nonempty_string(
+            value,
+            "label value",
+        )
+    return validated
+
+
+def _optional_timestamp(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_nonempty_string(value, field_name)

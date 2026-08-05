@@ -525,7 +525,21 @@ class IdempotencyRowKey:
         return f"idem:{self.session_id}:{self.idempotency_hash}"
 
 
-type DurableRowKey = SessionRowKey | RunRowKey | IdempotencyRowKey
+@dataclass(frozen=True, slots=True)
+class OwnerIdempotencyRowKey:
+    """Owner-scoped idempotency locator for a first session submission."""
+
+    idempotency_hash: str
+
+    @classmethod
+    def create(cls, idempotency_hash: str) -> OwnerIdempotencyRowKey:
+        return cls(idempotency_hash=_validate_sha256(idempotency_hash, "idempotency_hash"))
+
+    def __str__(self) -> str:
+        return f"owner-idem:{self.idempotency_hash}"
+
+
+type DurableRowKey = SessionRowKey | RunRowKey | IdempotencyRowKey | OwnerIdempotencyRowKey
 
 
 def parse_row_key(value: str) -> DurableRowKey:
@@ -537,6 +551,8 @@ def parse_row_key(value: str) -> DurableRowKey:
         return RunRowKey.create(parts[1], parts[2])
     if len(parts) == 3 and parts[0] == "idem":
         return IdempotencyRowKey.create(parts[1], parts[2])
+    if len(parts) == 2 and parts[0] == "owner-idem":
+        return OwnerIdempotencyRowKey.create(parts[1])
     raise SessionStateContractError("invalid durable row key")
 
 def _validate_snapshot_id(value: str) -> str:
@@ -914,6 +930,81 @@ class DurableIdempotencyRecord:
 
 
 @dataclass(frozen=True, slots=True)
+class DurableOwnerIdempotencyRecord:
+    """Hashed owner-scoped locator for a first session submission.
+
+    A raw client key never crosses this boundary.  Unlike
+    :class:`DurableIdempotencyRecord`, this row is intentionally not scoped to a
+    candidate session so concurrent first submissions contend on one durable
+    owner row.
+    """
+
+    owner_partition: OwnerPartition
+    idempotency_hash: str
+    request_hash: str
+    session_id: str
+    run_id: str
+    expires_at: datetime
+    created_at: datetime
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        idempotency_hash: str,
+        request_hash: str,
+        session_id: str,
+        run_id: str,
+        expires_at: datetime,
+        created_at: datetime,
+    ) -> DurableOwnerIdempotencyRecord:
+        return cls(
+            owner_partition=owner_partition,
+            idempotency_hash=_validate_sha256(idempotency_hash, "idempotency_hash"),
+            request_hash=_validate_sha256(request_hash, "request_hash"),
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            run_id=_validate_opaque_id(run_id, "run_id"),
+            expires_at=_utc_datetime(expires_at, "expires_at"),
+            created_at=_utc_datetime(created_at, "created_at"),
+        )
+
+    @property
+    def row_key(self) -> OwnerIdempotencyRowKey:
+        return OwnerIdempotencyRowKey.create(self.idempotency_hash)
+
+    def to_table_entity(self) -> TableEntity:
+        entity = _base_entity(self.owner_partition, self.row_key)
+        entity.update(
+            {
+                "request_hash": self.request_hash,
+                "session_id": self.session_id,
+                "run_id": self.run_id,
+                "expires_at": self.expires_at,
+                "created_at": self.created_at,
+            }
+        )
+        return entity
+
+    @classmethod
+    def from_table_entity(cls, entity: Mapping[str, object]) -> DurableOwnerIdempotencyRecord:
+        partition = _read_partition(entity)
+        row_key = parse_row_key(_require_str(entity, "RowKey"))
+        if not isinstance(row_key, OwnerIdempotencyRowKey):
+            raise SessionStateContractError("entity RowKey is not an owner idempotency row")
+        _validate_entity_header(entity, partition)
+        return cls.create(
+            owner_partition=partition,
+            idempotency_hash=row_key.idempotency_hash,
+            request_hash=_require_str(entity, "request_hash"),
+            session_id=_require_str(entity, "session_id"),
+            run_id=_require_str(entity, "run_id"),
+            expires_at=_require_datetime(entity, "expires_at"),
+            created_at=_require_datetime(entity, "created_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionRecords:
     """Rows that one admission writes together in a single owner-partition EGT."""
 
@@ -959,6 +1050,44 @@ class AdmissionRecords:
                     "idempotency admission row must identify the admitted run"
                 )
         return cls(session=session, run=run, idempotency=idempotency)
+
+
+@dataclass(frozen=True, slots=True)
+class NewSessionAdmissionRecords:
+    """Rows written atomically for a candidate session's first admitted run."""
+
+    session: DurableSessionRecord
+    run: DurableRunRecord
+    owner_idempotency: DurableOwnerIdempotencyRecord
+
+    @classmethod
+    def create(
+        cls,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        owner_idempotency: DurableOwnerIdempotencyRecord,
+    ) -> NewSessionAdmissionRecords:
+        partition_key = session.owner_partition.partition_key
+        if (
+            run.owner_partition.partition_key != partition_key
+            or owner_idempotency.owner_partition.partition_key != partition_key
+        ):
+            raise SessionStateContractError(
+                "new-session admission rows must share one owner partition"
+            )
+        if run.session_id != session.session_id or owner_idempotency.session_id != session.session_id:
+            raise SessionStateContractError(
+                "new-session admission rows must identify the candidate session"
+            )
+        if run.run_id != owner_idempotency.run_id:
+            raise SessionStateContractError(
+                "new-session owner idempotency row must identify the admitted run"
+            )
+        if run.generation != session.generation or session.active_run_id != run.run_id:
+            raise SessionStateContractError(
+                "new-session admission records must preserve the candidate binding"
+            )
+        return cls(session=session, run=run, owner_idempotency=owner_idempotency)
 
 
 def _read_partition(entity: Mapping[str, object]) -> OwnerPartition:

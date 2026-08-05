@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -12,6 +14,7 @@ import azure.functions as func
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
+from .config.http_auth import resolve_http_trigger_auth
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -21,25 +24,45 @@ from .config.validation import (
     validate_session_runtime,
     validate_subagent_references,
 )
+from .controller.package import build_expected_manifest_binding
 from .controller.readiness import (
     DEFAULT_AUTO_SUSPEND_SECONDS,
     DEFAULT_RECLAIM_IDLE_SECONDS,
     SessionRuntimeBinding,
     StateStoreBinding,
+    lifecycle_policy_for_idle,
+)
+from .controller.reconciler import (
+    ReconcilerConfig,
+    SessionReconciler,
+    reconciler_ncrontab,
+    resolve_reconciler_cadence,
 )
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
+from .execution.backend import RunContext, RunStatus
+from .execution.run_control import JOURNAL_ROOT_PATH, SandboxRunControl
 from .registration.capabilities import build_capabilities, validate_subagent_tool_names
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
-from .registration.endpoints import register_builtin_endpoints
+from .registration.endpoints import (
+    register_builtin_endpoints,
+    register_sandbox_management_endpoints,
+)
 from .registration.triggers import register_agent
 from .session_state import (
+    DurableRunRecord,
+    DurableSessionRecord,
     build_store_from_service_client,
     get_table_service_client,
     resolve_function_app_identity,
 )
-from .transport.ports import SandboxSessionProvider
+from .transport.ports import SandboxSessionHandle, SandboxSessionProvider
+from .transport.transport_models import (
+    PersistedSandboxBinding,
+    SandboxFileNotFoundError,
+    SandboxGroupBinding,
+)
 from .workflows import build_workflow_integration
 
 
@@ -72,6 +95,129 @@ def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
 
 def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
     return isinstance(workflows, dict) and workflows.get("enabled") is True
+
+
+def _sandbox_management_auth(resolved: ResolvedAgent) -> Any | None:
+    """Choose the already-validated common policy for ACA management routes."""
+    builtin_auth = (
+        resolved.builtin_endpoints.http_auth if resolved.builtin_endpoints.chat_api else None
+    )
+    trigger_auth = (
+        resolve_http_trigger_auth(resolved.trigger.args)
+        if resolved.trigger is not None and resolved.trigger.type == "http_trigger"
+        else None
+    )
+    return builtin_auth or trigger_auth
+
+
+def _build_session_reconciler(
+    runtime: SessionRuntimeBinding,
+    state_binding: StateStoreBinding,
+    provider: SandboxSessionProvider,
+    *,
+    cadence_seconds: int,
+) -> SessionReconciler:
+    """Compose provider-neutral reconciliation callbacks at the app boundary."""
+    run_control = SandboxRunControl()
+
+    async def with_handle[T](
+        session: DurableSessionRecord,
+        operation: Callable[[SandboxSessionHandle], Awaitable[T]],
+    ) -> T | None:
+        if session.sandbox_id is None:
+            return None
+        expected = build_expected_manifest_binding(
+            session,
+            sandbox_group_resource_id=runtime.sandbox_group_resource_id,
+            state_store_fingerprint=state_binding.state_store_fingerprint,
+        )
+        persisted = PersistedSandboxBinding.create(
+            session.sandbox_id,
+            SandboxGroupBinding.create(runtime.sandbox_group_resource_id, session.region),
+        )
+        try:
+            handle = await provider.attach(
+                persisted,
+                expected,
+                readiness_timeout_seconds=30.0,
+            )
+        except Exception:
+            return None
+        try:
+            return await operation(handle)
+        finally:
+            await handle.close()
+
+    async def terminal_reader(
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+    ) -> RunStatus | None:
+        return await with_handle(
+            session,
+            lambda handle: run_control.get_status(
+                handle,
+                RunContext(session_id=run.session_id, run_id=run.run_id),
+            ),
+        )
+
+    async def heartbeat_reader(
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+    ) -> datetime | None:
+        async def read_heartbeat(handle: SandboxSessionHandle) -> datetime | None:
+            try:
+                stat = await handle.stat_file(
+                    f"{JOURNAL_ROOT_PATH}/runs/{run.run_id}/heartbeat.json"
+                )
+            except SandboxFileNotFoundError:
+                return None
+            if stat.modified_at is None:
+                return None
+            return datetime.fromisoformat(stat.modified_at.replace("Z", "+00:00")).astimezone(UTC)
+
+        return await with_handle(session, read_heartbeat)
+
+    async def death_verifier(
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+    ) -> bool | None:
+        async def verify(handle: SandboxSessionHandle) -> bool | None:
+            try:
+                process: object = json.loads(
+                    (await handle.read_file(f"{JOURNAL_ROOT_PATH}/runs/{run.run_id}/process.json"))
+                    .decode("utf-8")
+                )
+                if not isinstance(process, dict):
+                    return None
+                process_group_id = process.get("process_group_id")
+                if isinstance(process_group_id, bool) or not isinstance(process_group_id, int):
+                    return None
+                result = await handle.exec(
+                    f"kill -0 -- -{process_group_id}",
+                    timeout_seconds=5.0,
+                )
+            except (SandboxFileNotFoundError, ValueError, json.JSONDecodeError):
+                return None
+            return result.exit_code != 0
+
+        return await with_handle(session, verify)
+
+    async def lifecycle_repair(session: DurableSessionRecord) -> bool:
+        async def rearm(handle: SandboxSessionHandle) -> bool:
+            await handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+            return True
+
+        return await with_handle(session, rearm) is True
+
+    return SessionReconciler(
+        store=state_binding.store,
+        provider=provider,
+        config=ReconcilerConfig(cadence_seconds=cadence_seconds),
+        terminal_reader=terminal_reader,
+        heartbeat_reader=heartbeat_reader,
+        death_verifier=death_verifier,
+        lifecycle_repair=lifecycle_repair,
+    )
 
 
 def _build_session_runtime_binding(
@@ -347,6 +493,15 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                     catalog=catalog,
                     session_runtime=session_runtime,
                 )
+        if session_runtime is not None:
+            management_auth = _sandbox_management_auth(resolved)
+            if management_auth is not None:
+                register_sandbox_management_endpoints(
+                    app,
+                    slug=resolved.slug,
+                    auth=management_auth,
+                    session_runtime=session_runtime,
+                )
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {
@@ -376,6 +531,26 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             system_tools_used.add("web_request")
 
         agents_summary.append(agent_info)
+
+    if session_runtime is not None:
+        cadence = resolve_reconciler_cadence()
+
+        async def reconcile_sandbox_sessions(_timer: Any) -> None:
+            state_binding = await session_runtime.get_state_store()
+            provider = await session_runtime.get_provider()
+            reconciler = _build_session_reconciler(
+                session_runtime,
+                state_binding,
+                provider,
+                cadence_seconds=cadence,
+            )
+            await reconciler.run_once()
+
+        reconciler_function = app.timer_trigger(
+            schedule=reconciler_ncrontab(cadence),
+            arg_name="timer",
+        )(reconcile_sandbox_sessions)
+        app.function_name(name="azure_functions_agents_reconciler")(reconciler_function)
 
     # Emit structured indexing summary log
     indexing_summary = {

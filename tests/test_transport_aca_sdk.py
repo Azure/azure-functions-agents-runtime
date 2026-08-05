@@ -30,6 +30,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
+    SandboxLifecyclePolicy,
     SandboxProvisioningError,
     SandboxProvisioningLabels,
 )
@@ -37,6 +38,7 @@ from tests.doubles.fake_aca_sdk import (
     FakeCredential,
     FakeSdkEgressPolicy,
     FakeSdkEnvironment,
+    FakeSdkSnapshot,
 )
 
 _GROUP_ID = (
@@ -404,6 +406,53 @@ async def test_adapter_maps_all_six_file_operations_directly_and_keeps_exec_sepa
 
 
 @pytest.mark.asyncio
+async def test_adapter_projects_complete_lifecycle_policy_without_group_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+
+    policy = SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=None,
+        auto_suspend_mode="Disk",
+        auto_delete_seconds=90_300,
+    )
+    await handle.set_lifecycle_policy(policy)
+
+    assert await handle.get_lifecycle_policy() == policy
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_projects_group_inventory_and_snapshot_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+    environment.group_client.snapshots["snapshot-1"] = FakeSdkSnapshot(
+        id="snapshot-1",
+        sandbox_id=handle.identity.sandbox_id,
+    )
+
+    inventory = await adapter.list_sandboxes(labels={"session_id": "session-123"})
+    snapshots = await adapter.list_snapshots()
+    await adapter.delete_snapshot("snapshot-1")
+    await adapter.delete_sandbox(handle.identity.sandbox_id)
+
+    assert inventory[0].sandbox_id == handle.identity.sandbox_id
+    assert snapshots[0].snapshot_id == "snapshot-1"
+    assert environment.group_client.deleted_snapshot_ids == ["snapshot-1"]
+    assert environment.group_client.deleted_sandbox_ids == [handle.identity.sandbox_id]
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_translate_file_errors_maps_resource_not_found_to_sandbox_file_not_found() -> None:
     """The pinned SDK raises ``ResourceNotFoundError`` for a missing path, not ``FileNotFoundError``."""
 
@@ -730,6 +779,30 @@ def test_create_request_rejects_ports_unsafe_egress_and_controller_credentials()
 def test_create_request_requires_positive_explicit_setup_budget() -> None:
     with pytest.raises(SandboxProvisioningError, match="positive"):
         _request(remaining_setup_budget_seconds=0)
+
+
+@pytest.mark.asyncio
+async def test_snapshot_like_source_is_rejected_before_adapter_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SnapshotLikeSource:
+        snapshot_id = "snapshot-1"
+
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxProvisioningError, match="exactly one"):
+        _request(
+            source=SnapshotLikeSource(),
+            environment={"HARNESS_MODE": "would-not-project"},
+            entrypoint=("would-not-project",),
+            cmd=("would-not-project",),
+        )
+
+    assert environment.group_client.create_calls == []
+    assert environment.sandboxes == {}
+    await adapter.close()
 
 
 @pytest.mark.parametrize(

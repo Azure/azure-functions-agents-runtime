@@ -48,9 +48,12 @@ from .session_models import (
     TERMINAL_RUN_STATUSES,
     AdmissionRecords,
     DurableIdempotencyRecord,
+    DurableOwnerIdempotencyRecord,
     DurableRunRecord,
     DurableSessionRecord,
     IdempotencyRowKey,
+    NewSessionAdmissionRecords,
+    OwnerIdempotencyRowKey,
     OwnerPartition,
     SessionStateContractError,
     TableEntity,
@@ -118,6 +121,14 @@ class IdempotencyRead:
 
 
 @dataclass(frozen=True, slots=True)
+class OwnerIdempotencyRead:
+    """An owner-scoped idempotency row plus the ETag it was read with."""
+
+    record: DurableOwnerIdempotencyRecord
+    etag: str
+
+
+@dataclass(frozen=True, slots=True)
 class AdmissionOutcome:
     """Result of :meth:`SessionStateStore.admit_run`.
 
@@ -147,6 +158,7 @@ class TableEntityPage:
 
     entities: tuple[Mapping[str, object], ...]
     continuation_token: str | None
+    service_time: datetime | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -209,6 +221,29 @@ class SessionStateStore(Protocol):
         safe re-read.
         """
 
+    async def get_owner_idempotency(
+        self,
+        owner_partition: OwnerPartition,
+        idempotency_hash: str,
+    ) -> OwnerIdempotencyRead | None:
+        """Read one owner-scoped first-session idempotency row when it exists."""
+
+    async def delete_owner_idempotency(
+        self,
+        *,
+        previous: DurableOwnerIdempotencyRecord,
+        etag: str,
+    ) -> None:
+        """Conditionally delete an expired owner-scoped idempotency row."""
+
+    async def admit_new_session_run(
+        self,
+        records: NewSessionAdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
+        """Atomically admit a candidate session and elect one owner-key winner."""
+
     async def adopt_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
         """Atomically move a run to a terminal status and free the session's slot.
 
@@ -226,6 +261,15 @@ class SessionStateStore(Protocol):
         updated_at: datetime,
     ) -> str:
         """Conditionally tombstone a session, preserving its historical fields."""
+
+    async def evict_run_result(
+        self,
+        *,
+        previous: DurableRunRecord,
+        etag: str,
+        updated_at: datetime,
+    ) -> str:
+        """Conditionally mark terminal result content unavailable without deleting status."""
 
     async def query_entities(
         self,
@@ -371,6 +415,40 @@ class AzureTableSessionStateStore:
             record=_parse_idempotency_entity(entity), etag=_etag_from_entity(entity)
         )
 
+    async def get_owner_idempotency(
+        self,
+        owner_partition: OwnerPartition,
+        idempotency_hash: str,
+    ) -> OwnerIdempotencyRead | None:
+        """Read a first-session idempotency winner without treating absence as failure."""
+        from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+
+        row_key = str(OwnerIdempotencyRowKey.create(idempotency_hash))
+        try:
+            entity = await self._table_client.get_entity(owner_partition.partition_key, row_key)
+        except ResourceNotFoundError:
+            return None
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context="get_owner_idempotency") from exc
+        return OwnerIdempotencyRead(
+            record=_parse_owner_idempotency_entity(entity),
+            etag=_etag_from_entity(entity),
+        )
+
+    async def delete_owner_idempotency(
+        self,
+        *,
+        previous: DurableOwnerIdempotencyRecord,
+        etag: str,
+    ) -> None:
+        """Delete a stale owner-key row only when the read ETag still matches."""
+        await self._delete_entity(
+            previous.to_table_entity(),
+            etag=etag,
+            not_found_error=SessionStateStoreError("owner idempotency row not found"),
+            context="delete_owner_idempotency",
+        )
+
     # -- admission (EGT) ------------------------------------------------
 
     async def admit_run(
@@ -434,6 +512,104 @@ class AzureTableSessionStateStore:
             run_etag=_etag_from_write_result(results[1]),
             session_etag=_etag_from_write_result(results[0]),
             replayed=False,
+        )
+
+    async def admit_new_session_run(
+        self,
+        records: NewSessionAdmissionRecords,
+        *,
+        expected_session_etag: str | None = None,
+    ) -> AdmissionOutcome:
+        """Admit a candidate through an owner-key EGT distinct from session dedupe."""
+        from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import TableTransactionError
+
+        partition = records.session.owner_partition
+        owner_idempotency = records.owner_idempotency
+        existing = await self.get_owner_idempotency(
+            partition,
+            owner_idempotency.idempotency_hash,
+        )
+        if existing is not None:
+            return await self._replay_owner_idempotency(existing, owner_idempotency)
+
+        current_session = await self.get_session(partition, records.session.session_id)
+        if (
+            expected_session_etag is not None
+            and current_session.etag != expected_session_etag
+        ):
+            raise ConcurrencyConflictError("session changed concurrently before admission")
+        if current_session.record.active_run_id is not None:
+            raise ActiveRunConflictError(
+                f"session {records.session.session_id!r} already has an active run",
+                active_run_id=current_session.record.active_run_id,
+            )
+        if current_session.record.status not in _STATUSES_ADMITTING_RUN:
+            raise SessionNotAdmissibleError("session lifecycle state cannot accept a new run")
+        _validate_generation_or_raise(
+            current_session.record.generation,
+            records.session.generation,
+            backing_rebind=False,
+        )
+
+        operations: list[_TransactionOp] = [
+            _update_op(records.session, etag=current_session.etag),
+            _create_op(records.run),
+            _create_op(owner_idempotency),
+        ]
+        try:
+            results = await self._table_client.submit_transaction(operations)
+        except TableTransactionError as exc:
+            if exc.index == 1:
+                raise RowAlreadyExistsError(f"run {records.run.run_id!r} already exists") from exc
+            if exc.index in (0, 2):
+                winner = await self.get_owner_idempotency(
+                    partition,
+                    owner_idempotency.idempotency_hash,
+                )
+                if winner is not None:
+                    return await self._replay_owner_idempotency(winner, owner_idempotency)
+                if exc.index == 0:
+                    reread = await self.get_session(partition, records.session.session_id)
+                    if reread.record.active_run_id is not None:
+                        raise ActiveRunConflictError(
+                            f"session {records.session.session_id!r} already has an active run",
+                            active_run_id=reread.record.active_run_id,
+                        ) from exc
+                raise ConcurrencyConflictError(
+                    "new-session owner idempotency admission changed concurrently"
+                ) from exc
+            raise _map_http_error(exc, context="admit_new_session_run") from exc
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context="admit_new_session_run") from exc
+        return AdmissionOutcome(
+            run=records.run,
+            run_etag=_etag_from_write_result(results[1]),
+            session_etag=_etag_from_write_result(results[0]),
+            replayed=False,
+        )
+
+    async def _replay_owner_idempotency(
+        self,
+        existing: OwnerIdempotencyRead,
+        candidate: DurableOwnerIdempotencyRecord,
+    ) -> AdmissionOutcome:
+        """Resolve a durable owner-key winner or report a payload conflict."""
+        if existing.record.request_hash != candidate.request_hash:
+            raise IdempotencyConflictError(
+                "idempotency key already used with a different payload",
+                existing_run_id=existing.record.run_id,
+            )
+        run = await self.get_run(
+            existing.record.owner_partition,
+            existing.record.session_id,
+            existing.record.run_id,
+        )
+        return AdmissionOutcome(
+            run=run.record,
+            run_etag=run.etag,
+            session_etag=None,
+            replayed=True,
         )
 
     async def _resolve_admission_conflict(
@@ -579,6 +755,37 @@ class AzureTableSessionStateStore:
             f"{_MAX_ADOPTION_ATTEMPTS} attempts"
         )
 
+    async def evict_run_result(
+        self,
+        *,
+        previous: DurableRunRecord,
+        etag: str,
+        updated_at: datetime,
+    ) -> str:
+        """Retain terminal status while making removed sandbox result content unavailable."""
+        if previous.status not in _TERMINAL_RUN_STATUSES:
+            raise TerminalStateConflictError("only terminal run results may be evicted")
+        if not previous.result_available:
+            return etag
+        evicted = DurableRunRecord.create(
+            owner_partition=previous.owner_partition,
+            session_id=previous.session_id,
+            run_id=previous.run_id,
+            generation=previous.generation,
+            status=previous.status,
+            result_available=False,
+            status_reason=previous.status_reason,
+            expires_at=previous.expires_at,
+            created_at=previous.created_at,
+            updated_at=updated_at,
+        )
+        return await self._replace_entity(
+            evicted.to_table_entity(),
+            etag=etag,
+            not_found_error=RunRowNotFoundError(f"run {previous.run_id!r} not found"),
+            context="evict_run_result",
+        )
+
     # -- bounded query ----------------------------------------------------
 
     async def query_entities(
@@ -607,7 +814,11 @@ class AzureTableSessionStateStore:
         except HttpResponseError as exc:
             raise _map_http_error(exc, context="query_entities") from exc
         next_token = _encode_continuation_token(pager.continuation_token)
-        return TableEntityPage(entities=entities, continuation_token=next_token)
+        return TableEntityPage(
+            entities=entities,
+            continuation_token=next_token,
+            service_time=_latest_service_timestamp(entities),
+        )
 
     # -- internals ----------------------------------------------------------
 
@@ -659,6 +870,40 @@ class AzureTableSessionStateStore:
             raise _map_http_error(exc, context=context) from exc
         return _etag_from_write_result(result)
 
+    async def _delete_entity(
+        self,
+        entity: Mapping[str, object],
+        *,
+        etag: str,
+        not_found_error: SessionStateStoreError,
+        context: str,
+    ) -> None:
+        from azure.core.exceptions import (
+            HttpResponseError,
+            ResourceModifiedError,
+            ResourceNotFoundError,
+        )
+
+        partition_key = entity.get("PartitionKey")
+        row_key = entity.get("RowKey")
+        if not isinstance(partition_key, str) or not isinstance(row_key, str):
+            raise SessionStateStoreError(f"{context}: durable entity has no key")
+        try:
+            await self._table_client.delete_entity(
+                partition_key,
+                row_key,
+                etag=etag,
+                match_condition=_if_not_modified(),
+            )
+        except ResourceNotFoundError as exc:
+            raise not_found_error from exc
+        except ResourceModifiedError as exc:
+            raise ConcurrencyConflictError(
+                f"{context}: row changed concurrently (stale ETag)"
+            ) from exc
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context=context) from exc
+
 
 # ---------------------------------------------------------------------------
 # Module-level helpers
@@ -685,13 +930,25 @@ def _if_not_modified() -> MatchConditions:
 
 
 def _create_op(
-    record: DurableSessionRecord | DurableRunRecord | DurableIdempotencyRecord,
+    record: (
+        DurableSessionRecord
+        | DurableRunRecord
+        | DurableIdempotencyRecord
+        | DurableOwnerIdempotencyRecord
+    ),
 ) -> _TransactionOp:
     return ("create", record.to_table_entity())
 
 
 def _update_op(
-    record: DurableSessionRecord | DurableRunRecord | DurableIdempotencyRecord, *, etag: str
+    record: (
+        DurableSessionRecord
+        | DurableRunRecord
+        | DurableIdempotencyRecord
+        | DurableOwnerIdempotencyRecord
+    ),
+    *,
+    etag: str,
 ) -> _TransactionOp:
     from azure.data.tables import UpdateMode
 
@@ -783,6 +1040,17 @@ def _parse_idempotency_entity(entity: Mapping[str, object]) -> DurableIdempotenc
         raise CorruptEntityError(f"stored idempotency entity failed validation: {exc}") from exc
 
 
+def _parse_owner_idempotency_entity(
+    entity: Mapping[str, object],
+) -> DurableOwnerIdempotencyRecord:
+    try:
+        return DurableOwnerIdempotencyRecord.from_table_entity(entity)
+    except SessionStateContractError as exc:
+        raise CorruptEntityError(
+            f"stored owner idempotency entity failed validation: {exc}"
+        ) from exc
+
+
 def _etag_from_write_result(result: Mapping[str, object]) -> str:
     etag = result.get("etag")
     if not isinstance(etag, str) or not etag:
@@ -830,6 +1098,18 @@ def _decode_continuation_token(token: str | None) -> Mapping[str, str] | None:
     ):
         raise SessionStateStoreError("invalid continuation token")
     return decoded
+
+
+def _latest_service_timestamp(entities: tuple[Mapping[str, object], ...]) -> datetime | None:
+    """Project the latest Azure Table service ``Timestamp`` from one read page."""
+    timestamps = [
+        timestamp
+        for entity in entities
+        if isinstance((timestamp := entity.get("Timestamp")), datetime)
+        and timestamp.tzinfo is not None
+        and timestamp.utcoffset() is not None
+    ]
+    return max(timestamps, default=None)
 
 
 async def build_store_from_service_client(

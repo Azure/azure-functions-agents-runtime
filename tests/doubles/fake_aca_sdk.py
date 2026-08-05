@@ -42,6 +42,23 @@ class FakeSdkEgressPolicy:
 
 
 @dataclass(frozen=True, slots=True)
+class FakeSdkAutoSuspendPolicy:
+    auto_suspend_seconds: int
+    mode: str
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkAutoDeletePolicy:
+    delete_interval_seconds: int
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkLifecyclePolicy:
+    auto_suspend: FakeSdkAutoSuspendPolicy | None
+    auto_delete: FakeSdkAutoDeletePolicy
+
+
+@dataclass(frozen=True, slots=True)
 class FakeSdkFileInfo:
     """Mirrors the preview SDK's ``FileInfo`` response shape.
 
@@ -81,6 +98,15 @@ class FakeSdkSandboxSummary:
 
     id: str = ""
     labels: dict[str, str] = field(default_factory=dict)
+    created_at: str | None = None
+    modified_at: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkSnapshot:
+    id: str
+    sandbox_id: str | None = None
+    created_at: str | None = None
 
 
 class FakeCredential:
@@ -127,6 +153,10 @@ class FakeSdkSandboxClient:
         self.deleted = False
         self.stop_kwargs: dict[str, Any] | None = None
         self.delete_kwargs: dict[str, Any] | None = None
+        self.lifecycle_policy = FakeSdkLifecyclePolicy(
+            auto_suspend=FakeSdkAutoSuspendPolicy(auto_suspend_seconds=300, mode="Disk"),
+            auto_delete=FakeSdkAutoDeletePolicy(delete_interval_seconds=90_300),
+        )
 
     async def list_files(self, path: str) -> FakeSdkDirListing:
         entries = await _as_sdk_response(self.transport.list_files(path))
@@ -193,6 +223,12 @@ class FakeSdkSandboxClient:
         self.calls.append(RecordedTransportCall("delete"))
         return FakePoller(None, on_result=self._mark_deleted)
 
+    async def get_lifecycle_policy(self) -> FakeSdkLifecyclePolicy:
+        return self.lifecycle_policy
+
+    async def set_lifecycle_policy(self, policy: FakeSdkLifecyclePolicy) -> None:
+        self.lifecycle_policy = policy
+
     async def close(self) -> None:
         self.closed = True
 
@@ -233,6 +269,8 @@ class FakeSdkGroupClient:
         self.create_result_error: Exception | None = None
         self.closed = False
         self.add_port_calls = 0
+        self.snapshots: dict[str, FakeSdkSnapshot] = {}
+        self.deleted_snapshot_ids: list[str] = []
 
     async def begin_create_sandbox(self, **kwargs: Any) -> FakePoller:
         self.create_calls.append(kwargs)
@@ -267,6 +305,22 @@ class FakeSdkGroupClient:
 
         return FakePoller(None, on_result=delete)
 
+    def list_snapshots(self) -> AsyncIterator[FakeSdkSnapshot]:
+        async def iterate() -> AsyncIterator[FakeSdkSnapshot]:
+            for snapshot in tuple(self.snapshots.values()):
+                yield snapshot
+
+        return iterate()
+
+    async def begin_delete_snapshot(self, snapshot_id: str, **kwargs: Any) -> FakePoller:
+        del kwargs
+
+        def delete() -> None:
+            self.snapshots.pop(snapshot_id, None)
+            self.deleted_snapshot_ids.append(snapshot_id)
+
+        return FakePoller(None, on_result=delete)
+
     async def close(self) -> None:
         self.closed = True
 
@@ -290,6 +344,9 @@ class FakeSdkEnvironment:
             sandbox_group_client=self.make_group_client,
             sandbox_client=self.make_sandbox_client,
             egress_policy=FakeSdkEgressPolicy,
+            lifecycle_policy=FakeSdkLifecyclePolicy,
+            auto_suspend_policy=FakeSdkAutoSuspendPolicy,
+            auto_delete_policy=FakeSdkAutoDeletePolicy,
         )
 
     def endpoint_for_region(self, region: str) -> str:

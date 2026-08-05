@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-03
+updated: 2026-08-04
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -367,6 +367,10 @@ provenance.
 | 124 | File transport errors | provider exceptions / runtime-owned errors | The ACA adapter maps not-found and operational SDK failures to runtime-owned types. Production smoke requires direct overwrite; no delete/rewrite fallback exists. | Agent | 2026-08-03 | 0008.6 |
 | 125 | Memory and streaming | full file reads / bounded capture | Stream files into a temporary ZIP, then materialize one ≤256 MiB payload for the current transport. Per-worker caching prevents duplicate captures; chunked delivery is deferred. | Human + Agent | 2026-08-03 | 0008.6 |
 | 126 | Runtime and CI platform | cross-platform / Linux only | Support Linux x86_64 Python 3.13/3.14 only. CI runs the full gate on Linux 3.13/3.14; unsupported platforms fail before filesystem access. | Human + Agent | 2026-08-03 | 0008.6 |
+| 127 | Reconciler timer cadence | fixed hour / unrestricted cadence / bounded setting | Use one plain timer setting, default/max 3600 seconds; permit faster whole-minute values from 60. | Human | 2026-08-04 | U1 |
+| 128 | Per-sandbox lifecycle policy | group readback / inherited default / explicit complete policy | Set suspend+delete immediately after create and before delivery; delete is reclaim + 3600 + 300. This supersedes row 74/group auto-delete validation. | Human | 2026-08-04 | U1 |
+| 129 | ACA HTTP auth parity | separate policies / weaker management auth / exact equality | Built-in chat and custom HTTP both honor `respond-async`; if both exist, compare complete resolved auth policies before route mutation. | Human | 2026-08-04 | U1 |
+| 130 | Lifecycle call ownership | U1 controller / U2 bootstrap / both | U1/P6 disables, restores, and reconciles per-sandbox lifecycle; U2 only makes its harness suspension-tolerant. | Human | 2026-08-04 | U1 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Human-authorized pre-merge editing replaces unmerged rows 119-148 with rows 119-126; merged history remains append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -543,6 +547,12 @@ infrastructure samples.
   not a stable content identity (Decision 119). An import-graph guard now also
   confines `controller/**` from importing `transport.aca_sdk`, alongside the
   existing raw-SDK confinement.
+- **U1 runtime completion (2026-08-04):** Added provider-neutral HTTP/LRO,
+  replayable SSE, owner-scoped first-session idempotency, lifecycle/reconciliation,
+  atomic commit, watchdog, and capability-registry seams. The controller writes
+  complete per-sandbox policy after create and never reads a group auto-delete
+  default. Production create remains unavailable and the ACA capability gate stays
+  closed pending the deferred bootstrap image/source.
 - **Human sign-off:** **Recorded — larohra, 2026-07-27; SDK verification
   consolidated 2026-07-28.** Status remains **Finalized**. Implementation may
   proceed per the finalized decisions, including Decisions 71–82.
@@ -756,7 +766,7 @@ class AgentExecutionBackend(Protocol):
 #### HTTP/status contract and validation gates
 
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
-* Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async run is `200`, never 5xx. Active slot -> `409 active_run_exists`; result evicted/tombstoned -> `410`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
+* Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async **status** read is `200`, never 5xx; a result URL is `410` when no result is available or its session is tombstoned. Active slot -> `409 active_run_exists`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
 * Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. Before ACA implementation exists, declaring `aca_sandbox` fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
 * Config/startup and runtime gates fail closed on: group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at local seam refactor; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke P4a onward; P9 full e2e plus 100-concurrent and large-payload gates.
@@ -854,7 +864,7 @@ A controller recycle is survivable: a later instance resolves the current ETag/g
 
 ##### HTTP, idempotency, and status
 
-Management routes are GET run, GET result, GET events, and POST cancel. Headers: `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, and `Last-Event-ID`. Async acceptance is `202` + `Location` + `Retry-After: 2`; completed failed async reads are `200` with typed error, not 5xx. `409 active_run_exists`, `410` for tombstone or result eviction, `422 idempotency_key_conflict`, and typed `504` distinguishes setup from run timeout. Dedupe happens before active-run admission: same key/same payload replays; same key/different payload is 422; distinct key while active is 409; post-eviction replay is 410; retry after abandonment rotates key. SSE adds named `snapshot-restart` and in-band terminal errors. Sync setup budget is 30s with >=150s execution floor, so provisioning threads remaining setup budget into `polling_timeout` or goes async.
+Management routes are GET run, GET result, GET events, and POST cancel. Headers: `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, and `Last-Event-ID`. Async acceptance is `202` + `Location` + `Retry-After: 2`; completed failed async **status** reads are `200` with typed error, not 5xx. A result read is `410` after eviction, absence, or session tombstone. `409 active_run_exists`, `422 idempotency_key_conflict`, and typed `504` distinguish setup from run timeout. Dedupe happens before active-run admission: same key/same payload replays; same key/different payload is 422; distinct key while active is 409; post-eviction replay is 410; retry after abandonment rotates key. SSE adds named `snapshot-restart` and in-band terminal errors. Sync setup budget is 30s with >=150s execution floor, so provisioning threads remaining setup budget into `polling_timeout` or goes async.
 
 Structured input validation remains controller-side pre-dispatch; output validation remains controller-side post-run. Invalid output creates typed validation `RunError` and terminal `failed` (async 200 typed body, sync 5xx), never succeeded with an invalid payload.
 
@@ -1016,9 +1026,9 @@ session_runtime:
 | 10 | `reclaim_idle` is non-positive or not strictly greater than `auto_suspend_idle` | Fail startup. | 0008.10 + 0008.12 |
 | 11 | ~~`retention` is set for a provider other than `aca_sandbox`~~ — **superseded** (Decision 84): `retention` now nests inside the `aca_sandbox` block itself, so this condition is structurally unrepresentable — `SessionRuntimeConfig`'s `extra="forbid"` rejects a sibling `retention` key outright at parse time. | N/A — condition cannot occur; row retained for numbering stability. | 0008.10 (superseded by #84) |
 | 12 | Functions app is not Linux x86_64 Python 3.13/3.14 | Fail startup; no in-sandbox ABI rebuild/fallback. Flex Consumption, Premium Linux, or Dedicated Linux is required in practice; Linux Consumption tops out at 3.12. | 0008.7 (ABI) + 0008.10 (config) |
-| 13 | `reclaim_idle > auto_delete - cadence - grace` | **Always fail startup/configuration** because SDK `AutoDeletePolicy.delete_interval_seconds` is readable. Use seconds; comparison is inclusive, so fail only on strict `>`. `cadence` is configured v1 reaper cadence (~1 h default), and `grace` defaults to ~300 s. | 0008.12 (inequality + terms) + 0008.10 (config) |
+| 13 | ~~Group-policy auto-delete readback / configured inequality~~ — **superseded** (Decision 128). | The controller writes a complete per-sandbox policy after create: auto-delete is `reclaim_idle + 3600 + 300`; no group default is read or validated. | U1 lifecycle policy |
 
-Row 1 (`harness`) is the one exception to the "conditioned on `aca_sandbox`" framing above: `harness` describes agent-execution semantics, not the physical execution backend, so it is checked whenever `session_runtime` is present at all, regardless of whether `aca_sandbox` is configured — and, since Decision #88, it is checked at the schema layer (`Literal["maf"]`) rather than inside `validate_session_runtime`. Absence of `session_runtime` entirely means no rows are checked and the in-lang-worker backend is selected with no behavior change. When `session_runtime` is present but the `aca_sandbox` block is absent, only row 1 applies (now at parse time, before `validate_session_runtime` runs); rows 2–13 are conditioned on `aca_sandbox` being present and do not apply. Rows 2–5, 8–10, and 12 are fail-closed inside `validate_session_runtime` (8 rows), row 1 is schema-enforced (1 row), and row 13 is the always-fail backstop (1 row), for 10 active rows; rows 6 and 7 are superseded (Decisions #87 and #86) and row 11 is superseded and structurally unrepresentable (Decision 84), for 3 superseded rows — numbering gaps are kept via strikethrough rather than renumbering, since rows are cross-referenced by number in the FRD, code comments, and fixture folder names. The old row-13 “cannot read backstop => warn and runtime clamp” fallback is invalidated by SDK verification and must not be implemented.
+Row 1 (`harness`) is the one exception to the "conditioned on `aca_sandbox`" framing above: `harness` describes agent-execution semantics, not the physical execution backend, so it is checked whenever `session_runtime` is present at all, regardless of whether `aca_sandbox` is configured — and, since Decision #88, it is checked at the schema layer (`Literal["maf"]`) rather than inside `validate_session_runtime`. Absence of `session_runtime` entirely means no rows are checked and the in-lang-worker backend is selected with no behavior change. When `session_runtime` is present but the `aca_sandbox` block is absent, only row 1 applies. Rows 2–5, 8–10, and 12 remain fail-closed; rows 6, 7, 11, and 13 are superseded. Row 13 now uses the explicit per-sandbox lifecycle policy from Decision 128, not a Sandbox Group readback or runtime clamp.
 
 #### 2. HTTP, status, async, and SSE contract
 
@@ -1081,7 +1091,8 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 | Sync harness/app fault | `5xx` before response (or terminal in-band if stream already started). |
 | Sync setup/run wait deadline | `504` with typed reason/retry hint. |
 | Async submission | `202`, `Location`, `Retry-After: 2`, URLs. |
-| Readable async status/result | `200`, even if run failed; failure is a body `state` + `error`, not read-path `5xx`. |
+| Readable async status | `200`, even if run failed; failure is a body `state` + `error`, not a read-path `5xx`. |
+| Unavailable async result | `410 Gone` after result eviction, missing result content, or session tombstone; status remains readable. |
 | Unknown run | `404`. |
 | Auth/authz | `401`/`403`. |
 | Different submission while active run holds slot | Flat `409 active_run_exists`, naming active run. |
@@ -1221,7 +1232,7 @@ an enabled v1 surface.
 * Typed execution seam conformance against Local and ACA backend: all seven states, exclusive cursor semantics, typed cursor expiry, cancellation, result eviction, and default local parity.
 * Azurite: owner vectors, ETag one-active-run race across two controllers, entity-group atomicity, idempotency, generation monotonicity, tombstone/410, loss-always-tombstones, redaction.
 * Stub transport plus real ACA smoke from adapter phase: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, SDK import firewall.
-* HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; snapshot restart; disconnect does not cancel; failed async read is `200`.
+* HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; snapshot restart; disconnect does not cancel; failed async status read is `200` while unavailable result reads are `410`.
 * Crash injection: file-write/rename/pointer-fsync boundaries; disk-intact crash resumes same sandbox; lost sandbox tombstones; stopped/suspended redeploy digest mismatch; OOM/disk full fails cleanly; clock-skew grace; post-terminal lifecycle re-arm.
 * Reconciler: stale heartbeat verification, no false abandon, label-scoped platform divergence, per-sandbox lifecycle writes, no-live-delete CAS, backstop inequality, terminal/tombstone pruning, snapshot pruning, capacity reap-and-retry.
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, all credential Transform sources, identity-less negative tests, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.

@@ -13,8 +13,9 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
 
 import aiohttp
 from azure.core.credentials_async import AsyncTokenCredential
@@ -50,7 +51,10 @@ from .transport_models import (
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxGroupIdentity,
+    SandboxLifecyclePolicy,
     SandboxProvisioningError,
+    SandboxSnapshot,
+    SandboxSummary,
     parse_sandbox_group_resource_id,
     source_to_provider_kwargs,
 )
@@ -59,7 +63,14 @@ if TYPE_CHECKING:
     # The optional preview SDK is imported for typing only. Every runtime use
     # goes through ``_load_sdk_factories()``'s lazy ``import_module()`` below,
     # so the default in-language-worker runtime never depends on this import.
-    from azure.containerapps.sandbox import EgressPolicy, ExecResult, FileInfo
+    from azure.containerapps.sandbox import (
+        AutoDeletePolicy,
+        AutoSuspendPolicy,
+        EgressPolicy,
+        ExecResult,
+        FileInfo,
+        LifecyclePolicy,
+    )
     from azure.containerapps.sandbox.aio import SandboxClient, SandboxGroupClient
 
 _ARM_HOST = "https://management.azure.com"
@@ -88,6 +99,9 @@ class SdkFactories:
     sandbox_group_client: Callable[..., SandboxGroupClient]
     sandbox_client: Callable[..., SandboxClient]
     egress_policy: Callable[..., EgressPolicy]
+    lifecycle_policy: Callable[..., LifecyclePolicy]
+    auto_suspend_policy: Callable[..., AutoSuspendPolicy]
+    auto_delete_policy: Callable[..., AutoDeletePolicy]
 
 
 def _load_sdk_factories() -> SdkFactories:
@@ -111,6 +125,9 @@ def _load_sdk_factories() -> SdkFactories:
         sandbox_group_client=async_sdk.SandboxGroupClient,
         sandbox_client=async_sdk.SandboxClient,
         egress_policy=sdk.EgressPolicy,
+        lifecycle_policy=sdk.LifecyclePolicy,
+        auto_suspend_policy=sdk.AutoSuspendPolicy,
+        auto_delete_policy=sdk.AutoDeletePolicy,
     )
 
 
@@ -383,6 +400,73 @@ class AcaSandboxAdapter:
         finally:
             await _close_resource(self._credential)
 
+    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+        """Project label-filtered platform inventory without leaking SDK summaries."""
+        self._ensure_open()
+        summaries: list[SandboxSummary] = []
+        async for sandbox in self._group_client.list_sandboxes(labels=labels):
+            sandbox_id = getattr(sandbox, "id", None)
+            sandbox_labels = getattr(sandbox, "labels", {})
+            if not isinstance(sandbox_id, str) or not isinstance(sandbox_labels, Mapping):
+                raise SandboxProvisioningError("Sandbox inventory response was incomplete.")
+            summaries.append(
+                SandboxSummary.create(
+                    sandbox_id=sandbox_id,
+                    labels={
+                        str(key): str(value)
+                        for key, value in sandbox_labels.items()
+                        if isinstance(key, str) and isinstance(value, str)
+                    },
+                    created_at=_sdk_timestamp(sandbox, "created_at"),
+                    modified_at=_sdk_timestamp(sandbox, "modified_at"),
+                )
+            )
+        return tuple(summaries)
+
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        """Delete one sandbox through the bound customer-owned group."""
+        self._ensure_open()
+        if not sandbox_id:
+            raise SandboxProvisioningError("Sandbox sandbox_id must be non-empty.")
+        poller = await self._group_client.begin_delete_sandbox(
+            sandbox_id,
+            polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+            polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+        )
+        await poller.result()
+
+    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+        """Project snapshots so the reconciler can prune provider-retained storage."""
+        self._ensure_open()
+        snapshots: list[SandboxSnapshot] = []
+        async for snapshot in self._group_client.list_snapshots():
+            snapshot_id = getattr(snapshot, "id", None)
+            if not isinstance(snapshot_id, str):
+                raise SandboxProvisioningError("Snapshot inventory response was incomplete.")
+            sandbox_id = getattr(snapshot, "sandbox_id", None)
+            if sandbox_id is not None and not isinstance(sandbox_id, str):
+                raise SandboxProvisioningError("Snapshot inventory response was invalid.")
+            snapshots.append(
+                SandboxSnapshot.create(
+                    snapshot_id=snapshot_id,
+                    sandbox_id=sandbox_id,
+                    created_at=_sdk_timestamp(snapshot, "created_at"),
+                )
+            )
+        return tuple(snapshots)
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete one unreferenced snapshot through the bound Sandbox Group."""
+        self._ensure_open()
+        if not snapshot_id:
+            raise SandboxProvisioningError("Sandbox snapshot_id must be non-empty.")
+        poller = await self._group_client.begin_delete_snapshot(
+            snapshot_id,
+            polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+            polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+        )
+        await poller.result()
+
     async def _attach_handle(
         self,
         persisted: PersistedSandboxBinding,
@@ -425,6 +509,7 @@ class AcaSandboxAdapter:
                 group_resource_id=self._group.resource_id,
                 region=self._group.region,
             ),
+            factories=self._factories,
         )
 
     async def _verify_manifest_handshake(
@@ -531,9 +616,16 @@ async def _translate_file_errors[T](operation: Awaitable[T]) -> T:
 class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
     """A live individual sandbox with direct file and separate process operations."""
 
-    def __init__(self, *, sdk_client: SandboxClient, identity: ProvisionedSandboxIdentity) -> None:
+    def __init__(
+        self,
+        *,
+        sdk_client: SandboxClient,
+        identity: ProvisionedSandboxIdentity,
+        factories: SdkFactories | None = None,
+    ) -> None:
         self._sdk_client = sdk_client
         self._identity = identity
+        self._factories = factories
         self._closed = False
 
     @property
@@ -617,6 +709,33 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         )
         await poller.result()
 
+    async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
+        """Read the complete lifecycle projection from the individual sandbox."""
+        self._ensure_open()
+        policy = await self._sdk_client.get_lifecycle_policy()
+        return _project_lifecycle_policy(policy)
+
+    async def set_lifecycle_policy(self, policy: SandboxLifecyclePolicy) -> None:
+        """Set both auto-suspend and auto-delete together; never inherit group policy."""
+        self._ensure_open()
+        if self._factories is None:
+            raise SandboxProvisioningError("ACA lifecycle factories are unavailable.")
+        auto_suspend = (
+            None
+            if policy.auto_suspend_seconds is None
+            else self._factories.auto_suspend_policy(
+                auto_suspend_seconds=policy.auto_suspend_seconds,
+                mode=policy.auto_suspend_mode,
+            )
+        )
+        lifecycle = self._factories.lifecycle_policy(
+            auto_suspend=auto_suspend,
+            auto_delete=self._factories.auto_delete_policy(
+                delete_interval_seconds=policy.auto_delete_seconds
+            ),
+        )
+        await self._sdk_client.set_lifecycle_policy(lifecycle)
+
     async def close(self) -> None:
         """Close the live data-plane handle."""
 
@@ -678,6 +797,44 @@ def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy)
         default_action="Deny",
         traffic_inspection=policy.traffic_inspection,
     )
+
+
+def _project_lifecycle_policy(policy: object) -> SandboxLifecyclePolicy:
+    """Project the SDK lifecycle response while keeping its shape adapter-local."""
+    auto_suspend = getattr(policy, "auto_suspend", None)
+    auto_delete = getattr(policy, "auto_delete", None)
+    auto_delete_seconds = getattr(auto_delete, "delete_interval_seconds", None)
+    if isinstance(auto_delete_seconds, bool) or not isinstance(auto_delete_seconds, int):
+        raise SandboxProvisioningError("Sandbox lifecycle policy omitted auto-delete.")
+
+    if auto_suspend is None:
+        return SandboxLifecyclePolicy.create(
+            auto_suspend_seconds=None,
+            auto_delete_seconds=auto_delete_seconds,
+        )
+    seconds = getattr(auto_suspend, "auto_suspend_seconds", None)
+    if seconds is None:
+        seconds = getattr(auto_suspend, "suspend_interval_seconds", None)
+    mode = getattr(auto_suspend, "mode", "Disk")
+    if isinstance(seconds, bool) or not isinstance(seconds, int) or mode not in {"Memory", "Disk"}:
+        raise SandboxProvisioningError("Sandbox lifecycle policy was invalid.")
+    auto_suspend_mode: Literal["Memory", "Disk"] = "Memory" if mode == "Memory" else "Disk"
+    return SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=seconds,
+        auto_suspend_mode=auto_suspend_mode,
+        auto_delete_seconds=auto_delete_seconds,
+    )
+
+
+def _sdk_timestamp(value: object, attribute: str) -> str | None:
+    timestamp = getattr(value, attribute, None)
+    if timestamp is None:
+        return None
+    if isinstance(timestamp, datetime):
+        return timestamp.astimezone(UTC).isoformat()
+    if isinstance(timestamp, str) and timestamp.strip():
+        return timestamp
+    raise SandboxProvisioningError("Sandbox inventory response contained an invalid timestamp.")
 
 
 def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:

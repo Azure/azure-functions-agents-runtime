@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -9,6 +10,9 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..config.schema import SubagentRef
     from ..registration.catalog import AgentCatalog
+    from .backend import RunError, RunResult
+
+type OutputValidator = Callable[["RunResult"], "RunError | None"]
 
 
 @dataclass(frozen=True)
@@ -29,6 +33,7 @@ class AgentBinding:
     web_request_tools: list[Any] | None = None
     subagents: list[SubagentRef] | None = None
     catalog: AgentCatalog | None = None
+    output_validator: OutputValidator | None = None
 
     def runner_kwargs(self, *, stream: bool) -> dict[str, Any]:
         """Return this binding in the runner's current keyword shape."""

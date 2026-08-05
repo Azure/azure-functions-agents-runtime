@@ -10,6 +10,7 @@ from types import SimpleNamespace
 from typing import Any, get_type_hints
 
 import azure.functions as func
+import pytest
 
 from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
@@ -18,6 +19,8 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.controller.http import ControllerResponse
+from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
 from azure_functions_agents.execution.backend import RunContext, RunEvent, RunHandle, RunStatus
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
@@ -26,9 +29,18 @@ from azure_functions_agents.registration.endpoints import (
     _run_agent_stream,
     _run_builtin_agent,
     _run_builtin_agent_stream,
+    _start_aca_stream,
     register_builtin_endpoints,
+    register_sandbox_management_endpoints,
 )
 from azure_functions_agents.runner import _SESSION_ID_PATTERN
+from azure_functions_agents.session_state import AppIdentity
+from tests.doubles.fake_session_runtime import (
+    DEFAULT_GROUP_RESOURCE_ID,
+    FakeSandboxSessionHandle,
+    FakeSandboxSessionProvider,
+    FakeSessionStateStore,
+)
 
 
 class FakeFunctionApp:
@@ -89,6 +101,99 @@ class DummyRequest:
 
     async def json(self) -> Any:
         return self._payload
+
+
+def _runtime(tmp_path: Path) -> SessionRuntimeBinding:
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    store = FakeSessionStateStore()
+
+    async def provider_factory() -> FakeSandboxSessionProvider:
+        return provider
+
+    async def state_store_factory() -> StateStoreBinding:
+        return StateStoreBinding.create(
+            store=store,
+            state_store_fingerprint="s1-" + ("a" * 52),
+        )
+
+    return SessionRuntimeBinding.create(
+        app_identity=AppIdentity.create(
+            subscription_id="11111111-2222-3333-4444-555555555555",
+            site_name="agent-app",
+        ),
+        sandbox_group_resource_id=DEFAULT_GROUP_RESOURCE_ID,
+        script_root=tmp_path,
+        provider_factory=provider_factory,
+        state_store_factory=state_store_factory,
+    )
+
+
+def test_sandbox_management_routes_share_one_submission_auth_policy(tmp_path: Path) -> None:
+    app = FakeFunctionApp()
+    auth = EndpointAuthConfig(mode="function")
+
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=auth,
+        session_runtime=_runtime(tmp_path),
+    )
+
+    assert {(route["route"], tuple(route["methods"])) for route in app.routes} == {
+        ("agents/test-agent/sessions/{session_id}/runs/{run_id}", ("GET",)),
+        ("agents/test-agent/sessions/{session_id}/runs/{run_id}/result", ("GET",)),
+        ("agents/test-agent/sessions/{session_id}/runs/{run_id}/events", ("GET",)),
+        ("agents/test-agent/sessions/{session_id}/runs/{run_id}/cancel", ("POST",)),
+    }
+    assert {route["auth_level"] for route in app.routes} == {func.AuthLevel.FUNCTION}
+
+
+@pytest.mark.asyncio
+async def test_builtin_stream_honors_respond_async(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_create_execution_backend(*args: Any, **kwargs: Any) -> object:
+        del args
+        captured.update(kwargs)
+        return object()
+
+    async def fake_submit_run(*args: Any, **kwargs: Any) -> ControllerResponse:
+        del args
+        captured["respond_async"] = kwargs["respond_async"]
+        return ControllerResponse(
+            status_code=202,
+            body={"session_id": "session-1", "run_id": "run-1", "status": "accepted"},
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        fake_create_execution_backend,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        fake_submit_run,
+    )
+
+    response = await _start_aca_stream(
+        prompt="hello",
+        resolved=_resolved_agent(
+            name="Test Agent",
+            is_main=True,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        ),
+        session_id=None,
+        idempotency_key=None,
+        session_runtime=_runtime(tmp_path),
+        owner=None,
+        respond_async=True,
+        after_sequence=0,
+    )
+
+    assert response.status_code == 202
+    assert captured["respond_async"] is True
 
 
 def test_run_agent_stream_adopts_terminal_state_after_normal_exhaustion(
@@ -1180,4 +1285,3 @@ def test_entra_workflow_endpoints_without_identity_are_unauthorized(
         route = next(route for route in app.routes if route["route"] == name)
         response = asyncio.run(route["handler"](DummyRequest({}), client=object()))
         assert response.status_code == 401
-

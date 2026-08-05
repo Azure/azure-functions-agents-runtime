@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.controller.readiness import (
+    HARNESS_PROTOCOL_PATH,
     ActivatedSession,
     SessionActivationError,
     SessionActivationGoneError,
@@ -20,6 +21,7 @@ from azure_functions_agents.controller.readiness import (
     revalidate_before_submit,
     session_with_admitted_run,
 )
+from azure_functions_agents.controller.reconciler import SessionReconciler
 from azure_functions_agents.execution.setup_budget import SetupBudget
 from azure_functions_agents.session_state import (
     AppIdentity,
@@ -30,7 +32,7 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.manifest import SandboxManifestMismatchError
-from azure_functions_agents.transport.transport_models import DiskSource
+from azure_functions_agents.transport.transport_models import DiskSource, SandboxFileOperationError
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
 from tests.doubles.fake_session_runtime import FakeSandboxSessionHandle as _FakeHandle
@@ -238,6 +240,28 @@ async def test_manifest_mismatch_quarantines_without_deleting_state(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_corrupt_optional_harness_protocol_quarantines_before_admission(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    handle = _FakeHandle("new-sandbox")
+    handle.seed_file(HARNESS_PROTOCOL_PATH, b"not-json")
+    provider = _FakeProvider(handle)
+    store = _FakeStore()
+
+    with pytest.raises(SessionActivationNotFoundError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            "new-session",
+            SetupBudget.start(),
+            allow_create=True,
+        )
+
+    assert store.session is not None
+    assert store.session.status == "quarantined"
+    assert store.session.quarantine_reason == "protocol_version_mismatch"
+
+
+@pytest.mark.asyncio
 async def test_manifest_mismatch_releases_an_active_slot_before_quarantine(
     tmp_path: Path,
 ) -> None:
@@ -333,6 +357,30 @@ async def test_deployment_epoch_mismatch_tombstones_an_idle_session(tmp_path: Pa
 
 
 @pytest.mark.asyncio
+async def test_suspended_stale_digest_tombstones_before_provider_resume(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    session = replace(
+        _session(script_root, status="suspended"),
+        digest="sha256:" + ("b" * 64),
+    )
+    store = _FakeStore(session)
+
+    with pytest.raises(SessionActivationGoneError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    assert provider.resume_calls == 0
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+
+
+@pytest.mark.asyncio
 async def test_missing_explicit_session_fails_closed_without_creating_a_sandbox(
     tmp_path: Path,
 ) -> None:
@@ -374,7 +422,44 @@ async def test_creation_reserves_the_row_then_proves_the_live_manifest(tmp_path:
     assert store.session.status == "ready"
     assert store.session.sandbox_id == "new-sandbox"
     assert not handle.closed
+    assert handle.lifecycle_policy.auto_suspend_seconds == 300
+    assert handle.lifecycle_policy.auto_delete_seconds == 90_300
     await activated.handle.close()
+
+
+@pytest.mark.asyncio
+async def test_partial_delivery_stays_creating_until_reconciler_reclaims_candidate(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = _FakeHandle("new-sandbox")
+    handle.write_errors.append(SandboxFileOperationError("partial delivery"))
+    provider = _FakeProvider(handle)
+    store = _FakeStore()
+
+    with pytest.raises(SandboxFileOperationError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            "new-session",
+            SetupBudget.start(),
+            allow_create=True,
+        )
+
+    assert store.session is not None
+    assert store.session.status == "creating"
+    store.session = replace(
+        store.session,
+        created_at=datetime.now(UTC) - timedelta(minutes=10),
+        updated_at=datetime.now(UTC) - timedelta(minutes=10),
+    )
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,
+    ).run_once()
+
+    assert report.tombstoned_sessions == 1
+    assert store.session.status == "tombstoned"
 
 
 @pytest.mark.asyncio

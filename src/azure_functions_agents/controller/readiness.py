@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -31,7 +32,9 @@ from ..transport.transport_models import (
     PersistedSandboxBinding,
     SandboxCreateRequest,
     SandboxCreateSource,
+    SandboxFileNotFoundError,
     SandboxGroupBinding,
+    SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
 )
 from .package import (
@@ -48,6 +51,23 @@ from .package import (
 DEFAULT_AUTO_SUSPEND_SECONDS = 300
 DEFAULT_RECLAIM_IDLE_SECONDS = 86_400
 DEFAULT_PROTOCOL_VERSION = "1"
+RECONCILER_MAX_CADENCE_SECONDS = 3600
+RECLAIM_SAFETY_GRACE_SECONDS = 300
+HARNESS_PROTOCOL_PATH = "/var/lib/azure-functions-agents/protocol.json"
+ATOMIC_CHECKPOINT_POINTER_PATH = "/var/lib/azure-functions-agents/session/current"
+QUARANTINE_REASONS: frozenset[str] = frozenset(
+    {
+        "sandbox_manifest_mismatch",
+        "routing_binding_changed",
+        "state_store_fingerprint_mismatch",
+        "protocol_version_mismatch",
+        "capability_mismatch",
+        "checkpoint_corrupt",
+        "journal_corrupt",
+        "generation_rollback",
+        "platform_binding_mismatch",
+    }
+)
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 
 type _SessionLockKey = tuple[str, str]
@@ -93,6 +113,14 @@ class SessionBindingChangedError(SessionActivationError):
 
 class SessionRunOwnershipChangedError(SessionActivationError):
     """The session no longer owns the admitted run before submission."""
+
+
+class SessionReadinessArtifactError(SessionActivationError):
+    """A harness-published protocol, capability, or checkpoint artifact was unsafe."""
+
+    def __init__(self, reason: str) -> None:
+        self.reason = _validate_quarantine_reason(reason)
+        super().__init__(f"Sandbox readiness artifact failed validation: {self.reason}.")
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,7 +471,7 @@ def session_with_admitted_run(
         status="running",
         last_activity_at=updated_at,
         expires_at=session.expires_at,
-        idle_policy_armed=session.idle_policy_armed,
+        idle_policy_armed=False,
         active_run_id=run_id,
         snapshot_ids=session.snapshot_ids,
         region=session.region,
@@ -474,6 +502,199 @@ def terminal_run(
         status_reason=reason,
         expires_at=run.expires_at,
         created_at=run.created_at,
+        updated_at=updated_at,
+    )
+
+
+def lifecycle_policy_for_idle(runtime: SessionRuntimeBinding) -> SandboxLifecyclePolicy:
+    """Build the complete per-sandbox policy used at create and after terminal adoption."""
+    return SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=runtime.auto_suspend_seconds,
+        auto_suspend_mode="Disk",
+        auto_delete_seconds=(
+            runtime.reclaim_idle_seconds
+            + RECONCILER_MAX_CADENCE_SECONDS
+            + RECLAIM_SAFETY_GRACE_SECONDS
+        ),
+    )
+
+
+async def disarm_idle_lifecycle(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+) -> ActivatedSession:
+    """Durably coordinate an idle-policy disable before a run can be admitted."""
+    now = datetime.now(UTC)
+    disarmed_session = _session_with_idle_policy_disarmed(activated.session, updated_at=now)
+    etag = await activated.store.update_session(
+        previous=activated.session,
+        updated=disarmed_session,
+        etag=activated.etag,
+    )
+    prepared = ActivatedSession.create(
+        handle=activated.handle,
+        session=disarmed_session,
+        etag=etag,
+        partition=activated.partition,
+        store=activated.store,
+    )
+    try:
+        current = await prepared.handle.get_lifecycle_policy()
+        disabled = SandboxLifecyclePolicy.create(
+            auto_suspend_seconds=None,
+            auto_suspend_mode=current.auto_suspend_mode,
+            auto_delete_seconds=current.auto_delete_seconds,
+        )
+        await prepared.handle.set_lifecycle_policy(disabled)
+    except BaseException:
+        try:
+            await restore_idle_lifecycle_if_unowned(runtime, prepared)
+        except Exception:
+            logger.exception("Could not restore sandbox idle policy after a pre-admission failure")
+        raise
+    return prepared
+
+
+async def rearm_idle_lifecycle(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+) -> None:
+    """Restore the controller-owned complete policy and durable idle accounting."""
+    await restore_idle_lifecycle_if_unowned(runtime, activated)
+
+
+async def restore_idle_lifecycle_if_unowned(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+) -> bool:
+    """Re-arm idle policy only after a fresh read proves no run holds the slot."""
+    current = await activated.store.get_session(activated.partition, activated.session.session_id)
+    if current.record.active_run_id is not None or current.record.status in {
+        "deleting",
+        "deleted",
+        "tombstoned",
+    }:
+        return False
+    await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+    updated = _session_with_idle_policy_armed(
+        current.record,
+        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+        updated_at=datetime.now(UTC),
+    )
+    await activated.store.update_session(
+        previous=current.record,
+        updated=updated,
+        etag=current.etag,
+    )
+    return True
+
+
+async def touch_session_activity(
+    runtime: SessionRuntimeBinding,
+    owner: OwnerContext,
+    session_id: str,
+) -> None:
+    """Reset one authorized session's idle wall clock for a management request."""
+    state_binding = await runtime.get_state_store()
+    partition = owner_partition(owner)
+    current = await state_binding.store.get_session(partition, session_id)
+    now = datetime.now(UTC)
+    updated = DurableSessionRecord.create(
+        owner_partition=current.record.owner_partition,
+        session_id=current.record.session_id,
+        sandbox_id=current.record.sandbox_id,
+        generation=current.record.generation,
+        digest_kind=current.record.digest_kind,
+        digest=current.record.digest,
+        protocol=current.record.protocol,
+        status=current.record.status,
+        last_activity_at=now,
+        expires_at=now + timedelta(seconds=runtime.reclaim_idle_seconds),
+        idle_policy_armed=current.record.idle_policy_armed,
+        active_run_id=current.record.active_run_id,
+        snapshot_ids=current.record.snapshot_ids,
+        region=current.record.region,
+        state_store_fingerprint=current.record.state_store_fingerprint,
+        quarantine_reason=current.record.quarantine_reason,
+        tombstone_reason=current.record.tombstone_reason,
+        created_at=current.record.created_at,
+        updated_at=now,
+    )
+    await state_binding.store.update_session(
+        previous=current.record,
+        updated=updated,
+        etag=current.etag,
+    )
+
+
+def session_with_idle_policy_armed(
+    session: DurableSessionRecord,
+    *,
+    reclaim_idle_seconds: int,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    """Return an idle session whose lifecycle deadline starts at terminal activity."""
+    return _session_with_idle_policy_armed(
+        session,
+        reclaim_idle_seconds=reclaim_idle_seconds,
+        updated_at=updated_at,
+    )
+
+
+def _session_with_idle_policy_disarmed(
+    session: DurableSessionRecord,
+    *,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+    )
+
+
+def _session_with_idle_policy_armed(
+    session: DurableSessionRecord,
+    *,
+    reclaim_idle_seconds: int,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    """Set idle policy state while preserving quarantined status when applicable."""
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=updated_at,
+        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        idle_policy_armed=True,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
         updated_at=updated_at,
     )
 
@@ -543,6 +764,10 @@ async def _create_and_activate_session(
             provider.create(create_request, persisted_group=group),
             setup_deadline,
         )
+        await _within_setup_budget(
+            handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime)),
+            setup_deadline,
+        )
         persisted_session = _session_with_sandbox(
             initial_session,
             sandbox_id=handle.identity.sandbox_id,
@@ -569,6 +794,10 @@ async def _create_and_activate_session(
             handle,
             expected=expected,
             setup_deadline=setup_deadline,
+        )
+        await _within_setup_budget(
+            _verify_optional_harness_artifacts(handle, persisted_session),
+            setup_deadline,
         )
         ready_session = _ready_session(persisted_session, updated_at=datetime.now(UTC))
         etag = await _within_setup_budget(
@@ -599,6 +828,18 @@ async def _create_and_activate_session(
         _record_security_event("sandbox_manifest_mismatch", frozenset({"manifest"}))
         raise SessionActivationNotFoundError(
             "Session sandbox binding cannot be trusted."
+        ) from None
+    except SessionReadinessArtifactError as exc:
+        if handle is not None:
+            await _quarantine_detected_binding(
+                state_binding.store,
+                persisted_session,
+                etag,
+                reason=exc.reason,
+            )
+        _record_security_event(exc.reason, frozenset({"harness_artifact"}))
+        raise SessionActivationNotFoundError(
+            "Session sandbox readiness artifacts cannot be trusted."
         ) from None
     except ContentPackagingError:
         raise SessionActivationError("Sandbox content delivery could not be verified.") from None
@@ -656,6 +897,59 @@ async def _capture_current_package(
         return await _within_setup_budget(get_content_package(script_root), setup_deadline)
     except ContentPackagingError:
         raise SessionActivationError("Sandbox content package could not be captured.") from None
+
+
+async def _verify_optional_harness_artifacts(
+    handle: SandboxSessionHandle,
+    session: DurableSessionRecord,
+) -> None:
+    """Validate harness artifacts when a bootstrap has published them.
+
+    The bootstrap image is intentionally deferred, so a missing optional artifact
+    cannot make the controller fabricate readiness. Once an artifact exists it is
+    controller-authoritative and malformed data fails closed.
+    """
+    protocol_payload = await _read_optional_file(handle, HARNESS_PROTOCOL_PATH)
+    if protocol_payload is not None:
+        try:
+            protocol = json.loads(protocol_payload)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise SessionReadinessArtifactError("protocol_version_mismatch") from exc
+        if not isinstance(protocol, dict) or protocol.get("protocol_version") != session.protocol:
+            raise SessionReadinessArtifactError("protocol_version_mismatch")
+        capabilities = protocol.get("capabilities")
+        if capabilities is not None and (
+            not isinstance(capabilities, dict)
+            or not all(
+                isinstance(feature, str) and isinstance(capability, str)
+                for feature, capability in capabilities.items()
+            )
+        ):
+            raise SessionReadinessArtifactError("capability_mismatch")
+
+    pointer_payload = await _read_optional_file(handle, ATOMIC_CHECKPOINT_POINTER_PATH)
+    if pointer_payload is not None:
+        try:
+            pointer = pointer_payload.decode("ascii").strip()
+        except UnicodeDecodeError as exc:
+            raise SessionReadinessArtifactError("checkpoint_corrupt") from exc
+        if (
+            not pointer.startswith("checkpoint-")
+            or "/" in pointer
+            or "\\" in pointer
+            or pointer in {".", ".."}
+        ):
+            raise SessionReadinessArtifactError("checkpoint_corrupt")
+
+
+async def _read_optional_file(
+    handle: SandboxSessionHandle,
+    path: str,
+) -> bytes | None:
+    try:
+        return await handle.read_file(path)
+    except SandboxFileNotFoundError:
+        return None
 
 
 def _remaining_setup_seconds(setup_deadline: SetupDeadline) -> float:
@@ -766,6 +1060,7 @@ def _quarantined_session(
     reason: str,
     updated_at: datetime,
 ) -> DurableSessionRecord:
+    reason = _validate_quarantine_reason(reason)
     return DurableSessionRecord.create(
         owner_partition=session.owner_partition,
         session_id=session.session_id,
@@ -807,6 +1102,7 @@ async def _quarantine_detected_binding(
     *,
     reason: str,
 ) -> None:
+    reason = _validate_quarantine_reason(reason)
     if session.active_run_id is None:
         await _quarantine_session(store, session, etag, reason=reason)
         return
@@ -857,6 +1153,12 @@ def _digest_pair(
     value: DurableSessionRecord | CapturedContentPackage,
 ) -> tuple[str, str]:
     return value.digest_kind, value.digest
+
+
+def _validate_quarantine_reason(reason: str) -> str:
+    if reason not in QUARANTINE_REASONS:
+        raise ValueError(f"Unsupported sandbox quarantine reason: {reason}")
+    return reason
 
 
 def _record_security_event(reason: str, fields: frozenset[str]) -> None:
