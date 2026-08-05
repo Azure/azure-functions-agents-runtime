@@ -944,9 +944,7 @@
 			startWorkflowPolling();
 		}
 
-		// Hash the base URL into the storage key so multiple deployments
-		// served from the same browser don't collide on `chat.sessionId`.
-		// Cheap non-cryptographic hash is fine — this is just a namespace.
+		// Cheap non-cryptographic hash — this is just a namespace.
 		function hashString(str) {
 			let h = 0;
 			for (let i = 0; i < str.length; i++) {
@@ -955,13 +953,22 @@
 			return (h >>> 0).toString(36);
 		}
 
+		// Namespace localStorage by BOTH the target base URL and the specific
+		// agent path (e.g. /agents/foo), so multiple deployments — and multiple
+		// agents served from the same host — don't collide on chat.sessionId,
+		// its source marker, or the Recent Sessions list.
+		function storageNamespace() {
+			if (!state.baseUrl) return "default";
+			return hashString(`${state.baseUrl}|${getApiBasePath()}`);
+		}
+
 		function storageKeyForSessionId() {
-			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
+			const ns = storageNamespace();
 			return `${STORAGE_KEYS.sessionId}.${ns}`;
 		}
 
 		function storageKeyForSessionIdSource() {
-			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
+			const ns = storageNamespace();
 			return `${STORAGE_KEYS.sessionIdSource}.${ns}`;
 		}
 
@@ -975,7 +982,7 @@
 		const RECENT_SESSIONS_MAX_BYTES = 50000;
 
 		function storageKeyForRecentSessions() {
-			const ns = state.baseUrl ? hashString(state.baseUrl) : "default";
+			const ns = storageNamespace();
 			return `${STORAGE_KEYS.recentSessions}.${ns}`;
 		}
 
@@ -1145,7 +1152,7 @@
 		// Reflect the active session id in the always-visible bar under the
 		// status line so users can see and copy the id at any time.
 		function updateSessionBar() {
-			if (!sessionBarEl) return;
+			if (!sessionBarEl || !sessionIdValueEl) return;
 			if (state.sessionId) {
 				sessionIdValueEl.textContent = state.sessionId;
 				sessionIdValueEl.title = state.sessionId;
@@ -1202,7 +1209,7 @@
 		// (no-op load returns empty, no-op persist drops the write).
 		function notifiedWorkflowsStorageKey() {
 			if (!state.baseUrl || !state.sessionId) return null;
-			return `chat.notifiedWorkflows.${hashString(state.baseUrl)}.${state.sessionId}`;
+			return `chat.notifiedWorkflows.${storageNamespace()}.${state.sessionId}`;
 		}
 
 		function loadNotifiedWorkflowIds() {
