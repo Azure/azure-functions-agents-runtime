@@ -40,6 +40,7 @@ def _resolved(
         tool_filter=SimpleNamespace(exclude=exclude or []),
         web_request_config=web_request_config,
         sandbox_config=sandbox_config,
+        workflows=None,
         subagents=subagents or [],
         source_file=source_file,
     )

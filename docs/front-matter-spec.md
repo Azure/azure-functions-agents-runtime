@@ -568,19 +568,49 @@ tools: false
 #### `workflows`
 - **Type:** `object`
 - **Location:** Agent front matter (`main.agent.md` only in v1)
-- **Description:** Enables Dynamic Workflows and optionally excludes discovered workflow tools from this agent.
+- **Description:** Enables Dynamic Workflows, filters discovered workflow tools, and
+  grants access to leaf specialists for workflow tasks.
 
 ```yaml
 workflows:
   enabled: true
   exclude: ["expensive_diagnostics"]  # Optional
+  subagents:
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an HTML portfolio report
 ```
 
-`workflows.enabled: true` injects workflow-management tools (`start_workflow`, `get_workflow_status`, `list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public `@workflow_tool` handlers discovered from `tools/*.py` as Durable Activity targets. The Activity runner calls workflow handlers as `handler(args)`, so v1 workflow tools must be synchronous, accept one dictionary argument, and return JSON-serializable values.
+`workflows.enabled` is a strict boolean. When true, it injects
+workflow-management tools (`start_workflow`, `get_workflow_status`,
+`list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public
+`@workflow_tool` handlers discovered from `tools/*.py` as workflow task targets.
+The v1 runtime currently requires workflow tool handlers to be synchronous,
+accept one dictionary argument, and return JSON-serializable values. This is an
+implementation constraint of the v1 registry and Activity runner, not a Durable
+Functions requirement.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 
 `workflows.exclude` filters only workflow Activity targets; it does not affect normal tools. Conversely, `tools.exclude` filters normal MAF tools and does not hide workflow tools. In v1, setting `workflows.enabled: true` outside `main.agent.md` logs a warning and is ignored.
+
+`workflows.subagents` is independent from top-level [`subagents`](#subagents).
+It is deny-by-default: only listed specialist slugs can appear in a workflow
+`sub_agent` node. Each frontmatter entry must be an object containing `agent` and optionally
+`when`; unknown fields, duplicate references, self references, and unknown slugs
+fail startup. The `when` hint is shown to the workflow authoring model; if
+omitted or blank, the specialist's `description` is used. The generated DAG node
+is separate and contains `id`, `type: "sub_agent"`, `agent`, `task`, and optional
+`depends_on`. Workflow specialists run with
+a fresh context and their own instructions, model, normal tools, MCP servers,
+skills, `web_request` setting, and timeout. They receive no parent conversation
+history, request-scoped sandbox, workflow-management tools, or `delegate_*`
+tools.
+
+See [Dynamic workflows](./workflows.md#workflow-sub-agents) for task examples and
+[`WorkflowConfig`](./front-matter-reference.md#workflowconfig) for the complete
+field reference.
 
 ---
 

@@ -31,7 +31,10 @@ def test_workflow_queue_sample_declares_workflow_queue() -> None:
         "queue_name": "issue-report-requests",
         "connection": "AzureWebJobsStorage",
     }
-    assert spec.workflows == {"enabled": True}
+    assert spec.workflows is not None
+    assert spec.workflows.enabled is True
+    assert spec.workflows.exclude == ()
+    assert spec.workflows.subagents == ()
     assert "create exactly one Dynamic Workflow" in spec.instructions
     for internal_term in (
         "start_workflow",

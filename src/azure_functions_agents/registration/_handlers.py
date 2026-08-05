@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
-from typing import Any, cast
+from typing import TYPE_CHECKING, Any, cast
 
 import azure.functions as func
 import jsonschema
@@ -27,6 +27,9 @@ from ._auth import authorize_entra_request
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
+
+if TYPE_CHECKING:
+    from ..workflows.schema import WorkflowPlanPolicy
 
 AUTH_LEVEL_MAP = {
     "anonymous": func.AuthLevel.ANONYMOUS,
@@ -232,6 +235,7 @@ def make_agent_handler(
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
 
@@ -284,6 +288,7 @@ def make_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
+                    workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
                 )
 
@@ -334,6 +339,7 @@ def make_http_agent_handler(
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler for an HTTP-triggered agent.
 
@@ -423,6 +429,7 @@ def make_http_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
+                    workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
                 )
 

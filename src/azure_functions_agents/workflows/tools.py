@@ -19,9 +19,9 @@ workflows.
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from azure_functions_agents._function_tool import tool as define_tool
 from azure_functions_agents._logger import logger
@@ -33,7 +33,12 @@ from .context import (
     session_owns_workflow,
 )
 from .engine import CANCEL_EVENT_NAME, ORCHESTRATOR_NAME
-from .schema import PlanValidationError, plan_to_activity_inputs, validate_plan
+from .schema import (
+    PlanValidationError,
+    WorkflowPlanPolicy,
+    plan_to_activity_inputs,
+    validate_plan,
+)
 
 MAX_ACTIVE_WORKFLOWS_PER_SESSION = 10
 MAX_WORKFLOW_STATUS_RESULTS = 25
@@ -45,31 +50,10 @@ _TERMINAL_RUNTIME_STATUSES = frozenset({
 })
 
 
-class _TaskSpec(BaseModel):
+class _TaskSpecBase(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str = Field(description="Unique identifier for this task within the plan.")
-    type: str = Field(
-        default="tool",
-        description=(
-            "Task type. 'tool' invokes a workflow-safe tool; 'wait' pauses the "
-            "workflow until a deadline (use the 'duration' or 'until' field)."
-        ),
-    )
-    tool: str | None = Field(
-        default=None,
-        description=(
-            "Required for type='tool'. Name of a workflow-safe tool to invoke. "
-            "The set of allowed tool names is configured per-agent and listed "
-            "in the system prompt under 'Available workflow tools'; an unknown "
-            "or disallowed name causes the plan to be rejected. Must be omitted "
-            "for type='wait'."
-        ),
-    )
-    args: dict[str, Any] = Field(
-        default_factory=dict,
-        description=(
-            "JSON-serializable arguments passed to the tool (type='tool' only)."
-        ),
-    )
     depends_on: list[str] = Field(
         default_factory=list,
         description=(
@@ -79,11 +63,30 @@ class _TaskSpec(BaseModel):
             "self-references are rejected at validation time."
         ),
     )
+
+
+class _ToolTaskSpec(_TaskSpecBase):
+    type: Literal["tool"] = "tool"
+    tool: str = Field(
+        description=(
+            "Name of a workflow-safe tool to invoke. "
+            "The set of allowed tool names is configured per-agent and listed "
+            "in the system prompt under 'Available workflow tools'; an unknown "
+            "or disallowed name causes the plan to be rejected."
+        ),
+    )
+    args: dict[str, Any] = Field(
+        default_factory=dict,
+        description="JSON-serializable arguments passed to the tool.",
+    )
+
+
+class _WaitTaskSpec(_TaskSpecBase):
+    type: Literal["wait"]
     duration: str | None = Field(
         default=None,
         description=(
-            "Required for type='wait' (and only valid then) when scheduling a "
-            "relative pause. ISO-8601 duration in the PnDTnHnMnS subset, e.g. "
+            "Relative pause. ISO-8601 duration in the PnDTnHnMnS subset, e.g. "
             "'PT30S' (30 seconds), 'PT5M' (5 minutes), 'PT1H30M', or 'P1D'. "
             "Capped at 24 hours."
         ),
@@ -99,6 +102,27 @@ class _TaskSpec(BaseModel):
     )
 
 
+class _SubAgentTaskSpec(_TaskSpecBase):
+    type: Literal["sub_agent"]
+    agent: str = Field(
+        description=(
+            "Authorized specialist slug listed under 'Available workflow Sub Agents'."
+        ),
+    )
+    task: str = Field(
+        description=(
+            "Complete self-contained instruction for the specialist; may reference "
+            "upstream results."
+        ),
+    )
+
+
+type _TaskSpec = Annotated[
+    _ToolTaskSpec | _WaitTaskSpec | _SubAgentTaskSpec,
+    Field(discriminator="type"),
+]
+
+
 class StartWorkflowParams(BaseModel):
     tasks: list[_TaskSpec] = Field(
         description=(
@@ -110,6 +134,18 @@ class StartWorkflowParams(BaseModel):
         ),
         min_length=1,
     )
+
+    @field_validator("tasks", mode="before")
+    @classmethod
+    def default_tool_task_type(cls, value: Any) -> Any:
+        if not isinstance(value, list):
+            return value
+        return [
+            {"type": "tool", **item}
+            if isinstance(item, dict) and "type" not in item
+            else item
+            for item in value
+        ]
 
 
 class GetWorkflowStatusParams(BaseModel):
@@ -269,7 +305,8 @@ START_WORKFLOW_DESCRIPTION = (
     "background orchestration; this tool returns as soon as the workflow is "
     "scheduled. Use it when work should survive across chat turns, run steps "
     "in parallel, or exceed a typical tool-call budget. Tasks form a DAG; "
-    "supported task types are 'tool' and 'wait'. This tool is fire-and-forget: "
+    "supported task types are 'tool', 'wait', and authorized 'sub_agent' tasks. "
+    "This tool is fire-and-forget: "
     "after receiving the workflow_id, end your turn promptly and do not poll "
     "get_workflow_status unless the user asks, or the chat client later injects "
     "a <workflow-notification> envelope containing a <workflow-id> and <status>."
@@ -303,12 +340,14 @@ CANCEL_WORKFLOW_DESCRIPTION = (
 async def start_workflow(
     params: StartWorkflowParams,
     session: WorkflowSessionContext | None,
+    *,
+    policy: WorkflowPlanPolicy | None = None,
 ) -> str:
     if session is None:
         return _error(_NO_CLIENT_MESSAGE)
 
-    allowed_tools = registry.get_app_config()
-    if allowed_tools is None:
+    allowed_tools = registry.get_app_config() if policy is None else None
+    if policy is None and allowed_tools is None:
         # Should be unreachable: build_workflow_integration sets the
         # allowlist whenever workflows are enabled, and start_workflow
         # is only registered as a tool in that case. Surface explicitly
@@ -318,7 +357,16 @@ async def start_workflow(
             "never configured (build_workflow_integration was not called)"
         )
     try:
-        plan = validate_plan(params.model_dump(), allowed_tools=set(allowed_tools))
+        if policy is None:
+            assert allowed_tools is not None
+            policy = WorkflowPlanPolicy(
+                allowed_tools=frozenset(allowed_tools),
+                allowed_subagents=frozenset(),
+            )
+        plan = validate_plan(
+            params.model_dump(exclude_unset=True),
+            policy=policy,
+        )
     except PlanValidationError as exc:
         return _error(str(exc))
 
@@ -492,6 +540,7 @@ def build_workflow_tools(
     session_id: str | None = None,
     agent_name: str = "main",
     durable_client: Any | None = None,
+    policy: WorkflowPlanPolicy | None = None,
 ) -> list[Any]:
     """Return the list of workflow tool objects to inject for an agent."""
     session = _build_session(session_id, agent_name, durable_client)
@@ -502,7 +551,7 @@ def build_workflow_tools(
         schema=StartWorkflowParams,
     )
     async def _start_workflow(params: StartWorkflowParams) -> str:
-        return await start_workflow(params, session)
+        return await start_workflow(params, session, policy=policy)
 
     @define_tool(
         name="get_workflow_status",

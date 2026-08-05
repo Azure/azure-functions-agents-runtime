@@ -41,6 +41,8 @@ from azure_functions_agents.config.schema import (
     SystemToolsConfig,
     ToolsFilter,
     TriggerSpec,
+    WorkflowConfig,
+    WorkflowSubagentRef,
 )
 from azure_functions_agents.config.validation import (
     validate_resolved_agent,
@@ -64,6 +66,8 @@ __all__ = [
     "SystemToolsConfig",
     "ToolsFilter",
     "TriggerSpec",
+    "WorkflowConfig",
+    "WorkflowSubagentRef",
     "_app_root",
     "_to_bool",
     "apply_mcp_filter",

@@ -25,6 +25,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.config.validation import (
     validate_resolved_agent,
     validate_subagent_references,
+    validate_workflow_subagent_references,
 )
 from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
@@ -719,3 +720,42 @@ def test_no_subagent_regression_fixture() -> None:
     assert main_caps.filtered_user_tools == discovered.tools
     assert nightly_report_caps.filtered_user_tools == discovered.tools
     assert resource_summary_caps.filtered_user_tools == []
+
+
+# ---------------------------------------------------------------------------
+# 17 — independent Dynamic Workflow Sub Agent grants
+# ---------------------------------------------------------------------------
+
+
+def test_dynamic_workflow_subagents_fixture() -> None:
+    fixture = FIXTURES_ROOT / "17_dynamic_workflow_subagents"
+    specs = load_agent_specs(fixture, strict=True)
+    resolved = [compose(spec, load_global_config(fixture)) for spec in specs]
+    by_slug = {agent.slug: agent for agent in resolved}
+
+    assert set(by_slug) == {
+        "main",
+        "pr_status_analyst",
+        "actionable_report_writer",
+    }
+    main = by_slug["main"]
+    assert main.workflows is not None
+    assert main.workflows.enabled is True
+    assert main.workflows.exclude == ("private_publisher",)
+    assert [
+        (ref.agent, ref.when) for ref in main.workflows.subagents
+    ] == [
+        ("pr_status_analyst", "Review one pull request"),
+        ("actionable_report_writer", None),
+    ]
+    assert main.subagents == []
+
+    known_slugs = set(by_slug)
+    validate_workflow_subagent_references(main, known_slugs=known_slugs)
+    for slug in ("pr_status_analyst", "actionable_report_writer"):
+        validate_resolved_agent(
+            by_slug[slug],
+            discovered_mcp_names=[],
+            discovered_skills=[],
+            is_referenced_as_subagent=True,
+        )
