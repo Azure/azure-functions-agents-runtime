@@ -170,6 +170,9 @@ def register_workflows(
                 entry.capabilities,
                 str(task["task"]),
                 timeout=entry.resolved.timeout,
+                execution_role="workflow_subagent",
+                workflow_id=workflow_id,
+                workflow_node_id=task_id,
             )
         except asyncio.CancelledError:
             raise

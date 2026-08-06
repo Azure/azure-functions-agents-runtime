@@ -17,14 +17,18 @@ ABC surface
   use given an optional per-call request.
 * :meth:`ClientManager.build_chat_client` — return a fresh ``ChatClient``
   bound to a specific model.
+* :meth:`ClientManager.build_chat_client_with_target` — return a fresh client
+    with authoritative inference-target metadata when available.
 * :meth:`ClientManager.close` — release any resources held by the manager
   (called from the application's shutdown hook).
 """
 
 from __future__ import annotations
 
+import json
 import os
 from abc import ABC, abstractmethod
+from dataclasses import dataclass
 from typing import Any
 
 from ._credential import build_async_credential
@@ -34,6 +38,15 @@ from .config.env import runtime_env_value
 # ---------------------------------------------------------------------------
 # ABC
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InferenceTarget:
+    """Construction-time metadata for the model endpoint used by a chat client."""
+
+    inference_provider: str | None = None
+    model: str | None = None
+    model_publisher: str | None = None
 
 
 class ClientManager(ABC):
@@ -58,6 +71,12 @@ class ClientManager(ABC):
         :meth:`resolve_model` itself. The return type is intentionally
         ``Any`` so different framework SDKs can be plugged in.
         """
+
+    def build_chat_client_with_target(
+        self, model: str | None
+    ) -> tuple[Any, InferenceTarget]:
+        """Construct a client and return any authoritative target metadata."""
+        return self.build_chat_client(model), InferenceTarget()
 
     async def close(self) -> None:
         """Release any resources held by the manager. Default: no-op."""
@@ -88,9 +107,12 @@ class MAFClientManager(ClientManager):
 
     def resolve_model(self, requested: str | None) -> str:
         """Resolve model as requested > provider-specific env > runtime env > default."""
+        return self._resolve_model(requested, self._provider())
+
+    @classmethod
+    def _resolve_model(cls, requested: str | None, provider: str) -> str:
         if requested:
             return requested
-        provider = self._provider()
         runtime_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
         if provider == "azure_openai":
             return (
@@ -101,18 +123,32 @@ class MAFClientManager(ClientManager):
         return runtime_model or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
+        client, _ = self.build_chat_client_with_target(model)
+        return client
+
+    def build_chat_client_with_target(
+        self, model: str | None
+    ) -> tuple[Any, InferenceTarget]:
         provider = self._provider()
-        resolved = self.resolve_model(model)
+        resolved = self._resolve_model(model, provider)
         logger.info("MAF provider=%s model=%s", provider, resolved)
         if provider == "openai":
-            return self._build_openai(resolved)
-        if provider == "azure_openai":
-            return self._build_azure_openai(resolved)
-        if provider == "foundry":
-            return self._build_foundry(resolved)
-        raise RuntimeError(
-            f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
-            "Use one of: openai, azure_openai, foundry."
+            client = self._build_openai(resolved)
+        elif provider == "azure_openai":
+            client = self._build_azure_openai(resolved)
+        elif provider == "foundry":
+            client = self._build_foundry(resolved)
+        else:
+            raise RuntimeError(
+                f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
+                "Use one of: openai, azure_openai, foundry."
+            )
+        return client, InferenceTarget(
+            inference_provider=provider,
+            model=resolved,
+            model_publisher=(
+                self._foundry_model_publisher(resolved) if provider == "foundry" else "openai"
+            ),
         )
 
     # ------------------------------------------------------------------
@@ -128,6 +164,22 @@ class MAFClientManager(ClientManager):
         unset so auto-detection does not pick them up.
         """
         return (os.environ.get(name) or "").strip()
+
+    @classmethod
+    def _foundry_model_publisher(cls, model: str) -> str | None:
+        raw_publishers = cls._env("AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS")
+        if not raw_publishers:
+            return None
+        try:
+            publishers = json.loads(raw_publishers)
+        except (json.JSONDecodeError, TypeError):
+            return None
+        if not isinstance(publishers, dict):
+            return None
+        publisher = publishers.get(model)
+        if not isinstance(publisher, str) or not publisher.strip():
+            return None
+        return publisher.strip().lower()
 
     @classmethod
     def _provider(cls) -> str:
