@@ -82,4 +82,20 @@ pip install -e .
 # Build a wheel
 pip install build
 python -m build --wheel
+
+# Or use uv (repo-level defaults are in uv.toml)
+uv build
+```
+
+### uv index defaults
+
+This repository includes [uv.toml](uv.toml) with default settings for environments where direct TLS access to PyPI is blocked:
+
+- `index-url = "https://packagefeedproxy.microsoft.io/pypi/simple/"`
+- `native-tls = true`
+
+You can override these defaults per command, for example:
+
+```bash
+uv build --default-index https://pypi.org/simple
 ```

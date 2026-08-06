@@ -67,6 +67,7 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
 # dependency-free module) so this layer stays valid without eagerly importing
 # the heavy ``runner`` module.
 _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
+_MAX_HISTORY_REPLAY_MESSAGES = 200
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -610,6 +611,88 @@ def _register_workflow_status_endpoints(
     )
 
 
+def _register_history_endpoint(
+    app: func.FunctionApp,
+    *,
+    slug: str,
+    base_function_name: str,
+    auth: EndpointAuthConfig,
+) -> None:
+    """Register a read-only endpoint that returns a session's persisted transcript.
+
+    The built-in chat UI calls this to repaint prior user/assistant messages when a
+    user resumes an older session. It reads the same blob history the runtime writes
+    each turn; when no storage is configured it degrades to an empty transcript so
+    older deployments (and local runs without storage) keep working.
+    """
+    auth_level = resolve_endpoint_auth_level(auth)
+
+    async def get_session_history(req: Request) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
+        session_id = req.headers.get("x-ms-session-id") or ""
+        if not session_id:
+            return Response(
+                json.dumps({"messages": [], "truncated": False}),
+                media_type="application/json",
+            )
+        # session_id becomes part of the blob path; reject anything unsafe.
+        if not _SAFE_SESSION_ID_PATTERN.match(session_id):
+            return Response(
+                json.dumps({"error": "invalid session id"}),
+                status_code=400,
+                media_type="application/json",
+            )
+
+        from .._blob_history import build_blob_provider_from_environment
+
+        provider = build_blob_provider_from_environment()
+        if provider is None:
+            return Response(
+                json.dumps({"messages": [], "truncated": False}),
+                media_type="application/json",
+            )
+        # Present a clean transcript: drop internal/excluded turns.
+        provider.skip_excluded = True
+        try:
+            messages = await provider.get_messages(session_id)
+        except Exception:
+            logger.exception("history endpoint failed")
+            return Response(
+                json.dumps({"error": "failed to load history"}),
+                status_code=500,
+                media_type="application/json",
+            )
+
+        rendered: list[dict[str, str]] = []
+        for message in messages:
+            role = str(getattr(message, "role", "") or "").strip().lower()
+            if role not in ("user", "assistant"):
+                continue
+            text = getattr(message, "text", "")
+            if not isinstance(text, str) or not text:
+                continue
+            rendered.append({"role": role, "text": text})
+
+        truncated = len(rendered) > _MAX_HISTORY_REPLAY_MESSAGES
+        if truncated:
+            rendered = rendered[-_MAX_HISTORY_REPLAY_MESSAGES:]
+        return Response(
+            json.dumps({"messages": rendered, "truncated": truncated}),
+            media_type="application/json",
+        )
+
+    # Order mirrors the chat/chatstream endpoints (route first, then
+    # function_name) so the applied name is idiomatic `@app.function_name`
+    # above `@app.route`. This is also what lets the route be looked up by
+    # its function name in tests.
+    decorated = app.route(
+        route=f"agents/{slug}/history", methods=["GET"], auth_level=auth_level
+    )(get_session_history)
+    app.function_name(name=f"{base_function_name}_history")(decorated)
+
+
 def register_builtin_endpoints(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
@@ -664,6 +747,12 @@ def register_builtin_endpoints(
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
             workflow_policy=workflow_policy,
+        )
+        _register_history_endpoint(
+            app,
+            slug=slug,
+            base_function_name=base_function_name,
+            auth=auth,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
