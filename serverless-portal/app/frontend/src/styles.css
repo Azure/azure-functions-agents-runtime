@@ -381,3 +381,19 @@ textarea.editor:focus {
 .skeleton-block { border-radius: var(--radius); }
 .shimmer-bar { height: 6px; border-radius: 999px; margin-top: 10px; }
 @media (prefers-reduced-motion: reduce) { .skeleton::after { animation: none; } }
+
+/* Modal dialog */
+.modal-backdrop { position: fixed; inset: 0; z-index: 100; background: rgba(8,10,18,.55);
+  backdrop-filter: blur(2px); display: flex; align-items: flex-start; justify-content: center;
+  padding: 6vh 20px 20px; overflow-y: auto; }
+.modal { background: var(--surface); border: 1px solid var(--border); border-radius: 12px;
+  box-shadow: var(--shadow-lg); width: 100%; max-width: 640px; max-height: 88vh; display: flex; flex-direction: column; }
+.modal-head { display: flex; align-items: center; justify-content: space-between; gap: 12px;
+  padding: 14px 18px; border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--surface); border-radius: 12px 12px 0 0; }
+.modal-head h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.modal-body { padding: 18px; overflow-y: auto; }
+
+/* GitHub panel collapse chevron */
+.gh-collapse { border: 0; background: transparent; color: var(--text-muted); cursor: pointer;
+  font-size: 12px; padding: 3px 5px; border-radius: 5px; font-family: inherit; line-height: 1; }
+.gh-collapse:hover { background: var(--surface-3); color: var(--text); }

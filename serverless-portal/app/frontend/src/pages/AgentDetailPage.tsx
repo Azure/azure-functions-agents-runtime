@@ -467,6 +467,7 @@ export default function AgentDetailPage() {
           />
           <GitHubConnect
             github={{ subscription: subForQuery, resourceGroup: agent.resourceGroup, app: agent.app }}
+            defaultCollapsed
           />
 
           <AddCapability

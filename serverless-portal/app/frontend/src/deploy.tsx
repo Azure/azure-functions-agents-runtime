@@ -148,8 +148,15 @@ function GrantAccess({
   )
 }
 
-export function GitHubConnect({ github }: { github: { subscription: string; resourceGroup: string; app: string } }) {
+export function GitHubConnect({
+  github,
+  defaultCollapsed = false,
+}: {
+  github: { subscription: string; resourceGroup: string; app: string }
+  defaultCollapsed?: boolean
+}) {
   const { subscription, resourceGroup, app } = github
+  const [collapsed, setCollapsed] = useState(defaultCollapsed)
   const [status, setStatus] = useState<GitHubStatus | null>(null)
   const [appConn, setAppConn] = useState<GitHubAppConnection | null>(null)
   const [busy, setBusy] = useState(false)
@@ -398,8 +405,25 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
   return (
     <div className="gh">
       <div className="gh-head">
+        <button
+          className="gh-collapse"
+          onClick={() => setCollapsed((c) => !c)}
+          title={collapsed ? 'Expand GitHub panel' : 'Collapse GitHub panel'}
+          aria-label="Toggle GitHub panel"
+        >
+          {collapsed ? '▸' : '▾'}
+        </button>
         <span className="gh-mark">🐙</span>
         <span className="gh-title">GitHub</span>
+        {collapsed && (
+          <span className="muted" style={{ fontSize: 12, marginLeft: 2 }}>
+            {appConn?.connected
+              ? `· ${repoShort || 'connected'}`
+              : status.connected
+                ? `· @${status.login}`
+                : '· not connected'}
+          </span>
+        )}
         <span style={{ flex: 1 }} />
         {status.connected ? (
           <span className="gh-user">
@@ -422,7 +446,8 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
         )}
       </div>
 
-      <div className="gh-body">
+      {!collapsed && (
+        <div className="gh-body">
         {appConn?.connected && status.connected && !result && !changingRepo ? (
           <div className="gh-success">
             <div className="h">✓ Connected to a repository</div>
@@ -691,7 +716,8 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
         )}
 
         {error && <div className="gh-err">{error}</div>}
-      </div>
+        </div>
+      )}
     </div>
   )
 }

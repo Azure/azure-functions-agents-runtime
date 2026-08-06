@@ -1259,6 +1259,19 @@ async function foundryAccountKey(accessToken, subscriptionId, resourceGroup, acc
  */
 export async function generateAgentInstructions(accessToken, subscriptionId, opts) {
   const { resourceGroup, account, openaiEndpoint, model, name, description } = opts
+  const system =
+    'You are an expert at writing system-prompt instructions for AI agents. Given an agent name and a short ' +
+    "description of what it should do, write clear, effective instructions used verbatim as the agent's system " +
+    'prompt. Describe the role, expected behavior, inputs and outputs, tone, and any constraints. Output ONLY ' +
+    'the instructions as plain Markdown prose — no YAML front matter, no code fences, no "Instructions" heading.'
+  const user = `Agent name: ${name || '(unnamed)'}\nWhat it should do: ${description || '(no description provided)'}`
+  return foundryChat(accessToken, subscriptionId, { resourceGroup, account, openaiEndpoint, model, system, user })
+}
+
+// Call a Foundry chat model with a system + user prompt; returns { content }
+// stripped of any wrapping code fence. Key-auth via the account key.
+async function foundryChat(accessToken, subscriptionId, opts) {
+  const { resourceGroup, account, openaiEndpoint, model, system, user, timeoutMs = 60000 } = opts
   if (!openaiEndpoint || !model || !account || !resourceGroup) {
     throw Object.assign(new Error('A Foundry account, model, and endpoint are required.'), { status: 400 })
   }
@@ -1267,18 +1280,11 @@ export async function generateAgentInstructions(accessToken, subscriptionId, opt
 
   const base = openaiEndpoint.endsWith('/') ? openaiEndpoint : `${openaiEndpoint}/`
   const url = `${base}openai/deployments/${encodeURIComponent(model)}/chat/completions?api-version=${OPENAI_CHAT_API}`
-  const system =
-    'You are an expert at writing system-prompt instructions for AI agents. Given an agent name and a short ' +
-    "description of what it should do, write clear, effective instructions used verbatim as the agent's system " +
-    'prompt. Describe the role, expected behavior, inputs and outputs, tone, and any constraints. Output ONLY ' +
-    'the instructions as plain Markdown prose — no YAML front matter, no code fences, no "Instructions" heading.'
-  const user = `Agent name: ${name || '(unnamed)'}\nWhat it should do: ${description || '(no description provided)'}`
-
   const res = await fetch(url, {
     method: 'POST',
     headers: { 'api-key': key, 'Content-Type': 'application/json' },
     body: JSON.stringify({ messages: [{ role: 'system', content: system }, { role: 'user', content: user }] }),
-    signal: AbortSignal.timeout(60000),
+    signal: AbortSignal.timeout(timeoutMs),
   })
   const text = await res.text()
   if (!res.ok) {
@@ -1298,6 +1304,89 @@ export async function generateAgentInstructions(accessToken, subscriptionId, opt
   }
   content = content.replace(/^\s*```[a-z]*\n?/i, '').replace(/\n?```\s*$/i, '').trim()
   return { content }
+}
+
+// Capability code generators, grounded in the azure-functions-agents-runtime
+// `.agent.md` front matter and `tools/` conventions.
+const CAPABILITY_PROMPTS = {
+  http_trigger: {
+    system:
+      'You are an expert author of AI agents for the azure-functions-agents-runtime (Azure Functions, Python). ' +
+      'Generate a COMPLETE `.agent.md` file for a TRIGGERED agent. Triggers are DECLARATIVE front matter — NEVER write Python or a function_app.py. Output exactly:\n' +
+      '1) YAML front matter between --- fences with keys:\n' +
+      '   name: <concise name>\n   description: <one line>\n' +
+      '   trigger:\n     type: <the requested trigger type>\n     args:\n       <exactly the args that trigger type requires>\n' +
+      '   Use the correct trigger.type and args for the REQUESTED trigger type, following the authoritative guidance. ' +
+      'For timer_trigger use args.schedule as an NCRONTAB string (6 fields); for http_trigger use route + methods + auth_level; for a connector use type: generic_trigger with args.type: connectorTrigger.\n' +
+      '   Optionally add input_schema and response_schema (JSON Schema objects) when the task has structured input/output.\n' +
+      '2) After the closing ---, the instructions as Markdown prose: the agent role and exactly what to do when the trigger fires (for a scheduled agent, the work to perform on each run).\n' +
+      'Output ONLY the .agent.md content. No code fences, no commentary.',
+    user: ({ name, description, triggerType }) =>
+      `Agent name: ${name || '(unnamed)'}\nTarget trigger type: ${triggerType || 'http_trigger'}\nWhat the agent should do when it is triggered: ${description || '(describe the task)'}`,
+  },
+  connector_trigger: {
+    system:
+      'You are an expert author of AI agents for the azure-functions-agents-runtime. Generate a COMPLETE `.agent.md` ' +
+      'for a CONNECTOR-triggered agent that runs when an Azure Connector event fires (e.g. a new Office 365 Outlook email). Output exactly:\n' +
+      '1) YAML front matter between --- fences with keys:\n' +
+      '   name: <concise name>\n   description: <one line>\n' +
+      '   trigger:\n     type: generic_trigger\n     args:\n       type: connectorTrigger\n' +
+      '2) After the closing ---, instructions: describe the connector event, how to read EVERY item in the trigger payload, the task to perform, and which tools/MCP servers to use (e.g. the Office 365 Outlook MCP to draft/send replies).\n' +
+      'Output ONLY the .agent.md content. No code fences, no commentary.',
+    user: ({ name, description }) =>
+      `Agent name: ${name || '(unnamed)'}\nWhat it should do on the connector event: ${description || '(describe the event and task)'}`,
+  },
+  custom_tool: {
+    system:
+      'You are an expert Python engineer writing a custom tool for the azure-functions-agents-runtime `tools/` directory. Requirements:\n' +
+      '- `from azure_functions_agents import tool` and `from pydantic import BaseModel, Field`.\n' +
+      '- Define a Pydantic input model (BaseModel) with Field(description=...) on each field.\n' +
+      '- Define ONE function decorated with `@tool` taking a single argument typed as that model and returning a `str` (JSON) or dict. It MAY be `async`.\n' +
+      '- Give the function a clear docstring (used as the tool description).\n' +
+      '- For Azure calls use `from azure.identity.aio import DefaultAzureCredential` (the app managed identity). Prefer aiohttp or httpx. Keep it a single self-contained file.\n' +
+      'Output ONLY valid Python for one file. No markdown, no code fences, no commentary.',
+    user: ({ name, description }) =>
+      `Tool name: ${name || '(unnamed)'}\nWhat the tool should do: ${description || '(describe the tool)'}`,
+  },
+  skill: {
+    system:
+      'You are an expert at authoring reusable SKILL.md knowledge files for the azure-functions-agents-runtime `skills/` directory. Generate a COMPLETE SKILL.md. Output exactly:\n' +
+      '1) YAML front matter between --- fences with:\n' +
+      '   name: <kebab-case-name>\n   description: <one sentence: the knowledge/capability it provides and when to use it>\n' +
+      '2) After the closing ---, Markdown giving the agent durable, reusable guidance: the domain knowledge, step-by-step how-to, key references/URLs/commands, best practices, and pitfalls. Keep it focused and actionable.\n' +
+      'Output ONLY the SKILL.md content. No code fences, no commentary.',
+    user: ({ name, description }) =>
+      `Skill name: ${name || '(unnamed)'}\nWhat the skill should cover: ${description || '(describe the knowledge/capability)'}`,
+  },
+}
+
+// Generate the code/config for an agent capability (HTTP trigger .agent.md,
+// connector trigger .agent.md, or a custom Python tool) with a Foundry model.
+export async function generateCapabilityCode(accessToken, subscriptionId, opts) {
+  const { resourceGroup, account, openaiEndpoint, model, kind, name, description, triggerType, skillsContext, guidance } = opts
+  const p = CAPABILITY_PROMPTS[kind]
+  if (!p) throw Object.assign(new Error(`Unknown capability kind: ${kind}`), { status: 400 })
+  let user = p.user({ name, description, triggerType })
+  if (skillsContext) {
+    user +=
+      '\n\nUse these existing project skills as authoritative reference where relevant ' +
+      '(match their conventions, tools, endpoints, and terminology):\n\n' +
+      skillsContext
+  }
+  // Prepend the portal's authoritative authoring skill for this capability kind.
+  const system = guidance
+    ? `${p.system}\n\n--- Authoritative runtime guidance (follow it exactly) ---\n\n${guidance}`
+    : p.system
+  const { content } = await foundryChat(accessToken, subscriptionId, {
+    resourceGroup,
+    account,
+    openaiEndpoint,
+    model,
+    system,
+    user,
+    timeoutMs: 90000,
+  })
+  return { content, kind }
 }
 
 // List the resource groups in a subscription (name + location), for the create
