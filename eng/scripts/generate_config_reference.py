@@ -42,11 +42,30 @@ ToolsFilter = schema.ToolsFilter
 TriggerSpec = schema.TriggerSpec
 TRIGGER_TYPES = schema.TRIGGER_TYPES
 WebRequestConfig = schema.WebRequestConfig
+WorkflowConfig = schema.WorkflowConfig
+WorkflowSubagentRef = schema.WorkflowSubagentRef
+
+# Extract description and default value dictionaries
+GLOBAL_CONFIG_DESCRIPTIONS = schema.GLOBAL_CONFIG_DESCRIPTIONS
+GLOBAL_CONFIG_DEFAULTS = schema.GLOBAL_CONFIG_DEFAULTS
+SYSTEM_TOOLS_CONFIG_DESCRIPTIONS = schema.SYSTEM_TOOLS_CONFIG_DESCRIPTIONS
+DYNAMIC_SESSIONS_DESCRIPTIONS = schema.DYNAMIC_SESSIONS_DESCRIPTIONS
+TOOLS_FILTER_DESCRIPTIONS = schema.TOOLS_FILTER_DESCRIPTIONS
+AGENT_SPEC_REQUIRED_DESCRIPTIONS = schema.AGENT_SPEC_REQUIRED_DESCRIPTIONS
+AGENT_SPEC_OPTIONAL_DESCRIPTIONS = schema.AGENT_SPEC_OPTIONAL_DESCRIPTIONS
+TRIGGER_SPEC_DESCRIPTIONS = schema.TRIGGER_SPEC_DESCRIPTIONS
+BUILTIN_ENDPOINTS_DESCRIPTIONS = schema.BUILTIN_ENDPOINTS_DESCRIPTIONS
+SYSTEM_TOOLS_AGENT_DESCRIPTIONS = schema.SYSTEM_TOOLS_AGENT_DESCRIPTIONS
+MCP_FILTER_DESCRIPTIONS = schema.MCP_FILTER_DESCRIPTIONS
+SKILLS_FILTER_DESCRIPTIONS = schema.SKILLS_FILTER_DESCRIPTIONS
+AGENT_TOOLS_FILTER_DESCRIPTIONS = schema.AGENT_TOOLS_FILTER_DESCRIPTIONS
+WEB_REQUEST_DESCRIPTIONS = schema.WEB_REQUEST_DESCRIPTIONS
 
 
 def format_type(field_info: FieldInfo, field_name: str) -> str:
     """Format field type annotation as a readable string."""
     annotation = field_info.annotation
+    annotation_args = get_args(annotation)
 
     # Handle Union types (e.g., str | None, bool | object)
     origin = get_origin(annotation)
@@ -56,6 +75,13 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
 
     # Get string representation
     type_str = str(annotation)
+
+    if "WorkflowSubagentRef" in type_str:
+        return "object[]"
+    if "StrictBool" in type_str:
+        return "boolean"
+    if origin is tuple and annotation_args == (str, Ellipsis):
+        return "string[]"
 
     # Clean up ForwardRef patterns early
     import re
@@ -79,6 +105,7 @@ def format_type(field_info: FieldInfo, field_name: str) -> str:
         "SystemToolsConfig",
         "SystemToolsAgentOverride",
         "TriggerSpec",
+        "WorkflowConfig",
     ]
     for class_name in model_class_names:
         if class_name in type_str:
@@ -180,6 +207,8 @@ def get_default_value(field_info: FieldInfo, field_name: str = "", field_type: s
         return f'`"{default}"`'
     if isinstance(default, (int, float)):
         return f"`{default}`"
+    if isinstance(default, tuple):
+        return "`[]`"
     return str(default)
 
 
@@ -279,7 +308,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
-    "workflows": "Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows)",
+    "workflows": "Dynamic Workflow enablement, tool filtering, and Sub Agent grants. [Details](#agent-workflows)",
     "subagents": "Specialist agents this agent can delegate to as `delegate_<slug>` tools. [Details](./front-matter-spec.md#subagents)",
     "input_schema": "JSON Schema for HTTP request validation",
     "response_schema": "JSON Schema for response validation",
@@ -313,6 +342,17 @@ SKILLS_FILTER_DESCRIPTIONS = {
 
 AGENT_TOOLS_FILTER_DESCRIPTIONS = {
     "exclude": "Tool names to exclude (in addition to global excludes)",
+}
+
+WORKFLOW_CONFIG_DESCRIPTIONS = {
+    "enabled": "Enable Dynamic Workflows for this agent. In v1, only `main.agent.md` is honored.",
+    "exclude": "Discovered `@workflow_tool` names to withhold from workflow plans.",
+    "subagents": "Independent, deny-by-default leaf-specialist grants. [Details](#agent-workflows-subagents)",
+}
+
+WORKFLOW_SUBAGENT_DESCRIPTIONS = {
+    "agent": "Required specialist identity slug.",
+    "when": "Optional model-facing routing hint; defaults to the specialist description.",
 }
 
 
@@ -517,6 +557,29 @@ def generate_markdown() -> str:
     lines.extend([
         "",
         "**See:** [Front Matter Spec - tools](./front-matter-spec.md#tools)",
+        "",
+        "### Agent: `workflows`",
+        "",
+        "Enable Dynamic Workflows, filter workflow tools, and grant leaf specialists.",
+        "",
+    ])
+    lines.extend(generate_model_table(WorkflowConfig, descriptions=WORKFLOW_CONFIG_DESCRIPTIONS))
+    lines.extend([
+        "",
+        "#### Agent: `workflows.subagents`",
+        "",
+        "Each entry is an object. Bare-string shorthand and unknown fields are rejected.",
+        "",
+    ])
+    lines.extend(
+        generate_model_table(
+            WorkflowSubagentRef,
+            descriptions=WORKFLOW_SUBAGENT_DESCRIPTIONS,
+        )
+    )
+    lines.extend([
+        "",
+        "**See:** [Front Matter Spec - workflows](./front-matter-spec.md#workflows)",
         "",
         "---",
         "",

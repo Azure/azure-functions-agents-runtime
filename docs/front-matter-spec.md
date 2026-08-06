@@ -568,19 +568,49 @@ tools: false
 #### `workflows`
 - **Type:** `object`
 - **Location:** Agent front matter (`main.agent.md` only in v1)
-- **Description:** Enables Dynamic Workflows and optionally excludes discovered workflow tools from this agent.
+- **Description:** Enables Dynamic Workflows, filters discovered workflow tools, and
+  grants access to leaf specialists for workflow tasks.
 
 ```yaml
 workflows:
   enabled: true
   exclude: ["expensive_diagnostics"]  # Optional
+  subagents:
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an HTML portfolio report
 ```
 
-`workflows.enabled: true` injects workflow-management tools (`start_workflow`, `get_workflow_status`, `list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public `@workflow_tool` handlers discovered from `tools/*.py` as Durable Activity targets. The Activity runner calls workflow handlers as `handler(args)`, so v1 workflow tools must be synchronous, accept one dictionary argument, and return JSON-serializable values.
+`workflows.enabled` is a strict boolean. When true, it injects
+workflow-management tools (`start_workflow`, `get_workflow_status`,
+`list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public
+`@workflow_tool` handlers discovered from `tools/*.py` as workflow task targets.
+The v1 runtime currently requires workflow tool handlers to be synchronous,
+accept one dictionary argument, and return JSON-serializable values. This is an
+implementation constraint of the v1 registry and Activity runner, not a Durable
+Functions requirement.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 
 `workflows.exclude` filters only workflow Activity targets; it does not affect normal tools. Conversely, `tools.exclude` filters normal MAF tools and does not hide workflow tools. In v1, setting `workflows.enabled: true` outside `main.agent.md` logs a warning and is ignored.
+
+`workflows.subagents` is independent from top-level [`subagents`](#subagents).
+It is deny-by-default: only listed specialist slugs can appear in a workflow
+`sub_agent` node. Each frontmatter entry must be an object containing `agent` and optionally
+`when`; unknown fields, duplicate references, self references, and unknown slugs
+fail startup. The `when` hint is shown to the workflow authoring model; if
+omitted or blank, the specialist's `description` is used. The generated DAG node
+is separate and contains `id`, `type: "sub_agent"`, `agent`, `task`, and optional
+`depends_on`. Workflow specialists run with
+a fresh context and their own instructions, model, normal tools, MCP servers,
+skills, `web_request` setting, and timeout. They receive no parent conversation
+history, request-scoped sandbox, workflow-management tools, or `delegate_*`
+tools.
+
+See [Dynamic workflows](./workflows.md#workflow-sub-agents) for task examples and
+[`WorkflowConfig`](./front-matter-reference.md#workflowconfig) for the complete
+field reference.
 
 ---
 
@@ -1261,6 +1291,30 @@ For agents, two related identifiers are derived from the source filename. The fr
   - Uses the same fail-fast collision handling as Azure Function names: if another agent in the same `create_function_app()` call already uses that sanitized slug, app startup fails with a duplicate-slug error instead of registering an alternate route.
   - Example: `daily-report.agent.md` → `/agents/daily_report/`; if `daily_report.agent.md` also exists, app startup now fails instead of allocating `/agents/daily_report_2/`.
 
+#### Flexible filename conventions
+
+In addition to the standard `<name>.agent.md` pattern, the runtime recognises two alternative conventions:
+
+**Bare single-agent aliases** — `agent.md` (any casing: `Agent.md`, `AGENT.MD`) and `CLAUDE.md` (any casing: `Claude.md`, `claude.md`) are treated as aliases for `main.agent.md` internally. Both produce slug `main` and are marked `is_main=True`. Use them when your function app contains exactly one agent and a simpler filename is preferable:
+
+```markdown
+---
+name: My Assistant
+description: A helpful assistant
+builtin_endpoints: true
+---
+You are a helpful assistant.
+```
+_(saved as `agent.md` — available at `/agents/main/chat`, same endpoint as `main.agent.md`)_
+
+> **Note:** `agent.md`, `CLAUDE.md`, and `main.agent.md` all produce slug `main` and **must not coexist in the same app**. App startup fails with a duplicate-slug error if more than one is present.
+
+**`*.claude.md` prefix pattern** — `summarizer.claude.md` is equivalent to `summarizer.agent.md`: the prefix becomes the slug (`summarizer`). Use whichever suffix fits your workflow.
+
+**Case-insensitive suffix matching** — `.agent.md` and `.claude.md` suffix detection is case-insensitive: `Report.AGENT.md` produces slug `report`, same as `report.agent.md`. Two filenames that produce the same slug collide and will fail startup.
+
+> **Not supported:** `*.agents.md` (plural) is **not** a recognised pattern. Files named e.g. `report.agents.md` are silently ignored by the loader. Use the singular `.agent.md` or `.claude.md` suffix.
+
 > **Breaking change (FRD 0007):** Duplicate agent slugs — including two file stems that *sanitize* to the same value (for example `daily-report.agent.md` and `daily_report.agent.md`), and duplicates across the root and an `agents/` subfolder — now fail app startup instead of silently auto-suffixing. This unifies agent-slug collision handling with the pre-existing duplicate-skill and duplicate-workflow-tool checks, and is required because a slug is now also a prompt-visible identity (the `delegate_<slug>` tool name); a silently renamed agent could otherwise leave a `subagents:` reference pointing at the wrong agent, or leave two different agents indistinguishable to a coordinator's model. If you relied on the old auto-suffix behavior, rename the colliding file(s) so every agent slug is unique.
 
 In other words, the display `name:` field is never used to derive registered Azure Function names, routes, or runtime identifiers; it is presentation-only. See also [`name`](#name).
@@ -1276,9 +1330,11 @@ Agents with neither `trigger` nor enabled `builtin_endpoints`, and that are not 
 ```
 /
   agents.config.yaml           # Global configuration
-  main.agent.md             # Optional chat agent convention; enable builtin_endpoints explicitly
+  agent.md                  # Bare alias for main.agent.md → slug "main" (is_main=true)
+                            # Alternatives: main.agent.md or CLAUDE.md → same slug "main"
+                            #   (agent.md, CLAUDE.md, and main.agent.md are aliases; only one per app)
   daily_report.agent.md     # Timer-triggered agent
-  resource_summary.agent.md # Custom HTTP agent
+  resource_summary.claude.md # *.claude.md is equivalent to *.agent.md — prefix becomes slug
   function_app.py           # Python Functions entry point
   host.json
   requirements.txt
