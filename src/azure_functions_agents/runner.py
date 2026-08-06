@@ -60,7 +60,6 @@ import asyncio
 import contextlib
 import json
 import sys
-import uuid
 from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -187,10 +186,8 @@ class _AgentUsageRecorder:
     agent_name: str
     execution_role: _AgentExecutionRole
     inference_target: InferenceTarget = field(default_factory=InferenceTarget)
-    session_id: str | None = None
     workflow_id: str | None = None
     workflow_node_id: str | None = None
-    invocation_id: str = field(default_factory=lambda: uuid.uuid4().hex)
     _emitted: bool = field(default=False, init=False)
 
     def emit(self, outcome: _AgentUsageOutcome, usage_details: Any = None) -> None:
@@ -204,13 +201,11 @@ class _AgentUsageRecorder:
                 "agent_name": self.agent_name,
                 "event_name": "agent_token_usage",
                 "execution_role": self.execution_role,
-                "inference_provider": self.inference_target.inference_provider,
-                "invocation_id": self.invocation_id,
+                "provider": self.inference_target.provider,
                 "model": self.inference_target.model,
                 "model_publisher": self.inference_target.model_publisher,
                 "outcome": outcome,
                 "schema_version": 1,
-                "session_id": self.session_id,
                 "usage_available": bool(usage),
                 "usage_complete": outcome == "success" and bool(usage),
                 "usage_scope": "agent_run_local",
@@ -1043,7 +1038,6 @@ async def run_agent(
                 agent_name=agent_name or "main",
                 execution_role="primary",
                 inference_target=inference_target,
-                session_id=resolved_id,
             )
             try:
                 response: AgentResponse[Any] = await asyncio.wait_for(
@@ -1308,7 +1302,6 @@ async def run_agent_stream(
                         agent_name=agent_name or "main",
                         execution_role="primary",
                         inference_target=inference_target,
-                        session_id=resolved_id,
                     )
                     stream = agent.run(
                         prompt,

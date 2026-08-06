@@ -44,7 +44,7 @@ from .config.env import runtime_env_value
 class InferenceTarget:
     """Construction-time metadata for the model endpoint used by a chat client."""
 
-    inference_provider: str | None = None
+    provider: str | None = None
     model: str | None = None
     model_publisher: str | None = None
 
@@ -144,7 +144,7 @@ class MAFClientManager(ClientManager):
                 "Use one of: openai, azure_openai, foundry."
             )
         return client, InferenceTarget(
-            inference_provider=provider,
+            provider=provider,
             model=resolved,
             model_publisher=(
                 self._foundry_model_publisher(resolved) if provider == "foundry" else "openai"

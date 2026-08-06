@@ -200,7 +200,7 @@ def test_maf_target_uses_one_provider_and_model_resolution_pass(
         built_client, target = MAFClientManager().build_chat_client_with_target("requested-model")
 
     assert built_client is client
-    assert target.inference_provider == "foundry"
+    assert target.provider == "foundry"
     assert target.model == "resolved-model"
     provider.assert_called_once_with()
     resolve.assert_called_once_with("requested-model", "foundry")

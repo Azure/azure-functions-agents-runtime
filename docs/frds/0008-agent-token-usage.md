@@ -54,8 +54,7 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 - Log model publisher separately from transport: direct OpenAI and Azure OpenAI are authoritative
   `openai`; Foundry resolves publisher from an explicit exact-model environment map.
 - Distinguish complete and unavailable usage without fabricating zeroes.
-- Correlate records by invocation id and session id; include workflow/node ids for Durable activity
-  attempts.
+- Include workflow/node ids for Durable activity attempts without logging chat session identifiers.
 - Keep usage extraction and emission non-fatal: telemetry must never change an agent result.
 - Keep usage metadata free of prompts, responses, tool arguments, and secrets regardless of
   `ENABLE_SENSITIVE_DATA`.
@@ -126,7 +125,7 @@ SSE mapper.
 
 ### 4.2 Inference target metadata
 
-`client_manager.py` adds an immutable `InferenceTarget` value with `inference_provider`, `model`,
+`client_manager.py` adds an immutable `InferenceTarget` value with `provider`, `model`,
 and `model_publisher`. A backward-compatible
 `ClientManager.build_chat_client_with_target()` method returns the client plus this descriptor;
 custom managers that implement only the existing abstract methods continue to work and receive a
@@ -138,13 +137,13 @@ The exact value type is:
 ```python
 @dataclass(frozen=True)
 class InferenceTarget:
-  inference_provider: str | None = None
+  provider: str | None = None
   model: str | None = None
   model_publisher: str | None = None
 ```
 
 Fields are optional because a custom manager may not have an authoritative value. The built-in MAF
-manager always supplies `inference_provider` and effective `model`; Foundry publisher is optional.
+manager always supplies `provider` and effective `model`; Foundry publisher is optional.
 The value remains valid for the lifetime of the client returned beside it.
 
 `build_chat_client()` remains an abstract, supported API with its existing signature. The new method
@@ -168,14 +167,14 @@ same cached values. The legacy method performs no independent provider or model 
 
 The frozen descriptor is a construction-time snapshot. Later environment, endpoint, credential, or
 manager-state changes do not mutate it. All fields remain optional in the shared type for custom
-manager compatibility. For `MAFClientManager`, `inference_provider` and `model` are always populated;
+manager compatibility. For `MAFClientManager`, `provider` and `model` are always populated;
 `model_publisher` is `openai` for direct OpenAI and Azure OpenAI, and the exact-model mapping value
 or `None` for Foundry. Consumers still treat every field as nullable and do not infer availability
 from provider type. Endpoint-derived host metadata is not collected or included in the descriptor.
 
 For built-in providers:
 
-| Configured transport | `inference_provider` | `model_publisher` |
+| Configured transport | `provider` | `model_publisher` |
 | --- | --- | --- |
 | Microsoft Foundry | `foundry` | exact-model lookup from `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS`, otherwise omitted |
 | Azure OpenAI | `azure_openai` | `openai` |
@@ -212,16 +211,16 @@ cancellation, and stream-generator teardown paths.
 
 Dynamic Workflow Activities are delivered at least once. If Durable retries an activity and the
 activity calls MAF again, that is another real model invocation attempt with new token consumption
-and therefore produces another record with a new `invocation_id`. The runtime does not suppress or
-deduplicate those records. `workflow_id` plus `workflow_node_id` groups attempts for the same
-logical workflow node; `invocation_id` distinguishes each billable attempt.
+and therefore produces another record. The runtime does not suppress or deduplicate those records.
+`workflow_id` plus `workflow_node_id` groups attempts for the same logical workflow node; each log
+item represents one actual invocation attempt.
 
 The record contains:
 
-- identity: `event_name=agent_token_usage`, `schema_version=1`, `invocation_id`, `agent_name`
-  (the resolved agent slug), `execution_role`;
-- correlation: `session_id`, optional `workflow_id` and `workflow_node_id`;
-- accounting: `outcome`, `usage_scope=agent_run_local`, nullable `inference_provider`, nullable
+- identity: `event_name=agent_token_usage`, `schema_version=1`, `agent_name` (the resolved agent
+  slug), `execution_role`;
+- correlation: optional `workflow_id` and `workflow_node_id`;
+- accounting: `outcome`, `usage_scope=agent_run_local`, nullable `provider`, nullable
   effective `model`, and nullable `model_publisher`;
 - quality: `usage_available`, `usage_complete`, `usage_source`; and
 - any valid normalized token fields from section 4.1.
@@ -233,11 +232,11 @@ The record contains:
 `timeout`, or `cancelled`.
 
 Each coordinator and specialist emits an independent local record. Chat-time delegation records
-carry their own invocation ids and the specialist's agent name. Workflow activities also include
-explicit workflow/node ids. Internal consumers can sum local records when a request-level total is
-needed; the runtime does not claim that sum as a coordinator total.
+carry the specialist's agent name. Workflow activities also include explicit workflow/node ids.
+Internal consumers can sum local records when a request-level total is needed; the runtime does not
+claim that sum as a coordinator total.
 
-The exact JSON target field names are `inference_provider`, `model`, and `model_publisher`. They are
+The exact JSON target field names are `provider`, `model`, and `model_publisher`. They are
 always present in schema version 1 with a JSON string or `null`, keeping the record shape stable for
 built-in and custom managers alike. No endpoint-derived host field is emitted.
 
@@ -319,11 +318,14 @@ contract; no new customer observability surface is introduced.
 | 15 | Keep revenue inputs within runner's authoritative data | strengthen `ClientManager` to guarantee provider/model / omit provider/model and join downstream | **Supersedes the model portion of #14:** log only authoritative token categories and invocation context; internal accounting joins provider/model/deployment pricing context outside the runtime. | Agent (internal-only scope review) | 2026-08-05 |
 | 16 | Finalize internal-only design | approve / revise | Approved for implementation. | Human | 2026-08-05 |
 | 17 | Identify where inference is hosted | model API hostname / Function App deployment / both | Log the sanitized model API hostname. | Human | 2026-08-06 |
-| 18 | Separate transport from publisher | one overloaded provider field / separate fields | Log configured inference transport and model publisher separately; a Foundry-hosted Anthropic model is `inference_provider=foundry`, `model_publisher=anthropic`. | Human | 2026-08-06 |
+| 18 | Separate transport from publisher | one overloaded provider field / separate fields | Log configured inference transport and model publisher separately; a Foundry-hosted Anthropic model is `provider=foundry`, `model_publisher=anthropic`. | Human | 2026-08-06 |
 | 19 | Resolve Foundry publisher | infer from model name / control-plane lookup / exact-model environment map / unavailable | Use an exact-model JSON environment map; never infer names or add an invocation-path control-plane request. | Human | 2026-08-06 |
 | 20 | Reintroduce authoritative provider/model metadata | keep #15 downstream-only / extend `ClientManager` target contract | **Supersedes #15:** extend `ClientManager` with a backward-compatible inference-target descriptor so the runner logs only metadata used to construct the client. | Agent | 2026-08-06 |
 | 21 | Finalize inference-target amendment | approve / revise | Approved for implementation. | Human | 2026-08-06 |
 | 22 | Minimize endpoint-derived metadata | keep sanitized host / remove host | **Supersedes #17:** do not collect or emit the model API host; provider, model/deployment, and publisher are sufficient for internal accounting. | Human | 2026-08-06 |
+| 23 | Per-attempt identifier | runtime-generated UUID / rely on one log item per attempt | Remove `invocation_id`; it has no external correlation source, and each emitted log item already represents one invocation attempt. | Human | 2026-08-06 |
+| 24 | Transport field name | `inference_provider` / `provider` | Use the concise JSON and descriptor field name `provider`; its values continue to identify the configured inference transport. | Human | 2026-08-06 |
+| 25 | Chat session identifier | retain for conversation aggregation / remove for data minimization | Do not include `session_id` in token usage logs; session-level cost analysis is not required for internal provider/model accounting. | Human | 2026-08-06 |
 
 ## 6. Test plan
 

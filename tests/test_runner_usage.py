@@ -94,10 +94,8 @@ def test_usage_recorder_emits_versioned_json_once_through_shared_logger(caplog: 
     recorder = runner._AgentUsageRecorder(
         agent_name="billing",
         execution_role="workflow_subagent",
-        session_id=None,
         workflow_id="workflow-1",
         workflow_node_id="node-2",
-        invocation_id="invocation-3",
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
@@ -119,15 +117,13 @@ def test_usage_recorder_emits_versioned_json_once_through_shared_logger(caplog: 
         "agent_name": "billing",
         "event_name": "agent_token_usage",
         "execution_role": "workflow_subagent",
-        "inference_provider": None,
+        "provider": None,
         "input_tokens": 10,
-        "invocation_id": "invocation-3",
         "model": None,
         "model_publisher": None,
         "outcome": "success",
         "output_tokens": 20,
         "schema_version": 1,
-        "session_id": None,
         "total_tokens": 30,
         "usage_available": True,
         "usage_complete": True,
@@ -142,8 +138,6 @@ def test_usage_recorder_marks_missing_usage_unavailable(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
         agent_name="main",
         execution_role="primary",
-        session_id="session-1",
-        invocation_id="invocation-1",
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
@@ -192,7 +186,7 @@ async def test_run_agent_logs_usage_from_real_maf_final_response(
     assert result.session_id == "session-1"
     payload = _usage_payload(caplog.records[-1])
     assert payload["execution_role"] == "primary"
-    assert payload["session_id"] == "session-1"
+    assert "session_id" not in payload
     assert payload["input_tokens"] == 11
     assert payload["output_tokens"] == 7
     assert payload["total_tokens"] == 18
@@ -207,7 +201,7 @@ async def test_run_agent_success_without_usage_logs_unavailable(
             return SimpleNamespace(text="done", messages=[], usage_details=None)
 
     target = InferenceTarget(
-        inference_provider="foundry",
+        provider="foundry",
         model="claude-deployment",
         model_publisher="anthropic",
     )
@@ -218,7 +212,7 @@ async def test_run_agent_success_without_usage_logs_unavailable(
     assert result.content == "done"
     assert _usage_payloads(caplog)[0]["outcome"] == "success"
     assert _usage_payloads(caplog)[0]["usage_available"] is False
-    assert _usage_payloads(caplog)[0]["inference_provider"] == "foundry"
+    assert _usage_payloads(caplog)[0]["provider"] == "foundry"
     assert "inference_host" not in _usage_payloads(caplog)[0]
     assert _usage_payloads(caplog)[0]["model"] == "claude-deployment"
     assert _usage_payloads(caplog)[0]["model_publisher"] == "anthropic"
@@ -329,10 +323,10 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
     ]
     assert len(usage_records) == 1
     payload = _usage_payload(usage_records[0])
-    assert payload["session_id"] == "session-2"
+    assert "session_id" not in payload
     assert payload["usage_source"] == "final_response"
     assert payload["total_tokens"] == 8
-    assert payload["inference_provider"] == "openai"
+    assert payload["provider"] == "openai"
     assert "inference_host" not in payload
     assert payload["model"] == "gpt-4o-mini"
     assert payload["model_publisher"] == "openai"
@@ -584,12 +578,11 @@ async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
     assert len(payloads) == 3
     assert payloads[0]["workflow_id"] == payloads[1]["workflow_id"] == "workflow-1"
     assert payloads[0]["workflow_node_id"] == payloads[1]["workflow_node_id"] == "node-1"
-    assert payloads[0]["invocation_id"] != payloads[1]["invocation_id"]
     assert payloads[2]["agent_name"] == "analyst"
     assert payloads[2]["execution_role"] == "delegate"
     assert payloads[2]["workflow_id"] is None
     for payload in payloads:
-        assert payload["inference_provider"] == "azure_openai"
+        assert payload["provider"] == "azure_openai"
         assert "inference_host" not in payload
         assert payload["model"] == "gpt-deployment"
         assert payload["model_publisher"] == "openai"
