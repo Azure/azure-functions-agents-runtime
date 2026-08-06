@@ -8,6 +8,8 @@ import LoginPage from './pages/LoginPage'
 import { IdentityProvider } from './identity'
 import { initMsal } from './auth'
 import { createQueryClient } from './query'
+import '@fontsource-variable/inter'
+import './theme'
 import './styles.css'
 
 const queryClient = createQueryClient()

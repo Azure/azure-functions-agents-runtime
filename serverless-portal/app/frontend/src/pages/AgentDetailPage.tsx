@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
@@ -85,11 +85,15 @@ function DraftEditor({
   load,
   save,
   fallback,
+  renderActions,
+  onSaved,
 }: {
   queryKey: unknown[]
   load: () => Promise<{ content: string; source: string }>
   save: (content: string) => Promise<unknown>
   fallback: string
+  renderActions?: (s: { source: string; dirty: boolean }) => ReactNode
+  onSaved?: () => void
 }) {
   const qc = useQueryClient()
   const { data, isLoading, error } = useQuery({
@@ -109,7 +113,10 @@ function DraftEditor({
 
   const saveMutation = useMutation({
     mutationFn: (content: string) => save(content),
-    onSuccess: () => qc.invalidateQueries({ queryKey }),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey })
+      onSaved?.()
+    },
   })
 
   if (isLoading) return <p className="muted">Loading…</p>
@@ -161,6 +168,7 @@ function DraftEditor({
         >
           {saveMutation.isPending ? 'Saving…' : 'Save draft'}
         </button>
+        {renderActions?.({ source, dirty })}
       </div>
       {unreadable && (
         <p className="muted" style={{ fontSize: 12, margin: '0 0 8px' }}>
@@ -246,6 +254,93 @@ export default function AgentDetailPage() {
   const markdown = agent ? buildAgentMarkdown(agent) : ''
   const endpoints = agent ? buildEndpoints(agent) : []
   const endpointsText = endpoints.map((e) => `${e.kind.padEnd(5)} ${e.url}`).join('\n')
+
+  // GitHub connection for this app — powers the contextual "Create PR" action in
+  // the editor toolbar (shown only once there are saved, unpushed changes).
+  const { data: appConn } = useQuery({
+    queryKey: ['githubAppConnection', subForQuery, agent?.resourceGroup ?? '', appName ?? ''],
+    queryFn: () =>
+      api.githubAppConnection({
+        subscription: subForQuery,
+        resourceGroup: agent!.resourceGroup,
+        app: agent!.app,
+      }),
+    enabled: !!agent,
+    staleTime: 30_000,
+  })
+
+  const [prPushed, setPrPushed] = useState(false)
+  const [prBusy, setPrBusy] = useState(false)
+  const [prResult, setPrResult] = useState<{ url: string; number?: number } | null>(null)
+  const [prError, setPrError] = useState<string | null>(null)
+
+  const createPr = async () => {
+    if (!agent || !appConn?.connected || !appConn.repoUrl) return
+    const repo = appConn.repoUrl.replace('https://github.com/', '')
+    setPrBusy(true)
+    setPrError(null)
+    try {
+      const r = await api.githubConnect({
+        subscription: subForQuery,
+        resourceGroup: agent.resourceGroup,
+        app: agent.app,
+        mode: 'existing',
+        repo,
+        branch: appConn.branch || 'main',
+      })
+      setPrResult({ url: r.prUrl || r.htmlUrl, number: r.prNumber })
+      setPrPushed(true)
+    } catch (e) {
+      setPrError((e as Error).message)
+    } finally {
+      setPrBusy(false)
+    }
+  }
+
+  // Reset the PR action whenever a new draft is saved so it reappears for the
+  // new changes, and hide it once the current changes have been pushed.
+  const onAgentSaved = () => {
+    setPrPushed(false)
+    setPrResult(null)
+    setPrError(null)
+  }
+
+  const renderPrAction = ({ source, dirty }: { source: string; dirty: boolean }): ReactNode => {
+    if (!appConn?.connected) return null
+    if (prBusy) {
+      return (
+        <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+          <span className="gh-spin" /> Opening pull request…
+        </span>
+      )
+    }
+    if (prPushed && prResult) {
+      return (
+        <a className="btn sm" href={prResult.url} target="_blank" rel="noreferrer" title="View the pull request">
+          ✓ PR updated{prResult.number ? ` · #${prResult.number}` : ''} →
+        </a>
+      )
+    }
+    if (source === 'draft' && !dirty) {
+      return (
+        <>
+          <button
+            className="btn sm primary"
+            onClick={() => void createPr()}
+            title="Open or update a pull request with your saved changes"
+          >
+            📤 Create PR
+          </button>
+          {prError && (
+            <span className="muted" style={{ color: 'var(--red)', fontSize: 11 }}>
+              {prError.slice(0, 90)}
+            </span>
+          )}
+        </>
+      )
+    }
+    return null
+  }
 
   return (
     <>
@@ -464,6 +559,8 @@ export default function AgentDetailPage() {
                       })
                     }
                     fallback={markdown}
+                    renderActions={renderPrAction}
+                    onSaved={onAgentSaved}
                   />
                 </>
               )}
