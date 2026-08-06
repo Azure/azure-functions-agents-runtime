@@ -241,12 +241,13 @@ app.put(
 const SOURCE_DRAFTS_DIR = path.join(__dirname, '..', '.data', 'source-drafts')
 
 function sourceDraftPath(subscription, appName, relPath) {
-  return path.join(
-    SOURCE_DRAFTS_DIR,
-    safeSegment(subscription),
-    safeSegment(appName),
-    safeSegment(relPath),
-  )
+  // Preserve nested structure (e.g. tools/x.py, skills/y/SKILL.md) so the draft
+  // round-trips to the right path — safeSegment each segment, keep the slashes.
+  const safeRel = String(relPath)
+    .split('/')
+    .map(safeSegment)
+    .join(path.sep)
+  return path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName), safeRel)
 }
 
 async function readSourceDraft(subscription, appName, relPath) {
@@ -318,6 +319,26 @@ app.put(
 
 const APP_SOURCES_DIR = path.join(__dirname, '..', '.data', 'app-sources')
 const SCAFFOLD_DIR = path.join(__dirname, '..', 'scaffold')
+
+// Portal's own authoring skills (a SKILL.md per capability kind), injected into
+// generation prompts so output follows the runtime conventions. Editable under
+// app/server/skills/; read fresh per request (no restart needed).
+const PORTAL_SKILLS_DIR = path.join(__dirname, '..', 'skills')
+const KIND_TO_PORTAL_SKILL = {
+  http_trigger: 'authoring-triggers',
+  connector_trigger: 'authoring-triggers',
+  custom_tool: 'authoring-custom-tools',
+  skill: 'authoring-skills',
+}
+async function readPortalSkill(kind) {
+  const slug = KIND_TO_PORTAL_SKILL[kind]
+  if (!slug) return ''
+  try {
+    return await fs.promises.readFile(path.join(PORTAL_SKILLS_DIR, slug, 'SKILL.md'), 'utf-8')
+  } catch {
+    return ''
+  }
+}
 
 const SCAFFOLD = {
   'function_app.py': 'from azure_functions_agents import create_function_app\n\napp = create_function_app()\n',
@@ -471,10 +492,28 @@ async function overlayDrafts(subscription, appName, baseFiles) {
     apply(file, await fs.promises.readFile(path.join(agentDir, file), 'utf-8'))
   }
   const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
-  for (const file of await listDirFiles(sourceDir)) {
-    apply(file, await fs.promises.readFile(path.join(sourceDir, file), 'utf-8'))
+  for (const f of await readDirRecursive(sourceDir)) {
+    apply(f.name, f.data.toString('utf-8'))
   }
   return [...byName].map(([name, data]) => ({ name, data }))
+}
+
+// Gather this app's SKILL.md files (portal source drafts + the working copy) as
+// {name, content}, so generation can be grounded in the app's existing skills.
+async function gatherAppSkills(subscription, appName) {
+  const out = []
+  const seen = new Set()
+  const add = (name, buf) => {
+    if (/(^|\/)skills\/[^/]+\/SKILL\.md$/i.test(name) && !seen.has(name)) {
+      seen.add(name)
+      out.push({ name, content: buf.toString('utf-8') })
+    }
+  }
+  const sourceDir = path.join(SOURCE_DRAFTS_DIR, safeSegment(subscription), safeSegment(appName))
+  for (const f of await readDirRecursive(sourceDir)) add(f.name, f.data)
+  const srcDir = path.join(APP_SOURCES_DIR, safeSegment(subscription), safeSegment(appName))
+  for (const f of await readDirRecursive(srcDir)) add(f.name, f.data)
+  return out
 }
 
 // Zip the prepared files and push them to the app with a remote build.
@@ -816,6 +855,62 @@ app.post(
           model: String(foundry.model ?? ''),
           name,
           description,
+        }),
+      )
+    } catch (err) {
+      throw new HttpError(err.status ?? 502, String(err?.message ?? err))
+    }
+  }),
+)
+
+// Generate the code/config for an agent capability (HTTP trigger .agent.md,
+// connector trigger .agent.md, or a custom Python tool) with a Foundry model.
+app.post(
+  '/api/generate-capability',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const foundry = req.body?.foundry ?? {}
+    const kind = String(req.body?.kind ?? '').trim()
+    const name = String(req.body?.name ?? '').trim()
+    const description = String(req.body?.description ?? '').trim()
+    const appName = String(req.body?.app ?? '').trim()
+    const triggerType = String(req.body?.triggerType ?? '').trim()
+    if (!['http_trigger', 'connector_trigger', 'custom_tool', 'skill'].includes(kind)) {
+      throw new HttpError(400, 'kind must be http_trigger, connector_trigger, custom_tool, or skill.')
+    }
+    if (!description) throw new HttpError(400, 'A description is required to generate.')
+
+    // Optionally ground the generation in the app's existing skills.
+    let skillsContext = ''
+    if (req.body?.groundInSkills && appName) {
+      try {
+        const skills = await gatherAppSkills(subscription, appName)
+        skillsContext = skills
+          .map((s) => `### skill: ${s.name}\n${s.content.slice(0, 1600)}`)
+          .join('\n\n')
+          .slice(0, 8000)
+      } catch {
+        /* best-effort grounding */
+      }
+    }
+
+    // Ground generation in the portal's authoritative authoring skill for this kind.
+    const guidance = await readPortalSkill(kind)
+
+    try {
+      res.json(
+        await azure.generateCapabilityCode(token, subscription, {
+          resourceGroup: String(foundry.resourceGroup ?? ''),
+          account: String(foundry.account ?? ''),
+          openaiEndpoint: String(foundry.openaiEndpoint ?? ''),
+          model: String(foundry.model ?? ''),
+          kind,
+          name,
+          description,
+          triggerType,
+          skillsContext,
+          guidance,
         }),
       )
     } catch (err) {

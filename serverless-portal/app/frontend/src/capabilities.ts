@@ -220,3 +220,26 @@ export const MCP_PRESETS: McpPreset[] = [
     },
   },
 ]
+
+// Slugify a skill name to the runtime's required kebab-case (a-z0-9 + single
+// hyphens), max 64 chars.
+export function skillSlug(name: string): string {
+  const s = (name || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 64)
+    .replace(/-+$/g, '')
+  return s || 'skill'
+}
+
+// Build a SKILL.md: kebab-case `name` + `description` frontmatter + Markdown body.
+export function buildSkillMd(name: string, description: string, body: string): string {
+  const nm = skillSlug(name)
+  const desc = '"' + (description || '').replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+  const content =
+    (body || '').trim() ||
+    `# ${name || nm}\n\nDescribe what this skill provides and how the agent should use it.`
+  return ['---', `name: ${nm}`, `description: ${desc}`, '---', '', content, ''].join('\n')
+}

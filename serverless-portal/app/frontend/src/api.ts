@@ -332,6 +332,16 @@ export const api = {
     description: string
     foundry: { resourceGroup: string; account: string; openaiEndpoint: string; model: string }
   }) => req<{ content: string }>('POST', '/api/generate-agent-md', p),
+  generateCapability: (p: {
+    subscription: string
+    app?: string
+    kind: 'http_trigger' | 'connector_trigger' | 'custom_tool' | 'skill'
+    triggerType?: string
+    name: string
+    description: string
+    groundInSkills?: boolean
+    foundry: { resourceGroup: string; account: string; openaiEndpoint: string; model: string }
+  }) => req<{ content: string; kind: string }>('POST', '/api/generate-capability', p),
 
   // Resource groups in a subscription (for the create flow's RG picker).
   listResourceGroups: (subscription?: string) =>
