@@ -166,6 +166,8 @@ export default function AgentsPage() {
         </Link>
       </div>
 
+      {isFetching && <div className="skeleton shimmer-bar" style={{ marginBottom: 12 }} />}
+
       <div className="table-wrap">
         <table>
           <thead>
@@ -179,13 +181,30 @@ export default function AgentsPage() {
             </tr>
           </thead>
           <tbody>
-            {scanning && (
-              <tr>
-                <td colSpan={6} className="empty">
-                  Scanning subscription…
-                </td>
-              </tr>
-            )}
+            {scanning &&
+              Array.from({ length: 5 }).map((_, i) => (
+                <tr key={`sk-${i}`}>
+                  <td>
+                    <div className="skeleton skeleton-line" style={{ width: '58%' }} />
+                    <div className="skeleton skeleton-line sm" style={{ width: '38%' }} />
+                  </td>
+                  <td>
+                    <div className="skeleton skeleton-line" style={{ width: '50%' }} />
+                  </td>
+                  <td>
+                    <div className="skeleton skeleton-line" style={{ width: '72%' }} />
+                  </td>
+                  <td>
+                    <div className="skeleton skeleton-line" style={{ width: '56%' }} />
+                  </td>
+                  <td>
+                    <div className="skeleton skeleton-line" style={{ width: '44%' }} />
+                  </td>
+                  <td>
+                    <div className="skeleton skeleton-line" style={{ width: '64%' }} />
+                  </td>
+                </tr>
+              ))}
             {error && (
               <tr>
                 <td colSpan={6} className="empty">

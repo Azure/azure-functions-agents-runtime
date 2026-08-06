@@ -380,31 +380,6 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
     void refreshStatus()
   }
 
-  // Push the app's current saved edits (including unpublished drafts) to the
-  // connected repo, opening or updating the rolling pull request.
-  const pushChanges = async () => {
-    if (!appConn?.repoUrl) return
-    const repo = appConn.repoUrl.replace('https://github.com/', '')
-    setError('')
-    setResult(null)
-    setPushing(true)
-    try {
-      const r = await api.githubConnect({
-        subscription,
-        resourceGroup,
-        app,
-        mode: 'existing',
-        repo,
-        branch: appConn.branch || 'main',
-      })
-      setResult(r)
-    } catch (e) {
-      setError((e as Error).message)
-    } finally {
-      setPushing(false)
-    }
-  }
-
   if (!status) return null
 
   if (!status.configured) {
@@ -426,7 +401,7 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
         <span className="gh-mark">🐙</span>
         <span className="gh-title">GitHub</span>
         <span style={{ flex: 1 }} />
-        {status.connected && (
+        {status.connected ? (
           <span className="gh-user">
             {status.avatarUrl && <img src={status.avatarUrl} alt="" />}
             @{status.login}
@@ -434,11 +409,21 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
               ✕
             </button>
           </span>
+        ) : (
+          <button className="btn sm" disabled={busy} onClick={() => void connect()} title="Connect GitHub">
+            {busy ? (
+              <>
+                <span className="gh-spin" /> Connecting…
+              </>
+            ) : (
+              <>🐙 Connect</>
+            )}
+          </button>
         )}
       </div>
 
       <div className="gh-body">
-        {appConn?.connected && !result && !changingRepo ? (
+        {appConn?.connected && status.connected && !result && !changingRepo ? (
           <div className="gh-success">
             <div className="h">✓ Connected to a repository</div>
             <div className="gh-row">
@@ -464,19 +449,10 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
               )}
             </div>
             <div className="muted" style={{ fontSize: 11, marginTop: 6 }}>
-              Use “Push changes &amp; open PR” to commit your latest saved edits (including unpublished
-              drafts) into a pull request on this repo.
+              Edit an agent and save a draft, then use <strong>Create PR</strong> in the editor toolbar to
+              open a pull request with your changes.
             </div>
             <div className="gh-row" style={{ marginTop: 10 }}>
-              <button className="btn sm primary" disabled={pushing} onClick={() => void pushChanges()}>
-                {pushing ? (
-                  <>
-                    <span className="gh-spin" /> Opening pull request…
-                  </>
-                ) : (
-                  <>📤 Push changes &amp; open PR</>
-                )}
-              </button>
               <button className="btn sm" disabled={provisioning} onClick={() => void provisionDeploy()}>
                 {provisioning ? (
                   <>
@@ -567,17 +543,27 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
           </div>
         ) : !status.connected ? (
           <div className="gh-cta">
-            <p>
-              Open a pull request with this agent’s source — on a new branch named for you. Review &amp; merge
-              to publish.
-            </p>
+            {appConn?.connected ? (
+              <p>
+                This agent is linked to{' '}
+                <span className="mono">
+                  {(appConn.repoUrl || '').replace('https://github.com/', '') || 'a repository'}
+                </span>
+                . Reconnect your GitHub account to manage it, change the repo, or open a pull request.
+              </p>
+            ) : (
+              <p>
+                Open a pull request with this agent’s source — on a new branch named for you. Review &amp;
+                merge to publish.
+              </p>
+            )}
             <button className="btn primary" disabled={busy} onClick={() => void connect()}>
               {busy ? (
                 <>
                   <span className="gh-spin" /> Waiting for GitHub…
                 </>
               ) : (
-                <>🐙 Connect GitHub</>
+                <>🐙 {appConn?.connected ? 'Reconnect GitHub' : 'Connect GitHub'}</>
               )}
             </button>
             {busy && (
@@ -691,6 +677,16 @@ export function GitHubConnect({ github }: { github: { subscription: string; reso
                 'Open pull request'
               )}
             </button>
+            {pushing && (
+              <>
+                <div className="skeleton shimmer-bar" />
+                <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
+                  {mode === 'new'
+                    ? 'Creating the repository and opening a pull request…'
+                    : 'Opening the pull request…'}
+                </div>
+              </>
+            )}
           </>
         )}
 

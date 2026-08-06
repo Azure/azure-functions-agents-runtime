@@ -762,13 +762,29 @@ export default function CreateAgentPage() {
                 <span className="badge gray">live preview</span>
               )}
             </div>
-            <textarea
-              className="editor"
-              spellCheck={false}
-              value={previewMd}
-              onChange={(e) => set('mdOverride', e.target.value)}
-              aria-label="Agent definition preview"
-            />
+            {generating ? (
+              <div className="skeleton-block" style={{ padding: '14px 4px', minHeight: 340 }} aria-busy="true">
+                <div className="skeleton skeleton-line lg" style={{ width: '32%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '86%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '92%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '74%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '88%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '64%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '80%' }} />
+                <div className="skeleton skeleton-line" style={{ width: '56%' }} />
+                <div className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+                  ✨ Generating instructions with <span className="mono">{draft.foundryModel}</span>…
+                </div>
+              </div>
+            ) : (
+              <textarea
+                className="editor"
+                spellCheck={false}
+                value={previewMd}
+                onChange={(e) => set('mdOverride', e.target.value)}
+                aria-label="Agent definition preview"
+              />
+            )}
           </div>
         </div>
       </div>
