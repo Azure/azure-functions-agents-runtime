@@ -1,7 +1,7 @@
 ---
 frd: 0008
 title: Per-agent Dynamic Workflows
-status: In review
+status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-17
 updated: 2026-08-05
@@ -358,6 +358,9 @@ rewriting history.
 | 21 | Legacy workflow IDs | Main-only fallback / dual-format lookup / no fallback | Reaffirm Decision #6: no application-level fallback; document drain guidance and Durable/DTS operator access | Human (prior decision) + Agent | 2026-08-05 |
 | 22 | Trigger-created ownership | Owner-only namespace / `(owner, generated invocation session)` / shared synthetic session | Use `(ResolvedAgent.slug, invocation session_id)`; non-HTTP triggers do not gain a new management index | Agent | 2026-08-05 |
 | 23 | Ineligible enabled owner after trigger support | Preserve Decision #8 warn-and-continue / fail composition | **Proposed, pending human ratification:** fail composition with an actionable error; supersedes Decision #8 because every valid owner must have a usable starter surface | Agent | 2026-08-05 |
+| 24 | Ratify enabled-owner eligibility | Warn and disable per Decision #8 / fail composition per proposed Decision #23 | Fail composition when an enabled agent has no Markdown-declared trigger, chat API, or MCP starter; supersedes Decision #8 and ratifies Decision #23 | Human | 2026-08-05 |
+| 25 | Ratify Activity reauthorization and revocation | Trust start-time validation / current deployed policy / persisted policy snapshot | Reauthorize every tool and Sub Agent Activity against the currently deployed owner policy; owner removal or policy tightening may fail pending nodes as fail-closed revocation, ratifying Decisions #18 and #19 | Human | 2026-08-05 |
+| 26 | Ratify non-HTTP trigger ownership management | Add owner workflow index/reconnect API / generated non-discoverable invocation sessions | Keep generated non-discoverable sessions, add no application-level owner workflow index or reconnect API, and leave operator management to Durable/DTS, ratifying Decision #22 | Human | 2026-08-05 |
 
 ## 6. Test plan
 
@@ -454,15 +457,12 @@ unchanged until implementation matches the finalized design.
   predicate, ownership-prefix scope, and Activity payload coverage. Re-review
   by `current-frd-reviewer` on 2026-08-05 found no remaining blocking or
   important findings and declared the architecture-review gate complete. The
-  FRD is ready for human ratification, not yet signed off.
-- **Open questions for human ratification:**
-  1. Should an agent with `workflows.enabled: true` but no trigger, chat API, or
-     MCP starter fail app composition, superseding Decision #8's
-     warn-and-continue behavior?
-  2. Should current-deployment Activity revalidation act as fail-closed
-     revocation, meaning owner removal or policy tightening may fail an
-     in-flight workflow at its next newly disallowed node?
-  3. Should non-HTTP trigger owners keep generated, non-discoverable invocation
-     sessions with no new application-level workflow management index?
-- **Human sign-off:** Pending. Keep `status: In review`; do not implement product
-  code until the reviewer findings are resolved and a human records approval.
+  FRD was ready for human ratification.
+- **Human sign-off:** Completed, 2026-08-05. The human ratified all three
+  previously open questions: fail composition for enabled owners without a
+  starter surface (Decision #24), Activity reauthorization against current
+  deployed policy with fail-closed in-flight revocation (Decision #25), and
+  generated non-discoverable non-HTTP trigger sessions without an
+  application-level owner index or reconnect API (Decision #26). Status set to
+  `Finalized`. Product implementation remains tracked separately by
+  `Azure/azure-functions-bucees-planning#1275`.
