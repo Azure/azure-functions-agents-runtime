@@ -14,7 +14,7 @@ branch: hallvictoria/token-usage
 
 ## 1. Summary
 
-The runtime will write one structured internal token-usage record through its existing
+The runtime will attempt one structured internal token-usage record through its existing
 `azure.functions.AgentRuntime` logger for every Microsoft Agent Framework (MAF) `Agent.run()`
 invocation attempt, including top-level agents, chat-time delegated specialists, and Dynamic
 Workflow Sub Agents. The runtime will consume MAF's public `AgentResponse.usage_details` contract,
@@ -44,8 +44,8 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 ## 3. Goals / Non-goals
 
 **Goals**
-- Emit exactly one metadata-only usage record in-process for each MAF `Agent.run()` attempt that
-  actually starts.
+- Attempt at most one metadata-only usage log emission in-process for each MAF `Agent.run()`
+  attempt that actually starts; logging failures remain non-fatal.
 - Cover non-streaming, streaming, chat-time delegated, and Dynamic Workflow Sub Agent calls.
 - Emit records only through the existing shared `azure.functions.AgentRuntime` logger.
 - Normalize MAF's canonical input, output, total, cache, and reasoning token fields.
@@ -60,6 +60,7 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 **Non-goals**
 - Rolling specialist usage into a coordinator or top-level request total.
 - Adding token usage to REST, MCP, SSE, or `AgentResult` response contracts.
+- Versioning the log payload or adding a unique per-invocation identifier.
 - Emitting one record per inner model call; MAF's existing `gen_ai.*` spans remain that surface.
 - Estimating tokens when a provider does not report them.
 - Calculating price, currency, quotas, budgets, or chargeback.
@@ -70,6 +71,7 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 - Requiring customer configuration solely to enrich internal telemetry.
 - Adding or changing spans, span attributes, metrics, or customer observability behavior.
 - Adding token metrics, persistence, dashboards, alerts, or a new config/front-matter switch.
+- Guaranteeing durable delivery from the Python process to the internal ingestion system.
 - Parsing provider-specific raw response payloads or private MAF telemetry internals.
 
 ## 4. Proposed design
@@ -116,6 +118,9 @@ The normalized token fields are:
 Reported integer zeroes are valid. Missing or malformed values are omitted. The runtime does not
 derive `total_tokens` from input/output when MAF omits it because the provider may report additional
 token categories. A record has `usage_available=true` when at least one canonical count is valid.
+`usage_complete=true` requires a successful call with valid `input_tokens`, `output_tokens`, and
+`total_tokens`; cache and reasoning counts remain optional provider-specific details. A successful
+call with only a subset of the three base counts is available but incomplete.
 
 A successful stream uses only final `AgentResponse.usage_details`, avoiding duplicate counting
 between intermediate updates and the final response. Usage content remains ignored by the runtime's
@@ -207,9 +212,9 @@ The record contains:
 
 `execution_role` is `primary`, `delegate`, or `workflow_subagent`. `usage_source` is
 `final_response` or `unavailable`. Normal completion with valid final response metadata sets
-`usage_complete=true`. Interrupted calls and completed calls without valid provider metadata emit
-`usage_available=false` and `usage_complete=false`. The record outcome is `success`, `error`,
-`timeout`, or `cancelled`.
+`usage_available=true`; it sets `usage_complete=true` only when all three base counts are present.
+Interrupted calls and completed calls without valid provider metadata emit `usage_available=false`
+and `usage_complete=false`. The record outcome is `success`, `error`, `timeout`, or `cancelled`.
 
 Each coordinator and specialist emits an independent local record. Chat-time delegation records
 carry the specialist's agent name. Workflow activities also include explicit workflow/node ids.
@@ -234,6 +239,11 @@ serializes with stable key ordering so internal ingestion can recognize the pref
 without relying on logger-specific custom-dimension handling. `_logger.py` and the
 `azure.functions.AgentRuntime` category remain unchanged, preserving all existing routing,
 filtering, and visibility behavior.
+
+The recorder provides in-process at-most-once emission attempts, not durable delivery. It marks an
+invocation before calling the logger and suppresses serialization or logging failures so telemetry
+cannot alter the agent result. A hosted validation of the intended internal sink is therefore a
+deployment gate outside unit tests.
 
 `run_leaf_agent_task()` adds required
 `execution_role: Literal["delegate", "workflow_subagent"]` plus optional `workflow_id` and
@@ -305,6 +315,8 @@ contract; no new customer observability surface is introduced.
 | 25 | Chat session identifier | retain for conversation aggregation / remove for data minimization | Do not include `session_id` in token usage logs; session-level cost analysis is not required for internal provider/model accounting. | Human | 2026-08-06 |
 | 26 | Customer setup for internal attribution | exact-model publisher map / publisher inference / provider and model only | **Supersedes #18, #19, and the publisher clause of #22:** internal usage logging must require no customer-facing setup. Remove `model_publisher` and `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS`; retain only authoritative `provider` and effective `model`, with no publisher inference or control-plane lookup. | Human | 2026-08-06 |
 | 27 | Log schema marker | retain `schema_version` / remove it | Remove `schema_version`; this internal log does not need an explicit schema field. | Human | 2026-08-06 |
+| 28 | Review remediation: completeness | any canonical count / all three base counts | Set `usage_complete=true` only for successful responses containing valid input, output, and total counts; optional cache/reasoning fields do not affect completeness. | Agent (PR review remediation) | 2026-08-06 |
+| 29 | Review remediation: delivery guarantee | claim one emitted record / explicit best effort | Promise one in-process emission attempt, not durable delivery; keep failures non-fatal and require hosted validation of the internal sink. | Agent (PR review remediation) | 2026-08-06 |
 
 ## 6. Test plan
 
@@ -337,10 +349,15 @@ contract; no new customer observability surface is introduced.
   and publisher configuration are absent, custom-manager compatibility, and no new customer
   telemetry surface.
 - [x] Full gate after inference-target amendment: ruff, mypy, and CI-equivalent pytest/coverage.
+- [x] Review remediation: partial base counts are available but incomplete.
+- [x] Review remediation: delegated/workflow leaf error, timeout, cancellation, and pre-invocation
+  construction failure logging behavior is asserted directly.
+- [x] Full gate after review remediation: ruff, mypy, and CI-equivalent pytest/coverage.
+- [ ] Hosted validation: confirm `azure.functions.AgentRuntime` INFO records reach the intended
+  internal sink and document its filtering, sampling, retry, and duplicate-delivery behavior.
 
-The unchecked amendment tests above are mandatory Phase 4 merge gates. Per `AGENTS.md`, they remain
-unchecked during Phase 2 architecture review and are marked complete only after product
-implementation exists and the tests pass.
+The hosted validation remains an external merge gate because repository unit tests can verify the
+logging call but cannot observe the platform's internal sink.
 
 No config scenario fixture is required because authoring/config interpretation does not change.
 
@@ -377,3 +394,8 @@ No config scenario fixture is required because authoring/config interpretation d
   returned **APPROVE**. Human sign-off: victoriahall, 2026-08-06. Decision #22 subsequently removes
   host collection to minimize potentially identifying endpoint metadata. Decision #26 subsequently
   removes publisher metadata and its customer-facing configuration. **Finalized.**
+- **PR review remediation (2026-08-06):** Review found that the implementation provided only a
+  best-effort emission attempt, treated partial usage as complete, and left stale publisher
+  documentation. Decisions #28-#29 define the local remediation requested by the Human; original
+  Decisions #23 and #27 remain authoritative, and hosted sink validation remains an external merge
+  gate.

@@ -142,6 +142,7 @@ _USAGE_FIELD_NAMES: dict[str, str] = {
     "cache_read_input_token_count": "cache_read_input_tokens",
     "reasoning_output_token_count": "reasoning_output_tokens",
 }
+_USAGE_COMPLETE_FIELDS = frozenset({"input_tokens", "output_tokens", "total_tokens"})
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
 
 
@@ -181,19 +182,19 @@ async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any
 
 @dataclass
 class _AgentUsageRecorder:
-    """Emit at most one internal token-usage record for a MAF invocation attempt."""
+    """Attempt at most one internal token-usage record for a MAF invocation."""
 
     agent_name: str
     execution_role: _AgentExecutionRole
     inference_target: InferenceTarget = field(default_factory=InferenceTarget)
     workflow_id: str | None = None
     workflow_node_id: str | None = None
-    _emitted: bool = field(default=False, init=False)
+    _emission_attempted: bool = field(default=False, init=False)
 
     def emit(self, outcome: _AgentUsageOutcome, usage_details: Any = None) -> None:
-        if self._emitted:
+        if self._emission_attempted:
             return
-        self._emitted = True
+        self._emission_attempted = True
 
         try:
             usage = _normalize_usage_details(usage_details)
@@ -201,11 +202,13 @@ class _AgentUsageRecorder:
                 "agent_name": self.agent_name,
                 "event_name": "agent_token_usage",
                 "execution_role": self.execution_role,
-                "provider": self.inference_target.provider,
                 "model": self.inference_target.model,
                 "outcome": outcome,
+                "provider": self.inference_target.provider,
                 "usage_available": bool(usage),
-                "usage_complete": outcome == "success" and bool(usage),
+                "usage_complete": (
+                    outcome == "success" and _USAGE_COMPLETE_FIELDS.issubset(usage)
+                ),
                 "usage_scope": "agent_run_local",
                 "usage_source": "final_response" if usage else "unavailable",
                 "workflow_id": self.workflow_id,

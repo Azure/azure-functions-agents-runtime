@@ -90,7 +90,7 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
     assert runner._normalize_usage_details(None) == {}
 
 
-def test_usage_recorder_emits_versioned_json_once_through_shared_logger(caplog: Any) -> None:
+def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
         agent_name="billing",
         execution_role="workflow_subagent",
@@ -117,11 +117,11 @@ def test_usage_recorder_emits_versioned_json_once_through_shared_logger(caplog: 
         "agent_name": "billing",
         "event_name": "agent_token_usage",
         "execution_role": "workflow_subagent",
-        "provider": None,
         "input_tokens": 10,
         "model": None,
         "outcome": "success",
         "output_tokens": 20,
+        "provider": None,
         "total_tokens": 30,
         "usage_available": True,
         "usage_complete": True,
@@ -150,14 +150,42 @@ def test_usage_recorder_marks_missing_usage_unavailable(caplog: Any) -> None:
     assert "total_tokens" not in payload
 
 
+def test_usage_recorder_marks_partial_base_counts_incomplete(caplog: Any) -> None:
+    recorder = runner._AgentUsageRecorder(
+        agent_name="main",
+        execution_role="primary",
+    )
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        recorder.emit(
+            "success",
+            {
+                "input_token_count": 10,
+                "output_token_count": 4,
+            },
+        )
+
+    payload = _usage_payload(caplog.records[-1])
+    assert payload["usage_available"] is True
+    assert payload["usage_complete"] is False
+    assert payload["usage_source"] == "final_response"
+
+
 def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypatch: Any) -> None:
+    logging_attempts = 0
+
     def fail_logging(*args: Any, **kwargs: Any) -> None:
+        nonlocal logging_attempts
+        logging_attempts += 1
         raise RuntimeError("logging unavailable")
 
     monkeypatch.setattr(runner.logger, "info", fail_logging)
     recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
 
     recorder.emit("success", {"total_token_count": 4})
+    recorder.emit("error")
+
+    assert logging_attempts == 1
 
 
 @pytest.mark.asyncio
@@ -579,3 +607,108 @@ async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
         assert payload["provider"] == "azure_openai"
         assert "inference_host" not in payload
         assert payload["model"] == "gpt-deployment"
+
+
+@pytest.mark.parametrize(
+    ("failure", "execution_role", "expected_exception", "expected_outcome"),
+    [
+        ("error", "delegate", ValueError, "error"),
+        ("timeout", "workflow_subagent", TimeoutError, "timeout"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_leaf_agent_failure_logs_once(
+    monkeypatch: Any,
+    caplog: Any,
+    failure: str,
+    execution_role: str,
+    expected_exception: type[BaseException],
+    expected_outcome: str,
+) -> None:
+    class Agent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            if failure == "error":
+                raise ValueError("model failed")
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        runner,
+        "_build_delegated_agent",
+        lambda *args: (Agent(), InferenceTarget("foundry", "model-one")),
+    )
+    with (
+        caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
+        pytest.raises(expected_exception),
+    ):
+        await runner.run_leaf_agent_task(
+            SimpleNamespace(slug="analyst"),
+            AgentCapabilities(),
+            "task",
+            timeout=0.01 if failure == "timeout" else 1.0,
+            execution_role=execution_role,
+            workflow_id="workflow-1" if execution_role == "workflow_subagent" else None,
+            workflow_node_id="node-1" if execution_role == "workflow_subagent" else None,
+        )
+
+    payloads = _usage_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["execution_role"] == execution_role
+    assert payloads[0]["outcome"] == expected_outcome
+    assert payloads[0]["usage_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_leaf_agent_cancellation_logs_once(monkeypatch: Any, caplog: Any) -> None:
+    started = asyncio.Event()
+
+    class Agent:
+        async def run(self, *args: Any, **kwargs: Any) -> Any:
+            started.set()
+            await asyncio.Event().wait()
+
+    monkeypatch.setattr(
+        runner,
+        "_build_delegated_agent",
+        lambda *args: (Agent(), InferenceTarget()),
+    )
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        task = asyncio.create_task(
+            runner.run_leaf_agent_task(
+                SimpleNamespace(slug="analyst"),
+                AgentCapabilities(),
+                "task",
+                timeout=1.0,
+                execution_role="delegate",
+            )
+        )
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    payloads = _usage_payloads(caplog)
+    assert len(payloads) == 1
+    assert payloads[0]["outcome"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_leaf_agent_construction_failure_emits_no_usage_record(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    def fail_build(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("configuration failed")
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", fail_build)
+    with (
+        caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"),
+        pytest.raises(RuntimeError, match="configuration failed"),
+    ):
+        await runner.run_leaf_agent_task(
+            SimpleNamespace(slug="analyst"),
+            AgentCapabilities(),
+            "task",
+            timeout=1.0,
+            execution_role="delegate",
+        )
+
+    assert _usage_payloads(caplog) == []
