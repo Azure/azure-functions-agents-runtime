@@ -7,7 +7,7 @@ import json
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
@@ -22,6 +22,9 @@ from ._handlers import _set_run_result_attributes, build_sandbox_tools_for_sessi
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
+
+if TYPE_CHECKING:
+    from ..workflows.schema import WorkflowPlanPolicy
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     [
@@ -151,6 +154,7 @@ async def _run_builtin_agent(
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -168,6 +172,7 @@ async def _run_builtin_agent(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
+        workflow_policy=workflow_policy,
         agent_name=resolved.slug,
         harness_config=resolved.harness_config,
         subagents=resolved.subagents,
@@ -185,6 +190,7 @@ def _run_builtin_agent_stream(
     workflow_system_addendum: str | None = None,
     durable_client: Any | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Any:
     resolved_session_id = _resolve_builtin_endpoints_session_id(session_id)
     sandbox_tools = build_sandbox_tools_for_session(resolved, resolved_session_id)
@@ -202,6 +208,7 @@ def _run_builtin_agent_stream(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
+        workflow_policy=workflow_policy,
         agent_name=resolved.slug,
         # S1b: `_register_http_chat_stream`'s `handle_chat_stream` (unlike
         # `handle_chat`/`handle_mcp_agent_chat` above) opens no span of its
@@ -277,6 +284,7 @@ def _register_http_chat(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
         resolved_session_id = _resolve_builtin_endpoints_session_id(
@@ -317,6 +325,7 @@ def _register_http_chat(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
+                    workflow_policy=workflow_policy,
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
@@ -372,6 +381,7 @@ def _register_http_chat_stream(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat_stream(
         req: Request,
@@ -394,6 +404,7 @@ def _register_http_chat_stream(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
+                    workflow_policy=workflow_policy,
                 ),
                 media_type="text/event-stream",
             )
@@ -433,6 +444,7 @@ def _register_mcp_endpoint(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         # Same rationale as `handle_chat` above: this built-in MCP surface
@@ -471,6 +483,7 @@ def _register_mcp_endpoint(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
+                    workflow_policy=workflow_policy,
                 )
                 # When the caller supplies no explicit session id (`session_id`
                 # is `None` above), the runner still resolves/generates one for
@@ -608,6 +621,7 @@ def register_builtin_endpoints(
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
@@ -639,6 +653,7 @@ def register_builtin_endpoints(
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
+            workflow_policy=workflow_policy,
         )
         _register_http_chat_stream(
             app,
@@ -650,6 +665,7 @@ def register_builtin_endpoints(
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
+            workflow_policy=workflow_policy,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
@@ -669,4 +685,5 @@ def register_builtin_endpoints(
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
+            workflow_policy=workflow_policy,
         )

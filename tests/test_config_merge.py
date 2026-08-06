@@ -33,6 +33,8 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
     TriggerSpec,
     WebRequestConfig,
+    WorkflowConfig,
+    WorkflowSubagentRef,
 )
 from azure_functions_agents.config.validation import validate_resolved_agent
 
@@ -243,6 +245,39 @@ def test_compose_preserves_substitute_variables_flag() -> None:
     )
 
     assert resolved.substitute_variables is False
+
+
+def test_compose_preserves_typed_workflow_subagent_grant() -> None:
+    workflow_config = WorkflowConfig(
+        enabled=True,
+        subagents=(
+            WorkflowSubagentRef(
+                agent="pr_status_analyst",
+                when="Analyze one pull request.",
+            ),
+        ),
+    )
+
+    resolved = compose(
+        AgentSpec(
+            name="Coordinator",
+            description="Coordinates PR reporting.",
+            workflows=workflow_config,
+        ),
+        GlobalConfig(),
+    )
+
+    assert resolved.workflows == workflow_config
+    assert resolved.metadata["workflows"] == {
+        "enabled": True,
+        "exclude": [],
+        "subagents": [
+            {
+                "agent": "pr_status_analyst",
+                "when": "Analyze one pull request.",
+            }
+        ],
+    }
 
 
 def test_compose_defers_warning_only_validation(

@@ -42,18 +42,13 @@ def _filter_tools_by_name(tools: list[Any], exclude_names: set[str]) -> list[Any
 
 
 def _workflows_enabled(resolved: ResolvedAgent) -> bool:
-    block = resolved.workflows
-    return isinstance(block, dict) and block.get("enabled") is True
+    return resolved.workflows is not None and resolved.workflows.enabled
 
 
 def _workflow_exclude_names(resolved: ResolvedAgent) -> set[str]:
-    block = resolved.workflows
-    if not isinstance(block, dict):
+    if resolved.workflows is None:
         return set()
-    raw = block.get("exclude")
-    if not isinstance(raw, list):
-        return set()
-    return {name for name in raw if isinstance(name, str)}
+    return set(resolved.workflows.exclude)
 
 
 def _build_web_request_tools(resolved: ResolvedAgent) -> list[Any]:
@@ -82,7 +77,7 @@ def build_capabilities(
         filtered_user_tools = _filter_tools_by_name(list(discovered_user_tools), exclude_names)
 
     workflow_tools = list(discovered_workflow_tools or [])
-    if getattr(resolved, "is_main", False) and _workflows_enabled(resolved):
+    if _workflows_enabled(resolved):
         workflow_exclude_names = _workflow_exclude_names(resolved)
         filtered_workflow_tools = [
             tool for tool in workflow_tools if tool.name not in workflow_exclude_names

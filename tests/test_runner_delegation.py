@@ -49,6 +49,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+from azure_functions_agents.workflows.schema import WorkflowPlanPolicy
 
 # ---------------------------------------------------------------------------
 # Shared scaffolding
@@ -327,7 +328,9 @@ def test_build_role_agent_delegated_role_has_only_its_own_tools() -> None:
     assert agent.context_providers == []
 
 
-def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
+def test_build_role_agent_direct_role_has_full_tool_superset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat_client = SimpleNamespace(model="fake-model")
     user_tool = SimpleNamespace(name="own_user_tool")
     mcp_tool = SimpleNamespace(name="own_mcp_tool")
@@ -335,6 +338,24 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
     web_request_tool = SimpleNamespace(name="web_request")
     delegate_tool = SimpleNamespace(name="delegate_billing")
     history_provider = SimpleNamespace()
+    policy = WorkflowPlanPolicy(
+        allowed_tools=frozenset({"own_user_tool"}),
+        allowed_subagents=frozenset({"billing"}),
+    )
+    captured: dict[str, object] = {}
+
+    def _build_workflow_tools(**kwargs: object) -> list[object]:
+        captured.update(kwargs)
+        return [
+            SimpleNamespace(name="start_workflow"),
+            SimpleNamespace(name="get_workflow_status"),
+            SimpleNamespace(name="list_workflows"),
+        ]
+
+    monkeypatch.setattr(
+        "azure_functions_agents.workflows.tools.build_workflow_tools",
+        _build_workflow_tools,
+    )
 
     agent = runner._build_role_agent(
         chat_client,
@@ -351,6 +372,7 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
         resolved_id="session-1",
         history_provider=history_provider,
         delegate_tools=[delegate_tool],
+        workflow_policy=policy,
     )
 
     tool_names = _tool_names(agent)
@@ -365,6 +387,7 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
         "list_workflows",
     } <= tool_names
     assert history_provider in agent.context_providers
+    assert captured["policy"] is policy
 
 
 # ---------------------------------------------------------------------------
@@ -542,6 +565,118 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     assert tracker.count == 0
     assert len(built_agents) == 1
     assert _tool_names(built_agents[0]) == set()
+
+
+# ---------------------------------------------------------------------------
+# Shared leaf execution used by chat delegation and Workflow Activities
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_builds_fresh_specialist_and_returns_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[_FakeSpecialistAgent] = []
+
+    def build(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+        async def respond(task: str) -> str:
+            return f"{resolved.slug}:{task}"
+
+        agent = _FakeSpecialistAgent(resolved.slug, respond)
+        built.append(agent)
+        return agent
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", build)
+    resolved = _make_resolved(slug="analyst")
+    capabilities = AgentCapabilities()
+
+    first, second = await asyncio.gather(
+        runner.run_leaf_agent_task(
+            resolved,
+            capabilities,
+            "first",
+            timeout=1.0,
+        ),
+        runner.run_leaf_agent_task(
+            resolved,
+            capabilities,
+            "second",
+            timeout=1.0,
+        ),
+    )
+
+    assert {first, second} == {"analyst:first", "analyst:second"}
+    assert len(built) == 2
+    assert built[0] is not built[1]
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_propagates_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def respond(task: str) -> str:
+        await asyncio.sleep(10)
+        return task
+
+    monkeypatch.setattr(
+        runner,
+        "_build_delegated_agent",
+        lambda resolved, capabilities: _FakeSpecialistAgent(resolved.slug, respond),
+    )
+
+    with pytest.raises(TimeoutError):
+        await runner.run_leaf_agent_task(
+            _make_resolved(slug="analyst"),
+            AgentCapabilities(),
+            "slow",
+            timeout=0.01,
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def respond(task: str) -> str:
+        await asyncio.sleep(10)
+        return task
+
+    monkeypatch.setattr(
+        runner,
+        "_build_delegated_agent",
+        lambda resolved, capabilities: _FakeSpecialistAgent(resolved.slug, respond),
+    )
+    running = asyncio.create_task(
+        runner.run_leaf_agent_task(
+            _make_resolved(slug="analyst"),
+            AgentCapabilities(),
+            "cancel",
+            timeout=30.0,
+        )
+    )
+    await asyncio.sleep(0.01)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_propagates_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+        raise RuntimeError("model configuration failed")
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", fail)
+
+    with pytest.raises(RuntimeError, match="model configuration failed"):
+        await runner.run_leaf_agent_task(
+            _make_resolved(slug="analyst"),
+            AgentCapabilities(),
+            "work",
+            timeout=1.0,
+        )
 
 
 # ---------------------------------------------------------------------------

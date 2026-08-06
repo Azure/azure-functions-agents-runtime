@@ -15,8 +15,12 @@ from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
-from .config.schema import ResolvedAgent
-from .config.validation import validate_resolved_agent, validate_subagent_references
+from .config.schema import ResolvedAgent, WorkflowConfig
+from .config.validation import (
+    validate_resolved_agent,
+    validate_subagent_references,
+    validate_workflow_subagent_references,
+)
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
@@ -54,8 +58,8 @@ def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
     )
 
 
-def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
-    return isinstance(workflows, dict) and workflows.get("enabled") is True
+def _workflows_requested(workflows: WorkflowConfig | None) -> bool:
+    return workflows is not None and workflows.enabled
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
@@ -145,7 +149,10 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     referenced_slugs: set[str] = set()
     for resolved in resolved_agents:
         validate_subagent_references(resolved, known_slugs=known_slugs)
+        validate_workflow_subagent_references(resolved, known_slugs=known_slugs)
         referenced_slugs.update(ref.agent for ref in resolved.subagents)
+        if resolved.workflows is not None:
+            referenced_slugs.update(ref.agent for ref in resolved.workflows.subagents)
 
     workflows_requested = any(
         resolved.is_main and _workflows_requested(resolved.workflows)
@@ -204,17 +211,23 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         workflows_enabled = False
         workflow_system_addendum: str | None = None
         trigger_workflow_system_addendum: str | None = None
+        workflow_policy = None
         if resolved.is_main:
             workflow_integration = build_workflow_integration(
                 app,
                 resolved.metadata,
                 workflow_tools=capabilities.filtered_workflow_tools,
+                workflow_subagents=(
+                    resolved.workflows.subagents if resolved.workflows is not None else ()
+                ),
+                catalog=catalog,
             )
             workflows_enabled = workflow_integration.enabled
             workflow_system_addendum = workflow_integration.chat_system_addendum
             trigger_workflow_system_addendum = (
                 workflow_integration.trigger_system_addendum
             )
+            workflow_policy = workflow_integration.plan_policy
         elif _workflows_requested(resolved.workflows):
             logger.warning(
                 "workflows.enabled is only honored on main.agent.md; ignoring "
@@ -247,6 +260,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 catalog=catalog,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=trigger_workflow_system_addendum,
+                workflow_policy=workflow_policy,
             )
         if _builtin_endpoints_enabled(resolved.builtin_endpoints):
             register_builtin_endpoints(
@@ -256,6 +270,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 slug=resolved.slug,
                 workflows_enabled=workflows_enabled,
                 workflow_system_addendum=workflow_system_addendum,
+                workflow_policy=workflow_policy,
                 catalog=catalog,
             )
 

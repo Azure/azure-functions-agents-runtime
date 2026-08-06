@@ -22,8 +22,10 @@ from azure_functions_agents.workflows.schema import (
     ECHO_TOOL_NAME,
     MAX_NODES,
     MAX_WAIT_DURATION,
+    SUB_AGENT_TASK_TYPE,
     PlanValidationError,
     TemplateResolutionError,
+    WorkflowPlanPolicy,
     parse_iso8601_datetime,
     parse_iso8601_duration,
     plan_to_activity_inputs,
@@ -34,11 +36,14 @@ from azure_functions_agents.workflows.schema import validate_plan as _validate_p
 # Schema tests use the internal echo tool; the production allowlist is
 # computed at app start by ``build_workflow_integration``. Wrap once so
 # every call site stays terse.
-_TEST_ALLOWLIST = frozenset({ECHO_TOOL_NAME})
+_TEST_POLICY = WorkflowPlanPolicy(
+    allowed_tools=frozenset({ECHO_TOOL_NAME}),
+    allowed_subagents=frozenset({"pr_status_analyst", "report_writer"}),
+)
 
 
-def validate_plan(raw, *, allowed_tools=_TEST_ALLOWLIST):
-    return _validate_plan(raw, allowed_tools=allowed_tools)
+def validate_plan(raw, *, policy=_TEST_POLICY):
+    return _validate_plan(raw, policy=policy)
 
 
 def _task(tid, depends_on=None, args=None, tool=ECHO_TOOL_NAME, type_="tool"):
@@ -62,6 +67,16 @@ def _wait(tid, duration=None, until=None, depends_on=None):
     if until is not None:
         out["until"] = until
     return out
+
+
+def _subagent(tid, agent="pr_status_analyst", task="Analyze one PR.", depends_on=None):
+    return {
+        "id": tid,
+        "type": SUB_AGENT_TASK_TYPE,
+        "agent": agent,
+        "task": task,
+        "depends_on": depends_on or [],
+    }
 
 
 def _plan(*tasks):
@@ -97,6 +112,80 @@ def test_rejects_plans_over_max_nodes():
     tasks = [_task(f"t{i}") for i in range(MAX_NODES + 1)]
     with pytest.raises(PlanValidationError, match="per-plan limit"):
         validate_plan(_plan(*tasks))
+
+
+def test_accepts_minimal_sub_agent_task() -> None:
+    plan = validate_plan(_plan(_subagent("analyze")))
+
+    assert plan.tasks[0].agent == "pr_status_analyst"
+    assert plan.tasks[0].task == "Analyze one PR."
+
+
+@pytest.mark.parametrize(
+    "node",
+    [
+        {"id": "analyze", "type": "sub_agent", "task": "Analyze one PR."},
+        {
+            "id": "analyze",
+            "type": "sub_agent",
+            "agent": "",
+            "task": "Analyze one PR.",
+        },
+        {
+            "id": "analyze",
+            "type": "sub_agent",
+            "agent": "pr_status_analyst",
+            "task": "",
+        },
+        {
+            "id": "analyze",
+            "type": "sub_agent",
+            "agent": "pr_status_analyst",
+            "task": 42,
+        },
+    ],
+)
+def test_rejects_invalid_sub_agent_required_fields(node: dict[str, object]) -> None:
+    with pytest.raises(PlanValidationError):
+        validate_plan(_plan(node))
+
+
+def test_rejects_unauthorized_sub_agent_before_scheduling() -> None:
+    with pytest.raises(PlanValidationError, match="not authorized"):
+        validate_plan(_plan(_subagent("analyze", agent="untrusted")))
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("tool", ECHO_TOOL_NAME),
+        ("args", {}),
+        ("duration", "PT1S"),
+        ("until", "2026-07-24T00:00:00Z"),
+    ],
+)
+def test_rejects_fields_forbidden_on_sub_agent(
+    field: str,
+    value: object,
+) -> None:
+    node = _subagent("analyze")
+    node[field] = value
+
+    with pytest.raises(PlanValidationError, match="not valid on type=sub_agent"):
+        validate_plan(_plan(node))
+
+
+@pytest.mark.parametrize("node", [_task("tool"), _wait("wait", duration="PT1S")])
+@pytest.mark.parametrize(("field", "value"), [("agent", "analyst"), ("task", "work")])
+def test_rejects_sub_agent_fields_on_other_node_types(
+    node: dict[str, object],
+    field: str,
+    value: str,
+) -> None:
+    node[field] = value
+
+    with pytest.raises(PlanValidationError, match="only valid on type=sub_agent"):
+        validate_plan(_plan(node))
 
 
 # ---------------------------------------------------------------------------
@@ -309,6 +398,44 @@ def test_accepts_multiple_valid_refs_in_one_string():
     )
 
 
+def test_accepts_upstream_template_in_sub_agent_task() -> None:
+    plan = validate_plan(
+        _plan(
+            _task("load"),
+            _subagent(
+                "analyze",
+                task="Analyze PR ${load.result.echoed.number}.",
+                depends_on=["load"],
+            ),
+        )
+    )
+
+    assert plan.tasks[1].task == "Analyze PR ${load.result.echoed.number}."
+
+
+@pytest.mark.parametrize(
+    ("task", "expected"),
+    [
+        ("Analyze ${missing.result}.", "unknown task"),
+        ("Analyze ${peer.result}.", "not an upstream dependency"),
+        ("Analyze ${load}.", "malformed template"),
+        ("Analyze ${load.result", "unterminated template"),
+    ],
+)
+def test_rejects_invalid_sub_agent_task_templates(
+    task: str,
+    expected: str,
+) -> None:
+    with pytest.raises(PlanValidationError, match=expected):
+        validate_plan(
+            _plan(
+                _task("load"),
+                _subagent("peer"),
+                _subagent("analyze", task=task, depends_on=["load"]),
+            )
+        )
+
+
 # ---------------------------------------------------------------------------
 # plan_to_activity_inputs preserves depends_on
 # ---------------------------------------------------------------------------
@@ -326,6 +453,57 @@ def test_plan_to_activity_inputs_includes_depends_on():
         {"id": "a", "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}, "depends_on": []},
         {"id": "b", "type": "tool", "tool": ECHO_TOOL_NAME, "args": {"k": "v"}, "depends_on": ["a"]},
     ]
+
+
+def test_plan_to_activity_inputs_preserves_sub_agent_contract() -> None:
+    plan = validate_plan(
+        _plan(
+            _subagent(
+                "analyze",
+                task="Analyze one pull request.",
+                depends_on=[],
+            ),
+            _subagent(
+                "report",
+                agent="report_writer",
+                task="Reduce ${analyze.result.text}.",
+                depends_on=["analyze"],
+            ),
+        )
+    )
+
+    assert plan_to_activity_inputs(plan) == [
+        {
+            "id": "analyze",
+            "type": "sub_agent",
+            "agent": "pr_status_analyst",
+            "task": "Analyze one pull request.",
+            "depends_on": [],
+        },
+        {
+            "id": "report",
+            "type": "sub_agent",
+            "agent": "report_writer",
+            "task": "Reduce ${analyze.result.text}.",
+            "depends_on": ["analyze"],
+        },
+    ]
+
+
+def test_policy_is_immutable_and_owner_specific() -> None:
+    first = WorkflowPlanPolicy(
+        allowed_tools=frozenset({"tool_a"}),
+        allowed_subagents=frozenset({"agent_a"}),
+    )
+    second = WorkflowPlanPolicy(
+        allowed_tools=frozenset({"tool_b"}),
+        allowed_subagents=frozenset({"agent_b"}),
+    )
+
+    with pytest.raises(AttributeError):
+        first.allowed_subagents = frozenset({"agent_b"})  # type: ignore[misc]
+    assert first.allowed_subagents == frozenset({"agent_a"})
+    assert second.allowed_subagents == frozenset({"agent_b"})
 
 
 # ---------------------------------------------------------------------------
@@ -795,4 +973,3 @@ def test_rejects_non_string_task_id():
     raw = _plan({"id": 42, "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}})
     with pytest.raises(PlanValidationError):
         validate_plan(raw)
-
