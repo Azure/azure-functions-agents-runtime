@@ -4,10 +4,12 @@ import asyncio
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from uuid import uuid4
 
 import pytest
 
 from azure_functions_agents.controller.readiness import (
+    ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
     ActivatedSession,
     SessionActivationError,
@@ -262,6 +264,82 @@ async def test_corrupt_optional_harness_protocol_quarantines_before_admission(tm
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "protocol_payload",
+    [
+        b'{"protocol_version":"1","protocol_version":"forged"}',
+        b'{"protocol_version":1}',
+        b'{"protocol_version":"1","capabilities":{"delegation":1}}',
+    ],
+)
+async def test_optional_harness_protocol_rejects_duplicate_keys_and_coercion(
+    tmp_path: Path,
+    protocol_payload: bytes,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = _FakeHandle("new-sandbox")
+    handle.seed_file(HARNESS_PROTOCOL_PATH, protocol_payload)
+    provider = _FakeProvider(handle)
+    store = _FakeStore()
+
+    with pytest.raises(SessionActivationNotFoundError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            "new-session",
+            SetupBudget.start(),
+            allow_create=True,
+        )
+
+    assert store.session is not None
+    assert store.session.quarantine_reason == "protocol_version_mismatch"
+
+
+@pytest.mark.asyncio
+async def test_optional_checkpoint_pointer_requires_a_canonical_uuid_name(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    handle = _FakeHandle("new-sandbox")
+    handle.seed_file(ATOMIC_CHECKPOINT_POINTER_PATH, b"checkpoint-not-a-uuid\n")
+    provider = _FakeProvider(handle)
+    store = _FakeStore()
+
+    with pytest.raises(SessionActivationNotFoundError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            "new-session",
+            SetupBudget.start(),
+            allow_create=True,
+        )
+
+    assert store.session is not None
+    assert store.session.quarantine_reason == "checkpoint_corrupt"
+
+
+@pytest.mark.asyncio
+async def test_optional_checkpoint_pointer_accepts_a_canonical_uuid_name(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    handle = _FakeHandle("new-sandbox")
+    handle.seed_file(
+        ATOMIC_CHECKPOINT_POINTER_PATH,
+        f"checkpoint-{uuid4().hex}\n".encode("ascii"),
+    )
+    provider = _FakeProvider(handle)
+    store = _FakeStore()
+
+    activated = await activate_session(
+        _runtime(script_root, provider, store),
+        _owner(),
+        "new-session",
+        SetupBudget.start(),
+        allow_create=True,
+    )
+
+    assert activated.session.status == "ready"
+    await activated.handle.close()
+
+
+@pytest.mark.asyncio
 async def test_manifest_mismatch_releases_an_active_slot_before_quarantine(
     tmp_path: Path,
 ) -> None:
@@ -456,6 +534,7 @@ async def test_partial_delivery_stays_creating_until_reconciler_reclaims_candida
     report = await SessionReconciler(
         store=store,
         provider=provider,
+        app_hash=owner_partition(_owner()).app_hash,
     ).run_once()
 
     assert report.tombstoned_sessions == 1

@@ -20,6 +20,7 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.controller.http import ControllerResponse
 from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
 from azure_functions_agents.registration._handlers import (
+    _controller_response_to_fastapi,
     _tool_error_count,
     _total_tool_error_count,
     build_sandbox_tools_for_session,
@@ -48,6 +49,19 @@ class DummyRequest:
         if isinstance(self._payload, bytes):
             return self._payload
         return json.dumps(self._payload).encode("utf-8")
+
+
+def test_controller_timeout_adapter_preserves_post_start_session_header() -> None:
+    response = _controller_response_to_fastapi(
+        ControllerResponse(
+            status_code=504,
+            body={"error": "run_deadline_exceeded"},
+            headers={"x-ms-session-id": "session-123"},
+        )
+    )
+
+    assert response.status_code == 504
+    assert response.headers["x-ms-session-id"] == "session-123"
 
 
 class RecordingSpan:
@@ -444,7 +458,8 @@ def test_http_handler_binds_the_authenticated_owner_for_sandbox_execution(
         captured["request"] = args[1]
         return ControllerResponse(
             status_code=200,
-            body={"session_id": "runtime-created", "response": "plain text"},
+            body={"response": "plain text"},
+            headers={"x-ms-session-id": "runtime-created"},
         )
 
     monkeypatch.setattr(

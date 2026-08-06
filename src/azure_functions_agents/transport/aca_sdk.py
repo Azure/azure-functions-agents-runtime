@@ -13,9 +13,8 @@ import time
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from importlib import import_module
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Protocol, cast
 
 import aiohttp
 from azure.core.credentials_async import AsyncTokenCredential
@@ -41,6 +40,7 @@ from .transport_models import (
     AcaSandboxDependencyError,
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
+    SandboxCapacityError,
     SandboxCreateRequest,
     SandboxEgressPolicy,
     SandboxExecResult,
@@ -297,6 +297,11 @@ class AcaSandboxAdapter:
                 polling_interval=request.polling_interval_seconds,
             )
         except HttpResponseError as exc:
+            if _is_capacity_rejection(exc):
+                await self._cleanup_failed_create(provisioning_attempt_id)
+                raise SandboxCapacityError(
+                    "Sandbox Group capacity is currently unavailable."
+                ) from exc
             if _is_definitive_client_rejection(exc):
                 raise
             await self._cleanup_failed_create(provisioning_attempt_id)
@@ -318,6 +323,13 @@ class AcaSandboxAdapter:
             sdk_client: SandboxClient = await poller.result()
         except asyncio.CancelledError:
             await self._cleanup_after_cancelled_create(provisioning_attempt_id)
+            raise
+        except HttpResponseError as exc:
+            await self._cleanup_failed_create(provisioning_attempt_id)
+            if _is_capacity_rejection(exc):
+                raise SandboxCapacityError(
+                    "Sandbox Group capacity is currently unavailable."
+                ) from exc
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
             await self._cleanup_failed_create(provisioning_attempt_id)
@@ -405,20 +417,12 @@ class AcaSandboxAdapter:
         self._ensure_open()
         summaries: list[SandboxSummary] = []
         async for sandbox in self._group_client.list_sandboxes(labels=labels):
-            sandbox_id = getattr(sandbox, "id", None)
-            sandbox_labels = getattr(sandbox, "labels", {})
-            if not isinstance(sandbox_id, str) or not isinstance(sandbox_labels, Mapping):
-                raise SandboxProvisioningError("Sandbox inventory response was incomplete.")
             summaries.append(
                 SandboxSummary.create(
-                    sandbox_id=sandbox_id,
-                    labels={
-                        str(key): str(value)
-                        for key, value in sandbox_labels.items()
-                        if isinstance(key, str) and isinstance(value, str)
-                    },
-                    created_at=_sdk_timestamp(sandbox, "created_at"),
-                    modified_at=_sdk_timestamp(sandbox, "modified_at"),
+                    sandbox_id=sandbox.id,
+                    labels=dict(sandbox.labels),
+                    created_at=_sdk_timestamp(sandbox.created_at),
+                    modified_at=_sdk_timestamp(sandbox.modified_at),
                 )
             )
         return tuple(summaries)
@@ -427,7 +431,7 @@ class AcaSandboxAdapter:
         """Delete one sandbox through the bound customer-owned group."""
         self._ensure_open()
         if not sandbox_id:
-            raise SandboxProvisioningError("Sandbox sandbox_id must be non-empty.")
+            raise SandboxProvisioningError("Sandbox ID must be non-empty.")
         poller = await self._group_client.begin_delete_sandbox(
             sandbox_id,
             polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
@@ -440,17 +444,11 @@ class AcaSandboxAdapter:
         self._ensure_open()
         snapshots: list[SandboxSnapshot] = []
         async for snapshot in self._group_client.list_snapshots():
-            snapshot_id = getattr(snapshot, "id", None)
-            if not isinstance(snapshot_id, str):
-                raise SandboxProvisioningError("Snapshot inventory response was incomplete.")
-            sandbox_id = getattr(snapshot, "sandbox_id", None)
-            if sandbox_id is not None and not isinstance(sandbox_id, str):
-                raise SandboxProvisioningError("Snapshot inventory response was invalid.")
             snapshots.append(
                 SandboxSnapshot.create(
-                    snapshot_id=snapshot_id,
-                    sandbox_id=sandbox_id,
-                    created_at=_sdk_timestamp(snapshot, "created_at"),
+                    snapshot_id=snapshot.id,
+                    sandbox_id=snapshot.sandbox_id,
+                    created_at=_sdk_timestamp(snapshot.created_at),
                 )
             )
         return tuple(snapshots)
@@ -459,7 +457,7 @@ class AcaSandboxAdapter:
         """Delete one unreferenced snapshot through the bound Sandbox Group."""
         self._ensure_open()
         if not snapshot_id:
-            raise SandboxProvisioningError("Sandbox snapshot_id must be non-empty.")
+            raise SandboxProvisioningError("Snapshot ID must be non-empty.")
         poller = await self._group_client.begin_delete_snapshot(
             snapshot_id,
             polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
@@ -799,42 +797,22 @@ def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy)
     )
 
 
-def _project_lifecycle_policy(policy: object) -> SandboxLifecyclePolicy:
+def _project_lifecycle_policy(policy: LifecyclePolicy) -> SandboxLifecyclePolicy:
     """Project the SDK lifecycle response while keeping its shape adapter-local."""
-    auto_suspend = getattr(policy, "auto_suspend", None)
-    auto_delete = getattr(policy, "auto_delete", None)
-    auto_delete_seconds = getattr(auto_delete, "delete_interval_seconds", None)
-    if isinstance(auto_delete_seconds, bool) or not isinstance(auto_delete_seconds, int):
-        raise SandboxProvisioningError("Sandbox lifecycle policy omitted auto-delete.")
-
-    if auto_suspend is None:
+    if policy.auto_suspend is None:
         return SandboxLifecyclePolicy.create(
             auto_suspend_seconds=None,
-            auto_delete_seconds=auto_delete_seconds,
+            auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
         )
-    seconds = getattr(auto_suspend, "auto_suspend_seconds", None)
-    if seconds is None:
-        seconds = getattr(auto_suspend, "suspend_interval_seconds", None)
-    mode = getattr(auto_suspend, "mode", "Disk")
-    if isinstance(seconds, bool) or not isinstance(seconds, int) or mode not in {"Memory", "Disk"}:
-        raise SandboxProvisioningError("Sandbox lifecycle policy was invalid.")
-    auto_suspend_mode: Literal["Memory", "Disk"] = "Memory" if mode == "Memory" else "Disk"
     return SandboxLifecyclePolicy.create(
-        auto_suspend_seconds=seconds,
-        auto_suspend_mode=auto_suspend_mode,
-        auto_delete_seconds=auto_delete_seconds,
+        auto_suspend_seconds=policy.auto_suspend.auto_suspend_seconds,
+        auto_suspend_mode=policy.auto_suspend.mode,
+        auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
     )
 
 
-def _sdk_timestamp(value: object, attribute: str) -> str | None:
-    timestamp = getattr(value, attribute, None)
-    if timestamp is None:
-        return None
-    if isinstance(timestamp, datetime):
-        return timestamp.astimezone(UTC).isoformat()
-    if isinstance(timestamp, str) and timestamp.strip():
-        return timestamp
-    raise SandboxProvisioningError("Sandbox inventory response contained an invalid timestamp.")
+def _sdk_timestamp(timestamp: str | None) -> str | None:
+    return timestamp
 
 
 def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
@@ -842,6 +820,10 @@ def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
 
     status_code = exc.status_code
     return status_code is not None and 400 <= status_code < 500
+
+
+def _is_capacity_rejection(exc: HttpResponseError) -> bool:
+    return exc.status_code in {409, 429, 503}
 
 
 async def _read_manifest_when_ready(
@@ -902,7 +884,7 @@ def _project_file_entry(entry: FileInfo) -> SandboxFileEntry:
         size=entry.size,
         is_directory=entry.is_directory,
         modified_at=entry.modified_at,
-        mode=_sdk_file_mode(entry),
+        mode=entry.mode,
     )
 
 
@@ -912,19 +894,8 @@ def _project_file_stat(entry: FileInfo) -> SandboxFileStat:
         size=entry.size,
         is_directory=entry.is_directory,
         modified_at=entry.modified_at,
-        mode=_sdk_file_mode(entry),
+        mode=entry.mode,
     )
-
-
-def _sdk_file_mode(entry: FileInfo) -> int | None:
-    """Read ``FileInfo.mode`` as the POSIX int the service actually sends.
-
-    The pinned SDK's ``str | None`` annotation is wrong — ``_from_dict`` passes
-    the wire value through uncoerced and live ACA sends an int. This is the one
-    permitted SDK-boundary cast here.
-    """
-
-    return cast("int | None", entry.mode)
 
 
 def _project_exec_result(result: ExecResult) -> SandboxExecResult:

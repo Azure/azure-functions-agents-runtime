@@ -48,6 +48,7 @@ from ._auth import (
 )
 from ._handlers import (
     _controller_response_to_fastapi,
+    _controller_session_id,
     _session_runtime_kwargs,
     _set_run_result_attributes,
     build_sandbox_tools_for_session,
@@ -457,17 +458,20 @@ def _register_http_chat(
                         controller_body.get("response"), str
                     ):
                         return _controller_response_to_fastapi(controller_response)
+                    controller_session_id = _controller_session_id(controller_response)
+                    if controller_session_id is None:
+                        return _controller_response_to_fastapi(controller_response)
                     span.set_attribute("af.agent.outcome", "success")
                     return Response(
                         json.dumps(
                             {
-                                "session_id": controller_body["session_id"],
+                                "session_id": controller_session_id,
                                 "response": controller_body["response"],
                                 "tool_calls": controller_body.get("tool_calls", []),
                             }
                         ),
                         media_type="application/json",
-                        headers={"x-ms-session-id": str(controller_body["session_id"])},
+                        headers={"x-ms-session-id": controller_session_id},
                     )
                 result = await _run_builtin_agent(
                     prompt,

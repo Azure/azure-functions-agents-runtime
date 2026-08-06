@@ -371,6 +371,7 @@ provenance.
 | 128 | Per-sandbox lifecycle policy | group readback / inherited default / explicit complete policy | Set suspend+delete immediately after create and before delivery; delete is reclaim + 3600 + 300. This supersedes row 74/group auto-delete validation. | Human | 2026-08-04 | U1 |
 | 129 | ACA HTTP auth parity | separate policies / weaker management auth / exact equality | Built-in chat and custom HTTP both honor `respond-async`; if both exist, compare complete resolved auth policies before route mutation. | Human | 2026-08-04 | U1 |
 | 130 | Lifecycle call ownership | U1 controller / U2 bootstrap / both | U1/P6 disables, restores, and reconciles per-sandbox lifecycle; U2 only makes its harness suspension-tolerant. | Human | 2026-08-04 | U1 |
+| 131 | Reclaimer isolation and fencing | Timer-only scan / app scope with fence | Scope inventory and Table scans to the app, rotate a durable bounded cursor, and fence an active backing before destructive recovery so terminal adoption cannot reopen its slot. | Agent | 2026-08-06 | U1 corrective |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Human-authorized pre-merge editing replaces unmerged rows 119-148 with rows 119-126; merged history remains append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in

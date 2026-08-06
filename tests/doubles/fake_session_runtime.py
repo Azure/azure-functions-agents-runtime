@@ -8,6 +8,8 @@ from datetime import datetime
 
 from azure_functions_agents.controller.package import CONTENT_MANIFEST_SEED_PATH
 from azure_functions_agents.session_state import (
+    TERMINAL_RUN_STATUSES,
+    ActiveRunConflictError,
     AdmissionOutcome,
     AdmissionRecords,
     AdoptionOutcome,
@@ -18,7 +20,10 @@ from azure_functions_agents.session_state import (
     NewSessionAdmissionRecords,
     OwnerIdempotencyRead,
     OwnerPartition,
+    ReclaimFence,
+    ReconcilerCursorRead,
     RunRead,
+    SessionNotAdmissibleError,
     SessionRead,
     TableEntityPage,
 )
@@ -112,6 +117,7 @@ class FakeSandboxSessionProvider:
         self.attach_calls = 0
         self.resume_calls = 0
         self.create_calls: list[SandboxCreateRequest] = []
+        self.create_errors: list[Exception] = []
         self.attach_error: Exception | None = None
         self.attach_delay = 0.0
         self.closed = False
@@ -128,6 +134,8 @@ class FakeSandboxSessionProvider:
     ) -> FakeSandboxSessionHandle:
         assert persisted_group.region == self.group.region
         self.create_calls.append(request)
+        if self.create_errors:
+            raise self.create_errors.pop(0)
         self.handle.labels = request.labels.to_provider_labels()
         self.sandboxes[self.handle.identity.sandbox_id] = self.handle
         return self.handle
@@ -187,6 +195,7 @@ class FakeSessionStateStore:
         self.owner_idempotency: dict[str, DurableOwnerIdempotencyRecord] = {}
         self.owner_idempotency_etags: dict[str, str] = {}
         self.admission_expected_session_etags: list[str | None] = []
+        self.reconciler_cursors: dict[str, ReconcilerCursorRead] = {}
 
     async def create_session(self, record: DurableSessionRecord) -> str:
         if self.session is not None:
@@ -253,7 +262,13 @@ class FakeSessionStateStore:
         if expected_session_etag is not None:
             assert self.etag == expected_session_etag
         self.admission_expected_session_etags.append(expected_session_etag)
-        assert self.session.active_run_id is None
+        if self.session.active_run_id is not None:
+            raise ActiveRunConflictError(
+                "session already has an active run",
+                active_run_id=self.session.active_run_id,
+            )
+        if self.session.status not in {"ready", "suspended"}:
+            raise SessionNotAdmissibleError("session lifecycle state cannot accept a new run")
         self.session = records.session
         self.runs[records.run.run_id] = records.run
         self.operations.append("admit")
@@ -289,6 +304,18 @@ class FakeSessionStateStore:
         self.owner_idempotency.pop(previous.idempotency_hash, None)
         self.owner_idempotency_etags.pop(previous.idempotency_hash, None)
         self.operations.append("delete_owner_idempotency")
+
+    async def get_idempotency(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        idempotency_hash: str,
+    ) -> None:
+        del owner_partition, session_id, idempotency_hash
+        return None
+
+    async def delete_idempotency(self, **_: object) -> None:
+        self.operations.append("delete_idempotency")
 
     async def admit_new_session_run(
         self,
@@ -331,17 +358,25 @@ class FakeSessionStateStore:
     async def adopt_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
         assert self.session is not None
         existing = self.runs.get(terminal_run.run_id)
-        if existing is not None and existing.status in {
-            "succeeded",
-            "failed",
-            "canceled",
-            "timed_out",
-            "abandoned",
-        }:
+        if existing is not None and existing.status in TERMINAL_RUN_STATUSES:
+            if (
+                self.session.status != "reclaiming"
+                and self.session.active_run_id == terminal_run.run_id
+            ):
+                self.session = replace(
+                    self.session,
+                    status="ready",
+                    active_run_id=None,
+                    updated_at=existing.updated_at,
+                )
+                self.etag = "etag-released"
+                return AdoptionOutcome(run=existing, run_etag="run-etag", slot_released=True)
             return AdoptionOutcome(run=existing, run_etag="run-etag", slot_released=False)
         self.adopted.append(terminal_run)
         self.operations.append("adopt")
         self.runs[terminal_run.run_id] = terminal_run
+        if self.session.status == "reclaiming":
+            return AdoptionOutcome(run=terminal_run, run_etag="run-etag", slot_released=False)
         self.session = replace(
             self.session,
             status="ready",
@@ -350,6 +385,126 @@ class FakeSessionStateStore:
         )
         self.etag = "etag-released"
         return AdoptionOutcome(run=terminal_run, run_etag="run-etag", slot_released=True)
+
+    async def acquire_reclaim_fence(
+        self,
+        *,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        token: str,
+        updated_at: datetime,
+    ) -> ReclaimFence | None:
+        if self.session is None or self.runs.get(run.run_id) is None:
+            return None
+        current_run = self.runs[run.run_id]
+        if self.session.status == "reclaiming":
+            if (
+                self.session.reclaim_fence_token != token
+                or self.session.active_run_id != run.run_id
+                or self.session.sandbox_id != session.sandbox_id
+                or self.session.generation != run.generation
+            ):
+                return None
+            return ReclaimFence.create(session=self.session, run=current_run, token=token)
+        if self.session != session or current_run != run:
+            return None
+        if self.session.status not in {"running", "canceling"}:
+            return None
+        fence = ReclaimFence.create(session=session, run=run, token=token)
+        self.session = replace(
+            session,
+            status="reclaiming",
+            idle_policy_armed=False,
+            reclaim_fence_token=token,
+            updated_at=updated_at,
+        )
+        self.operations.append("fence")
+        self.etag = "etag-fenced"
+        return fence
+
+    async def resolve_reclaim_fence_terminal(
+        self,
+        *,
+        fence: ReclaimFence,
+        terminal_run: DurableRunRecord,
+    ) -> AdoptionOutcome | None:
+        if self.session is None or not fence.matches(self.session):
+            return None
+        current = self.runs[fence.run_id]
+        if current.status not in TERMINAL_RUN_STATUSES:
+            self.runs[fence.run_id] = terminal_run
+            current = terminal_run
+        self.session = replace(
+            self.session,
+            status="ready",
+            active_run_id=None,
+            reclaim_fence_token=None,
+            updated_at=current.updated_at,
+        )
+        self.operations.append("resolve_fence")
+        self.etag = "etag-fence-resolved"
+        return AdoptionOutcome(run=current, run_etag="run-etag", slot_released=True)
+
+    async def tombstone_reclaim_fence(
+        self,
+        *,
+        fence: ReclaimFence,
+        terminal_run: DurableRunRecord,
+        tombstone_reason: str,
+        updated_at: datetime,
+    ) -> AdoptionOutcome | None:
+        if self.session is None or not fence.matches(self.session):
+            return None
+        current = self.runs[fence.run_id]
+        if current.status not in TERMINAL_RUN_STATUSES:
+            self.runs[fence.run_id] = terminal_run
+            current = terminal_run
+        self.session = replace(
+            self.session,
+            status="tombstoned",
+            active_run_id=None,
+            reclaim_fence_token=None,
+            tombstone_reason=tombstone_reason,
+            updated_at=updated_at,
+        )
+        self.operations.append("tombstone_fence")
+        self.etag = "etag-fence-tombstoned"
+        return AdoptionOutcome(run=current, run_etag="run-etag", slot_released=True)
+
+    async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
+        return self.reconciler_cursors.get(app_hash)
+
+    async def advance_reconciler_cursor(
+        self,
+        *,
+        app_hash: str,
+        previous: ReconcilerCursorRead | None,
+        continuation_token: str | None,
+    ) -> ReconcilerCursorRead:
+        current = self.reconciler_cursors.get(app_hash)
+        if current != previous:
+            from azure_functions_agents.session_state import ConcurrencyConflictError
+
+            raise ConcurrencyConflictError("cursor changed")
+        cursor = ReconcilerCursorRead(
+            app_hash=app_hash,
+            continuation_token=continuation_token,
+            etag=f"cursor-{len(self.operations) + 1}",
+        )
+        self.reconciler_cursors[app_hash] = cursor
+        self.operations.append("advance_cursor")
+        return cursor
+
+    async def delete_run(self, *, previous: DurableRunRecord, etag: str) -> None:
+        del etag
+        self.runs.pop(previous.run_id, None)
+        self.operations.append("delete_run")
+
+    async def delete_session(self, *, previous: DurableSessionRecord, etag: str) -> None:
+        assert self.session == previous
+        assert self.etag == etag
+        self.session = None
+        self.operations.append("delete_session")
 
     async def evict_run_result(
         self,

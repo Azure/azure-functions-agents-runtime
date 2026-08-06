@@ -23,6 +23,7 @@ import asyncio
 import contextlib
 import socket
 from collections.abc import AsyncIterator
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
@@ -299,6 +300,69 @@ async def test_session_run_idempotency_round_trip_and_key_shape() -> None:
         await raw_client.create_entity(idem.to_table_entity())
         raw_entity = await raw_client.get_entity(partition.partition_key, str(idem.row_key))
         assert DurableIdempotencyRecord.from_table_entity(raw_entity) == idem
+
+
+@pytest.mark.asyncio
+async def test_reclaim_fence_and_cursor_use_real_etag_guards() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        run = _run(partition=partition)
+        session = _admitted_session(
+            replace(
+                _session(partition=partition),
+                sandbox_id="sandbox-1",
+            ),
+            run.run_id,
+        )
+        await store.create_session(session)
+        await store.create_run(run)
+
+        fence = await store.acquire_reclaim_fence(
+            session=session,
+            run=run,
+            token="fence-token",
+            updated_at=_NOW,
+        )
+
+        assert fence is not None
+        fenced = await store.get_session(partition, session.session_id)
+        resumed = await store.acquire_reclaim_fence(
+            session=fenced.record,
+            run=run,
+            token=fence.token,
+            updated_at=_NOW,
+        )
+        assert resumed == fence
+        terminal = replace(run, status="succeeded", result_available=False)
+        adopted = await store.adopt_terminal_run(terminal)
+        assert adopted.slot_released is False
+        assert (await store.get_session(partition, session.session_id)).record.status == "reclaiming"
+
+        released = await store.resolve_reclaim_fence_terminal(
+            fence=fence,
+            terminal_run=terminal,
+        )
+        assert released is not None
+        assert released.slot_released is True
+        assert (await store.get_session(partition, session.session_id)).record.status == "ready"
+
+        first = await store.advance_reconciler_cursor(
+            app_hash=partition.app_hash,
+            previous=None,
+            continuation_token='{"next":"one"}',
+        )
+        second = await store.advance_reconciler_cursor(
+            app_hash=partition.app_hash,
+            previous=first,
+            continuation_token=None,
+        )
+        assert second.continuation_token is None
+        with pytest.raises(ConcurrencyConflictError):
+            await store.advance_reconciler_cursor(
+                app_hash=partition.app_hash,
+                previous=first,
+                continuation_token="stale",
+            )
 
 
 @pytest.mark.asyncio

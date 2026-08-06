@@ -28,6 +28,8 @@ from ..controller.readiness import (
     terminal_run,
 )
 from ..session_state import (
+    TERMINAL_RUN_STATUSES,
+    ActiveRunConflictError,
     AdmissionOutcome,
     AdmissionRecords,
     DurableIdempotencyRecord,
@@ -86,11 +88,26 @@ class AcaSandboxExecutionBackend:
 
     async def start_run(self, request: StartRunRequest) -> RunHandle:
         """Activate the session, atomically admit one run, and submit its envelope."""
+        partition = owner_partition(self._owner)
+        if request.session_id is not None:
+            await self._runtime.reconcile_session(partition, request.session_id)
+        try:
+            return await self._start_run_once(request, partition)
+        except ActiveRunConflictError:
+            if request.session_id is None:
+                raise
+            await self._runtime.reconcile_session(partition, request.session_id)
+            return await self._start_run_once(request, partition)
+
+    async def _start_run_once(
+        self,
+        request: StartRunRequest,
+        partition: OwnerPartition,
+    ) -> RunHandle:
         is_new_session = request.session_id is None
         session_id = request.session_id or mint_session_id()
         run_id = mint_run_id()
         setup_budget = self._setup_budget or SetupBudget.start()
-        partition = owner_partition(self._owner)
         attempt = build_idempotency_attempt(
             agent_slug=self._agent_name,
             prompt=request.prompt,
@@ -199,6 +216,8 @@ class AcaSandboxExecutionBackend:
             context.session_id,
             context.run_id,
         )
+        if run_read.record.status == "succeeded" and not run_read.record.result_available:
+            return _durable_status(run_read.record)
         try:
             activated = await activate_session(
                 self._runtime,
@@ -208,8 +227,14 @@ class AcaSandboxExecutionBackend:
                 allow_create=False,
             )
         except SessionActivationGoneError:
+            await self._runtime.reconcile_session(partition, context.session_id)
+            refreshed = await state_binding.store.get_run(
+                partition,
+                context.session_id,
+                context.run_id,
+            )
             return _durable_status(
-                run_read.record,
+                refreshed.record,
                 result_available=False,
                 error=RunError(
                     code=SESSION_TOMBSTONED_ERROR_CODE,
@@ -218,16 +243,37 @@ class AcaSandboxExecutionBackend:
                 ),
             )
         except SessionActivationError:
-            return _durable_status(run_read.record)
+            await self._runtime.reconcile_session(partition, context.session_id)
+            refreshed = await state_binding.store.get_run(
+                partition,
+                context.session_id,
+                context.run_id,
+            )
+            return _durable_status(refreshed.record)
         try:
             status = await self._run_control.get_status(activated.handle, context)
             status = _validate_terminal_output(self._binding, status)
-            await _adopt_if_terminal(
+            adopted = await _adopt_if_terminal(
                 self._runtime,
                 activated,
                 run_read.record,
                 status,
             )
+            if (
+                adopted is not None
+                and adopted.status == "succeeded"
+                and not adopted.result_available
+            ):
+                return _durable_status(adopted)
+            if status.state not in TERMINAL_RUN_STATUSES:
+                await self._runtime.reconcile_session(partition, context.session_id)
+                refreshed = await state_binding.store.get_run(
+                    partition,
+                    context.session_id,
+                    context.run_id,
+                )
+                if refreshed.record.status in TERMINAL_RUN_STATUSES:
+                    return _durable_status(refreshed.record)
             return status
         finally:
             await activated.handle.close()
@@ -317,34 +363,34 @@ async def _preflight_new_session_replay(
     """Return a durable owner-key winner before creating a competing sandbox."""
     state_binding = await _within_setup_budget(runtime.get_state_store(), setup_budget)
     existing = await _within_setup_budget(
-            state_binding.store.get_owner_idempotency(partition, attempt.key_hash),
-            setup_budget,
+        state_binding.store.get_owner_idempotency(partition, attempt.key_hash),
+        setup_budget,
     )
     if existing is None:
-            return None
+        return None
     if existing.record.expires_at <= datetime.now(UTC):
-            await _within_setup_budget(
-                state_binding.store.delete_owner_idempotency(
-                    previous=existing.record,
-                    etag=existing.etag,
-                ),
-                setup_budget,
-            )
-            return None
+        await _within_setup_budget(
+            state_binding.store.delete_owner_idempotency(
+                previous=existing.record,
+                etag=existing.etag,
+            ),
+            setup_budget,
+        )
+        return None
     if existing.record.request_hash != attempt.request_hash:
-            raise IdempotencyConflictError(
-                "idempotency key already used with a different payload",
-                existing_run_id=existing.record.run_id,
-            )
+        raise IdempotencyConflictError(
+            "idempotency key already used with a different payload",
+            existing_run_id=existing.record.run_id,
+        )
     return (
-            await _within_setup_budget(
-                state_binding.store.get_run(
-                    partition,
-                    existing.record.session_id,
-                    existing.record.run_id,
-                ),
-                setup_budget,
-            )
+        await _within_setup_budget(
+            state_binding.store.get_run(
+                partition,
+                existing.record.session_id,
+                existing.record.run_id,
+            ),
+            setup_budget,
+        )
     ).record
 
 
@@ -359,45 +405,45 @@ async def _admit_run(
 ) -> AdmissionOutcome:
     """Choose the session or owner idempotency EGT without mixing their invariants."""
     if is_new_session and attempt is not None:
-            owner_idempotency = DurableOwnerIdempotencyRecord.create(
-                owner_partition=activated.partition,
-                idempotency_hash=attempt.key_hash,
-                request_hash=attempt.request_hash,
-                session_id=run.session_id,
-                run_id=run.run_id,
-                expires_at=activated.session.expires_at,
-                created_at=run.created_at,
-            )
-            return await _within_setup_budget(
-                activated.store.admit_new_session_run(
-                    NewSessionAdmissionRecords.create(
-                        admitted_session,
-                        run,
-                        owner_idempotency,
-                    ),
-                    expected_session_etag=activated.etag,
+        owner_idempotency = DurableOwnerIdempotencyRecord.create(
+            owner_partition=activated.partition,
+            idempotency_hash=attempt.key_hash,
+            request_hash=attempt.request_hash,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            expires_at=activated.session.expires_at,
+            created_at=run.created_at,
+        )
+        return await _within_setup_budget(
+            activated.store.admit_new_session_run(
+                NewSessionAdmissionRecords.create(
+                    admitted_session,
+                    run,
+                    owner_idempotency,
                 ),
-                setup_budget,
-            )
-    idempotency = (
-            None
-            if attempt is None
-            else DurableIdempotencyRecord.create(
-                owner_partition=activated.partition,
-                session_id=run.session_id,
-                idempotency_hash=attempt.key_hash,
-                request_hash=attempt.request_hash,
-                run_id=run.run_id,
-                expires_at=activated.session.expires_at,
-                created_at=run.created_at,
-            )
-    )
-    return await _within_setup_budget(
-            activated.store.admit_run(
-                AdmissionRecords.create(admitted_session, run, idempotency),
                 expected_session_etag=activated.etag,
             ),
             setup_budget,
+        )
+    idempotency = (
+        None
+        if attempt is None
+        else DurableIdempotencyRecord.create(
+            owner_partition=activated.partition,
+            session_id=run.session_id,
+            idempotency_hash=attempt.key_hash,
+            request_hash=attempt.request_hash,
+            run_id=run.run_id,
+            expires_at=activated.session.expires_at,
+            created_at=run.created_at,
+        )
+    )
+    return await _within_setup_budget(
+        activated.store.admit_run(
+            AdmissionRecords.create(admitted_session, run, idempotency),
+            expected_session_etag=activated.etag,
+        ),
+        setup_budget,
     )
 
 
@@ -407,47 +453,47 @@ async def _retire_losing_new_session_candidate(
 ) -> None:
     """Leave a durable deleting trail before removing a first-call race loser."""
     try:
-            current = await activated.store.get_session(
-                activated.partition,
-                activated.session.session_id,
+        current = await activated.store.get_session(
+            activated.partition,
+            activated.session.session_id,
+        )
+        if current.record.active_run_id is not None or current.record.status not in {
+            "creating",
+            "ready",
+            "suspended",
+            "deleting",
+        }:
+            return
+        deleting = (
+            current.record
+            if current.record.status == "deleting"
+            else _session_with_status(
+                current.record,
+                status="deleting",
+                updated_at=datetime.now(UTC),
             )
-            if current.record.active_run_id is not None or current.record.status not in {
-                "creating",
-                "ready",
-                "suspended",
-                "deleting",
-            }:
-                return
-            deleting = (
-                current.record
-                if current.record.status == "deleting"
-                else _session_with_status(
-                    current.record,
-                    status="deleting",
-                    updated_at=datetime.now(UTC),
-                )
+        )
+        if current.record.status != "deleting":
+            await activated.store.update_session(
+                previous=current.record,
+                updated=deleting,
+                etag=current.etag,
             )
-            if current.record.status != "deleting":
-                await activated.store.update_session(
-                    previous=current.record,
-                    updated=deleting,
-                    etag=current.etag,
-                )
-            await activated.handle.delete()
-            provider = await runtime.get_provider()
-            for snapshot_id in deleting.snapshot_ids:
-                await provider.delete_snapshot(snapshot_id)
-            reread = await activated.store.get_session(
-                activated.partition,
-                activated.session.session_id,
+        await activated.handle.delete()
+        provider = await runtime.get_provider()
+        for snapshot_id in deleting.snapshot_ids:
+            await provider.delete_snapshot(snapshot_id)
+        reread = await activated.store.get_session(
+            activated.partition,
+            activated.session.session_id,
+        )
+        if reread.record.status == "deleting" and reread.record.active_run_id is None:
+            await activated.store.tombstone_session(
+                previous=reread.record,
+                etag=reread.etag,
+                tombstone_reason="new_session_idempotency_loser",
+                updated_at=datetime.now(UTC),
             )
-            if reread.record.status == "deleting" and reread.record.active_run_id is None:
-                await activated.store.tombstone_session(
-                    previous=reread.record,
-                    etag=reread.etag,
-                    tombstone_reason="new_session_idempotency_loser",
-                    updated_at=datetime.now(UTC),
-                )
     except Exception:
             logger.exception("Could not fully retire a losing new-session idempotency candidate")
 
@@ -459,34 +505,34 @@ def _session_with_status(
     updated_at: datetime,
 ) -> DurableSessionRecord:
     return DurableSessionRecord.create(
-            owner_partition=session.owner_partition,
-            session_id=session.session_id,
-            sandbox_id=session.sandbox_id,
-            generation=session.generation,
-            digest_kind=session.digest_kind,
-            digest=session.digest,
-            protocol=session.protocol,
-            status=status,  # type: ignore[arg-type]
-            last_activity_at=session.last_activity_at,
-            expires_at=session.expires_at,
-            idle_policy_armed=session.idle_policy_armed,
-            active_run_id=None,
-            snapshot_ids=session.snapshot_ids,
-            region=session.region,
-            state_store_fingerprint=session.state_store_fingerprint,
-            quarantine_reason=session.quarantine_reason,
-            tombstone_reason=session.tombstone_reason,
-            created_at=session.created_at,
-            updated_at=updated_at,
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=status,  # type: ignore[arg-type]
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
     )
 
 
 def _run_handle(run: DurableRunRecord) -> RunHandle:
     return RunHandle(
-            run_id=run.run_id,
-            session_id=run.session_id,
-            state=run.status,
-            created_at=run.created_at,
+        run_id=run.run_id,
+        session_id=run.session_id,
+        state=run.status,
+        created_at=run.created_at,
     )
 
 
@@ -533,13 +579,14 @@ async def _adopt_if_terminal(
     activated: ActivatedSession,
     run: DurableRunRecord,
     status: RunStatus,
-) -> None:
+) -> DurableRunRecord | None:
     terminal = _terminal_record(run, status)
     if terminal is None:
-        return
+        return None
     outcome = await activated.store.adopt_terminal_run(terminal)
     if outcome.slot_released:
         await rearm_idle_lifecycle(runtime, activated)
+    return outcome.run
 
 
 def _terminal_record(

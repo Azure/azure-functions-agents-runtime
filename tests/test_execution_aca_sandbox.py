@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -14,6 +15,8 @@ from azure_functions_agents.controller.readiness import (
     SessionRunOwnershipChangedError,
     SessionRuntimeBinding,
     StateStoreBinding,
+    session_with_admitted_run,
+    terminal_run,
 )
 from azure_functions_agents.execution.aca_sandbox import AcaSandboxExecutionBackend
 from azure_functions_agents.execution.backend import (
@@ -47,6 +50,7 @@ from azure_functions_agents.session_state import (
 )
 from azure_functions_agents.transport.transport_models import (
     DiskSource,
+    SandboxCapacityError,
     SandboxFileOperationError,
 )
 from tests.doubles.content_package import content_package
@@ -126,6 +130,10 @@ def _runtime(
     script_root: Path,
     provider: FakeSandboxSessionProvider,
     store: FakeSessionStateStore,
+    *,
+    targeted_reconciler: Callable[[OwnerPartition, str], Awaitable[None]] | None = None,
+    post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
+    capacity_reaper: Callable[[], Awaitable[None]] | None = None,
 ) -> SessionRuntimeBinding:
     async def provider_factory() -> FakeSandboxSessionProvider:
         return provider
@@ -143,6 +151,9 @@ def _runtime(
         provider_factory=provider_factory,
         state_store_factory=store_factory,
         creation_source=DiskSource.create("test-harness"),
+        targeted_reconciler=targeted_reconciler,
+        post_create_reconciler=post_create_reconciler,
+        capacity_reaper=capacity_reaper,
     )
 
 
@@ -301,6 +312,187 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     assert handle.closed
     assert handle.lifecycle_policy.auto_suspend_seconds is None
     assert store.session.idle_policy_armed is False
+
+
+@pytest.mark.asyncio
+async def test_new_session_creation_awaits_bounded_post_create_reconciliation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+    cleanup_calls = 0
+
+    async def post_create_cleanup() -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(
+            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+        )
+        handle.seed_file(
+            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            provider,
+            store,
+            post_create_reconciler=post_create_cleanup,
+        ),
+        owner=_owner(),
+    )
+
+    await backend.start_run(StartRunRequest(prompt="hello"))
+
+    assert cleanup_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_capacity_failure_reaps_once_before_retrying_new_session_creation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = FakeSandboxSessionProvider(handle)
+    provider.create_errors.append(SandboxCapacityError("capacity exhausted"))
+    store = FakeSessionStateStore()
+    reap_calls = 0
+
+    async def reap_capacity() -> None:
+        nonlocal reap_calls
+        reap_calls += 1
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(
+            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+        )
+        handle.seed_file(
+            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            provider,
+            store,
+            capacity_reaper=reap_capacity,
+        ),
+        owner=_owner(),
+    )
+
+    await backend.start_run(StartRunRequest(prompt="hello"))
+
+    assert reap_calls == 1
+    assert len(provider.create_calls) == 2
+
+
+@pytest.mark.asyncio
+async def test_active_conflict_reconciles_once_before_returning_or_admitting(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    base_session = _session(script_root)
+    session = session_with_admitted_run(
+        base_session,
+        "run-1",
+        updated_at=datetime.now(UTC),
+    )
+    active_run = _run(base_session, state="accepted")
+    store = FakeSessionStateStore(session)
+    store.runs[active_run.run_id] = active_run
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    reconcile_calls = 0
+
+    async def targeted_reconcile(_: OwnerPartition, __: str) -> None:
+        nonlocal reconcile_calls
+        reconcile_calls += 1
+        if reconcile_calls == 2:
+            await store.adopt_terminal_run(
+                terminal_run(
+                    active_run,
+                    status="abandoned",
+                    result_available=False,
+                    reason="verified_harness_death",
+                    updated_at=datetime.now(UTC),
+                )
+            )
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            _status(state="accepted", run_id=run_id, session_id=session.session_id),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            provider,
+            store,
+            targeted_reconciler=targeted_reconcile,
+        ),
+        owner=_owner(),
+    )
+
+    admitted = await backend.start_run(
+        StartRunRequest(prompt="next", session_id=session.session_id)
+    )
+
+    assert reconcile_calls == 2
+    assert admitted.run_id != active_run.run_id
+
+
+@pytest.mark.asyncio
+async def test_nonterminal_status_poll_uses_targeted_reconciliation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    run = _run(session)
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    calls = 0
+    handle.seed_file(
+        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        _status(state="running"),
+    )
+
+    async def targeted_reconcile(_: OwnerPartition, __: str) -> None:
+        nonlocal calls
+        calls += 1
+
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            provider,
+            store,
+            targeted_reconciler=targeted_reconcile,
+        ),
+        owner=_owner(),
+    )
+
+    status = await backend.get_run(RunContext(run_id=run.run_id, session_id=run.session_id))
+
+    assert status.state == "running"
+    assert calls == 1
 
 
 @pytest.mark.asyncio
@@ -824,6 +1016,55 @@ async def test_backend_reads_replayable_events_and_adopts_terminal_result(tmp_pa
     assert store.adopted[-1].status == "succeeded"
     with pytest.raises(EventCursorExpiredError):
         _ = [event async for event in backend.read_events(context, 1)]
+
+
+@pytest.mark.asyncio
+async def test_durable_result_eviction_masks_a_live_success_result_without_resurrection(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    run = replace(_run(session, state="succeeded"), result_available=False)
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    handle.seed_file(
+        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        _status(state="succeeded", result_available=True),
+    )
+    handle.seed_file(
+        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        json.dumps(
+            {
+                "content": "stale live result",
+                "content_intermediate": [],
+                "tool_calls": [],
+                "reasoning": None,
+                "delegate_error_count": 0,
+            }
+        ).encode("utf-8"),
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    context = RunContext(run_id=run.run_id, session_id=run.session_id)
+
+    first_status = await read_status(backend, context)
+    first_result = await read_result(backend, context)
+    second_status = await read_status(backend, context)
+    second_result = await read_result(backend, context)
+
+    assert first_status.status_code == second_status.status_code == 200
+    assert isinstance(first_status.body, dict)
+    assert isinstance(second_status.body, dict)
+    assert first_status.body["result_available"] is False
+    assert second_status.body["result_available"] is False
+    assert first_result.status_code == second_result.status_code == 410
+    assert provider.attach_calls == 0
+    assert store.runs[run.run_id].result_available is False
 
 
 @pytest.mark.asyncio

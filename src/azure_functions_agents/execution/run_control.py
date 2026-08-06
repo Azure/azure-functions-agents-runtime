@@ -14,7 +14,23 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
-from ..session_state import validate_run_id, validate_session_id
+from ..journal_paths import (
+    INBOX_PATH as _INBOX_PATH,
+)
+from ..journal_paths import (
+    JOURNAL_ROOT_PATH as _JOURNAL_ROOT_PATH,
+)
+from ..journal_paths import (
+    RUNS_PATH as _RUNS_PATH,
+)
+from ..journal_paths import (
+    inbox_path,
+    process_path,
+    result_path,
+    run_path,
+    status_path,
+)
+from ..session_state import TERMINAL_RUN_STATUSES, validate_run_id, validate_session_id
 from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.ports import SandboxSessionHandle
 from ..transport.transport_models import SandboxFileNotFoundError
@@ -29,9 +45,9 @@ from .backend import (
     assert_event_cursor_available,
 )
 
-JOURNAL_ROOT_PATH = "/var/lib/azure-functions-agents"
-INBOX_PATH = f"{JOURNAL_ROOT_PATH}/inbox"
-RUNS_PATH = f"{JOURNAL_ROOT_PATH}/runs"
+JOURNAL_ROOT_PATH = _JOURNAL_ROOT_PATH
+INBOX_PATH = _INBOX_PATH
+RUNS_PATH = _RUNS_PATH
 MAX_JOURNAL_DOCUMENT_BYTES = 4 * 1024 * 1024
 MAX_RUN_ENVELOPE_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_STATUS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
@@ -43,9 +59,6 @@ EVENT_POLL_INTERVAL_SECONDS = 1.0
 JOURNAL_VISIBILITY_TIMEOUT_SECONDS = 2.0
 CANCEL_CONFIRM_TIMEOUT_SECONDS = 5.0
 
-_TERMINAL_STATES: frozenset[RunState] = frozenset(
-    {"succeeded", "failed", "canceled", "timed_out", "abandoned"}
-)
 _JOURNAL_ENTRYPOINT = "setsid nohup python -m azure_functions_agents.harness"
 
 type _JournalText = Annotated[str, StringConstraints(min_length=1)]
@@ -316,7 +329,7 @@ class SandboxRunControl:
                     if event.type in TERMINAL_EVENT_TYPES:
                         # The event can arrive before the terminal status write.
                         break
-            if status.state in _TERMINAL_STATES:
+            if status.state in TERMINAL_RUN_STATUSES:
                 return
             await asyncio.sleep(self._event_poll_interval_seconds)
 
@@ -327,25 +340,34 @@ class SandboxRunControl:
     ) -> RunStatus:
         """Signal the recorded process group and wait for harness confirmation."""
         status = await self.get_status(handle, context)
-        if status.state in _TERMINAL_STATES:
+        if status.state in TERMINAL_RUN_STATUSES:
             return status
-        process_payload = await handle.read_file(_process_path(context.run_id))
-        _assert_journal_payload_size(process_payload, MAX_PROCESS_BYTES, "process")
-        process = _parse_process(process_payload)
+        process_group_id = await self.read_process_group_id(handle, context)
         deadline = time.monotonic() + self._cancel_confirm_timeout_seconds
         await handle.exec(
-            _signal_process_group(process.process_group_id, force=False),
+            _signal_process_group(process_group_id, force=False),
             timeout_seconds=_remaining_seconds(deadline),
         )
         try:
             return await self._wait_for_terminal(handle, context, deadline)
         except RunControlTimeoutError:
             await handle.exec(
-                _signal_process_group(process.process_group_id, force=True),
+                _signal_process_group(process_group_id, force=True),
                 timeout_seconds=self._cancel_confirm_timeout_seconds,
             )
             final_deadline = time.monotonic() + self._cancel_confirm_timeout_seconds
             return await self._wait_for_terminal(handle, context, final_deadline)
+
+    async def read_process_group_id(
+        self,
+        handle: SandboxSessionHandle,
+        context: RunContext,
+    ) -> int:
+        """Read one strictly validated process-group identifier."""
+        _validate_context(context)
+        process_payload = await handle.read_file(_process_path(context.run_id))
+        _assert_journal_payload_size(process_payload, MAX_PROCESS_BYTES, "process")
+        return _parse_process(process_payload).process_group_id
 
     async def _wait_for_acceptance(
         self,
@@ -378,7 +400,7 @@ class SandboxRunControl:
     ) -> RunStatus:
         while True:
             status = await self._with_deadline(self.get_status(handle, context), deadline)
-            if status.state in _TERMINAL_STATES:
+            if status.state in TERMINAL_RUN_STATUSES:
                 return status
             await self._sleep_until_poll(deadline)
 
@@ -478,7 +500,7 @@ class SandboxRunControl:
 
 
 def _inbox_path(run_id: str) -> str:
-    return f"{INBOX_PATH}/{validate_run_id(run_id)}.json"
+    return inbox_path(validate_run_id(run_id))
 
 
 def _validate_submission_inputs(
@@ -495,19 +517,19 @@ def _validate_submission_inputs(
 
 
 def _run_path(run_id: str) -> str:
-    return f"{RUNS_PATH}/{validate_run_id(run_id)}"
+    return run_path(validate_run_id(run_id))
 
 
 def _status_path(run_id: str) -> str:
-    return f"{_run_path(run_id)}/status.json"
+    return status_path(validate_run_id(run_id))
 
 
 def _result_path(run_id: str) -> str:
-    return f"{_run_path(run_id)}/result.json"
+    return result_path(validate_run_id(run_id))
 
 
 def _process_path(run_id: str) -> str:
-    return f"{_run_path(run_id)}/process.json"
+    return process_path(validate_run_id(run_id))
 
 
 def _launch_command(run_id: str) -> str:
@@ -604,7 +626,7 @@ def _event_history_matches_status(
         return status.last_sequence == 0
     if status.last_sequence > events[-1].sequence:
         return False
-    if status.state in _TERMINAL_STATES and status.last_sequence < events[-1].sequence:
+    if status.state in TERMINAL_RUN_STATUSES and status.last_sequence < events[-1].sequence:
         return False
     return all(
         current.sequence == previous.sequence + 1

@@ -9,6 +9,8 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
+from ..journal_paths import checkpoint_name, validate_checkpoint_name
+
 
 class AtomicCommitError(RuntimeError):
     """A checkpoint could not be safely committed or recovered."""
@@ -56,8 +58,8 @@ class AtomicCommitStore:
         self._ensure_layout()
         token = uuid.uuid4().hex
         staging = self._staging_root / token
-        checkpoint_name = f"checkpoint-{token}"
-        checkpoint = self._checkpoints_root / checkpoint_name
+        name = checkpoint_name(token)
+        checkpoint = self._checkpoints_root / name
         staging.mkdir()
         self._write_durable(staging / "conversation.json", conversation)
         for relative_path, content in working_files.items():
@@ -71,13 +73,13 @@ class AtomicCommitStore:
         self._fault("after_checkpoints_fsync")
 
         pointer_temp = self._root / f".current-{token}.tmp"
-        self._write_durable(pointer_temp, f"{checkpoint_name}\n".encode("ascii"))
+        self._write_durable(pointer_temp, f"{name}\n".encode("ascii"))
         self._fault("after_pointer_write")
         os.replace(pointer_temp, self._current_pointer)
         self._fault("after_pointer_replace")
         self._sync_directory(self._root)
         self._fault("after_pointer_fsync")
-        return CommittedCheckpoint(name=checkpoint_name, path=checkpoint)
+        return CommittedCheckpoint(name=name, path=checkpoint)
 
     def recover(self) -> CommittedCheckpoint | None:
         """Discard incomplete/unpointed trees and return only the pointer-selected turn."""
@@ -134,8 +136,10 @@ class AtomicCommitStore:
             name = raw.decode("ascii").strip()
         except UnicodeDecodeError as exc:
             raise AtomicCommitCorruptError("current pointer was not ASCII.") from exc
-        if not name or "/" in name or "\\" in name or name in {".", ".."}:
-            raise AtomicCommitCorruptError("current pointer target was unsafe.")
+        try:
+            validate_checkpoint_name(name)
+        except ValueError as exc:
+            raise AtomicCommitCorruptError("current pointer target was unsafe.") from exc
         target = self._checkpoints_root / name
         if target.parent != self._checkpoints_root or target.is_symlink() or not target.is_dir():
             raise AtomicCommitCorruptError("current pointer did not identify a checkpoint.")

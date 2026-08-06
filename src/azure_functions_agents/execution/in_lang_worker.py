@@ -13,6 +13,7 @@ from typing import Any, Protocol
 from uuid import uuid4
 
 from .._logger import logger
+from ..session_state import TERMINAL_RUN_STATUSES
 from .backend import (
     TERMINAL_EVENT_TYPES,
     RunContext,
@@ -30,11 +31,6 @@ from .result import AgentResult
 
 _RUNNER_TIMEOUT_PREFIX = "Agent run timed out after "
 _STREAM_TIMEOUT_PREFIX = "Timeout after "
-_TERMINAL_STATES: frozenset[RunState] = frozenset(
-    {"succeeded", "failed", "canceled", "timed_out", "abandoned"}
-)
-
-
 class _RunnerModule(Protocol):
     async def run_agent(self, prompt: str, **kwargs: Any) -> AgentResult: ...
 
@@ -102,7 +98,7 @@ class LanguageWorkerExecutionBackend:
         async with self._condition:
             run = self._require_run(context)
             task = run.task
-            if run.status.state in _TERMINAL_STATES or task is None:
+            if run.status.state in TERMINAL_RUN_STATUSES or task is None:
                 return run.status
             task.cancel()
 
@@ -126,7 +122,7 @@ class LanguageWorkerExecutionBackend:
                     after_sequence,
                 )
                 pending = [event for event in run.events if event.sequence > after_sequence]
-                terminal = run.status.state in _TERMINAL_STATES
+                terminal = run.status.state in TERMINAL_RUN_STATUSES
                 if not pending and not terminal:
                     await self._condition.wait()
                     continue
@@ -307,7 +303,7 @@ class LanguageWorkerExecutionBackend:
         fault_domain: str | None = "runtime",
     ) -> None:
         async with self._condition:
-            if run.status.state in _TERMINAL_STATES:
+            if run.status.state in TERMINAL_RUN_STATUSES:
                 return
             if self._stream_events and not _ends_with_terminal_event(run.events):
                 self._append_event_locked(run, "error", {"content": message})
@@ -337,7 +333,7 @@ class LanguageWorkerExecutionBackend:
 
     async def _record_terminal_status(self, run: _LanguageWorkerRun, state: RunState) -> None:
         async with self._condition:
-            if run.status.state in _TERMINAL_STATES:
+            if run.status.state in TERMINAL_RUN_STATUSES:
                 return
             if (
                 self._stream_events

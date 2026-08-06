@@ -29,6 +29,7 @@ type SessionStatus = Literal[
     "suspending",
     "suspended",
     "resuming",
+    "reclaiming",
     "failed",
     "quarantined",
     "tombstoned",
@@ -57,6 +58,7 @@ _SESSION_STATUSES: frozenset[str] = frozenset(
         "suspending",
         "suspended",
         "resuming",
+        "reclaiming",
         "failed",
         "quarantined",
         "tombstoned",
@@ -85,7 +87,9 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _STATE_STORE_FINGERPRINT_PATTERN = re.compile(rf"^{STATE_STORE_FINGERPRINT_VERSION}-{LABEL_SAFE_PAYLOAD_GROUP}$")
 _REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _REGION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
-_STATUSES_REQUIRING_ACTIVE_RUN: frozenset[str] = frozenset({"running", "canceling"})
+_STATUSES_REQUIRING_ACTIVE_RUN: frozenset[str] = frozenset(
+    {"running", "canceling", "reclaiming"}
+)
 _STATUSES_FORBIDDING_ACTIVE_RUN: frozenset[str] = frozenset(
     {
         "creating",
@@ -594,6 +598,7 @@ def _base_entity(partition: OwnerPartition, row_key: DurableRowKey) -> TableEnti
         "RowKey": str(row_key),
         "schema_version": ROW_SCHEMA_VERSION,
         "owner_hash_version": partition.owner_hash_version,
+        "app_hash": partition.app_hash,
     }
 
 
@@ -620,6 +625,7 @@ class DurableSessionRecord:
     tombstone_reason: str | None
     created_at: datetime
     updated_at: datetime
+    reclaim_fence_token: str | None = None
 
     @classmethod
     def create(
@@ -644,6 +650,7 @@ class DurableSessionRecord:
         tombstone_reason: str | None,
         created_at: datetime,
         updated_at: datetime,
+        reclaim_fence_token: str | None = None,
     ) -> DurableSessionRecord:
         if status not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
@@ -659,6 +666,17 @@ class DurableSessionRecord:
         if status in _STATUSES_FORBIDDING_ACTIVE_RUN and normalized_active_run_id is not None:
             raise SessionStateContractError(
                 f"{status} sessions require active_run_id to be unset"
+            )
+        normalized_fence_token = _optional_bounded_text(
+            reclaim_fence_token,
+            "reclaim_fence_token",
+            max_bytes=64,
+        )
+        if status == "reclaiming" and normalized_fence_token is None:
+            raise SessionStateContractError("reclaiming sessions require reclaim_fence_token")
+        if status != "reclaiming" and normalized_fence_token is not None:
+            raise SessionStateContractError(
+                "only reclaiming sessions may retain reclaim_fence_token"
             )
         normalized_snapshots = tuple(snapshot_ids)
         encode_snapshot_ids(normalized_snapshots)
@@ -695,6 +713,7 @@ class DurableSessionRecord:
             tombstone_reason=tombstone_reason,
             created_at=created_at_n,
             updated_at=updated_at_n,
+            reclaim_fence_token=normalized_fence_token,
         )
 
     @property
@@ -720,6 +739,7 @@ class DurableSessionRecord:
                 "state_store_fingerprint": self.state_store_fingerprint,
                 "quarantine_reason": self.quarantine_reason or "",
                 "tombstone_reason": self.tombstone_reason or "",
+                "reclaim_fence_token": self.reclaim_fence_token or "",
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
             }
@@ -759,6 +779,10 @@ class DurableSessionRecord:
             tombstone_reason=_optional_entity_str(entity, "tombstone_reason"),
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
+            reclaim_fence_token=_optional_entity_str_or_none(
+                entity,
+                "reclaim_fence_token",
+            ),
         )
 
 @dataclass(frozen=True, slots=True)
@@ -1104,6 +1128,11 @@ def _validate_entity_header(
         raise SessionStateContractError(
             "owner_hash_version does not match the owner partition"
         )
+    app_hash = entity.get("app_hash")
+    if app_hash is not None and (
+        not isinstance(app_hash, str) or app_hash != partition.app_hash
+    ):
+        raise SessionStateContractError("app_hash does not match the owner partition")
 
 
 def _require_str(entity: Mapping[str, object], field_name: str) -> str:
@@ -1116,6 +1145,15 @@ def _require_str(entity: Mapping[str, object], field_name: str) -> str:
 def _optional_entity_str(entity: Mapping[str, object], field_name: str) -> str | None:
     value = _require_str(entity, field_name)
     return value or None
+
+
+def _optional_entity_str_or_none(
+    entity: Mapping[str, object],
+    field_name: str,
+) -> str | None:
+    if field_name not in entity:
+        return None
+    return _optional_entity_str(entity, field_name)
 
 
 def _require_int(entity: Mapping[str, object], field_name: str) -> int:

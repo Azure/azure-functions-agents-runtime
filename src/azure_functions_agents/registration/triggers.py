@@ -77,14 +77,7 @@ def _register_builtin_agent(
 def _resolve_http_trigger_auth(
     resolved: ResolvedAgent, trigger_params: dict[str, Any]
 ) -> EndpointAuthConfig:
-    """Resolve an ``http_trigger``'s auth policy into the shared ``EndpointAuthConfig``.
-
-    Accepts the nested ``http_auth`` object (preferred — the same model built-in
-    endpoints use, supporting ``function``/``admin``/``anonymous``/``entra`` and
-    the string shorthand) and the legacy flat ``auth_level`` string (deprecated).
-    When both are present ``http_auth`` wins and ``auth_level`` is ignored with a
-    warning. When neither is present the default (``function``) is used.
-    """
+    """Resolve custom HTTP auth and warn on deprecated flat configuration."""
     raw_auth = trigger_params.get("http_auth")
     raw_level = trigger_params.get("auth_level")
 

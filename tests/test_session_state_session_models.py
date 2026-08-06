@@ -107,6 +107,7 @@ def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
         "RowKey": "session:session-1",
         "schema_version": 1,
         "owner_hash_version": "o1",
+        "app_hash": record.owner_partition.app_hash,
         "sandbox_id": "sandbox-1",
         "generation": 1,
         "digest_kind": "funcs_zip",
@@ -122,10 +123,19 @@ def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
         "state_store_fingerprint": _STATE_FINGERPRINT,
         "quarantine_reason": "",
         "tombstone_reason": "",
+        "reclaim_fence_token": "",
         "created_at": _NOW,
         "updated_at": _NOW,
     }
     assert DurableSessionRecord.from_table_entity(entity) == record
+
+
+def test_session_rows_without_new_scope_or_fence_properties_remain_readable() -> None:
+    entity = _session().to_table_entity()
+    entity.pop("app_hash")
+    entity.pop("reclaim_fence_token")
+
+    assert DurableSessionRecord.from_table_entity(entity) == _session()
 
 
 def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> None:
@@ -145,6 +155,7 @@ def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> N
         "RowKey",
         "schema_version",
         "owner_hash_version",
+        "app_hash",
         "request_hash",
         "run_id",
         "expires_at",

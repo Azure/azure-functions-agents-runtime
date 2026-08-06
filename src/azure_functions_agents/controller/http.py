@@ -18,6 +18,7 @@ from ..execution.backend import (
 from ..execution.compat import collect_terminal_run
 from ..execution.setup_budget import SetupBudgetExpiredError
 from ..session_state import (
+    TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
     IdempotencyConflictError,
     RunRowNotFoundError,
@@ -26,8 +27,6 @@ from ..session_state import (
 from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
 from .readiness import SessionActivationGoneError, SessionActivationSetupTimeoutError
-
-_TERMINAL_STATES = frozenset({"succeeded", "failed", "canceled", "timed_out", "abandoned"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,18 +120,10 @@ async def submit_run(
         status, _events = await budget.wait_for(collect_terminal_run(backend, context))
     except RunDeadlineExceededError:
         status = await backend.get_run(context)
-        if status.state in _TERMINAL_STATES:
+        if status.state in TERMINAL_RUN_STATUSES:
             return _synchronous_status_response(status)
         await backend.cancel_run(context)
-        return ControllerResponse(
-            status_code=504,
-            body={
-                "error": "run_deadline_exceeded",
-                "reason": "run_deadline_exceeded",
-                "retry_with": "respond-async",
-            },
-            headers={"x-ms-retry-with": "respond-async"},
-        )
+        return _run_timeout_response(context)
     return _synchronous_status_response(status)
 
 
@@ -167,7 +158,7 @@ async def read_result(
     if (
         status.error is not None
         and status.error.code == SESSION_TOMBSTONED_ERROR_CODE
-    ) or (status.state in _TERMINAL_STATES and not status.result_available):
+    ) or (status.state in TERMINAL_RUN_STATUSES and not status.result_available):
         return ControllerResponse(
             status_code=410,
             body={"error": "result_unavailable", "state": status.state},
@@ -239,7 +230,7 @@ def _synchronous_status_response(status: RunStatus) -> ControllerResponse:
             body=_result_payload(status.result),
             headers={"x-ms-session-id": status.session_id},
         )
-    if status.state in {"failed", "timed_out", "canceled", "abandoned"}:
+    if status.state in TERMINAL_RUN_STATUSES and status.state != "succeeded":
         return ControllerResponse(
             status_code=500,
             body=status_payload(status),
@@ -279,6 +270,21 @@ def _setup_timeout_response() -> ControllerResponse:
             "retry_with": "respond-async",
         },
         headers={"x-ms-retry-with": "respond-async"},
+    )
+
+
+def _run_timeout_response(context: RunContext) -> ControllerResponse:
+    return ControllerResponse(
+        status_code=504,
+        body={
+            "error": "run_deadline_exceeded",
+            "reason": "run_deadline_exceeded",
+            "retry_with": "respond-async",
+        },
+        headers={
+            "x-ms-retry-with": "respond-async",
+            "x-ms-session-id": context.session_id,
+        },
     )
 
 

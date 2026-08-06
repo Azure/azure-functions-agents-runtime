@@ -9,6 +9,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 
 from ..execution.backend import AgentExecutionBackend, EventCursorExpiredError, RunContext, RunEvent
+from ..session_state import TERMINAL_RUN_STATUSES
 from .http import status_payload
 
 DEFAULT_HEARTBEAT_SECONDS = 15.0
@@ -71,7 +72,7 @@ async def render_events(
                 pending_event = None
             except StopAsyncIteration:
                 status = await backend.get_run(context)
-                if status.state in {"failed", "timed_out", "canceled", "abandoned"}:
+                if status.state in TERMINAL_RUN_STATUSES and status.state != "succeeded":
                     yield (
                         "event: error\n"
                         f"data: {json.dumps(status_payload(status), ensure_ascii=False)}\n\n"

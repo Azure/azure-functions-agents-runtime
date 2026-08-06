@@ -43,7 +43,6 @@ from .errors import (
 )
 from .identity import run_row_key, session_row_key
 from .session_models import (
-    SESSION_STATUSES_REQUIRING_ACTIVE_RUN,
     TABLE_NAME,
     TERMINAL_RUN_STATUSES,
     AdmissionRecords,
@@ -79,16 +78,17 @@ type _TransactionOp = tuple[str, TableEntity] | tuple[str, TableEntity, Mapping[
 # exactly once.
 _TERMINAL_RUN_STATUSES = TERMINAL_RUN_STATUSES
 
-# The only two session statuses under which `active_run_id` may be set.
-# Releasing the slot always transitions to "ready" -- the idle-but-alive
-# state -- because the session model forbids any status outside this pair
-# from carrying an active_run_id.
-_STATUSES_OWNING_ACTIVE_RUN = SESSION_STATUSES_REQUIRING_ACTIVE_RUN
+# A reclaiming session retains its active-run ID as a destructive-recovery
+# fence, but terminal adoption must not release that slot.
+_STATUSES_OWNING_ACTIVE_RUN = frozenset({"running", "canceling"})
 
 # A new run can start from an idle session, or after readiness resumed a suspended one.
 _STATUSES_ADMITTING_RUN: frozenset[str] = frozenset({"ready", "suspended"})
 
 _MAX_ADOPTION_ATTEMPTS = 5
+_RECONCILER_CURSOR_PARTITION_PREFIX = "reconciler:"
+_RECONCILER_CURSOR_ROW_KEY = "cursor"
+_MAX_RECONCILER_CURSOR_BYTES = 32 * 1024
 
 
 # ---------------------------------------------------------------------------
@@ -150,6 +150,64 @@ class AdoptionOutcome:
     run: DurableRunRecord
     run_etag: str
     slot_released: bool
+
+
+@dataclass(frozen=True, slots=True)
+class ReclaimFence:
+    """A durable ownership fence for destructive active-run recovery."""
+
+    owner_partition: OwnerPartition
+    session_id: str
+    run_id: str
+    sandbox_id: str
+    generation: int
+    token: str
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        token: str,
+    ) -> ReclaimFence:
+        if (
+            session.sandbox_id is None
+            or session.owner_partition.partition_key != run.owner_partition.partition_key
+            or session.session_id != run.session_id
+            or session.active_run_id != run.run_id
+            or session.generation != run.generation
+            or not token
+        ):
+            raise SessionStateStoreError("invalid active-run reclaim fence")
+        return cls(
+            owner_partition=session.owner_partition,
+            session_id=session.session_id,
+            run_id=run.run_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            token=token,
+        )
+
+    def matches(self, session: DurableSessionRecord) -> bool:
+        return (
+            session.owner_partition.partition_key == self.owner_partition.partition_key
+            and session.session_id == self.session_id
+            and session.status == "reclaiming"
+            and session.active_run_id == self.run_id
+            and session.sandbox_id == self.sandbox_id
+            and session.generation == self.generation
+            and session.reclaim_fence_token == self.token
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcilerCursorRead:
+    """The app-scoped durable continuation for bounded reconciliation scans."""
+
+    app_hash: str
+    continuation_token: str | None
+    etag: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +294,22 @@ class SessionStateStore(Protocol):
     ) -> None:
         """Conditionally delete an expired owner-scoped idempotency row."""
 
+    async def get_idempotency(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        idempotency_hash: str,
+    ) -> IdempotencyRead | None:
+        """Read one session-scoped idempotency row when it exists."""
+
+    async def delete_idempotency(
+        self,
+        *,
+        previous: DurableIdempotencyRecord,
+        etag: str,
+    ) -> None:
+        """Conditionally delete an expired session-scoped idempotency row."""
+
     async def admit_new_session_run(
         self,
         records: NewSessionAdmissionRecords,
@@ -251,6 +325,52 @@ class SessionStateStore(Protocol):
         inline resubmit, opportunistic cleanup, and the reconciler timer can
         all call this without coordinating with each other.
         """
+
+    async def acquire_reclaim_fence(
+        self,
+        *,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        token: str,
+        updated_at: datetime,
+    ) -> ReclaimFence | None:
+        """Fence an active backing before any destructive recovery action."""
+
+    async def resolve_reclaim_fence_terminal(
+        self,
+        *,
+        fence: ReclaimFence,
+        terminal_run: DurableRunRecord,
+    ) -> AdoptionOutcome | None:
+        """Release a fenced slot only after a terminal outcome is durable."""
+
+    async def tombstone_reclaim_fence(
+        self,
+        *,
+        fence: ReclaimFence,
+        terminal_run: DurableRunRecord,
+        tombstone_reason: str,
+        updated_at: datetime,
+    ) -> AdoptionOutcome | None:
+        """Terminalize and tombstone a fenced backing after destructive recovery."""
+
+    async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
+        """Read the app-scoped bounded-scan continuation."""
+
+    async def advance_reconciler_cursor(
+        self,
+        *,
+        app_hash: str,
+        previous: ReconcilerCursorRead | None,
+        continuation_token: str | None,
+    ) -> ReconcilerCursorRead:
+        """Conditionally persist a completed bounded-scan continuation."""
+
+    async def delete_run(self, *, previous: DurableRunRecord, etag: str) -> None:
+        """Conditionally delete a terminal run after its retention period."""
+
+    async def delete_session(self, *, previous: DurableSessionRecord, etag: str) -> None:
+        """Conditionally delete an unreferenced tombstone after retention."""
 
     async def tombstone_session(
         self,
@@ -293,7 +413,10 @@ class AzureTableSessionStateStore:
         self._table_client = table_client
 
     async def ensure_table(self) -> None:
-        from azure.core.exceptions import HttpResponseError, ResourceExistsError
+        from azure.core.exceptions import (
+            HttpResponseError,
+            ResourceExistsError,
+        )
 
         try:
             await self._table_client.create_table()
@@ -352,6 +475,10 @@ class AzureTableSessionStateStore:
         tombstone_reason: str,
         updated_at: datetime,
     ) -> str:
+        if previous.reclaim_fence_token is not None:
+            raise SessionStateStoreError(
+                "a reclaiming session must be finalized through its reclaim fence"
+            )
         tombstoned = DurableSessionRecord.create(
             owner_partition=previous.owner_partition,
             session_id=previous.session_id,
@@ -372,6 +499,7 @@ class AzureTableSessionStateStore:
             tombstone_reason=tombstone_reason,
             created_at=previous.created_at,
             updated_at=updated_at,
+            reclaim_fence_token=None,
         )
         return await self.update_session(previous=previous, updated=tombstoned, etag=etag)
 
@@ -447,6 +575,27 @@ class AzureTableSessionStateStore:
             etag=etag,
             not_found_error=SessionStateStoreError("owner idempotency row not found"),
             context="delete_owner_idempotency",
+        )
+
+    async def get_idempotency(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        idempotency_hash: str,
+    ) -> IdempotencyRead | None:
+        return await self._get_idempotency(owner_partition, session_id, idempotency_hash)
+
+    async def delete_idempotency(
+        self,
+        *,
+        previous: DurableIdempotencyRecord,
+        etag: str,
+    ) -> None:
+        await self._delete_entity(
+            previous.to_table_entity(),
+            etag=etag,
+            not_found_error=SessionStateStoreError("idempotency row not found"),
+            context="delete_idempotency",
         )
 
     # -- admission (EGT) ------------------------------------------------
@@ -699,21 +848,79 @@ class AzureTableSessionStateStore:
         for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
             current_run = await self.get_run(partition, session_id, run_id)
             if current_run.record.status in _TERMINAL_RUN_STATUSES:
-                _require_matching_terminal_outcome(current_run.record, terminal_run, run_id)
+                if current_run.record.status != terminal_run.status:
+                    _require_matching_terminal_outcome(current_run.record, terminal_run, run_id)
+                adopted_run = (
+                    terminal_run
+                    if current_run.record.result_available and not terminal_run.result_available
+                    else current_run.record
+                )
+                try:
+                    session_read = await self.get_session(partition, session_id)
+                except SessionRowNotFoundError:
+                    session_read = None
+                owns_slot = (
+                    session_read is not None
+                    and session_read.record.active_run_id == run_id
+                    and session_read.record.status in _STATUSES_OWNING_ACTIVE_RUN
+                )
+                if owns_slot:
+                    assert session_read is not None
+                    released_session = _release_active_run(
+                        session_read.record,
+                        updated_at=adopted_run.updated_at,
+                    )
+                    operations: list[_TransactionOp] = [
+                        _update_op(released_session, etag=session_read.etag)
+                    ]
+                    if adopted_run is not current_run.record:
+                        operations.insert(0, _update_op(adopted_run, etag=current_run.etag))
+                    try:
+                        results = await self._table_client.submit_transaction(operations)
+                    except TableTransactionError as exc:
+                        if exc.index in (0, 1):
+                            continue
+                        raise _map_http_error(exc, context="adopt_terminal_run") from exc
+                    except HttpResponseError as exc:
+                        raise _map_http_error(exc, context="adopt_terminal_run") from exc
+                    run_etag = (
+                        _etag_from_write_result(results[0])
+                        if adopted_run is not current_run.record
+                        else current_run.etag
+                    )
+                    return AdoptionOutcome(
+                        run=adopted_run,
+                        run_etag=run_etag,
+                        slot_released=True,
+                    )
+                if adopted_run is not current_run.record:
+                    run_etag = await self._replace_entity(
+                        adopted_run.to_table_entity(),
+                        etag=current_run.etag,
+                        not_found_error=RunRowNotFoundError(f"run {run_id!r} not found"),
+                        context="adopt_terminal_run",
+                    )
+                    return AdoptionOutcome(
+                        run=adopted_run,
+                        run_etag=run_etag,
+                        slot_released=False,
+                    )
                 return AdoptionOutcome(
-                    run=current_run.record, run_etag=current_run.etag, slot_released=False
+                    run=current_run.record,
+                    run_etag=current_run.etag,
+                    slot_released=False,
                 )
 
-            session_read: SessionRead | None
+            active_session_read: SessionRead | None
             try:
-                session_read = await self.get_session(partition, session_id)
+                active_session_read = await self.get_session(partition, session_id)
             except SessionRowNotFoundError:
-                session_read = None
+                active_session_read = None
 
             owns_slot = (
-                session_read is not None
-                and session_read.record.active_run_id == run_id
-                and session_read.record.status in _STATUSES_OWNING_ACTIVE_RUN
+                active_session_read is not None
+                and active_session_read.record.active_run_id == run_id
+                and active_session_read.record.status in _STATUSES_OWNING_ACTIVE_RUN
             )
 
             if not owns_slot:
@@ -728,16 +935,16 @@ class AzureTableSessionStateStore:
                     continue
                 return AdoptionOutcome(run=terminal_run, run_etag=run_etag, slot_released=False)
 
-            assert session_read is not None
+            assert active_session_read is not None
             released_session = _release_active_run(
-                session_read.record, updated_at=terminal_run.updated_at
+                active_session_read.record, updated_at=terminal_run.updated_at
             )
-            operations: list[_TransactionOp] = [
+            active_operations: list[_TransactionOp] = [
                 _update_op(terminal_run, etag=current_run.etag),
-                _update_op(released_session, etag=session_read.etag),
+                _update_op(released_session, etag=active_session_read.etag),
             ]
             try:
-                results = await self._table_client.submit_transaction(operations)
+                results = await self._table_client.submit_transaction(active_operations)
             except TableTransactionError as exc:
                 if exc.index in (0, 1):
                     continue
@@ -753,6 +960,311 @@ class AzureTableSessionStateStore:
         raise ConcurrencyConflictError(
             f"adopt_terminal_run for {run_id!r} did not converge after "
             f"{_MAX_ADOPTION_ATTEMPTS} attempts"
+        )
+
+    async def acquire_reclaim_fence(
+        self,
+        *,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        token: str,
+        updated_at: datetime,
+    ) -> ReclaimFence | None:
+        fence = ReclaimFence.create(session=session, run=run, token=token)
+        current_session = await self.get_session(fence.owner_partition, fence.session_id)
+        current_run = await self.get_run(fence.owner_partition, fence.session_id, fence.run_id)
+        if current_session.record.status == "reclaiming":
+            if (
+                current_session.record.reclaim_fence_token != token
+                or current_session.record.active_run_id != fence.run_id
+                or current_session.record.sandbox_id != fence.sandbox_id
+                or current_session.record.generation != fence.generation
+                or current_run.record.generation != fence.generation
+            ):
+                return None
+            return ReclaimFence.create(
+                session=current_session.record,
+                run=current_run.record,
+                token=token,
+            )
+        if (
+            current_session.record.status not in _STATUSES_OWNING_ACTIVE_RUN
+            or current_session.record.active_run_id != fence.run_id
+            or current_session.record.sandbox_id != fence.sandbox_id
+            or current_session.record.generation != fence.generation
+        ):
+            return None
+        if (
+            current_run.record.status in _TERMINAL_RUN_STATUSES
+            or current_run.record.generation != fence.generation
+        ):
+            return None
+        fenced = _fenced_session(current_session.record, fence=fence, updated_at=updated_at)
+        try:
+            await self.update_session(
+                previous=current_session.record,
+                updated=fenced,
+                etag=current_session.etag,
+            )
+        except ConcurrencyConflictError:
+            return None
+        return fence
+
+    async def resolve_reclaim_fence_terminal(
+        self,
+        *,
+        fence: ReclaimFence,
+        terminal_run: DurableRunRecord,
+    ) -> AdoptionOutcome | None:
+        from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import TableTransactionError
+
+        if terminal_run.status not in _TERMINAL_RUN_STATUSES:
+            raise SessionStateStoreError("reclaim fence requires a terminal run")
+        for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
+            current_session = await self.get_session(fence.owner_partition, fence.session_id)
+            if not fence.matches(current_session.record):
+                return None
+            current_run = await self.get_run(fence.owner_partition, fence.session_id, fence.run_id)
+            if current_run.record.status in _TERMINAL_RUN_STATUSES:
+                _require_matching_terminal_outcome(
+                    current_run.record,
+                    terminal_run,
+                    fence.run_id,
+                )
+                released = _release_active_run(
+                    current_session.record,
+                    updated_at=current_run.record.updated_at,
+                )
+                try:
+                    session_etag = await self.update_session(
+                        previous=current_session.record,
+                        updated=released,
+                        etag=current_session.etag,
+                    )
+                except ConcurrencyConflictError:
+                    continue
+                return AdoptionOutcome(
+                    run=current_run.record,
+                    run_etag=current_run.etag,
+                    slot_released=bool(session_etag),
+                )
+            released = _release_active_run(
+                current_session.record,
+                updated_at=terminal_run.updated_at,
+            )
+            try:
+                results = await self._table_client.submit_transaction(
+                    [
+                        _update_op(terminal_run, etag=current_run.etag),
+                        _update_op(released, etag=current_session.etag),
+                    ]
+                )
+            except TableTransactionError as exc:
+                if exc.index in (0, 1):
+                    continue
+                raise _map_http_error(exc, context="resolve_reclaim_fence_terminal") from exc
+            except HttpResponseError as exc:
+                raise _map_http_error(exc, context="resolve_reclaim_fence_terminal") from exc
+            return AdoptionOutcome(
+                run=terminal_run,
+                run_etag=_etag_from_write_result(results[0]),
+                slot_released=True,
+            )
+        raise ConcurrencyConflictError(
+            f"reclaim fence for {fence.run_id!r} did not converge after "
+            f"{_MAX_ADOPTION_ATTEMPTS} attempts"
+        )
+
+    async def tombstone_reclaim_fence(
+        self,
+        *,
+        fence: ReclaimFence,
+        terminal_run: DurableRunRecord,
+        tombstone_reason: str,
+        updated_at: datetime,
+    ) -> AdoptionOutcome | None:
+        from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import TableTransactionError
+
+        if terminal_run.status not in _TERMINAL_RUN_STATUSES:
+            raise SessionStateStoreError("reclaim fence requires a terminal run")
+        for _attempt in range(_MAX_ADOPTION_ATTEMPTS):
+            current_session = await self.get_session(fence.owner_partition, fence.session_id)
+            if not fence.matches(current_session.record):
+                return None
+            current_run = await self.get_run(fence.owner_partition, fence.session_id, fence.run_id)
+            tombstoned = _tombstoned_fenced_session(
+                current_session.record,
+                tombstone_reason=tombstone_reason,
+                updated_at=updated_at,
+            )
+            if current_run.record.status in _TERMINAL_RUN_STATUSES:
+                if current_run.record.result_available:
+                    evicted = _terminal_without_result(
+                        current_run.record,
+                        updated_at=updated_at,
+                    )
+                    try:
+                        results = await self._table_client.submit_transaction(
+                            [
+                                _update_op(evicted, etag=current_run.etag),
+                                _update_op(tombstoned, etag=current_session.etag),
+                            ]
+                        )
+                    except TableTransactionError as exc:
+                        if exc.index in (0, 1):
+                            continue
+                        raise _map_http_error(
+                            exc,
+                            context="tombstone_reclaim_fence",
+                        ) from exc
+                    except HttpResponseError as exc:
+                        raise _map_http_error(
+                            exc,
+                            context="tombstone_reclaim_fence",
+                        ) from exc
+                    return AdoptionOutcome(
+                        run=evicted,
+                        run_etag=_etag_from_write_result(results[0]),
+                        slot_released=True,
+                    )
+                try:
+                    await self.update_session(
+                        previous=current_session.record,
+                        updated=tombstoned,
+                        etag=current_session.etag,
+                    )
+                except ConcurrencyConflictError:
+                    continue
+                return AdoptionOutcome(
+                    run=current_run.record,
+                    run_etag=current_run.etag,
+                    slot_released=True,
+                )
+            try:
+                results = await self._table_client.submit_transaction(
+                    [
+                        _update_op(terminal_run, etag=current_run.etag),
+                        _update_op(tombstoned, etag=current_session.etag),
+                    ]
+                )
+            except TableTransactionError as exc:
+                if exc.index in (0, 1):
+                    continue
+                raise _map_http_error(exc, context="tombstone_reclaim_fence") from exc
+            except HttpResponseError as exc:
+                raise _map_http_error(exc, context="tombstone_reclaim_fence") from exc
+            return AdoptionOutcome(
+                run=terminal_run,
+                run_etag=_etag_from_write_result(results[0]),
+                slot_released=True,
+            )
+        raise ConcurrencyConflictError(
+            f"reclaim fence for {fence.run_id!r} did not converge after "
+            f"{_MAX_ADOPTION_ATTEMPTS} attempts"
+        )
+
+    async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
+        from azure.core.exceptions import HttpResponseError, ResourceNotFoundError
+
+        partition_key = _reconciler_cursor_partition_key(app_hash)
+        try:
+            entity = await self._table_client.get_entity(
+                partition_key,
+                _RECONCILER_CURSOR_ROW_KEY,
+            )
+        except ResourceNotFoundError:
+            return None
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context="get_reconciler_cursor") from exc
+        stored_app_hash = entity.get("cursor_app_hash")
+        stored_token = entity.get("continuation_token")
+        if (
+            stored_app_hash != app_hash
+            or not isinstance(stored_token, str)
+            or len(stored_token.encode("utf-8")) > _MAX_RECONCILER_CURSOR_BYTES
+        ):
+            raise CorruptEntityError("stored reconciler cursor failed validation")
+        return ReconcilerCursorRead(
+            app_hash=app_hash,
+            continuation_token=stored_token or None,
+            etag=_etag_from_entity(entity),
+        )
+
+    async def advance_reconciler_cursor(
+        self,
+        *,
+        app_hash: str,
+        previous: ReconcilerCursorRead | None,
+        continuation_token: str | None,
+    ) -> ReconcilerCursorRead:
+        from azure.core.exceptions import (
+            HttpResponseError,
+            ResourceExistsError,
+            ResourceModifiedError,
+        )
+        from azure.data.tables import UpdateMode
+
+        partition_key = _reconciler_cursor_partition_key(app_hash)
+        token = continuation_token or ""
+        if len(token.encode("utf-8")) > _MAX_RECONCILER_CURSOR_BYTES:
+            raise SessionStateStoreError("reconciler continuation token is too large")
+        entity: TableEntity = {
+            "PartitionKey": partition_key,
+            "RowKey": _RECONCILER_CURSOR_ROW_KEY,
+            "cursor_app_hash": app_hash,
+            "continuation_token": token,
+        }
+        if previous is None:
+            try:
+                result = await self._table_client.create_entity(entity)
+            except ResourceExistsError as exc:
+                raise ConcurrencyConflictError("reconciler cursor was created concurrently") from exc
+            except HttpResponseError as exc:
+                raise _map_http_error(exc, context="advance_reconciler_cursor") from exc
+        else:
+            if previous.app_hash != app_hash:
+                raise SessionStateStoreError("reconciler cursor app hash does not match")
+            try:
+                result = await self._table_client.update_entity(
+                    entity,
+                    mode=UpdateMode.REPLACE,
+                    etag=previous.etag,
+                    match_condition=_if_not_modified(),
+                )
+            except ResourceModifiedError as exc:
+                raise ConcurrencyConflictError(
+                    "reconciler cursor changed concurrently"
+                ) from exc
+            except HttpResponseError as exc:
+                raise _map_http_error(exc, context="advance_reconciler_cursor") from exc
+        return ReconcilerCursorRead(
+            app_hash=app_hash,
+            continuation_token=continuation_token,
+            etag=_etag_from_write_result(result),
+        )
+
+    async def delete_run(self, *, previous: DurableRunRecord, etag: str) -> None:
+        if previous.status not in _TERMINAL_RUN_STATUSES:
+            raise SessionStateStoreError("only terminal runs may be pruned")
+        await self._delete_entity(
+            previous.to_table_entity(),
+            etag=etag,
+            not_found_error=RunRowNotFoundError(f"run {previous.run_id!r} not found"),
+            context="delete_run",
+        )
+
+    async def delete_session(self, *, previous: DurableSessionRecord, etag: str) -> None:
+        if previous.status not in {"tombstoned", "deleted"}:
+            raise SessionStateStoreError("only tombstoned sessions may be pruned")
+        await self._delete_entity(
+            previous.to_table_entity(),
+            etag=etag,
+            not_found_error=SessionRowNotFoundError(
+                f"session {previous.session_id!r} not found"
+            ),
+            context="delete_session",
         )
 
     async def evict_run_result(
@@ -959,6 +1471,85 @@ def _update_op(
     )
 
 
+def _fenced_session(
+    session: DurableSessionRecord,
+    *,
+    fence: ReclaimFence,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="reclaiming",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=fence.run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=fence.token,
+    )
+
+
+def _tombstoned_fenced_session(
+    session: DurableSessionRecord,
+    *,
+    tombstone_reason: str,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="tombstoned",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+    )
+
+
+def _terminal_without_result(
+    run: DurableRunRecord,
+    *,
+    updated_at: datetime,
+) -> DurableRunRecord:
+    return DurableRunRecord.create(
+        owner_partition=run.owner_partition,
+        session_id=run.session_id,
+        run_id=run.run_id,
+        generation=run.generation,
+        status=run.status,
+        result_available=False,
+        status_reason=run.status_reason,
+        expires_at=run.expires_at,
+        created_at=run.created_at,
+        updated_at=updated_at,
+    )
+
+
 def _release_active_run(
     session: DurableSessionRecord, *, updated_at: datetime
 ) -> DurableSessionRecord:
@@ -989,6 +1580,7 @@ def _release_active_run(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=None,
     )
 
 
@@ -1098,6 +1690,12 @@ def _decode_continuation_token(token: str | None) -> Mapping[str, str] | None:
     ):
         raise SessionStateStoreError("invalid continuation token")
     return decoded
+
+
+def _reconciler_cursor_partition_key(app_hash: str) -> str:
+    if not app_hash.startswith("a") or ":" in app_hash:
+        raise SessionStateStoreError("invalid reconciler app hash")
+    return f"{_RECONCILER_CURSOR_PARTITION_PREFIX}{app_hash}"
 
 
 def _latest_service_timestamp(entities: tuple[Mapping[str, object], ...]) -> datetime | None:

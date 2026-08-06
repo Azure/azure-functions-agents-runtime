@@ -62,9 +62,7 @@ class FakeSdkLifecyclePolicy:
 class FakeSdkFileInfo:
     """Mirrors the preview SDK's ``FileInfo`` response shape.
 
-    ``mode`` is carried through untouched (typed ``object``, never coerced) so
-    a test can pass whatever the real wire sends, rather than inheriting the
-    SDK's incorrect ``str | None`` assumption.
+    ``mode`` mirrors the integer POSIX value sent by the service.
     """
 
     name: str = ""
@@ -72,7 +70,7 @@ class FakeSdkFileInfo:
     size: int | None = None
     is_directory: bool = False
     modified_at: str | None = None
-    mode: object = None
+    mode: str | int | None = None
 
 
 @dataclass(frozen=True, slots=True)

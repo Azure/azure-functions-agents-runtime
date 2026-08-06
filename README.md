@@ -475,7 +475,10 @@ After sandbox loss or reap, a terminal failed/abandoned **status** remains
 readable (`200`) from durable state. Its **result** URL returns `410 Gone`;
 the same result response applies after result eviction.
 
-The controller registers one plain timer reconciler. Set
+The controller registers one plain timer reconciler as a backstop. Request paths
+also run bounded targeted reconciliation before surfacing an active-run conflict,
+while polling a nonterminal run whose backing is unavailable, after a new
+sandbox is created, and once before retrying a capacity failure. Set
 `AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS` to a whole-minute value
 from `60` through `3600`; the default and maximum is `3600`. If both a custom
 HTTP trigger and built-in chat are enabled for an ACA agent, their complete

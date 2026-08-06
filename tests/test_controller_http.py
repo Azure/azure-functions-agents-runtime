@@ -123,6 +123,42 @@ async def test_async_submission_returns_shared_management_urls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_sync_success_keeps_session_identity_in_the_response_header() -> None:
+    backend = FakeBackend(
+        _status(
+            state="succeeded",
+            result_available=True,
+            result=RunResult(
+                content="answer",
+                content_intermediate=[],
+                tool_calls=[],
+                reasoning=None,
+                delegate_error_count=0,
+            ),
+        )
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=False,
+        budget=RequestBudget.start(authored_timeout=1),
+    )
+
+    assert response.status_code == 200
+    assert response.body == {
+        "response": "answer",
+        "content": "answer",
+        "content_intermediate": [],
+        "tool_calls": [],
+        "reasoning": None,
+        "delegate_error_count": 0,
+    }
+    assert response.headers["x-ms-session-id"] == "session-1"
+
+
+@pytest.mark.asyncio
 async def test_sync_wall_expiry_cancels_before_returning_typed_timeout() -> None:
     backend = FakeBackend(_status(state="running"))
 
@@ -141,6 +177,7 @@ async def test_sync_wall_expiry_cancels_before_returning_typed_timeout() -> None
         "reason": "run_deadline_exceeded",
         "retry_with": "respond-async",
     }
+    assert response.headers["x-ms-session-id"] == "session-1"
 
 
 @pytest.mark.asyncio

@@ -196,6 +196,52 @@ async def test_builtin_stream_honors_respond_async(
     assert captured["respond_async"] is True
 
 
+def test_builtin_chat_sync_uses_controller_session_header(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def fake_submit_run(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(
+            status_code=200,
+            body={"response": "answer", "tool_calls": []},
+            headers={"x-ms-session-id": "new-session"},
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        fake_submit_run,
+    )
+    register_builtin_endpoints(
+        app,
+        _resolved_agent(
+            name="Test Agent",
+            is_main=False,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            source_file=tmp_path / "test.agent.md",
+        ),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chat"))
+
+    response = asyncio.run(route["handler"](DummyRequest({"prompt": "hello"})))
+
+    assert response.status_code == 200
+    assert response.headers["x-ms-session-id"] == "new-session"
+    assert json.loads(response.body) == {
+        "session_id": "new-session",
+        "response": "answer",
+        "tool_calls": [],
+    }
+
+
 def test_run_agent_stream_adopts_terminal_state_after_normal_exhaustion(
     monkeypatch: Any,
 ) -> None:

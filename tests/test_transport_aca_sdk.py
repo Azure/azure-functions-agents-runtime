@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict
-from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
@@ -38,6 +37,7 @@ from tests.doubles.fake_aca_sdk import (
     FakeCredential,
     FakeSdkEgressPolicy,
     FakeSdkEnvironment,
+    FakeSdkFileInfo,
     FakeSdkSnapshot,
 )
 
@@ -75,6 +75,7 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
         "source": DiskSource.create("runtime-bootstrap"),
         "labels": SandboxProvisioningLabels.create(
             owner_hash_version="o1",
+            owner_kind="function_app",
             owner_hash=_OWNER_HASH,
             app_hash=_APP_HASH,
             session_id="session-123",
@@ -187,6 +188,7 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
         if key != "provisioning_attempt_id"
     } == {
         "owner_hash_version": "o1",
+        "owner_kind": "function_app",
         "owner_hash": _OWNER_HASH,
         "app_hash": _APP_HASH,
         "session_id": "session-123",
@@ -807,11 +809,12 @@ async def test_snapshot_like_source_is_rejected_before_adapter_invocation(
 
 @pytest.mark.parametrize(
     "field_name",
-    ["owner_hash_version", "owner_hash", "app_hash", "session_id"],
+    ["owner_hash_version", "owner_kind", "owner_hash", "app_hash", "session_id"],
 )
 def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> None:
     values = {
         "owner_hash_version": "o1",
+        "owner_kind": "function_app",
         "owner_hash": _OWNER_HASH,
         "app_hash": _APP_HASH,
         "session_id": "session-123",
@@ -823,11 +826,7 @@ def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> No
 
 
 def test_file_projections_accept_live_numeric_posix_mode() -> None:
-    # Reproduce the SDK's own annotation defect (FileInfo.mode is typed
-    # str | None, but the wire actually sends an int) with a duck-typed
-    # stand-in shaped like the real FileInfo response, without importing the
-    # optional preview SDK from a test module (see test_transport_import_graph).
-    file_info = SimpleNamespace(
+    file_info = FakeSdkFileInfo(
         name="file.bin",
         path="/tmp/file.bin",
         size=7,

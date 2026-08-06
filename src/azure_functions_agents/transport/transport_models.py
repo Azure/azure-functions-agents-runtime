@@ -19,6 +19,10 @@ class SandboxProvisioningError(SandboxTransportError):
     """Raised when a sandbox provisioning request is unsafe or malformed."""
 
 
+class SandboxCapacityError(SandboxProvisioningError):
+    """Raised when the Sandbox Group cannot currently admit another sandbox."""
+
+
 class SandboxGroupBindingError(SandboxTransportError):
     """Raised when a configured, persisted, ARM, or live group binding disagrees."""
 
@@ -53,7 +57,7 @@ class SandboxFileEntry:
     size: int | None
     is_directory: bool
     modified_at: str | None = None
-    mode: int | None = None
+    mode: str | int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +68,7 @@ class SandboxFileStat:
     size: int | None
     is_directory: bool
     modified_at: str | None = None
-    mode: int | None = None
+    mode: str | int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -293,18 +297,26 @@ class SandboxProvisioningLabels:
     """
 
     owner_hash_version: str
+    owner_kind: str
     owner_hash: str
     app_hash: str
     session_id: str
 
     @classmethod
     def create(
-        cls, owner_hash_version: str, owner_hash: str, app_hash: str, session_id: str
+        cls,
+        owner_hash_version: str,
+        owner_hash: str,
+        app_hash: str,
+        session_id: str,
+        *,
+        owner_kind: str = "function_app",
     ) -> SandboxProvisioningLabels:
         return cls(
             owner_hash_version=_require_provider_label_value(
                 owner_hash_version, "owner_hash_version"
             ),
+            owner_kind=_require_provider_label_value(owner_kind, "owner_kind"),
             owner_hash=_require_provider_label_value(owner_hash, "owner_hash"),
             app_hash=_require_provider_label_value(app_hash, "app_hash"),
             session_id=_require_provider_label_value(session_id, "session_id"),
@@ -315,6 +327,7 @@ class SandboxProvisioningLabels:
 
         return {
             "owner_hash_version": self.owner_hash_version,
+            "owner_kind": self.owner_kind,
             "owner_hash": self.owner_hash,
             "app_hash": self.app_hash,
             "session_id": self.session_id,

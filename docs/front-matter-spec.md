@@ -212,7 +212,7 @@ trigger:
         allowed_audiences: ["api://my-app"]
 ```
 
-`http_trigger` `http_auth` reuses the same [`http_auth` endpoint-authentication model](#http_auth--endpoint-authentication) as the built-in chat endpoints. `entra` mode registers the route anonymous at the Functions key layer and enforces the App Service Authentication (Easy Auth) `x-ms-client-principal` header in-app, rejecting requests without a validated principal before the agent runs. The legacy flat `auth_level` string remains supported for backward compatibility but is deprecated.
+`http_trigger` `http_auth` reuses the same [`http_auth` endpoint-authentication model](#http_auth--endpoint-authentication) as the built-in chat endpoints. `entra` mode registers the route anonymous at the Functions key layer and enforces the App Service Authentication (Easy Auth) `x-ms-client-principal` header in-app, rejecting requests without a validated principal before the agent runs. The deprecated flat `auth_level` string remains compatible for `anonymous`, `function`, and `admin`, but cannot express an Entra policy.
 
 #### **Timer Trigger**
 ```yaml

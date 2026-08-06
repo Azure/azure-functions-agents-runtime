@@ -13,6 +13,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
+from ..journal_paths import HEARTBEAT_FILENAME, PROCESS_FILENAME
+
 type WatchdogState = Literal["failed", "canceled", "timed_out"]
 
 HEARTBEAT_INTERVAL_SECONDS = 30.0
@@ -65,12 +67,12 @@ class Watchdog:
     @property
     def heartbeat_path(self) -> Path:
         """Return the stable heartbeat path."""
-        return self._run_directory / "heartbeat.json"
+        return self._run_directory / HEARTBEAT_FILENAME
 
     @property
     def process_path(self) -> Path:
         """Return the stable process metadata path."""
-        return self._run_directory / "process.json"
+        return self._run_directory / PROCESS_FILENAME
 
     @property
     def terminal_path(self) -> Path:

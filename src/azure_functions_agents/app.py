@@ -14,7 +14,7 @@ import azure.functions as func
 from ._logger import logger
 from ._observability import configure_observability
 from ._source_marker import source_marker
-from .config.http_auth import resolve_http_trigger_auth
+from .config.http_auth import resolve_aca_submission_auth
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
@@ -42,7 +42,8 @@ from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
 from .execution.backend import RunContext, RunStatus
-from .execution.run_control import JOURNAL_ROOT_PATH, SandboxRunControl
+from .execution.run_control import RunControlError, SandboxRunControl
+from .journal_paths import heartbeat_path
 from .registration.capabilities import build_capabilities, validate_subagent_tool_names
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import (
@@ -53,7 +54,9 @@ from .registration.triggers import register_agent
 from .session_state import (
     DurableRunRecord,
     DurableSessionRecord,
+    OwnerPartition,
     build_store_from_service_client,
+    compute_app_hash,
     get_table_service_client,
     resolve_function_app_identity,
 )
@@ -61,6 +64,7 @@ from .transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from .transport.transport_models import (
     PersistedSandboxBinding,
     SandboxFileNotFoundError,
+    SandboxFileOperationError,
     SandboxGroupBinding,
 )
 from .workflows import build_workflow_integration
@@ -102,12 +106,15 @@ def _sandbox_management_auth(resolved: ResolvedAgent) -> Any | None:
     builtin_auth = (
         resolved.builtin_endpoints.http_auth if resolved.builtin_endpoints.chat_api else None
     )
-    trigger_auth = (
-        resolve_http_trigger_auth(resolved.trigger.args)
+    trigger_args = (
+        resolved.trigger.args
         if resolved.trigger is not None and resolved.trigger.type == "http_trigger"
         else None
     )
-    return builtin_auth or trigger_auth
+    return resolve_aca_submission_auth(
+        builtin_auth=builtin_auth,
+        trigger_args=trigger_args,
+    )
 
 
 def _build_session_reconciler(
@@ -116,6 +123,7 @@ def _build_session_reconciler(
     provider: SandboxSessionProvider,
     *,
     cadence_seconds: int,
+    max_pages: int | None = None,
 ) -> SessionReconciler:
     """Compose provider-neutral reconciliation callbacks at the app boundary."""
     run_control = SandboxRunControl()
@@ -167,7 +175,7 @@ def _build_session_reconciler(
         async def read_heartbeat(handle: SandboxSessionHandle) -> datetime | None:
             try:
                 stat = await handle.stat_file(
-                    f"{JOURNAL_ROOT_PATH}/runs/{run.run_id}/heartbeat.json"
+                    heartbeat_path(run.run_id)
                 )
             except SandboxFileNotFoundError:
                 return None
@@ -183,20 +191,15 @@ def _build_session_reconciler(
     ) -> bool | None:
         async def verify(handle: SandboxSessionHandle) -> bool | None:
             try:
-                process: object = json.loads(
-                    (await handle.read_file(f"{JOURNAL_ROOT_PATH}/runs/{run.run_id}/process.json"))
-                    .decode("utf-8")
+                process_group_id = await run_control.read_process_group_id(
+                    handle,
+                    RunContext(session_id=run.session_id, run_id=run.run_id),
                 )
-                if not isinstance(process, dict):
-                    return None
-                process_group_id = process.get("process_group_id")
-                if isinstance(process_group_id, bool) or not isinstance(process_group_id, int):
-                    return None
                 result = await handle.exec(
                     f"kill -0 -- -{process_group_id}",
                     timeout_seconds=5.0,
                 )
-            except (SandboxFileNotFoundError, ValueError, json.JSONDecodeError):
+            except (RunControlError, SandboxFileNotFoundError, SandboxFileOperationError):
                 return None
             return result.exit_code != 0
 
@@ -212,7 +215,11 @@ def _build_session_reconciler(
     return SessionReconciler(
         store=state_binding.store,
         provider=provider,
-        config=ReconcilerConfig(cadence_seconds=cadence_seconds),
+        app_hash=compute_app_hash(runtime.app_identity),
+        config=ReconcilerConfig(
+            cadence_seconds=cadence_seconds,
+            max_pages=max_pages or ReconcilerConfig().max_pages,
+        ),
         terminal_reader=terminal_reader,
         heartbeat_reader=heartbeat_reader,
         death_verifier=death_verifier,
@@ -251,7 +258,32 @@ def _build_session_runtime_binding(
             state_store_fingerprint=fingerprint,
         )
 
-    return SessionRuntimeBinding.create(
+    runtime: SessionRuntimeBinding
+
+    async def targeted_reconcile(partition: OwnerPartition, session_id: str) -> None:
+        state_binding = await runtime.get_state_store()
+        provider = await runtime.get_provider()
+        reconciler = _build_session_reconciler(
+            runtime,
+            state_binding,
+            provider,
+            cadence_seconds=resolve_reconciler_cadence(),
+        )
+        await reconciler.reconcile_session(partition, session_id)
+
+    async def bounded_reconcile() -> None:
+        state_binding = await runtime.get_state_store()
+        provider = await runtime.get_provider()
+        reconciler = _build_session_reconciler(
+            runtime,
+            state_binding,
+            provider,
+            cadence_seconds=resolve_reconciler_cadence(),
+            max_pages=1,
+        )
+        await reconciler.run_once()
+
+    runtime = SessionRuntimeBinding.create(
         app_identity=resolve_function_app_identity(),
         sandbox_group_resource_id=aca_sandbox.sandbox_group_resource_id,
         script_root=script_root,
@@ -259,7 +291,11 @@ def _build_session_runtime_binding(
         state_store_factory=state_store_factory,
         auto_suspend_seconds=auto_suspend_seconds,
         reclaim_idle_seconds=reclaim_idle_seconds,
+        targeted_reconciler=targeted_reconcile,
+        post_create_reconciler=bounded_reconcile,
+        capacity_reaper=bounded_reconcile,
     )
+    return runtime
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
@@ -411,6 +447,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:
         capabilities = catalog[resolved.slug].capabilities
+        management_auth = (
+            _sandbox_management_auth(resolved) if session_runtime is not None else None
+        )
 
         workflows_enabled = False
         workflow_system_addendum: str | None = None
@@ -493,15 +532,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                     catalog=catalog,
                     session_runtime=session_runtime,
                 )
-        if session_runtime is not None:
-            management_auth = _sandbox_management_auth(resolved)
-            if management_auth is not None:
-                register_sandbox_management_endpoints(
-                    app,
-                    slug=resolved.slug,
-                    auth=management_auth,
-                    session_runtime=session_runtime,
-                )
+        if session_runtime is not None and management_auth is not None:
+            register_sandbox_management_endpoints(
+                app,
+                slug=resolved.slug,
+                auth=management_auth,
+                session_runtime=session_runtime,
+            )
 
         # Collect agent summary info
         agent_info: dict[str, Any] = {

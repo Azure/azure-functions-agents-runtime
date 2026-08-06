@@ -425,6 +425,38 @@ async def test_cancel_signals_the_recorded_process_group_and_waits_for_journal()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"process_group_id":42,"process_group_id":99}',
+        b'{"process_group_id":"42"}',
+        b'{"process_group_id":0}',
+    ],
+)
+async def test_process_group_reader_rejects_untrusted_journal_documents(payload: bytes) -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(f"{RUNS_PATH}/run-1/process.json", payload)
+
+    with pytest.raises(RunJournalProtocolError):
+        await SandboxRunControl().read_process_group_id(transport, _context())
+
+
+@pytest.mark.asyncio
+async def test_process_group_reader_rejects_oversized_journal_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.run_control.MAX_PROCESS_BYTES",
+        1,
+    )
+    transport = FakeSandboxTransport()
+    transport.seed_file(f"{RUNS_PATH}/run-1/process.json", b"{}")
+
+    with pytest.raises(RunJournalProtocolError):
+        await SandboxRunControl().read_process_group_id(transport, _context())
+
+
+@pytest.mark.asyncio
 async def test_invalid_journal_document_fails_closed_without_echoing_payload() -> None:
     transport = FakeSandboxTransport()
     transport.seed_file(

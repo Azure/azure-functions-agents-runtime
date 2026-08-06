@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -11,8 +10,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
+from pydantic import BaseModel, ConfigDict, ValidationError
+
 from .._logger import logger
 from .._observability import current_span
+from ..journal_paths import (
+    ATOMIC_CHECKPOINT_POINTER_PATH,
+    HARNESS_PROTOCOL_PATH,
+    validate_checkpoint_name,
+)
+from ..sandbox_runtime_limits import lifecycle_auto_delete_seconds
 from ..session_state import (
     AppIdentity,
     DurableRunRecord,
@@ -26,10 +33,12 @@ from ..session_state import (
     verify_owner_hash,
 )
 from ..session_state.errors import SessionRowNotFoundError
+from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.manifest import ExpectedSandboxManifestBinding, SandboxManifestMismatchError
 from ..transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from ..transport.transport_models import (
     PersistedSandboxBinding,
+    SandboxCapacityError,
     SandboxCreateRequest,
     SandboxCreateSource,
     SandboxFileNotFoundError,
@@ -51,10 +60,6 @@ from .package import (
 DEFAULT_AUTO_SUSPEND_SECONDS = 300
 DEFAULT_RECLAIM_IDLE_SECONDS = 86_400
 DEFAULT_PROTOCOL_VERSION = "1"
-RECONCILER_MAX_CADENCE_SECONDS = 3600
-RECLAIM_SAFETY_GRACE_SECONDS = 300
-HARNESS_PROTOCOL_PATH = "/var/lib/azure-functions-agents/protocol.json"
-ATOMIC_CHECKPOINT_POINTER_PATH = "/var/lib/azure-functions-agents/session/current"
 QUARANTINE_REASONS: frozenset[str] = frozenset(
     {
         "sandbox_manifest_mismatch",
@@ -71,6 +76,8 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 
 type _SessionLockKey = tuple[str, str]
+type TargetedReconciler = Callable[[OwnerPartition, str], Awaitable[None]]
+type BoundedReconciler = Callable[[], Awaitable[None]]
 
 
 class SetupDeadline(Protocol):
@@ -121,6 +128,13 @@ class SessionReadinessArtifactError(SessionActivationError):
     def __init__(self, reason: str) -> None:
         self.reason = _validate_quarantine_reason(reason)
         super().__init__(f"Sandbox readiness artifact failed validation: {self.reason}.")
+
+
+class _HarnessProtocolArtifact(BaseModel):
+    model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
+
+    protocol_version: str
+    capabilities: dict[str, str] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +244,21 @@ class SessionRuntimeBinding:
     _provider: _AsyncSingleton[SandboxSessionProvider] = field(repr=False, compare=False)
     _state_store: _AsyncSingleton[StateStoreBinding] = field(repr=False, compare=False)
     _session_locks: _SessionLockRegistry = field(repr=False, compare=False)
+    _targeted_reconciler: TargetedReconciler | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _post_create_reconciler: BoundedReconciler | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
+    _capacity_reaper: BoundedReconciler | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     @classmethod
     def create(
@@ -244,6 +273,9 @@ class SessionRuntimeBinding:
         auto_suspend_seconds: int = DEFAULT_AUTO_SUSPEND_SECONDS,
         reclaim_idle_seconds: int = DEFAULT_RECLAIM_IDLE_SECONDS,
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
+        targeted_reconciler: TargetedReconciler | None = None,
+        post_create_reconciler: BoundedReconciler | None = None,
+        capacity_reaper: BoundedReconciler | None = None,
     ) -> SessionRuntimeBinding:
         group_resource_id = sandbox_group_resource_id.strip()
         if not group_resource_id:
@@ -265,6 +297,9 @@ class SessionRuntimeBinding:
             _provider=_AsyncSingleton(provider_factory),
             _state_store=_AsyncSingleton(state_store_factory),
             _session_locks=_SessionLockRegistry(),
+            _targeted_reconciler=targeted_reconciler,
+            _post_create_reconciler=post_create_reconciler,
+            _capacity_reaper=capacity_reaper,
         )
 
     async def get_provider(self) -> SandboxSessionProvider:
@@ -274,6 +309,25 @@ class SessionRuntimeBinding:
     async def get_state_store(self) -> StateStoreBinding:
         """Return the one lazily resolved state-store binding for this app."""
         return await self._state_store.get()
+
+    async def reconcile_session(
+        self,
+        partition: OwnerPartition,
+        session_id: str,
+    ) -> None:
+        """Run the shared targeted lifecycle reconciliation when configured."""
+        if self._targeted_reconciler is not None:
+            await self._targeted_reconciler(partition, session_id)
+
+    async def reconcile_after_create(self) -> None:
+        """Run the awaited bounded post-create cleanup when configured."""
+        if self._post_create_reconciler is not None:
+            await self._post_create_reconciler()
+
+    async def reap_for_capacity(self) -> None:
+        """Run the awaited bounded capacity cleanup when configured."""
+        if self._capacity_reaper is not None:
+            await self._capacity_reaper()
 
     @asynccontextmanager
     async def hold_session(
@@ -511,11 +565,7 @@ def lifecycle_policy_for_idle(runtime: SessionRuntimeBinding) -> SandboxLifecycl
     return SandboxLifecyclePolicy.create(
         auto_suspend_seconds=runtime.auto_suspend_seconds,
         auto_suspend_mode="Disk",
-        auto_delete_seconds=(
-            runtime.reclaim_idle_seconds
-            + RECONCILER_MAX_CADENCE_SECONDS
-            + RECLAIM_SAFETY_GRACE_SECONDS
-        ),
+        auto_delete_seconds=lifecycle_auto_delete_seconds(runtime.reclaim_idle_seconds),
     )
 
 
@@ -619,6 +669,7 @@ async def touch_session_activity(
         tombstone_reason=current.record.tombstone_reason,
         created_at=current.record.created_at,
         updated_at=now,
+        reclaim_fence_token=current.record.reclaim_fence_token,
     )
     await state_binding.store.update_session(
         previous=current.record,
@@ -666,6 +717,7 @@ def _session_with_idle_policy_disarmed(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
     )
 
 
@@ -696,6 +748,7 @@ def _session_with_idle_policy_armed(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
     )
 
 
@@ -748,6 +801,7 @@ async def _create_and_activate_session(
         source=runtime.creation_source,
         labels=SandboxProvisioningLabels.create(
             owner_hash_version=partition.owner_hash_version,
+            owner_kind=partition.owner_kind,
             owner_hash=partition.owner_hash,
             app_hash=partition.app_hash,
             session_id=session_id,
@@ -760,10 +814,17 @@ async def _create_and_activate_session(
     persisted_session = initial_session
     succeeded = False
     try:
-        handle = await _within_setup_budget(
-            provider.create(create_request, persisted_group=group),
-            setup_deadline,
-        )
+        try:
+            handle = await _within_setup_budget(
+                provider.create(create_request, persisted_group=group),
+                setup_deadline,
+            )
+        except SandboxCapacityError:
+            await _within_setup_budget(runtime.reap_for_capacity(), setup_deadline)
+            handle = await _within_setup_budget(
+                provider.create(create_request, persisted_group=group),
+                setup_deadline,
+            )
         await _within_setup_budget(
             handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime)),
             setup_deadline,
@@ -808,6 +869,7 @@ async def _create_and_activate_session(
             ),
             setup_deadline,
         )
+        await _within_setup_budget(runtime.reconcile_after_create(), setup_deadline)
         activated = ActivatedSession.create(
             handle=handle,
             session=ready_session,
@@ -903,29 +965,24 @@ async def _verify_optional_harness_artifacts(
     handle: SandboxSessionHandle,
     session: DurableSessionRecord,
 ) -> None:
-    """Validate harness artifacts when a bootstrap has published them.
-
-    The bootstrap image is intentionally deferred, so a missing optional artifact
-    cannot make the controller fabricate readiness. Once an artifact exists it is
-    controller-authoritative and malformed data fails closed.
-    """
+    """Validate optional harness artifacts without accepting malformed data."""
     protocol_payload = await _read_optional_file(handle, HARNESS_PROTOCOL_PATH)
     if protocol_payload is not None:
         try:
-            protocol = json.loads(protocol_payload)
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise SessionReadinessArtifactError("protocol_version_mismatch") from exc
-        if not isinstance(protocol, dict) or protocol.get("protocol_version") != session.protocol:
-            raise SessionReadinessArtifactError("protocol_version_mismatch")
-        capabilities = protocol.get("capabilities")
-        if capabilities is not None and (
-            not isinstance(capabilities, dict)
-            or not all(
-                isinstance(feature, str) and isinstance(capability, str)
-                for feature, capability in capabilities.items()
+            protocol = _HarnessProtocolArtifact.model_validate(
+                decode_json_object(protocol_payload),
+                strict=True,
             )
-        ):
-            raise SessionReadinessArtifactError("capability_mismatch")
+        except (
+            DuplicateJsonKeyError,
+            TypeError,
+            UnicodeDecodeError,
+            ValueError,
+            ValidationError,
+        ) as exc:
+            raise SessionReadinessArtifactError("protocol_version_mismatch") from exc
+        if protocol.protocol_version != session.protocol:
+            raise SessionReadinessArtifactError("protocol_version_mismatch")
 
     pointer_payload = await _read_optional_file(handle, ATOMIC_CHECKPOINT_POINTER_PATH)
     if pointer_payload is not None:
@@ -933,13 +990,10 @@ async def _verify_optional_harness_artifacts(
             pointer = pointer_payload.decode("ascii").strip()
         except UnicodeDecodeError as exc:
             raise SessionReadinessArtifactError("checkpoint_corrupt") from exc
-        if (
-            not pointer.startswith("checkpoint-")
-            or "/" in pointer
-            or "\\" in pointer
-            or pointer in {".", ".."}
-        ):
-            raise SessionReadinessArtifactError("checkpoint_corrupt")
+        try:
+            validate_checkpoint_name(pointer)
+        except ValueError:
+            raise SessionReadinessArtifactError("checkpoint_corrupt") from None
 
 
 async def _read_optional_file(
