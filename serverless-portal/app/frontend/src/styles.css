@@ -164,6 +164,7 @@ textarea.editor:focus { outline: 2px solid var(--brand); }
 .muted { color: var(--text-muted); }
 .divider { height: 1px; background: var(--border); margin: 20px 0; }
 .note { background: var(--amber-soft); border: 1px solid color-mix(in srgb, var(--amber) 34%, transparent); color: var(--amber); padding: 10px 14px; border-radius: 8px; font-size: 12.5px; }
+.note.ok { background: var(--green-soft); border-color: color-mix(in srgb, var(--green) 34%, transparent); color: var(--green); }
 .empty { text-align: center; padding: 46px 20px; color: var(--text-muted); }
 
 #toast { position: fixed; right: 20px; bottom: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 50; }

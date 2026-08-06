@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
 import { useDeployJob, DeploymentStatus, GitHubConnect } from '../deploy'
+import { AddCapability } from '../components/AddCapability'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 
@@ -466,6 +467,13 @@ export default function AgentDetailPage() {
           />
           <GitHubConnect
             github={{ subscription: subForQuery, resourceGroup: agent.resourceGroup, app: agent.app }}
+          />
+
+          <AddCapability
+            subscription={subForQuery}
+            resourceGroup={agent.resourceGroup}
+            app={agent.app}
+            agentName={agent.name}
           />
 
           <div className="components">
