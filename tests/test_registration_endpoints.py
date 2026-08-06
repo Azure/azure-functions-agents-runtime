@@ -19,6 +19,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
+    _MAX_HISTORY_REPLAY_MESSAGES,
     _SAFE_SESSION_ID_PATTERN,
     _extract_mcp_session_id,
     _run_builtin_agent,
@@ -978,7 +979,7 @@ def test_history_endpoint_returns_empty_without_session_header(
     response = asyncio.run(_history_route(app)["handler"](DummyRequest({}, headers={})))
 
     assert response.status_code == 200
-    assert json.loads(_response_text(response)) == {"messages": []}
+    assert json.loads(_response_text(response)) == {"messages": [], "truncated": False}
     # No session id: must short-circuit before touching storage.
     assert build_calls["count"] == 0
 
@@ -1012,7 +1013,7 @@ def test_history_endpoint_returns_empty_when_storage_unconfigured(
     response = asyncio.run(_history_route(app)["handler"](request))
 
     assert response.status_code == 200
-    assert json.loads(_response_text(response)) == {"messages": []}
+    assert json.loads(_response_text(response)) == {"messages": [], "truncated": False}
 
 
 def test_history_endpoint_filters_to_user_and_assistant_text(
@@ -1045,11 +1046,45 @@ def test_history_endpoint_filters_to_user_and_assistant_text(
             {"role": "user", "text": "hi"},
             {"role": "assistant", "text": "hello"},
             {"role": "user", "text": "bye"},
-        ]
+        ],
+        "truncated": False,
     }
     # The endpoint asks for a clean transcript and forwards the exact session id.
     assert provider.skip_excluded is True
     assert provider.captured_session_id == "abc123"
+
+
+def test_history_endpoint_caps_to_latest_messages(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    message_count = _MAX_HISTORY_REPLAY_MESSAGES + 3
+    provider = _FakeHistoryProvider(
+        [
+            SimpleNamespace(
+                role="user" if index % 2 == 0 else "assistant",
+                text=f"message-{index:03d}",
+            )
+            for index in range(message_count)
+        ]
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda **kwargs: provider,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app, _chat_api_agent(tmp_path, EndpointAuthConfig()), AgentCapabilities()
+    )
+
+    request = DummyRequest({}, headers={"x-ms-session-id": "abc123"})
+    response = asyncio.run(_history_route(app)["handler"](request))
+
+    assert response.status_code == 200
+    payload = json.loads(_response_text(response))
+    assert payload["truncated"] is True
+    assert len(payload["messages"]) == _MAX_HISTORY_REPLAY_MESSAGES
+    assert payload["messages"][0]["text"] == "message-003"
+    assert payload["messages"][-1]["text"] == f"message-{message_count - 1:03d}"
 
 
 def test_history_endpoint_returns_500_on_provider_error(
@@ -1228,4 +1263,3 @@ def test_entra_workflow_endpoints_without_identity_are_unauthorized(
         route = next(route for route in app.routes if route["route"] == name)
         response = asyncio.run(route["handler"](DummyRequest({}), client=object()))
         assert response.status_code == 401
-

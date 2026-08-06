@@ -857,10 +857,8 @@
 		// claim reconnect for this base URL. Set by either the explicit probe
 		// at boot or the first 404/501 from the polling endpoint.
 		let workflowsCapability = "unknown";
-		// Bumped every time the user changes base URL via Settings. Each
-		// in-flight fetch captures the current epoch and discards its
-		// response if the epoch has moved on, so a slow probe/poll for app
-		// A can't mutate state belonging to app B.
+		// Bumped whenever the app or active session identity changes. Workflow
+		// polls capture it and discard responses after a switch.
 		let workflowEpoch = 0;
 
 		// --- Workflow auto-notification (terminal-state -> synthetic
@@ -894,6 +892,11 @@
 		// server-assigned `session` SSE event can title a fresh id after
 		// the fact (the id doesn't exist yet when the message is sent).
 		let lastSentUserMessage = "";
+		// Every history request captures this generation. Any newer replay or
+		// chat activity increments it so a delayed response cannot replace
+		// bubbles rendered after that request began.
+		let historyReplayGeneration = 0;
+		let historyReplayInFlight = false;
 
 		// Mirror the server-side rule enforced by _validate_session_id in
 		// runner.py (SESSION_ID_PATTERN in _session_id.py) so the UI never
@@ -1356,6 +1359,19 @@
 			}
 		}
 
+		function workflowIdentityIsCurrent(epoch, baseUrl, sessionId) {
+			return epoch === workflowEpoch
+				&& baseUrl === state.baseUrl
+				&& sessionId === state.sessionId;
+		}
+
+		function resetWorkflowStateForSessionChange() {
+			workflowEpoch += 1;
+			stopWorkflowPolling();
+			resetWorkflowCards();
+			workflowPollFailureCount = 0;
+		}
+
 		async function pollWorkflowsOnce() {
 			if (workflowPollInFlight) return;
 			if (workflowsCapability !== "supported") return;
@@ -1368,8 +1384,8 @@
 			try {
 				const headers = { "x-ms-session-id": sessionId };
 				const resp = await fetch(`${baseUrl}${getApiBasePath()}/workflows${buildAuthQuery()}`, { headers });
-				// Discard stale responses from a prior baseUrl/settings.
-				if (epoch !== workflowEpoch) return;
+				// Discard stale responses from a prior app or session.
+				if (!workflowIdentityIsCurrent(epoch, baseUrl, sessionId)) return;
 				// 404 / 405 / 501 → endpoint genuinely not present. Stop forever.
 				if (resp.status === 404 || resp.status === 405 || resp.status === 501) {
 					markWorkflowsUnsupported();
@@ -1384,13 +1400,13 @@
 				}
 				workflowPollFailureCount = 0;
 				const body = await resp.json();
-				if (epoch !== workflowEpoch) return;
+				if (!workflowIdentityIsCurrent(epoch, baseUrl, sessionId)) return;
 				const workflows = Array.isArray(body?.workflows) ? body.workflows : [];
 				for (const wf of workflows) {
 					upsertWorkflowCard(wf);
 				}
 			} catch (err) {
-				if (epoch !== workflowEpoch) return;
+				if (!workflowIdentityIsCurrent(epoch, baseUrl, sessionId)) return;
 				workflowPollFailureCount += 1;
 				if (workflowPollFailureCount === WORKFLOW_POLL_FAILURE_WARN_AT) {
 					console.warn(`workflow polling: ${workflowPollFailureCount} consecutive failures`, err);
@@ -1406,6 +1422,7 @@
 			// session, and don't run on a hidden tab.
 			if (workflowsCapability !== "supported") return;
 			if (!state.sessionId) return;
+			if (historyReplayInFlight) return;
 			if (workflowPollTimer !== null) return;
 			if (document.visibilityState !== "visible") return;
 			pollWorkflowsOnce();
@@ -1536,6 +1553,8 @@
 			// observable effect is one extra notification on the
 			// previous app, which we already dropped from the DOM).
 			const prompt = buildCompletionNotificationPrompt(batch);
+			invalidateHistoryReplay();
+			startWorkflowPolling();
 			renderAutoNotificationBubble(batch, prompt);
 
 			setLoading(true, { showWaitingBubble: false });
@@ -1636,7 +1655,6 @@
 			if (workflowsCapability !== "unknown") return;
 			if (workflowProbeInFlight) return;
 			workflowProbeInFlight = true;
-			const epoch = workflowEpoch;
 			const baseUrl = state.baseUrl;
 			// Send the candidate header so the server can short-circuit
 			// auth checks identically to a real poll. The body is ignored.
@@ -1644,7 +1662,9 @@
 			try {
 				const headers = probeSessionId ? { "x-ms-session-id": probeSessionId } : {};
 				const resp = await fetch(`${baseUrl}${getApiBasePath()}/workflows${buildAuthQuery()}`, { headers });
-				if (epoch !== workflowEpoch) return;
+				// Capability belongs to the app, not a session. A session switch
+				// can reuse this result; a base-URL switch cannot.
+				if (baseUrl !== state.baseUrl) return;
 				if (resp.status === 404 || resp.status === 405 || resp.status === 501) {
 					markWorkflowsUnsupported();
 					return;
@@ -2087,6 +2107,11 @@
 			return { wrap, bubble, contentEl, intermediatesEl };
 		}
 
+		function invalidateHistoryReplay() {
+			historyReplayGeneration += 1;
+			historyReplayInFlight = false;
+		}
+
 		// Fetch and repaint a session's prior transcript from the server so a
 		// resumed/restored session shows its history instead of an empty
 		// window. Best-effort: older servers (no /history route), storage that
@@ -2096,54 +2121,79 @@
 			const requestedId = typeof sessionId === "string" ? sessionId.trim() : "";
 			if (!requestedId || !isValidSessionId(requestedId) || !state.baseUrl) return;
 
-			// Optionally blank the transcript up-front so a resumed session
-			// never shows the previous session's bubbles while the request is
-			// in flight. On empty/failed history the greeting is re-shown by
-			// the caller path (Hook 2 keeps it; Hook 1 leaves the "Resuming…"
-			// status and an empty pane, which the next turn fills).
-			if (replaceView) {
+			const generation = ++historyReplayGeneration;
+			historyReplayInFlight = true;
+			// Keep workflow cards from racing the transcript repaint. A current
+			// replay restarts polling in finally; session switches separately
+			// invalidate any poll already in flight.
+			stopWorkflowPolling();
+			try {
+				// Optionally blank the transcript up-front so a resumed session
+				// never shows the previous session's bubbles while the request
+				// is in flight.
+				if (replaceView) {
+					chatEl.innerHTML = "";
+					restoredGreetingContent = null;
+					hideDetails();
+				}
+
+				const endpoint = `${state.baseUrl}${getApiBasePath()}/history${buildAuthQuery()}`;
+				let payload;
+				try {
+					const resp = await fetch(endpoint, {
+						method: "GET",
+						headers: { "x-ms-session-id": requestedId, "Accept": "application/json" },
+					});
+					// A 404 means this server predates the history endpoint —
+					// stay silent and leave whatever is already on screen.
+					if (!resp.ok) return;
+					payload = await resp.json();
+				} catch (_e) {
+					return;
+				}
+
+				// The active session or transcript may have changed while the
+				// fetch was pending. Never replace newer user/streaming bubbles.
+				if (
+					state.sessionId !== requestedId
+					|| generation !== historyReplayGeneration
+				) return;
+
+				const messages = Array.isArray(payload && payload.messages) ? payload.messages : [];
+				const rendered = messages.filter(
+					(m) => m && (m.role === "user" || m.role === "assistant")
+						&& typeof m.text === "string" && m.text.length > 0
+				);
+				if (rendered.length === 0) return;
+
 				chatEl.innerHTML = "";
 				restoredGreetingContent = null;
 				hideDetails();
-			}
-
-			const endpoint = `${state.baseUrl}${getApiBasePath()}/history${buildAuthQuery()}`;
-			let payload;
-			try {
-				const resp = await fetch(endpoint, {
-					method: "GET",
-					headers: { "x-ms-session-id": requestedId, "Accept": "application/json" },
-				});
-				// A 404 means this server predates the history endpoint — stay
-				// silent and leave whatever is already on screen.
-				if (!resp.ok) return;
-				payload = await resp.json();
-			} catch (_e) {
-				return;
-			}
-
-			// The active session may have changed while awaiting the fetch
-			// (New session, a different resume) — don't clobber the newer view.
-			if (state.sessionId !== requestedId) return;
-
-			const messages = Array.isArray(payload && payload.messages) ? payload.messages : [];
-			const rendered = messages.filter(
-				(m) => m && (m.role === "user" || m.role === "assistant")
-					&& typeof m.text === "string" && m.text.length > 0
-			);
-			if (rendered.length === 0) return;
-
-			chatEl.innerHTML = "";
-			restoredGreetingContent = null;
-			hideDetails();
-			for (const message of rendered) {
-				const isUser = message.role === "user";
-				renderBubble(isUser ? "you" : "assistant", message.text, isUser ? "You" : "Assistant");
-			}
-			scrollChatToBottom();
-			if (announce) {
-				const count = rendered.length;
-				setStatus(`Loaded ${count} previous message${count === 1 ? "" : "s"} for session ${shortSessionId(requestedId)}.`);
+				if (payload?.truncated === true) {
+					renderBubble(
+						"copilot",
+						`Showing the ${rendered.length} most recent messages. Older messages are not displayed.`,
+						"History"
+					);
+				}
+				for (const message of rendered) {
+					const isUser = message.role === "user";
+					renderBubble(isUser ? "you" : "assistant", message.text, isUser ? "You" : "Assistant");
+				}
+				scrollChatToBottom();
+				if (announce) {
+					const count = rendered.length;
+					const qualifier = payload?.truncated === true ? " most recent" : " previous";
+					const suffix = payload?.truncated === true ? " Older messages were omitted." : "";
+					setStatus(
+						`Loaded ${count}${qualifier} message${count === 1 ? "" : "s"} for session ${shortSessionId(requestedId)}.${suffix}`
+					);
+				}
+			} finally {
+				if (generation === historyReplayGeneration) {
+					historyReplayInFlight = false;
+					startWorkflowPolling();
+				}
 			}
 		}
 
@@ -2354,15 +2404,13 @@
 			// that haven't resolved yet so they can't mutate new-app state.
 			const baseUrlChanged = previousBaseUrl && previousBaseUrl !== state.baseUrl;
 			if (baseUrlChanged) {
-				workflowEpoch += 1;
+				invalidateHistoryReplay();
+				resetWorkflowStateForSessionChange();
 				state.sessionId = null;
 				sessionWasFromServer = false;
 				sessionIdIsExplicit = false;
 				restoredSessionIdCandidate = null;
-				stopWorkflowPolling();
-				resetWorkflowCards();
 				workflowsCapability = "unknown";
-				workflowPollFailureCount = 0;
 				migrateRecentSessions();
 				loadRestoredSessionCandidate();
 				probeWorkflowsCapability();
@@ -2376,6 +2424,8 @@
 			const sessionFieldUntouched = sessionIdRaw === (settingsSessionIdPrefill || "").trim();
 			let statusMessage = "Settings saved.";
 			if (sessionIdRaw && !sessionFieldUntouched && sessionIdRaw !== state.sessionId) {
+				invalidateHistoryReplay();
+				resetWorkflowStateForSessionChange();
 				state.sessionId = sessionIdRaw;
 				sessionIdIsExplicit = true;
 				sessionWasFromServer = false;
@@ -2704,6 +2754,8 @@
 			const prompt = promptInputEl.value.trim();
 			if (!prompt || state.loading) return;
 
+			invalidateHistoryReplay();
+			startWorkflowPolling();
 			// Capture for the title-on-first-message logic. If an id is
 			// already active (continuing/resumed), record now; a brand-new
 			// id is titled from this text when the server assigns it in the
@@ -2795,6 +2847,8 @@
 		});
 
 		newSessionBtnEl.addEventListener("click", () => {
+			invalidateHistoryReplay();
+			resetWorkflowStateForSessionChange();
 			state.sessionId = null;
 			sessionWasFromServer = false;
 			sessionIdIsExplicit = false;
@@ -2806,8 +2860,6 @@
 			if (sessionIdInputEl) sessionIdInputEl.value = "";
 			clearSessionIdError();
 			updateSessionBar();
-			stopWorkflowPolling();
-			resetWorkflowCards();
 			chatEl.innerHTML = "";
 			hideDetails();
 			setStatus("Started a new session. Next message will not send a session id.");

@@ -67,6 +67,7 @@ def _run_agent_stream(*args: Any, **kwargs: Any) -> Any:
 # dependency-free module) so this layer stays valid without eagerly importing
 # the heavy ``runner`` module.
 _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
+_MAX_HISTORY_REPLAY_MESSAGES = 200
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -633,7 +634,7 @@ def _register_history_endpoint(
         session_id = req.headers.get("x-ms-session-id") or ""
         if not session_id:
             return Response(
-                json.dumps({"messages": []}),
+                json.dumps({"messages": [], "truncated": False}),
                 media_type="application/json",
             )
         # session_id becomes part of the blob path; reject anything unsafe.
@@ -649,7 +650,7 @@ def _register_history_endpoint(
         provider = build_blob_provider_from_environment()
         if provider is None:
             return Response(
-                json.dumps({"messages": []}),
+                json.dumps({"messages": [], "truncated": False}),
                 media_type="application/json",
             )
         # Present a clean transcript: drop internal/excluded turns.
@@ -673,8 +674,12 @@ def _register_history_endpoint(
             if not isinstance(text, str) or not text:
                 continue
             rendered.append({"role": role, "text": text})
+
+        truncated = len(rendered) > _MAX_HISTORY_REPLAY_MESSAGES
+        if truncated:
+            rendered = rendered[-_MAX_HISTORY_REPLAY_MESSAGES:]
         return Response(
-            json.dumps({"messages": rendered}),
+            json.dumps({"messages": rendered, "truncated": truncated}),
             media_type="application/json",
         )
 
