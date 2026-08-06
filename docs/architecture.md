@@ -347,9 +347,9 @@ To plug in a different chat backend, implement the `ClientManager` interface and
 
 This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it. Delegated specialists resolve their model through the same `ClientManager`, so a custom implementation applies uniformly to coordinators and specialists alike.
 
-The runner calls `build_chat_client_with_target()` and receives the client plus a frozen `InferenceTarget` containing nullable `provider`, `model`, and `model_publisher` fields. Its concrete base implementation calls the existing abstract `build_chat_client()` once and returns an empty descriptor, so existing custom managers remain compatible. A custom manager can override the new method when it can authoritatively describe the target used to construct its client.
+The runner calls `build_chat_client_with_target()` and receives the client plus a frozen `InferenceTarget` containing nullable `provider` and `model` fields. Its concrete base implementation calls the existing abstract `build_chat_client()` once and returns an empty descriptor, so existing custom managers remain compatible. A custom manager can override the new method when it can authoritatively describe the target used to construct its client.
 
-`MAFClientManager` resolves provider and effective model once, then uses those same values for both client construction and the descriptor. Endpoint-derived metadata is not collected. Direct OpenAI and Azure OpenAI targets use publisher `openai`; Foundry publisher is optional and comes only from the exact-model `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS` JSON map. The runtime never infers publisher from a deployment name or calls the Foundry control plane during an invocation.
+`MAFClientManager` resolves provider and effective model once, then uses those same values for both client construction and the descriptor. Endpoint-derived metadata and model publisher are not collected. Internal usage logging requires no customer configuration, does not infer publisher from a deployment name, and does not call the Foundry control plane during an invocation.
 
 ### Custom tools
 

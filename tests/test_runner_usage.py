@@ -120,10 +120,8 @@ def test_usage_recorder_emits_versioned_json_once_through_shared_logger(caplog: 
         "provider": None,
         "input_tokens": 10,
         "model": None,
-        "model_publisher": None,
         "outcome": "success",
         "output_tokens": 20,
-        "schema_version": 1,
         "total_tokens": 30,
         "usage_available": True,
         "usage_complete": True,
@@ -203,7 +201,6 @@ async def test_run_agent_success_without_usage_logs_unavailable(
     target = InferenceTarget(
         provider="foundry",
         model="claude-deployment",
-        model_publisher="anthropic",
     )
     _install_primary_agent(monkeypatch, Agent(), inference_target=target)
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
@@ -215,7 +212,6 @@ async def test_run_agent_success_without_usage_logs_unavailable(
     assert _usage_payloads(caplog)[0]["provider"] == "foundry"
     assert "inference_host" not in _usage_payloads(caplog)[0]
     assert _usage_payloads(caplog)[0]["model"] == "claude-deployment"
-    assert _usage_payloads(caplog)[0]["model_publisher"] == "anthropic"
 
 
 @pytest.mark.parametrize(
@@ -309,7 +305,7 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
         def run(self, *args: Any, **kwargs: Any) -> ResponseStream[Any, AgentResponse[Any]]:
             return ResponseStream(updates(), finalizer=lambda _: response)
 
-    target = InferenceTarget("openai", "gpt-4o-mini", "openai")
+    target = InferenceTarget("openai", "gpt-4o-mini")
     _install_primary_agent(monkeypatch, Agent(), "session-2", target)
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         events = [chunk async for chunk in runner.run_agent_stream("prompt", agent_name="main")]
@@ -329,7 +325,6 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
     assert payload["provider"] == "openai"
     assert "inference_host" not in payload
     assert payload["model"] == "gpt-4o-mini"
-    assert payload["model_publisher"] == "openai"
 
 
 @pytest.mark.asyncio
@@ -550,7 +545,6 @@ async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
     target = InferenceTarget(
         "azure_openai",
         "gpt-deployment",
-        "openai",
     )
     monkeypatch.setattr(runner, "_build_delegated_agent", lambda *args: (Agent(), target))
     resolved = SimpleNamespace(slug="analyst")
@@ -585,4 +579,3 @@ async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
         assert payload["provider"] == "azure_openai"
         assert "inference_host" not in payload
         assert payload["model"] == "gpt-deployment"
-        assert payload["model_publisher"] == "openai"

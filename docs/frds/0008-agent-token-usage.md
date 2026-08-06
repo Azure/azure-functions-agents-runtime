@@ -7,7 +7,7 @@ created: 2026-08-05
 updated: 2026-08-06
 issues: []
 pull_requests: []
-branch: vrdmr/agent-token-usage
+branch: hallvictoria/token-usage
 ---
 
 # FRD 0008 - Internal per-agent token usage logging
@@ -20,8 +20,8 @@ invocation attempt, including top-level agents, chat-time delegated specialists,
 Workflow Sub Agents. The runtime will consume MAF's public `AgentResponse.usage_details` contract,
 preserve calls whose provider does not report usage by marking them unavailable, and keep each
 agent's usage local rather than silently rolling specialist tokens into a coordinator total. Each
-record will also identify the transport provider, effective model/deployment, and model publisher
-when the runtime has an authoritative source for them.
+record will also identify the transport provider and effective model/deployment used to construct
+the client.
 
 ## 2. Motivation / problem
 
@@ -34,7 +34,7 @@ consumers need to identify:
 - reported input, output, total, cache, and reasoning token counts;
 - which coordinator or specialist incurred the usage; and
 - which configured transport handled the call;
-- which effective model/deployment and model publisher generated the usage; and
+- which effective model/deployment generated the usage; and
 - whether an attempted call completed without provider usage metadata.
 
 The record belongs on the existing shared logger. This preserves the runtime's current category,
@@ -51,8 +51,6 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 - Normalize MAF's canonical input, output, total, cache, and reasoning token fields.
 - Log the effective model/deployment and configured transport provider (`foundry`, `azure_openai`,
   or `openai`).
-- Log model publisher separately from transport: direct OpenAI and Azure OpenAI are authoritative
-  `openai`; Foundry resolves publisher from an explicit exact-model environment map.
 - Distinguish complete and unavailable usage without fabricating zeroes.
 - Include workflow/node ids for Durable activity attempts without logging chat session identifiers.
 - Keep usage extraction and emission non-fatal: telemetry must never change an agent result.
@@ -68,8 +66,8 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 - Inferring model publisher from model/deployment names such as `gpt-*` or `claude-*`.
 - Logging model API hosts or other endpoint-derived resource identifiers.
 - Calling the Foundry control plane from the invocation path to discover deployment metadata.
-- Supporting direct Anthropic transport; Anthropic is represented as a publisher when its model is
-  hosted through a supported transport such as Foundry.
+- Supporting direct Anthropic transport.
+- Requiring customer configuration solely to enrich internal telemetry.
 - Adding or changing spans, span attributes, metrics, or customer observability behavior.
 - Adding token metrics, persistence, dashboards, alerts, or a new config/front-matter switch.
 - Parsing provider-specific raw response payloads or private MAF telemetry internals.
@@ -85,7 +83,7 @@ OpenTelemetry surface do not change.
 | translate | none | No schema or resolved-config change. |
 | register | none | No change. |
 | execute | `runner.py` | Extract final MAF usage for successful non-streaming/streaming calls, carry the resolved inference target, and emit once per top-level or leaf invocation attempt. |
-| client construction | `client_manager.py` | Return the chat client with an immutable inference-target descriptor containing authoritative transport, hostname, effective model/deployment, and publisher when known. |
+| client construction | `client_manager.py` | Return the chat client with an immutable inference-target descriptor containing authoritative transport and effective model/deployment. |
 | internal logging | `runner.py` | Normalize usage and write structured JSON through the imported shared `logger`; `_logger.py` remains unchanged. |
 | Dynamic Workflow activity | `workflows/engine.py` | Pass workflow and node correlation into leaf-agent usage logging. |
 
@@ -125,8 +123,7 @@ SSE mapper.
 
 ### 4.2 Inference target metadata
 
-`client_manager.py` adds an immutable `InferenceTarget` value with `provider`, `model`,
-and `model_publisher`. A backward-compatible
+`client_manager.py` adds an immutable `InferenceTarget` value with `provider` and `model`. A backward-compatible
 `ClientManager.build_chat_client_with_target()` method returns the client plus this descriptor;
 custom managers that implement only the existing abstract methods continue to work and receive a
 best-effort descriptor with unavailable fields. `MAFClientManager` overrides the method so provider
@@ -139,12 +136,11 @@ The exact value type is:
 class InferenceTarget:
   provider: str | None = None
   model: str | None = None
-  model_publisher: str | None = None
 ```
 
 Fields are optional because a custom manager may not have an authoritative value. The built-in MAF
-manager always supplies `provider` and effective `model`; Foundry publisher is optional.
-The value remains valid for the lifetime of the client returned beside it.
+manager always supplies `provider` and effective `model`. The value remains valid for the lifetime
+of the client returned beside it.
 
 `build_chat_client()` remains an abstract, supported API with its existing signature. The new method
 is concrete on the ABC: its default calls `self.build_chat_client(model)` exactly once and returns
@@ -168,39 +164,23 @@ same cached values. The legacy method performs no independent provider or model 
 The frozen descriptor is a construction-time snapshot. Later environment, endpoint, credential, or
 manager-state changes do not mutate it. All fields remain optional in the shared type for custom
 manager compatibility. For `MAFClientManager`, `provider` and `model` are always populated;
-`model_publisher` is `openai` for direct OpenAI and Azure OpenAI, and the exact-model mapping value
-or `None` for Foundry. Consumers still treat every field as nullable and do not infer availability
-from provider type. Endpoint-derived host metadata is not collected or included in the descriptor.
+consumers still treat both fields as nullable and do not infer availability from provider type.
+Endpoint-derived host metadata and model publisher are not collected or included in the descriptor.
 
 For built-in providers:
 
-| Configured transport | `provider` | `model_publisher` |
-| --- | --- | --- |
-| Microsoft Foundry | `foundry` | exact-model lookup from `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS`, otherwise omitted |
-| Azure OpenAI | `azure_openai` | `openai` |
-| OpenAI | `openai` | `openai` |
+| Configured transport | `provider` |
+| --- | --- |
+| Microsoft Foundry | `foundry` |
+| Azure OpenAI | `azure_openai` |
+| OpenAI | `openai` |
 
 The effective `model` is the same resolved model/deployment passed to the MAF client.
-
-`AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS` is a JSON object whose keys exactly match effective
-Foundry model/deployment names and whose non-empty string values are normalized to lowercase, for
-example `{"claude-deployment":"anthropic","gpt-deployment":"openai"}`. Invalid JSON, non-object
-values, or a missing exact key leave `model_publisher` unavailable; malformed entries are ignored
-while other valid entries remain usable. Keys and lookups are case-sensitive and must exactly match
-the effective model/deployment, including case. String values are stripped and normalized to
-lowercase; empty or non-string values are ignored. Parse/validation failures never expose the raw
-environment value and never fail or change client construction. Invalid JSON, a non-object top
-level, and missing exact keys silently yield `None` without logging. Malformed individual entries,
-including non-string and whitespace-only values, are silently skipped while other valid entries
-remain usable. The runtime never guesses publisher from a model-name prefix. This map supports apps
-where different agents select models from different publishers without requiring a control-plane
-request or additional Azure permissions.
 
 Direct Anthropic transport remains unsupported: `ANTHROPIC_API_KEY` is not read and does not
 participate in provider precedence. If it is present alongside a supported provider's settings, the
 supported provider selection is unchanged; if it is the only provider credential, existing
-"No MAF provider configured" behavior remains unchanged. Anthropic appears only as publisher
-metadata for a model reached through a supported transport such as Foundry.
+"No MAF provider configured" behavior remains unchanged.
 
 ### 4.3 One record per invocation attempt
 
@@ -217,11 +197,11 @@ item represents one actual invocation attempt.
 
 The record contains:
 
-- identity: `event_name=agent_token_usage`, `schema_version=1`, `agent_name` (the resolved agent
-  slug), `execution_role`;
+- identity: `event_name=agent_token_usage`, `agent_name` (the resolved agent slug),
+  `execution_role`;
 - correlation: optional `workflow_id` and `workflow_node_id`;
 - accounting: `outcome`, `usage_scope=agent_run_local`, nullable `provider`, nullable
-  effective `model`, and nullable `model_publisher`;
+  effective `model`;
 - quality: `usage_available`, `usage_complete`, `usage_source`; and
 - any valid normalized token fields from section 4.1.
 
@@ -236,9 +216,9 @@ carry the specialist's agent name. Workflow activities also include explicit wor
 Internal consumers can sum local records when a request-level total is needed; the runtime does not
 claim that sum as a coordinator total.
 
-The exact JSON target field names are `provider`, `model`, and `model_publisher`. They are
-always present in schema version 1 with a JSON string or `null`, keeping the record shape stable for
-built-in and custom managers alike. No endpoint-derived host field is emitted.
+The exact JSON target field names are `provider` and `model`. They are always present with a JSON
+string or `null`, keeping the record shape stable for built-in and custom managers alike. No
+endpoint-derived host or publisher field is emitted.
 
 ### 4.4 Internal logging
 
@@ -246,7 +226,7 @@ built-in and custom managers alike. No endpoint-derived host field is emitted.
 writes one INFO message whose payload is deterministic JSON:
 
 ```text
-Agent token usage: {"agent_name":"main",...,"schema_version":1,"total_tokens":321}
+Agent token usage: {"agent_name":"main",...,"total_tokens":321}
 ```
 
 The implementation uses parameterized logging (`logger.info("Agent token usage: %s", payload)`) and
@@ -290,12 +270,9 @@ contract; no new customer observability surface is introduced.
   treated as zero-token calls.
 - Existing custom `ClientManager` implementations remain source-compatible; target fields they do
   not authoritatively provide are omitted.
-- Foundry publisher mapping is optional and affects only internal metadata. A missing or malformed
-  map never changes client construction or agent behavior.
+- Internal usage attribution requires no customer-only configuration.
 - The implementation targets the declared `agent-framework-*==1.3.*` public API and includes
   compatibility tests for `usage_details` and `ResponseStream.get_final_response()`.
-- `schema_version` remains `1` because FRD 0008 has not merged or established a deployed consumer;
-  the initial versioned schema includes these target fields before first release.
 
 ## 5. Decisions log
 
@@ -326,13 +303,15 @@ contract; no new customer observability surface is introduced.
 | 23 | Per-attempt identifier | runtime-generated UUID / rely on one log item per attempt | Remove `invocation_id`; it has no external correlation source, and each emitted log item already represents one invocation attempt. | Human | 2026-08-06 |
 | 24 | Transport field name | `inference_provider` / `provider` | Use the concise JSON and descriptor field name `provider`; its values continue to identify the configured inference transport. | Human | 2026-08-06 |
 | 25 | Chat session identifier | retain for conversation aggregation / remove for data minimization | Do not include `session_id` in token usage logs; session-level cost analysis is not required for internal provider/model accounting. | Human | 2026-08-06 |
+| 26 | Customer setup for internal attribution | exact-model publisher map / publisher inference / provider and model only | **Supersedes #18, #19, and the publisher clause of #22:** internal usage logging must require no customer-facing setup. Remove `model_publisher` and `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS`; retain only authoritative `provider` and effective `model`, with no publisher inference or control-plane lookup. | Human | 2026-08-06 |
+| 27 | Log schema marker | retain `schema_version` / remove it | Remove `schema_version`; this internal log does not need an explicit schema field. | Human | 2026-08-06 |
 
 ## 6. Test plan
 
 - [x] Unit: usage normalization preserves valid zeroes and canonical optional fields while omitting
   missing, boolean, negative, and malformed counts.
 - [x] Unit: stable JSON message shape/prefix through the existing shared logger, metadata-only
-  privacy, `schema_version=1`, INFO level, and emitter idempotence.
+  privacy, INFO level, and emitter idempotence.
 - [x] Unit: non-streaming success with/without usage and timeout/exception/cancellation emit exactly
   once per attempt; pre-invocation build failure emits none.
 - [x] MAF contract: one non-streaming `Agent.run()` with multiple model/tool turns reports the
@@ -348,17 +327,15 @@ contract; no new customer observability surface is introduced.
 - [x] Full gate: ruff, mypy, and CI-equivalent pytest/coverage commands from `AGENTS.md`.
 - [x] Smoke test: normal, streaming, delegated, unavailable, and workflow calls each write the
   expected `azure.functions.AgentRuntime` line and contain no sensitive content.
-- [x] Unit: built-in providers return the effective model, configured transport, and authoritative
-  direct-provider publisher without collecting endpoint-derived host metadata.
-- [x] Unit: Foundry publisher mapping uses exact model keys, supports mixed OpenAI/Anthropic models,
-  and treats malformed/missing mappings as unavailable without changing client construction.
+- [x] Unit: built-in providers return the effective model and configured transport without
+  collecting endpoint-derived host or publisher metadata.
 - [x] Unit: custom `ClientManager` implementations remain compatible and omit target fields they do
   not provide.
 - [x] Unit: primary, streaming, delegated, and workflow usage records carry the target associated
   with their own built client; target metadata remains present when usage itself is unavailable.
 - [x] Testing review: independently verify client/metadata cannot drift, endpoint-derived metadata
-  is absent, publisher-source behavior, custom-manager compatibility, and no new customer telemetry
-  surface.
+  and publisher configuration are absent, custom-manager compatibility, and no new customer
+  telemetry surface.
 - [x] Full gate after inference-target amendment: ruff, mypy, and CI-equivalent pytest/coverage.
 
 The unchecked amendment tests above are mandatory Phase 4 merge gates. Per `AGENTS.md`, they remain
@@ -372,14 +349,13 @@ No config scenario fixture is required because authoring/config interpretation d
 - [x] `docs/architecture.md` - note that `runner.py` emits internal per-attempt token usage records.
 - [x] `docs/architecture.md` - in the module map and extension-point/custom-inference-client
   discussion, document the `build_chat_client_with_target()` tuple contract, `InferenceTarget`
-  fields and provider-specific availability, absence of endpoint-derived metadata, Foundry
-  exact-model publisher mapping, and that `runner.py` consumes this descriptor rather than
-  duplicating provider selection.
+  fields and provider-specific availability, absence of endpoint-derived and publisher metadata,
+  and that `runner.py` consumes this descriptor rather than duplicating provider selection.
 - [x] `docs/observability.md` - no change; customer token detail remains MAF's existing App Insights
   span surface, and the internal logger behavior described there remains unchanged.
 - [x] `docs/frds/0007-multi-agent-delegation.md` - no change; customer-facing MAF span and no-rollup
   behavior remains accurate.
-- [x] `README.md` - document optional `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS` deployment setting.
+- [x] `README.md` - no customer setup is required for the internal usage record.
 - [x] `AGENTS.md` - no change; the implementation follows the shared-logger convention.
 - [x] `docs/front-matter-spec.md` - no change; there is no authoring surface.
 - [x] `docs/triggers.md` - no change; trigger behavior is unchanged.
@@ -391,11 +367,13 @@ No config scenario fixture is required because authoring/config interpretation d
   Review of that reduced design found one blocker: guaranteeing provider/model would require a
   broader `ClientManager` contract change. Decision #15 resolves it by limiting the record to
   authoritative invocation/token data and leaving provider/model/pricing joins downstream. The
-  review also requested `schema_version=1`, now included. A final independent follow-up review found
-  no blocker, major, or minor findings and returned **APPROVE** on 2026-08-05.
+  review also requested `schema_version=1`, subsequently removed by Decision #27. A final
+  independent follow-up review found no blocker, major, or minor findings and returned **APPROVE**
+  on 2026-08-05.
 - **Human sign-off:** victoriahall, 2026-08-05. **Finalized.**
 - **Inference-target amendment (2026-08-06):** Reopened for architecture review after the Human
   requested model API host plus separate transport/publisher metadata and selected an exact-model
   Foundry publisher map. Independent planning-only review found no unresolved design findings and
   returned **APPROVE**. Human sign-off: victoriahall, 2026-08-06. Decision #22 subsequently removes
-  host collection to minimize potentially identifying endpoint metadata. **Finalized.**
+  host collection to minimize potentially identifying endpoint metadata. Decision #26 subsequently
+  removes publisher metadata and its customer-facing configuration. **Finalized.**

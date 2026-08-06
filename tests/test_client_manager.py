@@ -98,22 +98,20 @@ def test_resolve_model_uses_default_when_no_override_exists(
 
 
 @pytest.mark.parametrize(
-    ("provider", "builder", "endpoint_name", "endpoint", "publisher"),
+    ("provider", "builder", "endpoint_name", "endpoint"),
     [
-        ("openai", "_build_openai", None, None, "openai"),
+        ("openai", "_build_openai", None, None),
         (
             "azure_openai",
             "_build_azure_openai",
             "AZURE_OPENAI_ENDPOINT",
             "https://account.openai.azure.com/openai/deployments/private?api-version=secret",
-            "openai",
         ),
         (
             "foundry",
             "_build_foundry",
             "FOUNDRY_PROJECT_ENDPOINT",
             "https://user:password@project.services.ai.azure.com:443/api/projects/private",
-            "anthropic",
         ),
     ],
 )
@@ -123,15 +121,10 @@ def test_build_chat_client_with_target_matches_client_branch(
     builder: str,
     endpoint_name: str | None,
     endpoint: str | None,
-    publisher: str,
 ) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
     if endpoint_name and endpoint:
         monkeypatch.setenv(endpoint_name, endpoint)
-    monkeypatch.setenv(
-        "AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS",
-        '{"model-one": " Anthropic "}',
-    )
     client = object()
 
     with patch.object(MAFClientManager, builder, return_value=client) as build:
@@ -139,49 +132,8 @@ def test_build_chat_client_with_target_matches_client_branch(
 
     assert built_client is client
     build.assert_called_once_with("model-one")
-    assert target == InferenceTarget(provider, "model-one", publisher)
+    assert target == InferenceTarget(provider, "model-one")
     assert not hasattr(target, "inference_host")
-
-
-@pytest.mark.parametrize(
-    "publisher_map",
-    [
-        "not-json",
-        '["anthropic"]',
-        '{"different-case": "anthropic"}',
-        '{"Model-One": "anthropic"}',
-        '{"model-one": ""}',
-        '{"model-one": 42}',
-    ],
-)
-def test_foundry_publisher_is_unavailable_for_invalid_or_missing_exact_mapping(
-    monkeypatch: pytest.MonkeyPatch,
-    publisher_map: str,
-) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
-    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS", publisher_map)
-
-    with patch.object(MAFClientManager, "_build_foundry", return_value=object()):
-        _, target = MAFClientManager().build_chat_client_with_target("model-one")
-
-    assert target.model_publisher is None
-
-
-def test_foundry_publisher_ignores_malformed_entries_but_keeps_valid_ones(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
-    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
-    monkeypatch.setenv(
-        "AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS",
-        '{"broken": 42, "model-one": " OpenAI ", "blank": " "}',
-    )
-
-    with patch.object(MAFClientManager, "_build_foundry", return_value=object()):
-        _, target = MAFClientManager().build_chat_client_with_target("model-one")
-
-    assert target.model_publisher == "openai"
 
 
 def test_maf_target_uses_one_provider_and_model_resolution_pass(

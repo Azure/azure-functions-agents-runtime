@@ -25,7 +25,6 @@ ABC surface
 
 from __future__ import annotations
 
-import json
 import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -46,7 +45,6 @@ class InferenceTarget:
 
     provider: str | None = None
     model: str | None = None
-    model_publisher: str | None = None
 
 
 class ClientManager(ABC):
@@ -146,9 +144,6 @@ class MAFClientManager(ClientManager):
         return client, InferenceTarget(
             provider=provider,
             model=resolved,
-            model_publisher=(
-                self._foundry_model_publisher(resolved) if provider == "foundry" else "openai"
-            ),
         )
 
     # ------------------------------------------------------------------
@@ -164,22 +159,6 @@ class MAFClientManager(ClientManager):
         unset so auto-detection does not pick them up.
         """
         return (os.environ.get(name) or "").strip()
-
-    @classmethod
-    def _foundry_model_publisher(cls, model: str) -> str | None:
-        raw_publishers = cls._env("AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS")
-        if not raw_publishers:
-            return None
-        try:
-            publishers = json.loads(raw_publishers)
-        except (json.JSONDecodeError, TypeError):
-            return None
-        if not isinstance(publishers, dict):
-            return None
-        publisher = publishers.get(model)
-        if not isinstance(publisher, str) or not publisher.strip():
-            return None
-        return publisher.strip().lower()
 
     @classmethod
     def _provider(cls) -> str:

@@ -42,8 +42,6 @@ If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first pr
 
 Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
 
-For internal usage attribution across Foundry-hosted publishers, optionally set `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS` to a JSON object whose keys exactly match effective Foundry model/deployment names, for example `{"claude-deployment":"anthropic","gpt-deployment":"openai"}`. Keys are case-sensitive. Invalid or missing entries leave publisher metadata unavailable and never change client construction; the runtime does not infer publisher from model names.
-
 ## Quick Start
 
 ### 1. Create the agent file
@@ -578,7 +576,6 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS` | Per-call timeout in seconds (default `900`) |
 | `AZURE_FUNCTIONS_AGENTS_PROVIDER` | Pin the model provider (`openai`/`azure_openai`/`foundry`) and skip auto-detection |
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
-| `AZURE_FUNCTIONS_AGENTS_MODEL_PUBLISHERS` | Optional exact-model JSON map for publisher metadata on Foundry-hosted models |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
 
