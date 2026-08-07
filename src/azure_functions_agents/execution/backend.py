@@ -18,6 +18,7 @@ type RunState = Literal[
 ]
 
 TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"done", "error"})
+SESSION_TOMBSTONED_ERROR_CODE = "session_tombstoned"
 
 
 @dataclass
@@ -94,6 +95,23 @@ class RunEvent:
 class EventCursorExpiredError(Exception):
     """Raised when an event cursor is older than the backend's retained journal."""
 
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        after_sequence: int | None = None,
+        earliest_sequence: int | None = None,
+    ) -> None:
+        self.after_sequence = after_sequence
+        self.earliest_sequence = earliest_sequence
+        super().__init__(
+            message
+            or (
+                f"Event cursor {after_sequence} expired; "
+                f"earliest retained event is {earliest_sequence}"
+            )
+        )
+
 
 def assert_event_cursor_available(earliest_sequence: int | None, after_sequence: int) -> None:
     """Raise when an exclusive event cursor precedes retained history."""
@@ -101,7 +119,8 @@ def assert_event_cursor_available(earliest_sequence: int | None, after_sequence:
         return
     if after_sequence < earliest_sequence - 1:
         raise EventCursorExpiredError(
-            f"Event cursor {after_sequence} expired; earliest retained event is {earliest_sequence}"
+            after_sequence=after_sequence,
+            earliest_sequence=earliest_sequence,
         )
 
 

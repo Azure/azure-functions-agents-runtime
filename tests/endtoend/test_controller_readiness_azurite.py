@@ -81,6 +81,8 @@ def _session() -> DurableSessionRecord:
         tombstone_reason=None,
         created_at=now,
         updated_at=now,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -140,6 +142,8 @@ async def test_recheck_releases_the_slot_before_quarantining_a_repointed_binding
             tombstone_reason=None,
             created_at=admitted.record.created_at,
             updated_at=datetime.now(UTC),
+            active_operation_id=admitted.record.active_operation_id,
+            operation_sequence=admitted.record.operation_sequence,
         )
         await store.update_session(
             previous=admitted.record,

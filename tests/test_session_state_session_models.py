@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError, replace
 from datetime import UTC, datetime, timedelta, timezone
+from typing import get_args
 
 import pytest
 
@@ -13,16 +14,23 @@ from azure_functions_agents.session_state import (
     AppIdentity,
     DurableIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    OperationRowKey,
     OwnerPartition,
+    SessionOperationTarget,
     SessionStateContractError,
+    SessionStatus,
     decode_snapshot_ids,
     encode_snapshot_ids,
+    operation_correlation_label,
     owner_partition,
     validate_generation,
     validate_generation_transition,
+    validate_operation_phase_transition,
 )
+from azure_functions_agents.transport.transport_models import SandboxProvisioningLabels
 
 _NOW = datetime(2026, 7, 30, 16, 0, tzinfo=UTC)
 _SESSION_ID = "session-1"
@@ -64,6 +72,8 @@ def _session(
         tombstone_reason=None,
         created_at=_NOW,
         updated_at=_NOW,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -79,6 +89,42 @@ def _run(*, partition: OwnerPartition | None = None) -> DurableRunRecord:
         expires_at=_NOW + timedelta(minutes=15),
         created_at=_NOW,
         updated_at=_NOW,
+        agent_slug="main",
+    )
+
+
+def _operation(
+    *,
+    partition: OwnerPartition | None = None,
+    sequence: int = 1,
+    kind: str = "reclaim_backing",
+) -> DurableSessionOperation:
+    run_id = _RUN_ID
+    phase = "reclaim_fenced" if kind == "reclaim_backing" else "submit_disarm"
+    return DurableSessionOperation.create(
+        owner_partition=partition or _partition(),
+        target=SessionOperationTarget.create(
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            run_id=run_id,
+        ),
+        sequence=sequence,
+        kind=kind,  # type: ignore[arg-type]
+        phase=phase,  # type: ignore[arg-type]
+        state="active",
+        correlation_label=operation_correlation_label(_SESSION_ID, sequence),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+        agent_slug="main",
     )
 
 
@@ -107,6 +153,7 @@ def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
         "RowKey": "session:session-1",
         "schema_version": 1,
         "owner_hash_version": "o1",
+        "app_hash": record.owner_partition.app_hash,
         "sandbox_id": "sandbox-1",
         "generation": 1,
         "digest_kind": "funcs_zip",
@@ -122,10 +169,128 @@ def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
         "state_store_fingerprint": _STATE_FINGERPRINT,
         "quarantine_reason": "",
         "tombstone_reason": "",
+        "active_operation_id": "",
+        "operation_sequence": 0,
         "created_at": _NOW,
         "updated_at": _NOW,
     }
     assert DurableSessionRecord.from_table_entity(entity) == record
+
+
+def test_session_rows_without_app_hash_remain_readable() -> None:
+    entity = _session().to_table_entity()
+    entity.pop("app_hash")
+
+    assert DurableSessionRecord.from_table_entity(entity) == _session()
+
+
+def test_session_operation_fields_round_trip_explicit_none_and_zero() -> None:
+    record = _session()
+
+    assert record.active_operation_id is None
+    assert record.operation_sequence == 0
+    assert DurableSessionRecord.from_table_entity(record.to_table_entity()) == record
+
+
+@pytest.mark.parametrize("field_name", ("active_operation_id", "operation_sequence"))
+def test_session_rows_require_operation_fields(field_name: str) -> None:
+    entity = _session().to_table_entity()
+    entity.pop(field_name)
+
+    with pytest.raises(SessionStateContractError, match=field_name):
+        DurableSessionRecord.from_table_entity(entity)
+
+
+@pytest.mark.parametrize("value", (-1, True, "0"))
+def test_session_rows_require_nonnegative_integer_operation_sequence(value: object) -> None:
+    entity = _session().to_table_entity()
+    entity["operation_sequence"] = value  # type: ignore[assignment]
+
+    with pytest.raises(SessionStateContractError, match="operation_sequence"):
+        DurableSessionRecord.from_table_entity(entity)
+
+
+def test_operation_rows_bind_a_monotonic_sequence_to_the_session_target() -> None:
+    operation = _operation()
+    entity = operation.to_table_entity()
+
+    assert entity["RowKey"] == "operation:session-1:1"
+    assert entity["operation_id"] == "op-1"
+    assert entity["agent_slug"] == "main"
+    assert isinstance(operation.row_key, OperationRowKey)
+    assert DurableSessionOperation.from_table_entity(entity) == operation
+    missing_agent_slug = dict(entity)
+    missing_agent_slug.pop("agent_slug")
+    with pytest.raises(SessionStateContractError, match="agent_slug"):
+        DurableSessionOperation.from_table_entity(missing_agent_slug)
+
+    with pytest.raises(SessionStateContractError, match="phase does not match"):
+        DurableSessionOperation.create(
+            owner_partition=operation.owner_partition,
+            target=operation.target,
+            sequence=operation.sequence,
+            kind="reclaim_backing",
+            phase="submit_disarm",
+            state="active",
+            correlation_label=operation.correlation_label,
+            token=operation.token,
+            attempt_count=0,
+            error_code=None,
+            lease_expires_at=operation.lease_expires_at,
+            next_attempt_at=None,
+            created_at=_NOW,
+            updated_at=_NOW,
+            finished_at=None,
+        )
+
+    validate_operation_phase_transition(
+        "submit_run",
+        "submit_journal",
+        "submit_launching",
+    )
+    validate_operation_phase_transition(
+        "submit_run",
+        "submit_launching",
+        "submit_launching",
+    )
+    validate_operation_phase_transition(
+        "reclaim_backing",
+        "reclaim_fenced",
+        "reclaim_rearm",
+    )
+    with pytest.raises(SessionStateContractError, match="not monotonic"):
+        validate_operation_phase_transition(
+            "submit_run",
+            "submit_launching",
+            "submit_journal",
+        )
+    with pytest.raises(SessionStateContractError, match="not monotonic"):
+        validate_operation_phase_transition(
+            "reclaim_backing",
+            "reclaim_deleting",
+            "reclaim_rearm",
+        )
+
+
+@pytest.mark.parametrize("sequence", [1, 999, 1000, 10**100])
+def test_operation_correlation_label_is_fixed_size_and_provider_safe(sequence: int) -> None:
+    label = operation_correlation_label("s" * 63, sequence)
+
+    assert label.startswith("op-")
+    assert len(label) == 55
+    assert label == operation_correlation_label("s" * 63, sequence)
+    assert label != operation_correlation_label("s" * 63, sequence + 1)
+    assert (
+        SandboxProvisioningLabels.create(
+            owner_hash_version="o1",
+            owner_kind="function_app",
+            owner_hash="o1-" + ("a" * 52),
+            app_hash="a1-" + ("b" * 52),
+            session_id="session-1",
+            operation_label=label,
+        ).operation_label
+        == label
+    )
 
 
 def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> None:
@@ -138,13 +303,19 @@ def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> N
     assert run_entity["RowKey"] == "run:session-1:run-1"
     assert run_entity["generation"] == 1
     assert run_entity["status_reason"] == ""
+    assert run_entity["agent_slug"] == "main"
     assert DurableRunRecord.from_table_entity(run_entity) == run
+    missing_agent_slug = dict(run_entity)
+    missing_agent_slug.pop("agent_slug")
+    with pytest.raises(SessionStateContractError, match="agent_slug"):
+        DurableRunRecord.from_table_entity(missing_agent_slug)
     assert idempotency_entity["RowKey"] == f"idem:session-1:{'c' * 64}"
     assert set(idempotency_entity) == {
         "PartitionKey",
         "RowKey",
         "schema_version",
         "owner_hash_version",
+        "app_hash",
         "request_hash",
         "run_id",
         "expires_at",
@@ -260,6 +431,8 @@ def test_reason_fields_are_bounded_codes_and_required_for_terminal_session_state
             tombstone_reason="raw user claim: secret",
             created_at=_NOW,
             updated_at=_NOW,
+            active_operation_id=None,
+            operation_sequence=0,
         )
 
 
@@ -283,6 +456,23 @@ def test_session_status_enforces_active_run_id_lifecycle_invariants() -> None:
     canceling = _session(status="canceling", active_run_id=_RUN_ID)
     assert ready.active_run_id is None
     assert canceling.active_run_id == _RUN_ID
+
+
+def test_session_status_contract_has_no_unreleased_reclaim_path() -> None:
+    assert set(get_args(SessionStatus.__value__)) == {
+        "creating",
+        "ready",
+        "running",
+        "canceling",
+        "suspending",
+        "suspended",
+        "resuming",
+        "failed",
+        "quarantined",
+        "tombstoned",
+        "deleting",
+        "deleted",
+    }
 
 
 def test_result_availability_is_consistent_with_run_status() -> None:
@@ -337,6 +527,8 @@ def test_row_boolean_fields_are_strict_at_construction() -> None:
             tombstone_reason=None,
             created_at=_NOW,
             updated_at=_NOW,
+            active_operation_id=None,
+            operation_sequence=0,
         )
     with pytest.raises(SessionStateContractError, match="result_available"):
         DurableRunRecord.create(
@@ -392,6 +584,8 @@ def test_rows_are_immutable_and_state_fingerprint_cannot_hold_credentials() -> N
             tombstone_reason=None,
             created_at=_NOW,
             updated_at=_NOW,
+            active_operation_id=None,
+            operation_sequence=0,
         )
 
 
@@ -417,6 +611,8 @@ def test_row_timestamps_require_awareness_and_normalize_to_utc() -> None:
             tombstone_reason=None,
             created_at=datetime(2026, 7, 30, 16, 0),
             updated_at=_NOW,
+            active_operation_id=None,
+            operation_sequence=0,
         )
 
     plus_five = timezone(timedelta(hours=5))
@@ -441,6 +637,8 @@ def test_row_timestamps_require_awareness_and_normalize_to_utc() -> None:
         tombstone_reason=None,
         created_at=local_time,
         updated_at=local_time,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
     assert record.created_at == _NOW

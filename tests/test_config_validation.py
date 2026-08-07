@@ -4,8 +4,11 @@ from pathlib import Path
 
 import pytest
 
+from azure_functions_agents.app import _sandbox_management_auth
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
+    EndpointAuthConfig,
+    EntraAuthConfig,
     ResolvedAgent,
     SubagentRef,
     ToolsFilter,
@@ -47,6 +50,41 @@ def _make_resolved(**overrides: object) -> ResolvedAgent:
     )
     defaults.update(overrides)
     return ResolvedAgent(**defaults)  # type: ignore[arg-type]
+
+
+def test_management_auth_selection_rejects_mismatched_full_entra_policies() -> None:
+    resolved = _make_resolved(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"http_auth": {"mode": "entra", "entra": {"allowed_audiences": ["api://two"]}}},
+        ),
+        builtin_endpoints=BuiltinEndpointsConfig(
+            chat_api=True,
+            http_auth=EndpointAuthConfig(
+                mode="entra",
+                entra=EntraAuthConfig(allowed_audiences=["api://one"]),
+            ),
+        ),
+    )
+
+    with pytest.raises(ValueError, match="identical resolved auth policies"):
+        _sandbox_management_auth(resolved)
+
+
+def test_management_auth_selection_returns_matching_resolved_policy() -> None:
+    auth = EndpointAuthConfig(
+        mode="entra",
+        entra=EntraAuthConfig(allowed_audiences=["api://one"]),
+    )
+    resolved = _make_resolved(
+        trigger=TriggerSpec(
+            type="http_trigger",
+            args={"http_auth": {"mode": "entra", "entra": {"allowed_audiences": ["api://one"]}}},
+        ),
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True, http_auth=auth),
+    )
+
+    assert _sandbox_management_auth(resolved) == auth
 
 
 def test_validate_resolved_agent_requires_trigger_when_no_builtin_endpoints(

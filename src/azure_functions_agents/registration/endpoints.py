@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -17,8 +18,21 @@ from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
-from ..controller.readiness import SessionRuntimeBinding
-from ..execution.backend import RunContext
+from ..controller.budget import RequestBudget
+from ..controller.http import (
+    cancel_run as cancel_controller_run,
+)
+from ..controller.http import (
+    parse_last_event_id,
+    prefers_respond_async,
+    read_result,
+    read_status,
+    submit_run,
+)
+from ..controller.readiness import SessionRuntimeBinding, touch_session_activity
+from ..controller.streaming import render_events
+from ..execution.backend import SESSION_TOMBSTONED_ERROR_CODE, RunContext, StartRunRequest
+from ..execution.binding import AgentBinding
 from ..execution.compat import (
     render_sse_event,
     run_to_agent_result,
@@ -26,7 +40,15 @@ from ..execution.compat import (
 )
 from ..execution.factory import create_execution_backend
 from ..execution.setup_budget import synchronous_wait_seconds
-from ..session_state import FunctionAppPrincipal, OwnerPrincipal
+from ..session_state import (
+    FunctionAppPrincipal,
+    OwnerPrincipal,
+    SessionStateContractError,
+    encode_label_safe_digest,
+    resolve_owner_context,
+    validate_run_id,
+    validate_session_id,
+)
 from ._auth import (
     AuthError,
     authorize_entra_request,
@@ -34,8 +56,11 @@ from ._auth import (
     resolve_owner_principal,
 )
 from ._handlers import (
+    _controller_response_to_fastapi,
+    _controller_session_id,
     _session_runtime_kwargs,
     _set_run_result_attributes,
+    build_output_validator,
     build_sandbox_tools_for_session,
 )
 from ._naming import _function_name_from_source, _safe_function_name
@@ -55,7 +80,7 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
 )
 
 type ChatHandler = Callable[[Request, Any | None], Awaitable[Response]]
-type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[StreamingResponse]]
+type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[Response]]
 type McpAgentChatHandler = Callable[[str, Any | None], Awaitable[str]]
 
 
@@ -122,6 +147,9 @@ def _run_agent_stream(
 # dependency-free module) so this layer stays valid without eagerly importing
 # the heavy ``runner`` module.
 _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
+_PROVIDER_LABEL_VALUE_PATTERN = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
+)
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -129,7 +157,11 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     value = value.strip()
-    if _SAFE_SESSION_ID_PATTERN.match(value):
+    if (
+        len(value) <= 63
+        and _SAFE_SESSION_ID_PATTERN.match(value)
+        and _PROVIDER_LABEL_VALUE_PATTERN.fullmatch(value)
+    ):
         return value
     # The MCP extension mints its own transport session id (e.g. the
     # streamable-HTTP ``Mcp-Session-Id``), whose format we do not control and
@@ -137,8 +169,8 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     # cap. Map any such value deterministically into the safe space so the same
     # MCP session still resolves to the same agent session (conversation
     # continuity) without tripping the runner's validation.
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"mcp-{digest}"
+    digest = hashlib.sha256(value.encode("utf-8")).digest()
+    return f"mcp-{encode_label_safe_digest(digest)}"
 
 
 def _index_path() -> Path:
@@ -178,8 +210,8 @@ def _chat_handler_without_client(handle_chat: ChatHandler) -> Callable[[Request]
 
 def _chat_stream_handler_with_client(
     handle_chat_stream: ChatStreamHandler,
-) -> Callable[[Request, str], Awaitable[StreamingResponse]]:
-    async def chat_stream(req: Request, client: str) -> StreamingResponse:
+) -> Callable[[Request, str], Awaitable[Response]]:
+    async def chat_stream(req: Request, client: str) -> Response:
         return await handle_chat_stream(req, client)
 
     return chat_stream
@@ -187,8 +219,8 @@ def _chat_stream_handler_with_client(
 
 def _chat_stream_handler_without_client(
     handle_chat_stream: ChatStreamHandler,
-) -> Callable[[Request], Awaitable[StreamingResponse]]:
-    async def chat_stream(req: Request) -> StreamingResponse:
+) -> Callable[[Request], Awaitable[Response]]:
+    async def chat_stream(req: Request) -> Response:
         return await handle_chat_stream(req, None)
 
     return chat_stream
@@ -251,6 +283,7 @@ async def _run_builtin_agent(
         "agent_name": resolved.slug,
         "subagents": resolved.subagents,
         "catalog": catalog,
+        "output_validator": build_output_validator(resolved),
     }
     runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
     if runtime_kwargs is None:
@@ -298,6 +331,7 @@ def _run_builtin_agent_stream(
         "display_name": resolved.name,
         "subagents": resolved.subagents,
         "catalog": catalog,
+        "output_validator": build_output_validator(resolved),
     }
     runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
     if runtime_kwargs is None:
@@ -416,6 +450,51 @@ def _register_http_chat(
                         return _json_error(auth_error.message, status_code=auth_error.status_code)
                 body = await req.json()
                 prompt = _extract_prompt_from_body(body)
+                if session_runtime is not None:
+                    budget = RequestBudget.start(authored_timeout=resolved.timeout)
+                    backend = create_execution_backend(
+                        binding=AgentBinding(
+                            agent_name=resolved.slug,
+                            output_validator=build_output_validator(resolved),
+                        ),
+                        session_runtime=session_runtime,
+                        owner=owner,
+                        setup_budget=budget.setup,
+                    )
+                    controller_response = await submit_run(
+                        backend,
+                        StartRunRequest(
+                            prompt=prompt,
+                            session_id=resolved_session_id,
+                            idempotency_key=req.headers.get("Idempotency-Key"),
+                            timeout=resolved.timeout,
+                        ),
+                        agent_slug=resolved.slug,
+                        respond_async=prefers_respond_async(req.headers),
+                        budget=budget,
+                    )
+                    if controller_response.status_code != 200:
+                        return _controller_response_to_fastapi(controller_response)
+                    controller_body = controller_response.body
+                    if not isinstance(controller_body, dict) or not isinstance(
+                        controller_body.get("response"), str
+                    ):
+                        return _controller_response_to_fastapi(controller_response)
+                    controller_session_id = _controller_session_id(controller_response)
+                    if controller_session_id is None:
+                        return _controller_response_to_fastapi(controller_response)
+                    span.set_attribute("af.agent.outcome", "success")
+                    return Response(
+                        json.dumps(
+                            {
+                                "session_id": controller_session_id,
+                                "response": controller_body["response"],
+                                "tool_calls": controller_body.get("tool_calls", []),
+                            }
+                        ),
+                        media_type="application/json",
+                        headers={"x-ms-session-id": controller_session_id},
+                    )
                 result = await _run_builtin_agent(
                     prompt,
                     resolved=resolved,
@@ -471,6 +550,60 @@ def _register_http_chat(
     app.function_name(name=function_name)(decorated)
 
 
+async def _start_aca_stream(
+    *,
+    prompt: str,
+    resolved: ResolvedAgent,
+    session_id: str | None,
+    idempotency_key: str | None,
+    session_runtime: SessionRuntimeBinding,
+    owner: OwnerPrincipal | None,
+    respond_async: bool,
+    after_sequence: int,
+) -> Response:
+    """Accept a built-in stream through the shared LRO path, then render journal SSE."""
+    budget = RequestBudget.start(authored_timeout=resolved.timeout)
+    backend = create_execution_backend(
+        binding=AgentBinding(
+            agent_name=resolved.slug,
+            output_validator=build_output_validator(resolved),
+        ),
+        session_runtime=session_runtime,
+        owner=owner,
+        setup_budget=budget.setup,
+    )
+    accepted = await submit_run(
+        backend,
+        StartRunRequest(
+            prompt=prompt,
+            session_id=session_id,
+            idempotency_key=idempotency_key,
+            timeout=resolved.timeout,
+        ),
+        agent_slug=resolved.slug,
+        respond_async=True,
+        budget=budget,
+    )
+    if accepted.status_code != 202 or respond_async:
+        return _controller_response_to_fastapi(accepted)
+    body = accepted.body
+    if not isinstance(body, dict):
+        return _controller_response_to_fastapi(accepted)
+    accepted_session_id = body.get("session_id")
+    run_id = body.get("run_id")
+    if not isinstance(accepted_session_id, str) or not isinstance(run_id, str):
+        return _json_error("sandbox run acceptance response was invalid")
+    return StreamingResponse(
+        render_events(
+            backend,
+            RunContext(session_id=accepted_session_id, run_id=run_id),
+            after_sequence=after_sequence,
+        ),
+        media_type="text/event-stream",
+        headers={"x-ms-session-id": accepted_session_id},
+    )
+
+
 def _register_http_chat_stream(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
@@ -487,7 +620,7 @@ def _register_http_chat_stream(
     async def handle_chat_stream(
         req: Request,
         durable_client: Any | None,
-    ) -> StreamingResponse:
+    ) -> Response:
         try:
             owner, auth_error = _resolve_session_owner(
                 req.headers.get,
@@ -508,6 +641,21 @@ def _register_http_chat_stream(
                     else _resolve_builtin_endpoints_session_id(None)
                 )
             )
+            if session_runtime is not None:
+                try:
+                    after_sequence = parse_last_event_id(req.headers)
+                except ValueError as exc:
+                    return _json_error(str(exc), status_code=400)
+                return await _start_aca_stream(
+                    prompt=prompt,
+                    resolved=resolved,
+                    session_id=session_id,
+                    idempotency_key=req.headers.get("Idempotency-Key"),
+                    session_runtime=session_runtime,
+                    owner=owner,
+                    respond_async=prefers_respond_async(req.headers),
+                    after_sequence=after_sequence,
+                )
             return StreamingResponse(
                 _run_builtin_agent_stream(
                     prompt,
@@ -518,10 +666,10 @@ def _register_http_chat_stream(
                     workflow_system_addendum=workflow_system_addendum,
                     durable_client=durable_client,
                     catalog=catalog,
-                    session_runtime=session_runtime,
+                    session_runtime=None,
                     owner=owner,
-                ),
-                media_type="text/event-stream",
+                    ),
+                    media_type="text/event-stream",
             )
         except ValueError as exc:
             return _sse_error_response(str(exc), status_code=400)
@@ -803,3 +951,126 @@ def register_builtin_endpoints(
             catalog=catalog,
             session_runtime=session_runtime,
         )
+
+
+def register_sandbox_management_endpoints(
+    app: func.FunctionApp,
+    *,
+    slug: str,
+    auth: EndpointAuthConfig,
+    session_runtime: SessionRuntimeBinding,
+    binding: AgentBinding,
+) -> None:
+    """Register one authenticated status/result/events/cancel set for an ACA agent."""
+    base_function_name = _safe_function_name(f"agent_{slug}_sandbox_management")
+    route_base = f"agents/{slug}/sessions/{{session_id}}/runs/{{run_id}}"
+
+    async def authorized_context(
+        req: Request,
+    ) -> tuple[OwnerPrincipal | None, RunContext] | Response:
+        owner, auth_error = _resolve_session_owner(req.headers.get, auth, session_runtime)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
+        path_params = getattr(req, "path_params", {}) or {}
+        session_id = path_params.get("session_id")
+        run_id = path_params.get("run_id")
+        if not isinstance(session_id, str) or not isinstance(run_id, str):
+            return _json_error("missing session or run identifier", status_code=400)
+        try:
+            return owner, RunContext(
+                session_id=validate_session_id(session_id),
+                run_id=validate_run_id(run_id),
+            )
+        except (SessionStateContractError, ValueError):
+            return _json_error("invalid session or run identifier", status_code=400)
+
+    def backend_for(owner: OwnerPrincipal | None) -> Any:
+        return create_execution_backend(
+            binding=binding,
+            session_runtime=session_runtime,
+            owner=owner,
+        )
+
+    def touch_for(owner: OwnerPrincipal | None, context: RunContext) -> Callable[[], Awaitable[None]]:
+        owner_context = resolve_owner_context(session_runtime.app_identity, slug, owner)
+        return lambda: touch_session_activity(session_runtime, owner_context, context.session_id)
+
+    async def status_handler(req: Request) -> Response:
+        resolved = await authorized_context(req)
+        if isinstance(resolved, Response):
+            return resolved
+        owner, context = resolved
+        response = await read_status(
+            backend_for(owner),
+            context,
+            touch=touch_for(owner, context),
+        )
+        return _controller_response_to_fastapi(response)
+
+    async def result_handler(req: Request) -> Response:
+        resolved = await authorized_context(req)
+        if isinstance(resolved, Response):
+            return resolved
+        owner, context = resolved
+        response = await read_result(
+            backend_for(owner),
+            context,
+            touch=touch_for(owner, context),
+        )
+        return _controller_response_to_fastapi(response)
+
+    async def events_handler(req: Request) -> Response:
+        resolved = await authorized_context(req)
+        if isinstance(resolved, Response):
+            return resolved
+        owner, context = resolved
+        try:
+            after_sequence = parse_last_event_id(req.headers)
+        except ValueError as exc:
+            return _json_error(str(exc), status_code=400)
+        backend = backend_for(owner)
+        preflight = await read_status(backend, context)
+        if preflight.status_code != 200:
+            return _controller_response_to_fastapi(preflight)
+        body = preflight.body
+        error = body.get("error") if isinstance(body, dict) else None
+        if (
+            isinstance(error, dict)
+            and error.get("code") == SESSION_TOMBSTONED_ERROR_CODE
+        ):
+            return _controller_response_to_fastapi(preflight)
+        await touch_for(owner, context)()
+        return StreamingResponse(
+            render_events(
+                backend,
+                context,
+                after_sequence=after_sequence,
+            ),
+            media_type="text/event-stream",
+        )
+
+    async def cancel_handler(req: Request) -> Response:
+        resolved = await authorized_context(req)
+        if isinstance(resolved, Response):
+            return resolved
+        owner, context = resolved
+        response = await cancel_controller_run(
+            backend_for(owner),
+            context,
+            touch=touch_for(owner, context),
+        )
+        return _controller_response_to_fastapi(response)
+
+    registrations: tuple[tuple[str, list[str], str, Any], ...] = (
+        (route_base, ["GET"], f"{base_function_name}_status", status_handler),
+        (f"{route_base}/result", ["GET"], f"{base_function_name}_result", result_handler),
+        (f"{route_base}/events", ["GET"], f"{base_function_name}_events", events_handler),
+        (f"{route_base}/cancel", ["POST"], f"{base_function_name}_cancel", cancel_handler),
+    )
+    for route, methods, function_name, handler in registrations:
+        decorated = app.route(
+            route=route,
+            methods=methods,
+            auth_level=resolve_endpoint_auth_level(auth),
+        )(handler)
+        app.function_name(name=function_name)(decorated)

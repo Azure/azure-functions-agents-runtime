@@ -87,6 +87,7 @@ async def test_live_aca_file_exec_stop_resume_delete_smoke() -> None:
             source=_source_from_environment(),
             labels=SandboxProvisioningLabels.create(
                 owner_hash_version="o1",
+                owner_kind="function_app",
                 owner_hash=_OWNER_HASH,
                 app_hash=_APP_HASH,
                 session_id=session_id,

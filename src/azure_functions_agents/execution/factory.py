@@ -8,6 +8,7 @@ from .aca_sandbox import AcaSandboxExecutionBackend
 from .backend import AgentExecutionBackend
 from .binding import AgentBinding
 from .in_lang_worker import LanguageWorkerExecutionBackend
+from .setup_budget import SetupBudget
 from .unavailable import UnavailableBackend
 
 DEFAULT_EXECUTION_PROVIDER = "in_lang_worker"
@@ -21,6 +22,7 @@ def create_execution_backend(
     stream_events: bool = False,
     session_runtime: SessionRuntimeBinding | None = None,
     owner: OwnerPrincipal | None = None,
+    setup_budget: SetupBudget | None = None,
 ) -> AgentExecutionBackend:
     """Create the execution backend for ``provider``.
 
@@ -36,6 +38,7 @@ def create_execution_backend(
             binding,
             runtime=session_runtime,
             owner=resolve_owner_context(session_runtime.app_identity, agent_name, owner),
+            setup_budget=setup_budget,
         )
     if provider == DEFAULT_EXECUTION_PROVIDER:
         return LanguageWorkerExecutionBackend(binding, stream_events=stream_events)

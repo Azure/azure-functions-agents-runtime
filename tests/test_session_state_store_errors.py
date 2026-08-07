@@ -208,6 +208,8 @@ def _session(
         tombstone_reason=tombstone_reason,
         created_at=_NOW,
         updated_at=_NOW,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -916,6 +918,37 @@ async def test_adopt_terminal_run_releases_slot_and_is_idempotent() -> None:
 
     second = await store.adopt_terminal_run(terminal)
     assert second.slot_released is False  # idempotent no-op
+
+
+@pytest.mark.asyncio
+async def test_adopt_existing_terminal_run_releases_a_stale_active_slot() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    terminal = _run(status="succeeded", result_available=False)
+    active_session = _session(status="running", active_run_id=terminal.run_id)
+    await store.create_session(active_session)
+    await store.create_run(terminal)
+
+    outcome = await store.adopt_terminal_run(terminal)
+
+    assert outcome.slot_released is True
+    assert (await store.get_session(_partition(), active_session.session_id)).record.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_adopt_terminal_run_never_resurrects_an_evicted_result() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    evicted = _run(status="succeeded", result_available=False)
+    await store.create_run(evicted)
+
+    outcome = await store.adopt_terminal_run(
+        _run(status="succeeded", result_available=True)
+    )
+
+    assert outcome.run.result_available is False
+    stored = await store.get_run(_partition(), "session-1", "run-1")
+    assert stored.record.result_available is False
 
 
 @pytest.mark.asyncio

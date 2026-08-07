@@ -281,11 +281,11 @@ def test_source_module_basenames_are_unique() -> None:
     )
 
 
-def test_execution_and_controller_activation_code_stay_behind_protocols() -> None:
+def test_execution_and_controller_code_stay_behind_protocols() -> None:
     root = _repository_root()
     module_paths = [
         *sorted((root / "src" / "azure_functions_agents" / "execution").glob("*.py")),
-        root / "src" / "azure_functions_agents" / "controller" / "readiness.py",
+        *sorted((root / "src" / "azure_functions_agents" / "controller").glob("*.py")),
     ]
     sdk_imports: list[str] = []
     concrete_casts: list[str] = []

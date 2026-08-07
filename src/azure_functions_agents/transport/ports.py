@@ -14,6 +14,9 @@ from .transport_models import (
     SandboxFileStat,
     SandboxGroupBinding,
     SandboxGroupIdentity,
+    SandboxLifecyclePolicy,
+    SandboxSnapshot,
+    SandboxSummary,
 )
 
 
@@ -73,6 +76,12 @@ class SandboxSessionHandle(SandboxFileTransport, SandboxProcessTransport, Protoc
     async def delete(self) -> None:
         """Delete this individual sandbox."""
 
+    async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
+        """Read the complete per-sandbox lifecycle policy."""
+
+    async def set_lifecycle_policy(self, policy: SandboxLifecyclePolicy) -> None:
+        """Set the complete per-sandbox lifecycle policy."""
+
     async def close(self) -> None:
         """Release controller-side resources for this handle."""
 
@@ -110,6 +119,18 @@ class SandboxSessionProvider(Protocol):
         readiness_timeout_seconds: float,
     ) -> SandboxSessionHandle:
         """Resume a persisted sandbox and prove its manifest binding."""
+
+    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+        """List app-owned sandboxes using an exact label selector."""
+
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        """Delete one group-owned sandbox by its provider identifier."""
+
+    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+        """List snapshots visible to the bound Sandbox Group."""
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete one unreferenced snapshot from the bound Sandbox Group."""
 
     async def close(self) -> None:
         """Release controller-side provider resources."""

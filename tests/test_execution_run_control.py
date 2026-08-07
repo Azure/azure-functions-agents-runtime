@@ -32,15 +32,16 @@ def _status(
     *,
     state: str = "accepted",
     last_sequence: int = 0,
-    result_available: bool = False,
+    result_available: bool | None = None,
 ) -> bytes:
+    resolved_result_available = state == "succeeded" if result_available is None else result_available
     return json.dumps(
         {
             "run_id": "run-1",
             "session_id": "session-1",
             "state": state,
             "last_sequence": last_sequence,
-            "result_available": result_available,
+            "result_available": resolved_result_available,
             "error": None,
         }
     ).encode("utf-8")
@@ -176,18 +177,71 @@ async def test_get_status_reads_terminal_result_when_available() -> None:
 
 
 @pytest.mark.asyncio
-async def test_get_status_allows_evicted_success_result() -> None:
+async def test_get_status_rejects_succeeded_status_without_a_result() -> None:
     transport = FakeSandboxTransport()
     transport.seed_file(
         f"{RUNS_PATH}/run-1/status.json",
         _status(state="succeeded", last_sequence=4, result_available=False),
     )
 
-    status = await SandboxRunControl().get_status(transport, _context())
+    with pytest.raises(RunJournalProtocolError, match="status document is invalid"):
+        await SandboxRunControl().get_status(transport, _context())
 
-    assert status.state == "succeeded"
-    assert status.result_available is False
-    assert status.result is None
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "status",
+    [
+        {
+            "state": "succeeded",
+            "result_available": True,
+            "error": {"code": "bad", "message": "bad"},
+        },
+        {"state": "accepted", "result_available": True, "error": None},
+        {
+            "state": "running",
+            "result_available": False,
+            "error": {"code": "bad", "message": "bad"},
+        },
+        {
+            "state": "canceled",
+            "result_available": False,
+            "error": {"code": "bad", "message": "bad"},
+        },
+        {"state": "failed", "result_available": False, "error": None},
+        {"state": "timed_out", "result_available": False, "error": None},
+        {"state": "abandoned", "result_available": False, "error": None},
+    ],
+)
+async def test_get_status_rejects_invalid_terminal_status_combinations(
+    status: dict[str, object],
+) -> None:
+    transport = FakeSandboxTransport()
+    payload = {
+        "run_id": "run-1",
+        "session_id": "session-1",
+        "last_sequence": 0,
+        **status,
+    }
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        json.dumps(payload).encode("utf-8"),
+    )
+
+    with pytest.raises(RunJournalProtocolError, match="status document is invalid"):
+        await SandboxRunControl().get_status(transport, _context())
+
+
+@pytest.mark.asyncio
+async def test_get_status_treats_a_missing_advertised_result_as_protocol_corruption() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/status.json",
+        _status(state="succeeded", result_available=True),
+    )
+
+    with pytest.raises(RunJournalProtocolError, match="result is missing"):
+        await SandboxRunControl().get_status(transport, _context())
 
 
 @pytest.mark.asyncio
@@ -422,6 +476,38 @@ async def test_cancel_signals_the_recorded_process_group_and_waits_for_journal()
 
     assert status.state == "canceled"
     assert [call.operation for call in transport.calls][-2:] == ["exec", "read_file"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "payload",
+    [
+        b'{"process_group_id":42,"process_group_id":99}',
+        b'{"process_group_id":"42"}',
+        b'{"process_group_id":0}',
+    ],
+)
+async def test_process_group_reader_rejects_untrusted_journal_documents(payload: bytes) -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(f"{RUNS_PATH}/run-1/process.json", payload)
+
+    with pytest.raises(RunJournalProtocolError):
+        await SandboxRunControl().read_process_group_id(transport, _context())
+
+
+@pytest.mark.asyncio
+async def test_process_group_reader_rejects_oversized_journal_document(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.run_control.MAX_PROCESS_BYTES",
+        1,
+    )
+    transport = FakeSandboxTransport()
+    transport.seed_file(f"{RUNS_PATH}/run-1/process.json", b"{}")
+
+    with pytest.raises(RunJournalProtocolError):
+        await SandboxRunControl().read_process_group_id(transport, _context())
 
 
 @pytest.mark.asyncio

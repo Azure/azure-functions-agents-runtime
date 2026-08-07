@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-03
+updated: 2026-08-07
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -367,6 +367,24 @@ provenance.
 | 124 | File transport errors | provider exceptions / runtime-owned errors | The ACA adapter maps not-found and operational SDK failures to runtime-owned types. Production smoke requires direct overwrite; no delete/rewrite fallback exists. | Agent | 2026-08-03 | 0008.6 |
 | 125 | Memory and streaming | full file reads / bounded capture | Stream files into a temporary ZIP, then materialize one ≤256 MiB payload for the current transport. Per-worker caching prevents duplicate captures; chunked delivery is deferred. | Human + Agent | 2026-08-03 | 0008.6 |
 | 126 | Runtime and CI platform | cross-platform / Linux only | Support Linux x86_64 Python 3.13/3.14 only. CI runs the full gate on Linux 3.13/3.14; unsupported platforms fail before filesystem access. | Human + Agent | 2026-08-03 | 0008.6 |
+| 127 | Reconciler timer cadence | fixed hour / unrestricted cadence / bounded setting | Use one plain timer setting, default/max 3600 seconds; permit faster whole-minute values from 60. | Human | 2026-08-04 | U1 |
+| 128 | Per-sandbox lifecycle policy | group readback / inherited default / explicit complete policy | Set suspend+delete immediately after create and before delivery; delete is reclaim + 3600 + 300. This supersedes row 74/group auto-delete validation. | Human | 2026-08-04 | U1 |
+| 129 | ACA HTTP auth parity | separate policies / weaker management auth / exact equality | Built-in chat and custom HTTP both honor `respond-async`; if both exist, compare complete resolved auth policies before route mutation. | Human | 2026-08-04 | U1 |
+| 130 | Lifecycle call ownership | U1 controller / U2 bootstrap / both | U1/P6 disables, restores, and reconciles per-sandbox lifecycle; U2 only makes its harness suspension-tolerant. | Human | 2026-08-04 | U1 |
+| 131 | Reclaimer isolation and fencing | Timer-only scan / app scope with fence | Scope inventory and Table scans to the app, rotate a durable bounded cursor, and fence an active backing before destructive recovery so terminal adoption cannot reopen its slot. | Agent | 2026-08-06 | U1 corrective |
+| 132 | Durable session operations | Per-flow statuses / generic same-partition row / external coordinator | Use sequence-keyed operation rows plus a session pointer/token; EGT fences reclaim and lifecycle rearm, blocks admission, and resumes/prunes durably. | Human + Agent | 2026-08-06 | U1 corrective |
+| 133 | Operation taxonomy (narrows #132) | Per-state flags / broad op set / three controller flows | Limit v1 operations to `provision_submit`, `submit_run`, and `reclaim_backing`; terminal rearm is the final submit phase, while reads, adoption, attach, quarantine, drain, and routine reconcile remain direct paths. | Human + Agent | 2026-08-06 | U1 corrective |
+| 134 | Reservation and recovery (narrows #132) | Create-first compensation / external coordinator / owner-partition EGT | Reserve owner claim, session, accepted run, and provision op before create; bind a stable provider label and phase target. Resume by token/CAS and prune terminal ops. | Human + Agent | 2026-08-06 | U1 corrective |
+| 135 | Durable terminal validator routing | Request-only validation / raw app-wide timer / persisted agent identity | Persist the non-secret agent slug on new runs and submit operations so management and app-wide reconciliation select the same resolved output validator. | Human + Agent | 2026-08-06 | U1 corrective |
+| 136 | Provider labels and journal integrity | Variable labels / fixed digest labels; deferred journal errors / terminalize then quarantine | Hash transport IDs and operation correlations into fixed provider-safe labels. On invalid journal protocol, terminalize the affected run before quarantining its matching session and return only a typed redacted failure. | Human + Agent | 2026-08-07 | U1 corrective |
+| 137 | ACA surface validation and preflight | Per-route validators / shared resolved validator; lazy SSE / status preflight | All ACA chat, stream, MCP, management, and timer paths use the resolved output validator. Management SSE verifies status before headers and touches only live session states; corrupt submit journals finalize their matching fence after quarantine. | Human + Agent | 2026-08-07 | U1 corrective |
+| 138 | Cancel validation and touch contention | Raw cancel status / validated durable projection; fail reads / bounded retry | Cancel validates natural terminal success before adoption and returns its durable projection. Management activity touch retries one ETag conflict from a fresh row, then becomes a no-op without masking other store failures. | Human + Agent | 2026-08-07 | U1 corrective |
+| 139 | Cancel and journal status contract | Raw activation exceptions / management mapping; permissive status shape / strict terminal invariants | Management cancel maps absent and retired sessions to typed 404/410 responses. Journal status requires consistent result/error fields; an advertised-but-missing result is a redacted integrity failure. | Human + Agent | 2026-08-07 | U1 corrective |
+| 140 | Journal correction and deadline cleanup | Immutable terminal rows / integrity override; unbounded cleanup / reserved headroom | Journal integrity may narrowly replace even a prior terminal success with failed/no-result before quarantine, then finalize only its matching submit fence. Post-deadline status/cancel cleanup shares a 45-second platform-headroom deadline. | Human + Agent | 2026-08-07 | U1 corrective |
+| 141 | Materialized result contract | Availability flag alone / require payload | A succeeded run with `result_available=true` but no materialized payload returns retryable 503 rather than false 200 or permanent 410; evicted/tombstoned results remain 410. | Human + Agent | 2026-08-07 | U1 corrective |
+| 142 | Takeover and route safety | Preempt leases / expired-only takeover; opaque / validated IDs | Take over only expired leases via ETag; validate management IDs before backend work; close unreturned post-create handles on failure. | Human + Agent | 2026-08-07 | U1 corrective |
+| 143 | Live provision replay ownership | Resume any matching provision / expired takeover or observe | A same-key replay never rotates a live provision lease or calls create; it returns the existing accepted run until the owner advances. Post-create reconciliation failures close the unreturned handle. | Human + Agent | 2026-08-07 | U1 corrective |
+| 144 | Unreleased operation row shape | Interim-row support / fail closed and reset | The first released operation schema requires `active_operation_id` and nonnegative `operation_sequence`; unreleased interim rows are unsupported and must be reset. | Human | 2026-08-07 | U1 corrective |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Human-authorized pre-merge editing replaces unmerged rows 119-148 with rows 119-126; merged history remains append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -380,7 +398,7 @@ No bespoke signed package is used in v1. Capability-negotiation phrasing (e.g.
 *Reconciler-timer note.* The reconciler timer (Decisions 22, 58) and the v2
 checkpoint-mirror cadence (Decision 24) are the **same** registered timer trigger
 at two maturities — v1 = backstop-only at ~1 h (crash-detection,
-idle-policy-repair, reclaim, Table cleanup); v2 tightens the same timer to ~1/min
+submit-operation finalization, reclaim, Table cleanup); v2 tightens the same timer to ~1/min
 and folds in the mirror job to hold the 2-min-p95 SLO. It is not a second timer.
 
 The trade-offs accepted by Decisions #86 and #87, stated explicitly rather than left implicit: (1) session state's storage account now shares its *lifetime* with the host's own `AzureWebJobsStorage` app setting — rotating, repointing, or redeploying to a different storage account affects live session-state rows, which a dedicated account would have decoupled; (2) session-state Table/Blob operations now share one account's throughput/scalability budget with the host's own queue/blob/lease traffic, rather than an isolated budget — likely fine at v1 scale, worth reassessing if Decision #29's concurrent-run load target is ever stress-tested; (3) dropping row 6 narrows, not eliminates, what the state row's ETag-guarded, forward-only `generation` field protects against: it still prevents racing controllers from stepping on each other, but no longer assumes a single RBAC-scoped writer, since Shared Key is now an accepted connection method for the shared account. None of this changes the sandbox's own identity-less posture (Decision #66): the sandbox itself never holds a storage credential and cannot reach session state regardless of how `AzureWebJobsStorage` is secured. The deeper state-row integrity story for `aca_sandbox` (live sandbox-manifest cross-verification alongside the Table row) remains the FRD's already-decided future design (Decisions #51/#52); this phase (P2) is config-only and does not implement that live check yet. A future, purely additive option if a stronger infrastructure-level integrity guarantee is ever wanted back without reintroducing an RBAC mandate: an HMAC row-integrity tag computed over the row's material fields, with the key held outside the storage account and verified with local compute only (no per-write Key Vault call) — not a revert of Decisions #51/#52, just a possible opt-in hardening layer, undesigned and unimplemented as of this writing.
@@ -543,6 +561,12 @@ infrastructure samples.
   not a stable content identity (Decision 119). An import-graph guard now also
   confines `controller/**` from importing `transport.aca_sdk`, alongside the
   existing raw-SDK confinement.
+- **U1 runtime completion (2026-08-04):** Added provider-neutral HTTP/LRO,
+  replayable SSE, owner-scoped first-session idempotency, lifecycle/reconciliation,
+  atomic commit, watchdog, and capability-registry seams. The controller writes
+  complete per-sandbox policy after create and never reads a group auto-delete
+  default. Production create remains unavailable and the ACA capability gate stays
+  closed pending the deferred bootstrap image/source.
 - **Human sign-off:** **Recorded — larohra, 2026-07-27; SDK verification
   consolidated 2026-07-28.** Status remains **Finalized**. Implementation may
   proceed per the finalized decisions, including Decisions 71–82.
@@ -756,7 +780,7 @@ class AgentExecutionBackend(Protocol):
 #### HTTP/status contract and validation gates
 
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
-* Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async run is `200`, never 5xx. Active slot -> `409 active_run_exists`; result evicted/tombstoned -> `410`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
+* Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async **status** read is `200`, never 5xx; a result URL is `410` when no result is available or its session is tombstoned. Active slot -> `409 active_run_exists`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
 * Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. Before ACA implementation exists, declaring `aca_sandbox` fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
 * Config/startup and runtime gates fail closed on: group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at local seam refactor; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke P4a onward; P9 full e2e plus 100-concurrent and large-payload gates.
@@ -854,7 +878,7 @@ A controller recycle is survivable: a later instance resolves the current ETag/g
 
 ##### HTTP, idempotency, and status
 
-Management routes are GET run, GET result, GET events, and POST cancel. Headers: `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, and `Last-Event-ID`. Async acceptance is `202` + `Location` + `Retry-After: 2`; completed failed async reads are `200` with typed error, not 5xx. `409 active_run_exists`, `410` for tombstone or result eviction, `422 idempotency_key_conflict`, and typed `504` distinguishes setup from run timeout. Dedupe happens before active-run admission: same key/same payload replays; same key/different payload is 422; distinct key while active is 409; post-eviction replay is 410; retry after abandonment rotates key. SSE adds named `snapshot-restart` and in-band terminal errors. Sync setup budget is 30s with >=150s execution floor, so provisioning threads remaining setup budget into `polling_timeout` or goes async.
+Management routes are GET run, GET result, GET events, and POST cancel. Headers: `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, and `Last-Event-ID`. Async acceptance is `202` + `Location` + `Retry-After: 2`; completed failed async **status** reads are `200` with typed error, not 5xx. A result read is `410` after eviction, absence, or session tombstone. `409 active_run_exists`, `422 idempotency_key_conflict`, and typed `504` distinguish setup from run timeout. Dedupe happens before active-run admission: same key/same payload replays; same key/different payload is 422; distinct key while active is 409; post-eviction replay is 410; retry after abandonment rotates key. SSE adds named `snapshot-restart` and in-band terminal errors. Sync setup budget is 30s with >=150s execution floor, so provisioning threads remaining setup budget into `polling_timeout` or goes async.
 
 Structured input validation remains controller-side pre-dispatch; output validation remains controller-side post-run. Invalid output creates typed validation `RunError` and terminal `failed` (async 200 typed body, sync 5xx), never succeeded with an invalid payload.
 
@@ -911,7 +935,7 @@ Managed identity/HOBO is not user OAuth OBO. Real OBO is deferred: reserve an ex
 
 #### 7. Persistent control records and invariants
 
-`OwnerContext` kinds are `entra_user`, `function_app`, and reserved `trigger_binding`; unresolved owner fails closed. Canonical owner hash is discriminator-first `o1-<52 lower-case base32 characters>` with version retained (Decision #106). Table `AzureFunctionsAgentsSessions`: partition `{owner_hash_version}:{app_hash}:{owner_kind}:{owner_hash}`; session row `session:{id}`, run row `run:{session_id}:{run_id}`. Session record stores sandbox_id, forward-only generation, digest kind/digest, protocol, status, activity/expiry, idle policy armed, active_run_id, snapshot IDs, region, and the label-safe `s1-<52 base32>` state-store fingerprint (Decision #114). Controller is the intended writer via its Function App identity to the shared `AzureWebJobsStorage` account; Shared Key is an accepted connection method (Decision #87). ETag/CAS plus entity-group transaction admits one active run; second returns 409 (implemented in P3b -- Decision #116 -- against a real Azure Table service). Raw claims never enter labels/session IDs. Binding is Table-row authoritative, monotonic, rollback-proof, and live-manifest cross-checked; no per-binding Key Vault signature/WORM log.
+`OwnerContext` kinds are `entra_user`, `function_app`, and reserved `trigger_binding`; unresolved owner fails closed. Canonical owner hash is discriminator-first `o1-<52 lower-case base32 characters>` with version retained (Decision #106). Table `AzureFunctionsAgentsSessions`: partition `{owner_hash_version}:{app_hash}:{owner_kind}:{owner_hash}`; session row `session:{id}`, run row `run:{session_id}:{run_id}`, and durable operation row `operation:{session_id}:{sequence}`. Every session row carries `active_operation_id` (empty string means none) and a nonnegative `operation_sequence`; missing fields fail typed parsing. An operation retains its flow kind/phase, immutable digest/session/run target, optional bound sandbox, fixed-size provider correlation label, token, lease/next-attempt timestamps, bounded attempts, a non-secret agent slug for terminal validator routing, and only sanitized error code metadata. New run rows carry the same slug so app-wide reconciliation uses the resolved agent validator before terminal adoption. A malformed journal terminalizes the matching active run as `failed` before its session is quarantined as `journal_corrupt`; status and SSE expose only the typed redacted failure. Controller is the intended writer via its Function App identity to the shared `AzureWebJobsStorage` account; Shared Key is an accepted connection method (Decision #87). ETag/CAS plus entity-group transaction admits one active run or begins/completes a same-partition operation; provision reservation also includes the owner-key row before provider create. Raw claims never enter labels/session IDs. Binding is Table-row authoritative, monotonic, rollback-proof, and live-manifest cross-checked; no per-binding Key Vault signature/WORM log.
 
 Invariants: no anonymous ingress; no ingress ports; one active run; free slot only on terminal plus verified death; OS lock/journal—not lease—is liveness authority; controller does not mint owner identity; controller captures/delivers content before run; sandbox never accepts partial/digest-mismatched content; client disconnect cannot cancel; content changes drain rather than generation bump; loss always tombstones v1; status/content split after reaping; and redaction across journal, Tables, traces, and egress.
 
@@ -1016,9 +1040,9 @@ session_runtime:
 | 10 | `reclaim_idle` is non-positive or not strictly greater than `auto_suspend_idle` | Fail startup. | 0008.10 + 0008.12 |
 | 11 | ~~`retention` is set for a provider other than `aca_sandbox`~~ — **superseded** (Decision 84): `retention` now nests inside the `aca_sandbox` block itself, so this condition is structurally unrepresentable — `SessionRuntimeConfig`'s `extra="forbid"` rejects a sibling `retention` key outright at parse time. | N/A — condition cannot occur; row retained for numbering stability. | 0008.10 (superseded by #84) |
 | 12 | Functions app is not Linux x86_64 Python 3.13/3.14 | Fail startup; no in-sandbox ABI rebuild/fallback. Flex Consumption, Premium Linux, or Dedicated Linux is required in practice; Linux Consumption tops out at 3.12. | 0008.7 (ABI) + 0008.10 (config) |
-| 13 | `reclaim_idle > auto_delete - cadence - grace` | **Always fail startup/configuration** because SDK `AutoDeletePolicy.delete_interval_seconds` is readable. Use seconds; comparison is inclusive, so fail only on strict `>`. `cadence` is configured v1 reaper cadence (~1 h default), and `grace` defaults to ~300 s. | 0008.12 (inequality + terms) + 0008.10 (config) |
+| 13 | ~~Group-policy auto-delete readback / configured inequality~~ — **superseded** (Decision 128). | The controller writes a complete per-sandbox policy after create: auto-delete is `reclaim_idle + 3600 + 300`; no group default is read or validated. | U1 lifecycle policy |
 
-Row 1 (`harness`) is the one exception to the "conditioned on `aca_sandbox`" framing above: `harness` describes agent-execution semantics, not the physical execution backend, so it is checked whenever `session_runtime` is present at all, regardless of whether `aca_sandbox` is configured — and, since Decision #88, it is checked at the schema layer (`Literal["maf"]`) rather than inside `validate_session_runtime`. Absence of `session_runtime` entirely means no rows are checked and the in-lang-worker backend is selected with no behavior change. When `session_runtime` is present but the `aca_sandbox` block is absent, only row 1 applies (now at parse time, before `validate_session_runtime` runs); rows 2–13 are conditioned on `aca_sandbox` being present and do not apply. Rows 2–5, 8–10, and 12 are fail-closed inside `validate_session_runtime` (8 rows), row 1 is schema-enforced (1 row), and row 13 is the always-fail backstop (1 row), for 10 active rows; rows 6 and 7 are superseded (Decisions #87 and #86) and row 11 is superseded and structurally unrepresentable (Decision 84), for 3 superseded rows — numbering gaps are kept via strikethrough rather than renumbering, since rows are cross-referenced by number in the FRD, code comments, and fixture folder names. The old row-13 “cannot read backstop => warn and runtime clamp” fallback is invalidated by SDK verification and must not be implemented.
+Row 1 (`harness`) is the one exception to the "conditioned on `aca_sandbox`" framing above: `harness` describes agent-execution semantics, not the physical execution backend, so it is checked whenever `session_runtime` is present at all, regardless of whether `aca_sandbox` is configured — and, since Decision #88, it is checked at the schema layer (`Literal["maf"]`) rather than inside `validate_session_runtime`. Absence of `session_runtime` entirely means no rows are checked and the in-lang-worker backend is selected with no behavior change. When `session_runtime` is present but the `aca_sandbox` block is absent, only row 1 applies. Rows 2–5, 8–10, and 12 remain fail-closed; rows 6, 7, 11, and 13 are superseded. Row 13 now uses the explicit per-sandbox lifecycle policy from Decision 128, not a Sandbox Group readback or runtime clamp.
 
 #### 2. HTTP, status, async, and SSE contract
 
@@ -1081,7 +1105,8 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 | Sync harness/app fault | `5xx` before response (or terminal in-band if stream already started). |
 | Sync setup/run wait deadline | `504` with typed reason/retry hint. |
 | Async submission | `202`, `Location`, `Retry-After: 2`, URLs. |
-| Readable async status/result | `200`, even if run failed; failure is a body `state` + `error`, not read-path `5xx`. |
+| Readable async status | `200`, even if run failed; failure is a body `state` + `error`, not a read-path `5xx`. |
+| Unavailable async result | `410 Gone` after result eviction, missing result content, or session tombstone; status remains readable. |
 | Unknown run | `404`. |
 | Auth/authz | `401`/`403`. |
 | Different submission while active run holds slot | Flat `409 active_run_exists`, naming active run. |
@@ -1126,6 +1151,71 @@ Canonical stored/wire run states: `accepted`, `running`, `succeeded`, `failed`, 
 * Terminal rows survive the result reaping interval, then are pruned/archived to bound working-set scans; after terminal-row pruning, status returns `410` too.
 * Capture content digest is SHA-256 over script-root zip including vendored `.python_packages`; sessions are stamped with that digest. Same digest across worker restart/scale-out is not redeploy. On first request after a digest mismatch: short drain grace; otherwise abandon in-flight run; tombstone session; return `410`; client creates new current-epoch session. Old sandboxes are reclaimed by idle retention. V1 has no continuity across redeploy.
 
+**Stage-1 durable operation fence (Decision 132).** A session owns a monotonic
+`operation_sequence` and an optional `active_operation_id`; each operation is a
+same-owner-partition row `operation:{session_id}:{sequence}` with a typed kind/phase,
+immutable sandbox/generation/active-run target, opaque fencing token, timestamps,
+bounded attempt count, and sanitized reason-code metadata. Beginning an operation
+updates the session pointer and creates the row in one EGT. Resume rotates the token;
+advance, complete, and abort reject stale tokens. Completion clears the pointer in the
+same EGT as any terminal run/session transition. Admission rejects every active
+operation, independently of `active_run_id`.
+
+Stage 1 uses this primitive for destructive active-run reclaim and lifecycle rearm
+only. Reclaim retains the active run until its fenced terminal/tombstone transaction,
+so an adopted terminal cannot reopen the slot. Intact terminal reclaim and missing-run
+recovery advance to their flow's final rearm phase, re-read the matching token and
+target before calling `set_lifecycle_policy`, then clear the pointer and mark idle
+policy armed in the completion or abort EGT. A policy failure leaves the operation
+active and disarmed with retry evidence. A disarmed idle marker without its matching
+durable operation is an invariant violation. A crash or a competing controller
+therefore resumes the durable operation; no process-local lock is a correctness
+mechanism. Completed and aborted operation rows are retention-pruned by the bounded
+reconciler scan. The first released Table shape has no compatibility parser:
+unreleased interim rows are unsupported and must be reset. Other lifecycle
+integrations stay behind this extension point.
+
+**Stage-2 correction (Decisions 133–134).** The initial `rearm_lifecycle` kind is
+superseded. New-session work begins as `provision_submit`: its owner-key claim,
+session reservation, accepted run, and operation row commit in one EGT before any
+provider create. Existing work begins as `submit_run`: disarm, admission, journal
+acceptance, terminal rearm, and completion are phases of one fence. Destructive
+work uses `reclaim_backing` for active loss, idle teardown, and snapshots. Operation
+targets retain the digest and optional run/sandbox binding,
+an operation-label correlation value, and scheduling metadata. A lease timestamp is
+observability/scheduling data only; only a fresh token/ETag takeover authorizes a
+retry. Reads, result/status paths, terminal adoption, attach, quarantine, epoch
+drain, ordinary reconcile, result eviction, and standalone orphan pruning do not
+become operations.
+
+The controller never stores raw prompt/envelope content in Tables. A crash before
+journal acceptance therefore resumes provisioning/resource phases from the durable
+operation, but launches a run only when a matching idempotent client retry supplies
+the envelope again; once the inbox/status exists, the same `run_id` is checked before
+any launch attempt. This is a deliberate privacy and duplicate-side-effect boundary,
+not a second attach or background launch loop.
+
+Journal launch itself is a token-fenced operation phase: a controller atomically
+claims the phase and its short lease before writing/execing, while another retry
+observes journal status or waits for takeover rather than launching a second process.
+The reconciler never fabricates a prompt; it adopts visible terminal state, finalizes
+rearm, or expires an unresolved no-retry submit operation. A missing durable run
+aborts the operation and restores idle policy instead of leaving the session fenced.
+
+Phase transitions are forward-only within each operation kind; retries may renew the
+same phase but cannot reset provisioning to create or jump across flows. Owner-key
+idempotency rows retain at least the session/run/operation recovery horizon and are
+not pruned while their referenced run or operation remains active. A page-local
+absence of run rows is never evidence that a ready session is reclaimable; only its
+authoritative expiry and durable pointers control idle teardown.
+
+Security quarantine is sticky across submit terminal/rearm phases: only ordinary
+running/canceling sessions return ready, while quarantined sessions retain their
+reason and remain non-admissible. Missing-backing cleanup is a reclaim operation so
+referenced snapshots are verified against the recorded sandbox and deleted before
+tombstone; transient deletion failure leaves the operation/session discoverable for
+the next pass.
+
 ##### Required failure behavior
 
 | Condition | v1 requirement |
@@ -1146,7 +1236,7 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 ##### Reconciler/reaper
 
 * A plain Functions timer trigger—not Durable Functions—is mandatory as the guaranteed floor. Default cadence is about one hour, configurable/tunable up to several hours; v2 would tighten the same timer to about one minute for the deferred mirror SLO.
-* Fast paths: inline reconcile before active-run check on request/resubmit, client `get_status`/`get_result`, fire-and-forget sweep after create, and synchronous reap-on-capacity-failure then retry once. Periodic pass covers crashed/no-poll/idle-app cases and idle-policy repair.
+* Fast paths: inline reconcile before active-run check on request/resubmit, client `get_status`/`get_result`, fire-and-forget sweep after create, and synchronous reap-on-capacity-failure then retry once. Periodic pass covers crashed/no-poll/idle-app cases and submit-operation finalization.
 * Heartbeat default: emitted ~30 seconds; stale after ~3 missed emissions (~90 seconds). This merely triggers verification; it never authorizes abandon alone.
 * Direct scan requirements: use the authoritative Tables rows and, per SDK correction, reconcile against `list_sandboxes(labels=...)` platform truth. Scan nonterminal `accepted` and `running` run rows with due `expires_at`; session rows with idle-reclaim `expires_at` only after CAS confirms no `active_run_id`; and terminal session rows where `idle_policy_armed=false`. Due fields are state-dependent: run timeout deadline vs session reclaim deadline; `last_activity_at` feeds idle expiry. Terminal/tombstone pruning keeps scan bounded.
 * Reconciler only deletes runtime per-session resources: sandbox, snapshot, generated packages, and Table records/tombstones. It never deletes customer-owned Sandbox Group, state account, identity, egress policy, base disk/image, or RBAC.
@@ -1219,11 +1309,11 @@ an enabled v1 surface.
 
 * Config scenario fixture for every matrix row, absence/default, valid ACA config, dropped fields, hard unavailable-backend startup gate, HTTP-only restriction, ABI rule, and always-hard row 13.
 * Typed execution seam conformance against Local and ACA backend: all seven states, exclusive cursor semantics, typed cursor expiry, cancellation, result eviction, and default local parity.
-* Azurite: owner vectors, ETag one-active-run race across two controllers, entity-group atomicity, idempotency, generation monotonicity, tombstone/410, loss-always-tombstones, redaction.
+* Azurite: owner vectors, ETag one-active-run race across two controllers, entity-group atomicity, idempotency, generation monotonicity, tombstone/410, loss-always-tombstones, redaction, and generic operation begin/resume/advance/complete/abort with stale-token races. Cover provision reservation's owner claim/run/operation EGT, submit admission's operation EGT, rearm-vs-admission, and terminal-vs-reclaim interactions.
 * Stub transport plus real ACA smoke from adapter phase: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, SDK import firewall.
-* HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; snapshot restart; disconnect does not cancel; failed async read is `200`.
+* HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; snapshot restart; disconnect does not cancel; failed async status read is `200` while unavailable result reads are `410`.
 * Crash injection: file-write/rename/pointer-fsync boundaries; disk-intact crash resumes same sandbox; lost sandbox tombstones; stopped/suspended redeploy digest mismatch; OOM/disk full fails cleanly; clock-skew grace; post-terminal lifecycle re-arm.
-* Reconciler: stale heartbeat verification, no false abandon, label-scoped platform divergence, per-sandbox lifecycle writes, no-live-delete CAS, backstop inequality, terminal/tombstone pruning, snapshot pruning, capacity reap-and-retry.
+* Reconciler: stale heartbeat verification, no false abandon, label-scoped platform divergence, per-sandbox lifecycle writes, no-live-delete CAS, backstop inequality, terminal/tombstone and completed-operation pruning, snapshot pruning, capacity reap-and-retry, resumed incomplete operations, required operation fields, and fail-closed orphan idle markers. Fault injection covers each provider create/lifecycle/content/manifest/journal phase and stable-label recovery after ambiguous create or launch response loss.
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, all credential Transform sources, identity-less negative tests, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.
 * Harness: bootstrap ABI/protocol/digest failure, no anonymous ingress, workflows/code-interpreter fail-closed, semantic golden traces every CI, advertise capability only after exercised trace.
 * Delegation: static/single-level guard, cycle/depth guard, egress union, co-location/no second run, recoverable specialist failure, whole-chain sync timeout.

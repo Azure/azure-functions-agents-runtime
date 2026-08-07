@@ -19,6 +19,10 @@ class SandboxProvisioningError(SandboxTransportError):
     """Raised when a sandbox provisioning request is unsafe or malformed."""
 
 
+class SandboxCapacityError(SandboxProvisioningError):
+    """Raised when the Sandbox Group cannot currently admit another sandbox."""
+
+
 class SandboxGroupBindingError(SandboxTransportError):
     """Raised when a configured, persisted, ARM, or live group binding disagrees."""
 
@@ -53,7 +57,7 @@ class SandboxFileEntry:
     size: int | None
     is_directory: bool
     modified_at: str | None = None
-    mode: int | None = None
+    mode: str | int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,7 +68,7 @@ class SandboxFileStat:
     size: int | None
     is_directory: bool
     modified_at: str | None = None
-    mode: int | None = None
+    mode: str | int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +78,90 @@ class SandboxExecResult:
     exit_code: int
     stdout: str
     stderr: str
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxLifecyclePolicy:
+    """Complete per-sandbox lifecycle policy projected without provider SDK types."""
+
+    auto_suspend_seconds: int | None
+    auto_suspend_mode: SandboxAutoSuspendMode = "Disk"
+    auto_delete_seconds: int = 1
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        auto_suspend_seconds: int | None,
+        auto_delete_seconds: int,
+        auto_suspend_mode: SandboxAutoSuspendMode = "Disk",
+    ) -> SandboxLifecyclePolicy:
+        if auto_suspend_seconds is not None and auto_suspend_seconds < 60:
+            raise SandboxProvisioningError(
+                "Sandbox auto_suspend_seconds must be at least 60 when enabled."
+            )
+        if auto_delete_seconds <= 0:
+            raise SandboxProvisioningError("Sandbox auto_delete_seconds must be positive.")
+        if auto_suspend_mode not in {"Memory", "Disk"}:
+            raise SandboxProvisioningError("Sandbox auto_suspend_mode must be Memory or Disk.")
+        return cls(
+            auto_suspend_seconds=auto_suspend_seconds,
+            auto_suspend_mode=auto_suspend_mode,
+            auto_delete_seconds=auto_delete_seconds,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSummary:
+    """A label-filterable platform inventory projection for one sandbox."""
+
+    sandbox_id: str
+    labels: Mapping[str, str]
+    created_at: str | None = None
+    modified_at: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        sandbox_id: str,
+        labels: Mapping[str, str],
+        created_at: str | None = None,
+        modified_at: str | None = None,
+    ) -> SandboxSummary:
+        return cls(
+            sandbox_id=_require_nonempty_string(sandbox_id, "sandbox_id"),
+            labels=MappingProxyType(_validate_labels(labels)),
+            created_at=_optional_timestamp(created_at, "created_at"),
+            modified_at=_optional_timestamp(modified_at, "modified_at"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxSnapshot:
+    """A provider-neutral projection for a retained sandbox snapshot."""
+
+    snapshot_id: str
+    sandbox_id: str | None
+    created_at: str | None = None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        snapshot_id: str,
+        sandbox_id: str | None,
+        created_at: str | None = None,
+    ) -> SandboxSnapshot:
+        return cls(
+            snapshot_id=_require_nonempty_string(snapshot_id, "snapshot_id"),
+            sandbox_id=(
+                None
+                if sandbox_id is None
+                else _require_nonempty_string(sandbox_id, "sandbox_id")
+            ),
+            created_at=_optional_timestamp(created_at, "created_at"),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -209,32 +297,51 @@ class SandboxProvisioningLabels:
     """
 
     owner_hash_version: str
+    owner_kind: str
     owner_hash: str
     app_hash: str
     session_id: str
+    operation_label: str | None = None
 
     @classmethod
     def create(
-        cls, owner_hash_version: str, owner_hash: str, app_hash: str, session_id: str
+        cls,
+        owner_hash_version: str,
+        owner_hash: str,
+        app_hash: str,
+        session_id: str,
+        *,
+        owner_kind: str = "function_app",
+        operation_label: str | None = None,
     ) -> SandboxProvisioningLabels:
         return cls(
             owner_hash_version=_require_provider_label_value(
                 owner_hash_version, "owner_hash_version"
             ),
+            owner_kind=_require_provider_label_value(owner_kind, "owner_kind"),
             owner_hash=_require_provider_label_value(owner_hash, "owner_hash"),
             app_hash=_require_provider_label_value(app_hash, "app_hash"),
             session_id=_require_provider_label_value(session_id, "session_id"),
+            operation_label=(
+                None
+                if operation_label is None
+                else _require_provider_label_value(operation_label, "operation_label")
+            ),
         )
 
     def to_provider_labels(self) -> dict[str, str]:
         """Return only safe, versioned fingerprint labels for provisioning."""
 
-        return {
+        labels = {
             "owner_hash_version": self.owner_hash_version,
+            "owner_kind": self.owner_kind,
             "owner_hash": self.owner_hash,
             "app_hash": self.app_hash,
             "session_id": self.session_id,
         }
+        if self.operation_label is not None:
+            labels["operation_label"] = self.operation_label
+        return labels
 
 
 @dataclass(frozen=True, slots=True)
@@ -459,3 +566,19 @@ def _validate_create_environment(environment: Mapping[str, str]) -> Mapping[str,
             )
         validated[key] = value
     return MappingProxyType(validated)
+
+
+def _validate_labels(labels: Mapping[str, str]) -> dict[str, str]:
+    validated: dict[str, str] = {}
+    for key, value in labels.items():
+        validated[_require_nonempty_string(key, "label key")] = _require_nonempty_string(
+            value,
+            "label value",
+        )
+    return validated
+
+
+def _optional_timestamp(value: str | None, field_name: str) -> str | None:
+    if value is None:
+        return None
+    return _require_nonempty_string(value, field_name)

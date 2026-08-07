@@ -40,6 +40,7 @@ from .transport_models import (
     AcaSandboxDependencyError,
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
+    SandboxCapacityError,
     SandboxCreateRequest,
     SandboxEgressPolicy,
     SandboxExecResult,
@@ -50,7 +51,10 @@ from .transport_models import (
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxGroupIdentity,
+    SandboxLifecyclePolicy,
     SandboxProvisioningError,
+    SandboxSnapshot,
+    SandboxSummary,
     parse_sandbox_group_resource_id,
     source_to_provider_kwargs,
 )
@@ -59,7 +63,14 @@ if TYPE_CHECKING:
     # The optional preview SDK is imported for typing only. Every runtime use
     # goes through ``_load_sdk_factories()``'s lazy ``import_module()`` below,
     # so the default in-language-worker runtime never depends on this import.
-    from azure.containerapps.sandbox import EgressPolicy, ExecResult, FileInfo
+    from azure.containerapps.sandbox import (
+        AutoDeletePolicy,
+        AutoSuspendPolicy,
+        EgressPolicy,
+        ExecResult,
+        FileInfo,
+        LifecyclePolicy,
+    )
     from azure.containerapps.sandbox.aio import SandboxClient, SandboxGroupClient
 
 _ARM_HOST = "https://management.azure.com"
@@ -67,6 +78,7 @@ _ARM_SCOPE = f"{_ARM_HOST}/.default"
 _ARM_API_VERSION = "2026-02-01-preview"
 _ARM_REQUEST_TIMEOUT_SECONDS = 30
 _PROVISIONING_ATTEMPT_LABEL = "provisioning_attempt_id"
+_OPERATION_LABEL = "operation_label"
 _CONTROL_OPERATION_TIMEOUT_SECONDS = 30
 _CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
 _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
@@ -88,6 +100,9 @@ class SdkFactories:
     sandbox_group_client: Callable[..., SandboxGroupClient]
     sandbox_client: Callable[..., SandboxClient]
     egress_policy: Callable[..., EgressPolicy]
+    lifecycle_policy: Callable[..., LifecyclePolicy]
+    auto_suspend_policy: Callable[..., AutoSuspendPolicy]
+    auto_delete_policy: Callable[..., AutoDeletePolicy]
 
 
 def _load_sdk_factories() -> SdkFactories:
@@ -111,6 +126,9 @@ def _load_sdk_factories() -> SdkFactories:
         sandbox_group_client=async_sdk.SandboxGroupClient,
         sandbox_client=async_sdk.SandboxClient,
         egress_policy=sdk.EgressPolicy,
+        lifecycle_policy=sdk.LifecyclePolicy,
+        auto_suspend_policy=sdk.AutoSuspendPolicy,
+        auto_delete_policy=sdk.AutoDeletePolicy,
     )
 
 
@@ -230,18 +248,49 @@ class AcaSandboxAdapter:
         self._ensure_open()
         _verify_group_binding(persisted_group, self._group)
         egress = _compile_egress_policy(self._factories, request.egress_policy)
-        provisioning_attempt_id = uuid.uuid4().hex
+        provisioning_attempt_id = request.labels.operation_label or uuid.uuid4().hex
+        stable_attempt = request.labels.operation_label is not None
+        if stable_attempt:
+            existing = await self._find_failed_create_sandboxes(
+                provisioning_attempt_id,
+                label_key=_OPERATION_LABEL,
+                expected_labels=request.labels.to_provider_labels(),
+            )
+            if len(existing) == 1:
+                return await self._handle_for_sandbox_id(existing[0])
+            if len(existing) > 1:
+                raise SandboxProvisioningError(
+                    "A durable provisioning operation matches multiple sandboxes."
+                )
         labels = {
             **request.labels.to_provider_labels(),
-            _PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id,
+            (
+                _OPERATION_LABEL if stable_attempt else _PROVISIONING_ATTEMPT_LABEL
+            ): provisioning_attempt_id,
         }
-        poller = await self._begin_create_sandbox(
-            request,
-            labels=labels,
-            egress=egress,
-            provisioning_attempt_id=provisioning_attempt_id,
-        )
-        return await self._await_create_result(poller, provisioning_attempt_id)
+        try:
+            poller = await self._begin_create_sandbox(
+                request,
+                labels=labels,
+                egress=egress,
+                provisioning_attempt_id=provisioning_attempt_id,
+                cleanup_on_failure=not stable_attempt,
+            )
+            return await self._await_create_result(
+                poller,
+                provisioning_attempt_id,
+                cleanup_on_failure=not stable_attempt,
+            )
+        except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            if stable_attempt:
+                existing = await self._find_failed_create_sandboxes(
+                    provisioning_attempt_id,
+                    label_key=_OPERATION_LABEL,
+                    expected_labels=request.labels.to_provider_labels(),
+                )
+                if len(existing) == 1:
+                    return await self._handle_for_sandbox_id(existing[0])
+            raise
 
     async def _begin_create_sandbox(
         self,
@@ -250,6 +299,7 @@ class AcaSandboxAdapter:
         labels: dict[str, str],
         egress: EgressPolicy,
         provisioning_attempt_id: str,
+        cleanup_on_failure: bool,
     ) -> AsyncLROPoller[SandboxClient]:
         """Start the create call, reconciling any partial create on failure."""
 
@@ -280,30 +330,53 @@ class AcaSandboxAdapter:
                 polling_interval=request.polling_interval_seconds,
             )
         except HttpResponseError as exc:
+            if _is_capacity_rejection(exc):
+                if cleanup_on_failure:
+                    await self._cleanup_failed_create(provisioning_attempt_id)
+                raise SandboxCapacityError(
+                    "Sandbox Group capacity is currently unavailable."
+                ) from exc
             if _is_definitive_client_rejection(exc):
                 raise
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         except asyncio.CancelledError:
-            await self._cleanup_after_cancelled_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_after_cancelled_create(provisioning_attempt_id)
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         return poller
 
     async def _await_create_result(
-        self, poller: AsyncLROPoller[SandboxClient], provisioning_attempt_id: str
+        self,
+        poller: AsyncLROPoller[SandboxClient],
+        provisioning_attempt_id: str,
+        *,
+        cleanup_on_failure: bool,
     ) -> AcaSandboxHandle:
         """Await the poller, reconciling any partial create on failure."""
 
         try:
             sdk_client: SandboxClient = await poller.result()
         except asyncio.CancelledError:
-            await self._cleanup_after_cancelled_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_after_cancelled_create(provisioning_attempt_id)
+            raise
+        except HttpResponseError as exc:
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
+            if _is_capacity_rejection(exc):
+                raise SandboxCapacityError(
+                    "Sandbox Group capacity is currently unavailable."
+                ) from exc
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         return await self._make_handle(sdk_client)
 
@@ -383,6 +456,77 @@ class AcaSandboxAdapter:
         finally:
             await _close_resource(self._credential)
 
+    async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+        """Project label-filtered platform inventory without leaking SDK summaries."""
+        self._ensure_open()
+        summaries: list[SandboxSummary] = []
+        async for sandbox in self._group_client.list_sandboxes(labels=labels):
+            summaries.append(
+                SandboxSummary.create(
+                    sandbox_id=sandbox.id,
+                    labels=dict(sandbox.labels),
+                    created_at=_sdk_timestamp(sandbox.created_at),
+                    modified_at=_sdk_timestamp(sandbox.modified_at),
+                )
+            )
+        return tuple(summaries)
+
+    async def delete_sandbox(self, sandbox_id: str) -> None:
+        """Delete one sandbox through the bound customer-owned group."""
+        self._ensure_open()
+        if not sandbox_id:
+            raise SandboxProvisioningError("Sandbox ID must be non-empty.")
+        try:
+            poller = await self._group_client.begin_delete_sandbox(
+                sandbox_id,
+                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+            )
+            await poller.result()
+        except ResourceNotFoundError as exc:
+            raise SandboxProvisioningError("Sandbox delete found no target.") from exc
+        except HttpResponseError as exc:
+            if exc.status_code == 404:
+                raise SandboxProvisioningError("Sandbox delete found no target.") from exc
+            raise SandboxProvisioningError("Sandbox delete failed.") from exc
+        except AzureError as exc:
+            raise SandboxProvisioningError("Sandbox delete failed.") from exc
+
+    async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+        """Project snapshots so the reconciler can prune provider-retained storage."""
+        self._ensure_open()
+        snapshots: list[SandboxSnapshot] = []
+        async for snapshot in self._group_client.list_snapshots():
+            snapshots.append(
+                SandboxSnapshot.create(
+                    snapshot_id=snapshot.id,
+                    sandbox_id=snapshot.sandbox_id,
+                    created_at=_sdk_timestamp(snapshot.created_at),
+                )
+            )
+        return tuple(snapshots)
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete one unreferenced snapshot through the bound Sandbox Group."""
+        self._ensure_open()
+        if not snapshot_id:
+            raise SandboxProvisioningError("Snapshot ID must be non-empty.")
+        try:
+            poller = await self._group_client.begin_delete_snapshot(
+                snapshot_id,
+                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+            )
+            await poller.result()
+        except ResourceNotFoundError as exc:
+            raise SandboxProvisioningError("Snapshot delete found no target.") from exc
+        except HttpResponseError as exc:
+            if exc.status_code == 404:
+                raise SandboxProvisioningError("Snapshot delete found no target.") from exc
+            raise SandboxProvisioningError("Snapshot delete failed.") from exc
+        except AzureError as exc:
+            raise SandboxProvisioningError("Snapshot delete failed.") from exc
+
     async def _attach_handle(
         self,
         persisted: PersistedSandboxBinding,
@@ -409,6 +553,18 @@ class AcaSandboxAdapter:
         )
         return await self._make_handle(sdk_client, expected_sandbox_id=persisted.sandbox_id)
 
+    async def _handle_for_sandbox_id(self, sandbox_id: str) -> AcaSandboxHandle:
+        self._ensure_open()
+        sdk_client = self._factories.sandbox_client(
+            self._factories.endpoint_for_region(self._group.region),
+            self._credential,
+            subscription_id=self._group.subscription_id,
+            resource_group=self._group.resource_group,
+            sandbox_group=self._group.group_name,
+            sandbox_id=sandbox_id,
+        )
+        return await self._make_handle(sdk_client, expected_sandbox_id=sandbox_id)
+
     async def _make_handle(
         self, sdk_client: SandboxClient, *, expected_sandbox_id: str | None = None
     ) -> AcaSandboxHandle:
@@ -425,6 +581,7 @@ class AcaSandboxAdapter:
                 group_resource_id=self._group.resource_id,
                 region=self._group.region,
             ),
+            factories=self._factories,
         )
 
     async def _verify_manifest_handshake(
@@ -478,16 +635,29 @@ class AcaSandboxAdapter:
                 "Failed sandbox creation could not be reconciled for cleanup."
             ) from exc
 
-    async def _find_failed_create_sandboxes(self, provisioning_attempt_id: str) -> list[str]:
+    async def _find_failed_create_sandboxes(
+        self,
+        provisioning_attempt_id: str,
+        *,
+        label_key: str = _PROVISIONING_ATTEMPT_LABEL,
+        expected_labels: Mapping[str, str] | None = None,
+    ) -> list[str]:
         """List, with bounded retries, the sandbox(es) tagged by one create attempt."""
 
-        labels = {_PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id}
+        labels = {label_key: provisioning_attempt_id}
         for attempt in range(_FAILED_CREATE_LOOKUP_ATTEMPTS):
-            sandbox_ids = [
-                sandbox.id async for sandbox in self._group_client.list_sandboxes(labels=labels)
+            summaries = [
+                sandbox async for sandbox in self._group_client.list_sandboxes(labels=labels)
             ]
-            if sandbox_ids:
-                return sandbox_ids
+            if summaries:
+                if expected_labels is not None and any(
+                    dict(summary.labels) != dict(expected_labels)
+                    for summary in summaries
+                ):
+                    raise SandboxProvisioningError(
+                        "Provisioning label collision cannot be safely reused."
+                    )
+                return [summary.id for summary in summaries]
             if attempt + 1 < _FAILED_CREATE_LOOKUP_ATTEMPTS:
                 await _sleep(_FAILED_CREATE_LOOKUP_DELAY_SECONDS)
         return []
@@ -531,9 +701,16 @@ async def _translate_file_errors[T](operation: Awaitable[T]) -> T:
 class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
     """A live individual sandbox with direct file and separate process operations."""
 
-    def __init__(self, *, sdk_client: SandboxClient, identity: ProvisionedSandboxIdentity) -> None:
+    def __init__(
+        self,
+        *,
+        sdk_client: SandboxClient,
+        identity: ProvisionedSandboxIdentity,
+        factories: SdkFactories | None = None,
+    ) -> None:
         self._sdk_client = sdk_client
         self._identity = identity
+        self._factories = factories
         self._closed = False
 
     @property
@@ -617,6 +794,33 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
         )
         await poller.result()
 
+    async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
+        """Read the complete lifecycle projection from the individual sandbox."""
+        self._ensure_open()
+        policy = await self._sdk_client.get_lifecycle_policy()
+        return _project_lifecycle_policy(policy)
+
+    async def set_lifecycle_policy(self, policy: SandboxLifecyclePolicy) -> None:
+        """Set both auto-suspend and auto-delete together; never inherit group policy."""
+        self._ensure_open()
+        if self._factories is None:
+            raise SandboxProvisioningError("ACA lifecycle factories are unavailable.")
+        auto_suspend = (
+            None
+            if policy.auto_suspend_seconds is None
+            else self._factories.auto_suspend_policy(
+                auto_suspend_seconds=policy.auto_suspend_seconds,
+                mode=policy.auto_suspend_mode,
+            )
+        )
+        lifecycle = self._factories.lifecycle_policy(
+            auto_suspend=auto_suspend,
+            auto_delete=self._factories.auto_delete_policy(
+                delete_interval_seconds=policy.auto_delete_seconds
+            ),
+        )
+        await self._sdk_client.set_lifecycle_policy(lifecycle)
+
     async def close(self) -> None:
         """Close the live data-plane handle."""
 
@@ -680,11 +884,33 @@ def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy)
     )
 
 
+def _project_lifecycle_policy(policy: LifecyclePolicy) -> SandboxLifecyclePolicy:
+    """Project the SDK lifecycle response while keeping its shape adapter-local."""
+    if policy.auto_suspend is None:
+        return SandboxLifecyclePolicy.create(
+            auto_suspend_seconds=None,
+            auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
+        )
+    return SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=policy.auto_suspend.auto_suspend_seconds,
+        auto_suspend_mode=policy.auto_suspend.mode,
+        auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
+    )
+
+
+def _sdk_timestamp(timestamp: str | None) -> str | None:
+    return timestamp
+
+
 def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
     """A 4xx create rejection is definitive: the request never created a sandbox."""
 
     status_code = exc.status_code
     return status_code is not None and 400 <= status_code < 500
+
+
+def _is_capacity_rejection(exc: HttpResponseError) -> bool:
+    return exc.status_code in {409, 429, 503}
 
 
 async def _read_manifest_when_ready(
@@ -745,7 +971,7 @@ def _project_file_entry(entry: FileInfo) -> SandboxFileEntry:
         size=entry.size,
         is_directory=entry.is_directory,
         modified_at=entry.modified_at,
-        mode=_sdk_file_mode(entry),
+        mode=entry.mode,
     )
 
 
@@ -755,19 +981,8 @@ def _project_file_stat(entry: FileInfo) -> SandboxFileStat:
         size=entry.size,
         is_directory=entry.is_directory,
         modified_at=entry.modified_at,
-        mode=_sdk_file_mode(entry),
+        mode=entry.mode,
     )
-
-
-def _sdk_file_mode(entry: FileInfo) -> int | None:
-    """Read ``FileInfo.mode`` as the POSIX int the service actually sends.
-
-    The pinned SDK's ``str | None`` annotation is wrong — ``_from_dict`` passes
-    the wire value through uncoerced and live ACA sends an int. This is the one
-    permitted SDK-boundary cast here.
-    """
-
-    return cast("int | None", entry.mode)
 
 
 def _project_exec_result(result: ExecResult) -> SandboxExecResult:

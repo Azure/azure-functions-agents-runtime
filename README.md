@@ -442,6 +442,48 @@ The JSON endpoint returns `session_id`, `response`, and `tool_calls`. The stream
 
 Pass `x-ms-session-id` header to continue a conversation across requests. If omitted, a new session is created automatically.
 
+### Experimental ACA session-runtime contract
+
+The ACA Sandbox session runtime is opt-in and currently remains capability-gated
+closed while its production bootstrap image and create source are deferred. The
+following HTTP contract is implemented and exercised with an injected
+provider-neutral test source; enabling `session_runtime.aca_sandbox` in an app
+still fails startup until the later capability gate opens.
+
+When enabled, ordinary chat calls remain synchronous. Send
+`Prefer: respond-async` on either built-in chat surface or a custom
+`http_trigger` to receive `202 Accepted`, `Location`, `Retry-After: 2`, and:
+
+```json
+{
+  "session_id": "...",
+  "run_id": "...",
+  "status_url": "/agents/main/sessions/.../runs/...",
+  "result_url": "/agents/main/sessions/.../runs/.../result",
+  "events_url": "/agents/main/sessions/.../runs/.../events",
+  "cancel_url": "/agents/main/sessions/.../runs/.../cancel"
+}
+```
+
+Poll the status/result URLs or stream `events_url`. SSE frames carry `id`
+values; reconnect with `Last-Event-ID`. A `snapshot-restart` event means old
+journal events rotated out: read status/result, then reconnect at the reported
+earliest ID minus one. Supply `Idempotency-Key` to replay the same logical
+attempt safely; keys are stored only as hashes.
+
+After sandbox loss or reap, a terminal failed/abandoned **status** remains
+readable (`200`) from durable state. Its **result** URL returns `410 Gone`;
+the same result response applies after result eviction.
+
+The controller registers one plain timer reconciler as a backstop. Request paths
+also run bounded targeted reconciliation before surfacing an active-run conflict,
+while polling a nonterminal run whose backing is unavailable, after a new
+sandbox is created, and once before retrying a capacity failure. Set
+`AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS` to a whole-minute value
+from `60` through `3600`; the default and maximum is `3600`. If both a custom
+HTTP trigger and built-in chat are enabled for an ACA agent, their complete
+resolved auth policies must match before any route is registered.
+
 ### MCP Server
 
 When `builtin_endpoints: true` or `builtin_endpoints.mcp: true`, the agent is exposed as an MCP tool named after its slug through the shared MCP-compatible endpoint at `/runtime/webhooks/mcp`. Requires the MCP extension system key in the `x-functions-key` header when deployed.

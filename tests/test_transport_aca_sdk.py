@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict
-from types import SimpleNamespace
 from typing import Any
 
 import aiohttp
@@ -30,6 +29,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxFileOperationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
+    SandboxLifecyclePolicy,
     SandboxProvisioningError,
     SandboxProvisioningLabels,
 )
@@ -37,6 +37,8 @@ from tests.doubles.fake_aca_sdk import (
     FakeCredential,
     FakeSdkEgressPolicy,
     FakeSdkEnvironment,
+    FakeSdkFileInfo,
+    FakeSdkSnapshot,
 )
 
 _GROUP_ID = (
@@ -73,6 +75,7 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
         "source": DiskSource.create("runtime-bootstrap"),
         "labels": SandboxProvisioningLabels.create(
             owner_hash_version="o1",
+            owner_kind="function_app",
             owner_hash=_OWNER_HASH,
             app_hash=_APP_HASH,
             session_id="session-123",
@@ -162,6 +165,47 @@ async def test_read_arm_group_uses_an_explicit_timeout_and_translates_transport_
 
 
 @pytest.mark.asyncio
+async def test_read_arm_group_sends_bearer_token_without_logging_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_headers: dict[str, str] = {}
+
+    class _Response:
+        status = 200
+
+        async def __aenter__(self) -> _Response:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def json(self, *, content_type: object) -> dict[str, str]:
+            del content_type
+            return {"id": _GROUP_ID, "location": "westus2"}
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> _Response:
+            del args
+            headers = kwargs["headers"]
+            assert isinstance(headers, dict)
+            captured_headers.update(headers)
+            return _Response()
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _Session())
+    credential = FakeCredential()
+
+    await aca_sdk._read_arm_group(credential, _GROUP_ID)
+
+    assert captured_headers["Authorization"] == "Bearer test-token"
+
+
+@pytest.mark.asyncio
 async def test_create_passes_explicit_safe_values_and_returns_only_session_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,6 +229,7 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
         if key != "provisioning_attempt_id"
     } == {
         "owner_hash_version": "o1",
+        "owner_kind": "function_app",
         "owner_hash": _OWNER_HASH,
         "app_hash": _APP_HASH,
         "session_id": "session-123",
@@ -200,6 +245,93 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
     assert environment.group_client.add_port_calls == 0
 
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_reuses_a_stable_operation_label_after_ambiguous_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    request = _request(labels=labels)
+
+    first = await adapter.create(request, persisted_group=_binding())
+    second = await adapter.create(request, persisted_group=_binding())
+
+    assert first.identity.sandbox_id == second.identity.sandbox_id
+    assert len(environment.group_client.create_calls) == 1
+    assert environment.group_client.create_calls[0]["labels"]["operation_label"] == (
+        "op-session-123-1"
+    )
+    await first.close()
+    await second.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mismatch",
+    ["app_hash", "owner_hash", "session_id", "unexpected_provider_label"],
+)
+async def test_create_rejects_stable_label_collision_with_foreign_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    foreign = environment.add_sandbox("foreign")
+    foreign.labels = {
+        **labels.to_provider_labels(),
+        mismatch: f"other-{mismatch}",
+    }
+
+    with pytest.raises(SandboxProvisioningError, match="collision"):
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert environment.group_client.create_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_multiple_exact_stable_label_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    for sandbox_id in ("duplicate-a", "duplicate-b"):
+        environment.add_sandbox(sandbox_id).labels = labels.to_provider_labels()
+
+    with pytest.raises(SandboxProvisioningError, match="multiple"):
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
     await adapter.close()
 
 
@@ -400,6 +532,78 @@ async def test_adapter_maps_all_six_file_operations_directly_and_keeps_exec_sepa
     ]
 
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_projects_complete_lifecycle_policy_without_group_readback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+
+    policy = SandboxLifecyclePolicy.create(
+        auto_suspend_seconds=None,
+        auto_suspend_mode="Disk",
+        auto_delete_seconds=90_300,
+    )
+    await handle.set_lifecycle_policy(policy)
+
+    assert await handle.get_lifecycle_policy() == policy
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_adapter_projects_group_inventory_and_snapshot_deletion(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+    environment.group_client.snapshots["snapshot-1"] = FakeSdkSnapshot(
+        id="snapshot-1",
+        sandbox_id=handle.identity.sandbox_id,
+    )
+
+    inventory = await adapter.list_sandboxes(labels={"session_id": "session-123"})
+    snapshots = await adapter.list_snapshots()
+    await adapter.delete_snapshot("snapshot-1")
+    await adapter.delete_sandbox(handle.identity.sandbox_id)
+
+    assert inventory[0].sandbox_id == handle.identity.sandbox_id
+    assert snapshots[0].snapshot_id == "snapshot-1"
+    assert environment.group_client.deleted_snapshot_ids == ["snapshot-1"]
+    assert environment.group_client.deleted_sandbox_ids == [handle.identity.sandbox_id]
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_delete_translates_sdk_failures_to_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    rejection = HttpResponseError("service rejected the request")
+    rejection.status_code = 503
+
+    async def rejected_delete_snapshot(_: str, **__: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(
+        environment.group_client,
+        "begin_delete_snapshot",
+        rejected_delete_snapshot,
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="Snapshot delete failed"):
+        await adapter.delete_snapshot("snapshot-1")
+
     await adapter.close()
 
 
@@ -732,13 +936,38 @@ def test_create_request_requires_positive_explicit_setup_budget() -> None:
         _request(remaining_setup_budget_seconds=0)
 
 
+@pytest.mark.asyncio
+async def test_snapshot_like_source_is_rejected_before_adapter_invocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class SnapshotLikeSource:
+        snapshot_id = "snapshot-1"
+
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxProvisioningError, match="exactly one"):
+        _request(
+            source=SnapshotLikeSource(),
+            environment={"HARNESS_MODE": "would-not-project"},
+            entrypoint=("would-not-project",),
+            cmd=("would-not-project",),
+        )
+
+    assert environment.group_client.create_calls == []
+    assert environment.sandboxes == {}
+    await adapter.close()
+
+
 @pytest.mark.parametrize(
     "field_name",
-    ["owner_hash_version", "owner_hash", "app_hash", "session_id"],
+    ["owner_hash_version", "owner_kind", "owner_hash", "app_hash", "session_id"],
 )
 def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> None:
     values = {
         "owner_hash_version": "o1",
+        "owner_kind": "function_app",
         "owner_hash": _OWNER_HASH,
         "app_hash": _APP_HASH,
         "session_id": "session-123",
@@ -750,11 +979,7 @@ def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> No
 
 
 def test_file_projections_accept_live_numeric_posix_mode() -> None:
-    # Reproduce the SDK's own annotation defect (FileInfo.mode is typed
-    # str | None, but the wire actually sends an int) with a duck-typed
-    # stand-in shaped like the real FileInfo response, without importing the
-    # optional preview SDK from a test module (see test_transport_import_graph).
-    file_info = SimpleNamespace(
+    file_info = FakeSdkFileInfo(
         name="file.bin",
         path="/tmp/file.bin",
         size=7,

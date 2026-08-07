@@ -23,7 +23,10 @@ from .._observability import (
 )
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent, _to_bool
+from ..controller.budget import RequestBudget
+from ..controller.http import ControllerResponse, prefers_respond_async, submit_run
 from ..controller.readiness import SessionRuntimeBinding
+from ..execution.backend import RunError, RunResult
 from ..execution.compat import run_to_agent_result, split_runner_call
 from ..execution.factory import create_execution_backend
 from ..execution.setup_budget import synchronous_wait_seconds
@@ -264,6 +267,107 @@ def _session_runtime_kwargs(
     return {"session_runtime": session_runtime, "owner": owner}
 
 
+def _controller_response_to_fastapi(response: ControllerResponse) -> Response:
+    """Adapt a framework-neutral controller response at the registration boundary."""
+    content = (
+        response.body
+        if isinstance(response.body, str)
+        else json.dumps(response.body, ensure_ascii=False)
+    )
+    return Response(
+        content=content,
+        status_code=response.status_code,
+        media_type="text/plain" if isinstance(response.body, str) else "application/json",
+        headers=dict(response.headers),
+    )
+
+
+def _controller_session_id(response: ControllerResponse) -> str | None:
+    for name, value in response.headers.items():
+        if name.casefold() == _SESSION_ID_HEADER and value.strip():
+            return value
+    return None
+
+
+def _render_validated_http_response(
+    resolved: ResolvedAgent,
+    content: str,
+    session_id: str,
+    *,
+    on_invalid_json: Callable[[json.JSONDecodeError], None] | None = None,
+    on_schema_error: Callable[[jsonschema.ValidationError], None] | None = None,
+) -> Response:
+    """Apply the existing custom HTTP response contract to a controller result."""
+    extracted = extract_json_from_response(content)
+    try:
+        parsed = json.loads(extracted)
+    except json.JSONDecodeError as exc:
+        if on_invalid_json is not None:
+            on_invalid_json(exc)
+        return Response(
+            content=json.dumps(
+                {
+                    "error": "Agent returned invalid JSON",
+                    "raw_response": content,
+                }
+            ),
+            status_code=500,
+            media_type="application/json",
+            headers={_SESSION_ID_HEADER: session_id},
+        )
+    if resolved.response_schema:
+        try:
+            jsonschema.validate(instance=parsed, schema=resolved.response_schema)
+        except jsonschema.ValidationError as exc:
+            if on_schema_error is not None:
+                on_schema_error(exc)
+            return Response(
+                content=json.dumps(
+                    {
+                        "error": "Agent response validation failed",
+                        "details": exc.message,
+                    }
+                ),
+                status_code=500,
+                media_type="application/json",
+                headers={_SESSION_ID_HEADER: session_id},
+            )
+    return Response(
+        content=json.dumps(parsed, ensure_ascii=False),
+        status_code=200,
+        media_type="application/json",
+        headers={_SESSION_ID_HEADER: session_id},
+    )
+
+
+def build_output_validator(resolved: ResolvedAgent) -> Callable[[RunResult], RunError | None] | None:
+    """Build the controller-side validator used before an ACA success is adopted."""
+    if not resolved.response_example and not resolved.response_schema:
+        return None
+
+    def validate(result: RunResult) -> RunError | None:
+        try:
+            parsed = json.loads(extract_json_from_response(result.content))
+        except json.JSONDecodeError:
+            return RunError(
+                code="response_validation_failed",
+                message="Agent returned invalid JSON.",
+                fault_domain="app",
+            )
+        if resolved.response_schema is not None:
+            try:
+                jsonschema.validate(instance=parsed, schema=resolved.response_schema)
+            except jsonschema.ValidationError:
+                return RunError(
+                    code="response_validation_failed",
+                    message="Agent response failed schema validation.",
+                    fault_domain="app",
+                )
+        return None
+
+    return validate
+
+
 def make_agent_handler(
     resolved: ResolvedAgent,
     trigger_type: str,
@@ -477,12 +581,57 @@ def make_http_agent_handler(
                     "workflow_enabled": workflows_enabled,
                     "workflow_durable_client": durable_client,
                     "agent_name": resolved.slug,
+                    "output_validator": build_output_validator(resolved),
                 }
                 runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
                 if runtime_kwargs is None:
                     result = await _run_agent(prompt, **runner_kwargs)
                 else:
-                    result = await _run_agent(prompt, **runner_kwargs, **runtime_kwargs)
+                    budget = RequestBudget.start(authored_timeout=resolved.timeout)
+                    request, binding = split_runner_call(
+                        (prompt,),
+                        {
+                            **runner_kwargs,
+                            "idempotency_key": _request_header_value(req, "Idempotency-Key"),
+                        },
+                        stream=False,
+                    )
+                    backend = create_execution_backend(
+                        binding=binding,
+                        session_runtime=runtime_kwargs["session_runtime"],
+                        owner=runtime_kwargs["owner"],
+                        setup_budget=budget.setup,
+                    )
+                    controller_response = await submit_run(
+                        backend,
+                        request,
+                        agent_slug=resolved.slug,
+                        respond_async=prefers_respond_async(req.headers),
+                        budget=budget,
+                    )
+                    if controller_response.status_code != 200:
+                        return _controller_response_to_fastapi(controller_response)
+                    body_value = controller_response.body
+                    if not isinstance(body_value, dict):
+                        return _controller_response_to_fastapi(controller_response)
+                    result_content = body_value.get("response")
+                    if not isinstance(result_content, str):
+                        return _controller_response_to_fastapi(controller_response)
+                    controller_session_id = _controller_session_id(controller_response)
+                    if controller_session_id is None:
+                        return _controller_response_to_fastapi(controller_response)
+                    if resolved.response_example or resolved.response_schema:
+                        return _render_validated_http_response(
+                            resolved,
+                            result_content,
+                            controller_session_id,
+                        )
+                    return Response(
+                        content=result_content,
+                        status_code=200,
+                        media_type="text/plain",
+                        headers={_SESSION_ID_HEADER: controller_session_id},
+                    )
 
                 _set_run_result_attributes(span, result)
                 span.add_event("af.agent.invoke.completed")
@@ -500,10 +649,7 @@ def make_http_agent_handler(
                     )
 
                 if resolved.response_example or resolved.response_schema:
-                    extracted = extract_json_from_response(result.content)
-                    try:
-                        parsed = json.loads(extracted)
-                    except json.JSONDecodeError as exc:
+                    def record_invalid_json(exc: json.JSONDecodeError) -> None:
                         logger.warning(
                             "HTTP agent '%s' returned invalid JSON: %s",
                             resolved.name,
@@ -515,53 +661,29 @@ def make_http_agent_handler(
                             "af.response.invalid_json",
                             {ATTR_FAULT_DOMAIN: FaultDomain.APP},
                         )
-                        return Response(
-                            content=json.dumps(
-                                {
-                                    "error": "Agent returned invalid JSON",
-                                    "raw_response": result.content,
-                                }
-                            ),
-                            status_code=500,
-                            media_type="application/json",
-                            headers={_SESSION_ID_HEADER: result.session_id},
+
+                    def record_schema_error(exc: jsonschema.ValidationError) -> None:
+                        logger.warning(
+                            "HTTP agent '%s' returned JSON that failed schema validation: %s",
+                            resolved.name,
+                            exc,
                         )
-                    if resolved.response_schema:
-                        try:
-                            jsonschema.validate(
-                                instance=parsed,
-                                schema=resolved.response_schema,
-                            )
-                        except jsonschema.ValidationError as exc:
-                            logger.warning(
-                                "HTTP agent '%s' returned JSON that failed schema validation: %s",
-                                resolved.name,
-                                exc,
-                            )
-                            span.set_attribute("af.agent.outcome", "error")
-                            span.set_error(
-                                "response schema validation failed", fault_domain=FaultDomain.APP
-                            )
-                            span.add_event(
-                                "af.response.schema_validation_failed",
-                                {ATTR_FAULT_DOMAIN: FaultDomain.APP},
-                            )
-                            return Response(
-                                content=json.dumps(
-                                    {
-                                        "error": "Agent response validation failed",
-                                        "details": exc.message,
-                                    }
-                                ),
-                                status_code=500,
-                                media_type="application/json",
-                                headers={_SESSION_ID_HEADER: result.session_id},
-                            )
-                    return Response(
-                        content=json.dumps(parsed, ensure_ascii=False),
-                        status_code=200,
-                        media_type="application/json",
-                        headers={_SESSION_ID_HEADER: result.session_id},
+                        span.set_attribute("af.agent.outcome", "error")
+                        span.set_error(
+                            "response schema validation failed",
+                            fault_domain=FaultDomain.APP,
+                        )
+                        span.add_event(
+                            "af.response.schema_validation_failed",
+                            {ATTR_FAULT_DOMAIN: FaultDomain.APP},
+                        )
+
+                    return _render_validated_http_response(
+                        resolved,
+                        result.content,
+                        result.session_id,
+                        on_invalid_json=record_invalid_json,
+                        on_schema_error=record_schema_error,
                     )
 
                 return Response(

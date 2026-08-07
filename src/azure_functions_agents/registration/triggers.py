@@ -5,11 +5,11 @@ from __future__ import annotations
 from typing import Any
 
 import azure.functions as func
-from pydantic import ValidationError
 
 from .._logger import logger
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
+from ..config.http_auth import resolve_http_trigger_auth
 from ..controller.readiness import SessionRuntimeBinding
 from . import _naming
 from ._auth import resolve_endpoint_auth_level
@@ -28,12 +28,6 @@ __all__ = [
 ]
 
 _function_name_from_source = _naming._function_name_from_source
-
-# Legacy flat ``auth_level`` values accepted on ``http_trigger``. These map 1:1 to
-# the ``function``/``admin``/``anonymous`` auth modes; the flat field never
-# supported ``entra`` (identity enforcement is only expressible via ``http_auth``).
-_LEGACY_AUTH_LEVELS = frozenset({"anonymous", "function", "admin"})
-
 
 def _register_builtin_agent(
     app: func.FunctionApp,
@@ -83,37 +77,19 @@ def _register_builtin_agent(
 def _resolve_http_trigger_auth(
     resolved: ResolvedAgent, trigger_params: dict[str, Any]
 ) -> EndpointAuthConfig:
-    """Resolve an ``http_trigger``'s auth policy into the shared ``EndpointAuthConfig``.
-
-    Accepts the nested ``http_auth`` object (preferred — the same model built-in
-    endpoints use, supporting ``function``/``admin``/``anonymous``/``entra`` and
-    the string shorthand) and the legacy flat ``auth_level`` string (deprecated).
-    When both are present ``http_auth`` wins and ``auth_level`` is ignored with a
-    warning. When neither is present the default (``function``) is used.
-    """
+    """Resolve custom HTTP auth and warn on deprecated flat configuration."""
     raw_auth = trigger_params.get("http_auth")
     raw_level = trigger_params.get("auth_level")
 
-    if raw_auth is not None:
-        if raw_level is not None:
-            logger.warning(
-                "Agent '%s' (%s): http_trigger sets both 'http_auth' and 'auth_level'; "
-                "'auth_level' is deprecated and ignored in favor of 'http_auth'. "
-                "See docs/front-matter-spec.md#http-trigger.",
-                resolved.name,
-                source_marker(resolved.source_file),
-            )
-        try:
-            return EndpointAuthConfig.model_validate(raw_auth)
-        except ValidationError as exc:
-            detail = exc.errors()[0].get("msg", "invalid value") if exc.errors() else "invalid value"
-            raise ValueError(
-                f"Agent '{resolved.name}' ({resolved.source_file}): "
-                f"invalid http_trigger 'http_auth': {detail}. "
-                "See docs/front-matter-spec.md#http-trigger."
-            ) from exc
-
-    if raw_level is not None:
+    if raw_auth is not None and raw_level is not None:
+        logger.warning(
+            "Agent '%s' (%s): http_trigger sets both 'http_auth' and 'auth_level'; "
+            "'auth_level' is deprecated and ignored in favor of 'http_auth'. "
+            "See docs/front-matter-spec.md#http-trigger.",
+            resolved.name,
+            source_marker(resolved.source_file),
+        )
+    elif raw_level is not None:
         logger.warning(
             "Agent '%s' (%s): http_trigger 'auth_level' is deprecated; use the nested "
             "'http_auth' object instead (http_auth: %s). See docs/front-matter-spec.md#http-trigger.",
@@ -121,17 +97,13 @@ def _resolve_http_trigger_auth(
             source_marker(resolved.source_file),
             str(raw_level).lower(),
         )
-        level_str = str(raw_level).lower()
-        if level_str not in _LEGACY_AUTH_LEVELS:
-            valid = ", ".join(sorted(_LEGACY_AUTH_LEVELS))
-            raise ValueError(
-                f"Agent '{resolved.name}' ({resolved.source_file}): "
-                f"invalid auth_level '{level_str}'. Must be one of: {valid}. "
-                "See docs/front-matter-spec.md#auth_level."
-            )
-        return EndpointAuthConfig.model_validate({"mode": level_str})
-
-    return EndpointAuthConfig()
+    try:
+        return resolve_http_trigger_auth(trigger_params)
+    except ValueError as exc:
+        raise ValueError(
+            f"Agent '{resolved.name}' ({resolved.source_file}): {exc}. "
+            "See docs/front-matter-spec.md#http-trigger."
+        ) from exc
 
 
 def _register_http_agent(
