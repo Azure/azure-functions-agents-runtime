@@ -18,7 +18,11 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
 )
 from azure_functions_agents.controller.http import ControllerResponse
-from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
+from azure_functions_agents.controller.readiness import (
+    SessionActivationNotFoundError,
+    SessionRuntimeBinding,
+    StateStoreBinding,
+)
 from azure_functions_agents.registration._handlers import (
     _controller_response_to_fastapi,
     _tool_error_count,
@@ -481,6 +485,39 @@ def test_http_handler_binds_the_authenticated_owner_for_sandbox_execution(
     assert captured["session_runtime"] is runtime
     assert captured["owner"] == FunctionAppPrincipal()
     assert captured["request"].session_id is None
+
+
+def test_custom_sandbox_http_maps_unknown_session_through_real_controller_response(
+    monkeypatch: Any,
+    tmp_path: Path,
+) -> None:
+    class MissingSessionBackend:
+        async def start_run(self, _request: Any) -> None:
+            raise SessionActivationNotFoundError("Session was not found for this owner.")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.create_execution_backend",
+        lambda **_kwargs: MissingSessionBackend(),
+    )
+    handler = make_http_agent_handler(
+        _resolved_agent(response_schema=None),
+        AgentCapabilities(),
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+    )
+
+    response = asyncio.run(
+        handler(
+            DummyRequest(
+                {"hello": "world"},
+                headers={"x-ms-session-id": "unknown-session"},
+            )
+        )
+    )
+
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "session_not_found"}
+    assert "owner" not in response.body.decode("utf-8")
 
 
 def test_http_handler_honors_respond_async_for_sandbox_submission(

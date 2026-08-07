@@ -13,6 +13,7 @@ from azure_functions_agents.controller.http import (
     submit_run,
 )
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
+from azure_functions_agents.controller.readiness import SessionActivationNotFoundError
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     RunContext,
@@ -212,6 +213,25 @@ async def test_evicted_idempotent_result_returns_gone() -> None:
     )
 
     assert response.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_unknown_session_submission_returns_sanitized_not_found() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationNotFoundError(
+        "Session was not found for this owner."
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello", session_id="unknown-session"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 404
+    assert response.body == {"error": "session_not_found"}
 
 
 @pytest.mark.asyncio

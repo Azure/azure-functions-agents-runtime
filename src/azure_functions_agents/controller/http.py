@@ -26,7 +26,11 @@ from ..session_state import (
 )
 from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
-from .readiness import SessionActivationGoneError, SessionActivationSetupTimeoutError
+from .readiness import (
+    SessionActivationGoneError,
+    SessionActivationNotFoundError,
+    SessionActivationSetupTimeoutError,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +115,8 @@ async def submit_run(
         return ControllerResponse(status_code=410, body={"error": "result_unavailable"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
+    except SessionActivationNotFoundError:
+        return ControllerResponse(status_code=404, body={"error": "session_not_found"})
 
     context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
     if respond_async:

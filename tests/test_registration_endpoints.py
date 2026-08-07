@@ -21,7 +21,11 @@ from azure_functions_agents.config.schema import (
     ToolsFilter,
 )
 from azure_functions_agents.controller.http import ControllerResponse
-from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
+from azure_functions_agents.controller.readiness import (
+    SessionActivationNotFoundError,
+    SessionRuntimeBinding,
+    StateStoreBinding,
+)
 from azure_functions_agents.execution.backend import RunContext, RunEvent, RunHandle, RunStatus
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
@@ -243,6 +247,46 @@ def test_builtin_chat_sync_uses_controller_session_header(
         "response": "answer",
         "tool_calls": [],
     }
+
+
+def test_builtin_sandbox_http_maps_unknown_session_through_real_controller_response(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class MissingSessionBackend:
+        async def start_run(self, _request: Any) -> None:
+            raise SessionActivationNotFoundError("Session was not found for this owner.")
+
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: MissingSessionBackend(),
+    )
+    register_builtin_endpoints(
+        app,
+        _resolved_agent(
+            name="Test Agent",
+            is_main=False,
+            builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            source_file=tmp_path / "test.agent.md",
+        ),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/chat"))
+
+    response = asyncio.run(
+        route["handler"](
+            DummyRequest(
+                {"prompt": "hello"},
+                headers={"x-ms-session-id": "unknown-session"},
+            )
+        )
+    )
+
+    assert response.status_code == 404
+    assert json.loads(response.body) == {"error": "session_not_found"}
+    assert "owner" not in response.body.decode("utf-8")
 
 
 def test_run_agent_stream_adopts_terminal_state_after_normal_exhaustion(
