@@ -127,8 +127,9 @@ behavior with a wildcard Allow after the explicit control-plane Denies. Set
 The platform re-evaluates HTTP redirects and already blocks IMDS and the
 wireserver. It does not inspect UDP DNS to Azure DNS; DNS-based exfiltration is
 a known platform limitation. `get_egress_decisions()` is a rolling sample, not
-a complete audit log. Egress is create-time-only in this version: credential
-rotation or policy change drains the session and starts a new one.
+a complete audit log. Egress is create-time-only in this version: policy or
+credential changes do **not** reach live sessions. Drain the session and start
+a new one to apply them.
 
 The runtime supports at most 500 combined host and full rules per sandbox
 policy. This is the default service limit; it intentionally does not depend on
@@ -161,8 +162,8 @@ secret and use an ACA-specific `secretRef` at a header value:
 `format` must be non-empty and contain the literal `{value}` placeholder. The
 runtime only references the secret; it never reads, writes, rotates, or deletes
 it. A missing secret or key fails sandbox creation. Rotation requires draining
-or refreshing live sessions; deletion is not credential revocation and there
-is no mid-stream update. Group-secret provisioning is a data-plane operation
+and replacing the session; deletion is not credential revocation and there is
+no mid-stream update. Group-secret provisioning is a data-plane operation
 performed with an SDK, deployment script, or `az rest`, not a runtime-created
 resource.
 

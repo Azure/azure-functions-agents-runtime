@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,6 +18,23 @@ from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
 from azure_functions_agents.harness.atomic_commit import AtomicCommitError, AtomicCommitStore
 from azure_functions_agents.harness.journal_writer import HarnessJournalError
 from azure_functions_agents.harness.sandbox_capabilities import HARNESS_CAPABILITIES
+
+
+def test_python_module_entrypoint_exposes_the_harness_run_argument() -> None:
+    source_root = Path(__file__).resolve().parents[1] / "src"
+    environment = {**os.environ, "PYTHONPATH": str(source_root)}
+
+    result = subprocess.run(
+        [sys.executable, "-m", "azure_functions_agents.harness", "--help"],
+        capture_output=True,
+        check=False,
+        cwd=source_root.parent,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "--run-id" in result.stdout
 
 
 @pytest.mark.asyncio

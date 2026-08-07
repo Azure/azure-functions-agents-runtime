@@ -336,3 +336,7 @@ def _install_cancellation_handler() -> None:
     if task is None:
         return
     loop.add_signal_handler(signal.SIGTERM, task.cancel)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

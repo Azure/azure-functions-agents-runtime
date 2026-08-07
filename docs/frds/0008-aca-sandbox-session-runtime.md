@@ -305,7 +305,7 @@ provenance.
 | 63 | Suspend restore/reclaim | Self-restore / callback / TTL-disable / reconciler | Periodic reconciler is required for crash-before-signal; reject self-restore/callback. Optional self-suspend request; re-arm #27 idle policy (xref 0008.8; cd0f619 resolved). | Agent | 2026-07-24 | 0008.12 |
 | 64 | Session retention | Fixed TTL / group-only / idle hybrid | Use group default < app `session_runtime.aca_sandbox.retention` (v1) < per-agent `.agent.md` (v2); no absolute creation TTL. | Human | 2026-07-24 | 0008.12 (xref 0008.10, 0008.4) |
 | 65 | Residency/provisioning (refines #30) | Microsoft / cross-tenant / customer IaC | Customer Bicep/ARM under customer creds; no Microsoft/cross-tenant ID. One group/app-env/region; customer tears down IaC, runtime deletes sessions. Preview quota; #29 validates 100. Pinned image/sample IaC; quickstart later. | Human | 2026-07-22 | 0008.4 |
-| 66 | Identity-less v1 sandbox (supersedes #56/#57) | App UAMI / sandbox UAMI / none | Historical choice; **superseded by §11**: an attached Sandbox Group managed identity is directly usable by guest code, while egress limits destinations rather than token acquisition. It is not the controller identity or user OBO. | Human | 2026-07-24 | 0008.9 (xref 0008.3, 0008.6) |
+| 66 | Historical sandbox identity posture (supersedes #56/#57) | App UAMI / sandbox UAMI / none | Historical no-identity choice; **superseded by §11**: an attached Sandbox Group managed identity is directly usable by guest code, while egress limits destinations rather than token acquisition. It is not the controller identity or user OBO. | Human | 2026-07-24 | 0008.9 (xref 0008.3, 0008.6) |
 | 67 | Loss vs crash (refines #9/#62) | Reuse always / tombstone always / distinguish | Loss/snapshot tombstones (410/new session). Intact-disk crash abandons run but retains sandbox/session at atomic checkpoint. Only future state-preserving rebind changes generation. | Human | 2026-07-24 | 0008.12 (xref 0008.8, 0008.2, 0008.5) |
 | 68 | Content capture (refines #48/#17) | Sandbox storage / plan Blob / local root | Controller captures local root plus `.python_packages`, hashes, and file-transfers; sandbox has no storage. Require Linux Python 3.13/3.14 ABI; #69 supersedes separate runtime environment. | Human | 2026-07-24 | 0008.6 (xref 0008.9) |
 | 69 | Stdlib bootstrap (refines #68/#17; supersedes baked MAF) | Bake runtime/MAF / stdlib bootstrap | Functions Python base plus stdlib bootstrap; captured `.python_packages` is one pip env for runtime/MAF/tools via `site.addsitedir`. No isolation; base ensures ABI. | Human | 2026-07-27 | 0008.6 (xref 0008.7) |
@@ -390,7 +390,7 @@ provenance.
 | 147 | Harness durability | Host stream / private run journal | Use the shared structured runner stream, strict journal, bounded private cwd, history/checkpoint commit, watchdog, and process-group cancellation. | Human | 2026-08-07 | U2 |
 | 148 | Harness capabilities | Bootstrap-only / exact map | Preserve base atomic-commit and watchdog capabilities; register bootstrap and delegation for one exact four-capability readiness map. | Human | 2026-08-07 | U2 |
 | 149 | Sandbox environment | Whole host environment / positive provenance | Forward only the built-in non-secret profile and explicit `SandboxEnv__*`; prefixed credentials are intentional guest exposure. | Human | 2026-08-07 | U2 |
-| 150 | Identity and headers | Identity-less / group identity | Guest credentials use the dedicated Sandbox Group identity; static proxy headers are default and optional `secretRef` remains customer-provisioned. | Human | 2026-08-07 | U2 |
+| 150 | Identity and headers | No group identity / group identity | Guest credentials use the dedicated Sandbox Group identity; static proxy headers are default and optional `secretRef` remains customer-provisioned. | Human | 2026-08-07 | U2 |
 | 151 | Egress lifecycle | Legacy inspection or mutable policy / Full create-time policy | Use explicit Deny plus Full inspection, ordered rules, capped policy, and drain/new session for policy or credential rotation. | Human | 2026-08-07 | U2 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
@@ -673,10 +673,10 @@ The reconciler uses `list_sandboxes(labels={...})` to compare platform truth wit
 Table records. Snapshots are not platform-garbage-collected, so the controller
 records IDs and prunes them with `list_snapshots()` / `delete_snapshot()`.
 
-Disk images are self-serve: `create_disk_image(base_image, name=)` /
-`begin_create_disk_image(...)` build bootable disks from any OCI image reference,
-and `SandboxClient.commit()` returns `DiskImage`. No MCR or cross-team base-image
-publishing dependency blocks P7.
+The SDK supports self-service disk-image operations, but this runtime does not
+build an OCI image or commit a disk. It defaults to the public
+`python-3.<minor>` disk and permits only a customer-selected disk name or ID
+override for reproducibility.
 
 ### Preview containment
 
@@ -772,7 +772,7 @@ class AgentExecutionBackend(Protocol):
 
 * One group per app/environment in customer subscription is hard v1 invariant; customer chooses one region and state account must be co-regional. Customer IaC/customer identity creates standing ARM/RBAC resources; customer owns standing-IaC teardown. Runtime has SandboxGroup Data Owner scoped to the one pre-provisioned group and creates/resumes/deletes session sandboxes only. Runtime never creates/updates group ARM resources, images, or role assignments.
 * v1 uses preview default group quotas; 100 concurrency must be tested, not assumed. Multi-region/DR/multiple groups are deferred. v1 ships composable documented sample IaC; customer-run composite quickstart is post-v1. Deploying scoped RBAC requires Owner or User Access Administrator.
-* Runtime project authors/publishes digest-pinned generic stdlib bootstrap. Customer IaC references/pins it. Controller captures script root plus `.python_packages`, computes SHA-256 `digest_kind=funcs_zip`, and transfers content; sandbox does not read storage. Standard image contains neither MAF nor runtime. Captured tree is one pip-resolved environment; require Functions Linux Python 3.13/3.14 and ABI-compatible image.
+* The runtime uses the public `python-3.<minor>` disk by default; a customer may supply a disk name or immutable ID override. The controller captures script root plus `.python_packages`, computes SHA-256 `digest_kind=funcs_zip`, and transfers content with the stdlib bootstrap; sandbox does not read storage. No custom OCI image is built by this runtime.
 
 ##### SDK corrections that are binding for consolidation
 
@@ -803,7 +803,7 @@ class AgentExecutionBackend(Protocol):
 5. **D17/D48 vs D68/69:** signed package, sandbox download of RFP artifact, and baked MAF/runtime are obsolete. Actual v1 content is controller-captured local script-root zip with vendored `.python_packages`; bootstrap is stdlib-only and sandbox has no storage identity. The parent’s later prose that still calls Path 1 “Run-From-Package deploy artifact” must be rewritten/qualified as historical provenance, not runtime source.
 6. **D18/D24 vs D54/D58/D59:** v1 neither mirrors checkpoints nor runs one-minute reconciliation. Use mandatory approximately-hourly backstop; one-minute/2-minute SLO is v2 mirror-only.
 7. **D32/D39 vs D51/D52 (further revised by #87):** KV per-binding signing and WORM binding log are removed. Do not provision KV signing key/WORM container; authoritative row + ETag generation + live manifest are the v1 trust design (Decision #87 dropped the scoped-RBAC/Shared-Key requirement from this list — `AzureWebJobsStorage` accepts either).
-8. **D56/D57 vs D66:** the earlier identity-less model is superseded by §11. Guest code uses an attached Sandbox Group managed identity through native credentials; it is neither the controller identity nor user OBO.
+8. **D56/D57 vs D66:** the earlier no-identity model is superseded by §11. Guest code uses an attached Sandbox Group managed identity through native credentials; it is neither the controller identity nor user OBO.
 9. **Group-lifecycle claims in 0008.4:** wording that treats the lifecycle behavior as group-only or says runtime cannot adjust it is invalidated by verified SDK: `set_lifecycle_policy` is per sandbox and auto-delete interval is readable. Retain group residency/IaC ownership, but express active-run disable/rearm and app retention as per-sandbox data-plane actions.
 10. **Transport lifecycle/file assumptions:** all references to `suspend()` must become `stop()`/`resume()`; file journal is first-class SDK file APIs, not exec scripts. Store `sandbox_id` and construct `SandboxClient` directly for recovery.
 11. **Unsafe defaults/polling:** no implementation may depend on SDK default Allow egress, unset traffic inspection, omitted disk source, `skip_egress_proxy`, 300s default create poll, or unobservable delete interval. Explicit safe fields and polling budget are gates.
@@ -905,7 +905,11 @@ Session content is immutable for its lifetime. A `(digest_kind,digest)` pair is 
 
 ##### Deferred Path 2 and escapes
 
-Committed-image priming is future only: at deploy time, controlled-egress priming sandbox extracts/installs, then commits an image; sessions boot its immutable disk ID with deny egress. It requires deploy identity create/exec/commit, image lifecycle/pruning, disk-id immutability verification, and base/protocol re-commit/conformance. Image deletion is deploy/customer-side (creator owns teardown); runtime reaper has no image rights. Platform child-before-parent prevents deletion while pinned. A custom image is rare IaC escape hatch, still MAF-conformant; non-MAF is a separate FRD. No `content_package` or `disk` authoring field exists in v1.
+Committed-image priming is future only: it would require a separate deploy-time
+design, image lifecycle, disk-id immutability verification, and conformance.
+The runtime reaper has no image rights. This version neither builds nor commits
+an OCI image; it uses the public Python disk or an explicit customer disk
+override. No `content_package` or `disk` authoring field exists in v1.
 
 ##### Harness contract
 
@@ -934,7 +938,7 @@ Reconciler is timer, not Durable Functions. It uses label-scoped `list_sandboxes
 
 #### 6. Egress, identity, secrets, and OBO
 
-At sandbox creation compile one per-sandbox, create-time-only policy from web-request allowed hosts, MCP URLs, model, telemetry, and reachable delegates. Emit explicit default Deny plus Full inspection; put exact host/path Transform/Deny rules before broad host allows, first-match-wins, and deploy-time lint against broad allow shadowing. Rotation or policy change drains the session and starts a new one; no mutable `set_egress_policy` path exists without a durable fence. The platform re-evaluates redirects and blocks IMDS/wireserver. Azure DNS UDP remains an uninspected platform gap.
+At sandbox creation compile one per-sandbox, create-time-only policy from web-request allowed hosts, MCP URLs, model, telemetry, and reachable delegates. Emit explicit default Deny plus Full inspection; put exact host/path Transform/Deny rules before broad host allows, first-match-wins, and deploy-time lint against broad allow shadowing. Policy or credential changes do **not** reach live sessions: drain and replace the session. No mutable `set_egress_policy` path exists without a durable fence. The platform re-evaluates redirects and blocks IMDS/wireserver. Azure DNS UDP remains an uninspected platform gap.
 
 An attached Sandbox Group managed identity is directly available through the platform identity endpoint. Native `DefaultAzureCredential` uses that identity for Foundry, Azure OpenAI, and authenticated MCP servers; it is not user OBO or the controller identity. Egress limits token-use destinations, not token acquisition. Use a dedicated least-privileged group identity and do not grant state-store or Sandbox Group management access unless workload code requires it. Static model/MCP headers are proxy transformations and never reach guest process/filesystem; optional group `secretRef` values remain customer-provisioned and runtime-referenced only.
 
@@ -1027,8 +1031,12 @@ session_runtime:
 * The resource ID is non-secret and uses existing environment substitution. Its region is derived from the resolved group; it is not authored.
 * No `max_run_seconds`, `region`, `disk`, or `content_package` field exists; reject dropped fields. Existing per-agent `timeout` is the sole run-duration knob. For a shared session sandbox, the entry/coordinator timeout controls the whole run; subagents are bounded by `min(subagent timeout, coordinator remaining)`.
 * The watchdog equals authored `timeout`; synchronous wait is `min(timeout, 180s)`. The in-lang-worker backend imposes no additional synchronous-wait cap of its own, but remains subject to the Azure Functions platform's own ~230-second HTTP timeout for synchronous responses regardless of backend ([service limits](https://learn.microsoft.com/azure/azure-functions/functions-scale#service-limits)); long-running work should use the existing async-accepted (`202`) pattern.
-* Disk is a customer-IaC-pinned generic MAF-conformant harness image. Content is controller-captured from script root at session start and delivered over the transport; it is not a Run-From-Package or Blob artifact. A custom image is IaC-plane only and must remain MAF-conformant.
-* Egress is derived from existing MCP URLs, `web_request.allowed_hosts`, model endpoint, telemetry, and future broker—not a new field. The sandbox’s outbound auth is injected by the external egress proxy (managed-identity Transform preferred; group Secrets/Key Vault/static-secret fallback); it must not use `DefaultAzureCredential`/IMDS. Local in-lang-worker behavior remains unchanged.
+* Disk defaults to public `python-3.<minor>` with an optional customer disk
+  name or immutable-ID override. Content is controller-captured from script
+  root at session start and delivered over the transport; it is not a
+  Run-From-Package or Blob artifact. This runtime does not build a custom OCI
+  image.
+* Egress is derived from existing MCP URLs, `web_request.allowed_hosts`, model endpoint, telemetry, and future broker—not a new field. Static and optional group-secret headers are injected by the egress proxy, while native `DefaultAzureCredential` in the sandbox uses the attached Sandbox Group identity. The runtime never attaches, removes, or strips that identity; the controller identity remains separate and is the sole state writer. Local in-lang-worker behavior remains unchanged.
 * Deployment relies on the Function App's own `AzureWebJobsStorage` as the trust anchor, in every environment (Decision #86): Table + container. There is no Key Vault signing-key validation.
 * Compatibility: the legacy `runtime:` frontmatter key remains ignored and is not
   reused for `aca_sandbox`.
