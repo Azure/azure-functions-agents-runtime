@@ -440,6 +440,12 @@ A built-in single-page chat interface served at `/agents/{slug}/` when `builtin_
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
 
+The chat UI manages the session id for you. The active id is shown beneath the status line with a **Copy** button, and you can resume an existing conversation by pasting its id into the **Session ID (optional)** field in the settings dialog. Pasted ids are validated client-side against the same rule the server enforces (`^[A-Za-z0-9._-]{1,128}$`) and persist in browser local storage per base URL and agent (each `/agents/{slug}/`), so a resumed conversation survives page reloads and new tabs. Use **New session** to clear the id and start fresh.
+
+The settings dialog also keeps a **Recent sessions** list (most-recent first, up to 8 per base URL and agent). Each turn adds or updates an entry, auto-titling it with your first message (renameable via **Rename**); pick one to fill the Session ID field and **Save** to resume it, or use **Remove** / **Clear recent** to prune the list. This list is a per-browser convenience stored in local storage — it is **not** synced across devices or browsers, and it does not include sessions created through the raw HTTP API from other clients.
+
+When you resume a session — whether by pasting an id or picking one from **Recent sessions** — the chat window reloads that conversation's earlier messages from the server (via a `GET /agents/{slug}/history` endpoint) so its history is visible right away, not just carried invisibly into your next turn. The replay is capped at the 200 most recent user and assistant messages; the UI shows a notice when older messages were omitted. Intermediate tool activity is not replayed. This requires the app's blob-backed [session storage](#session-storage) to be configured; without it — or on an older runtime that predates the history endpoint — the window simply starts empty and the resumed session still continues on your next message.
+
 ### HTTP Chat API
 
 POST endpoints for programmatic access:
