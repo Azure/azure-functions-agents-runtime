@@ -165,6 +165,47 @@ async def test_read_arm_group_uses_an_explicit_timeout_and_translates_transport_
 
 
 @pytest.mark.asyncio
+async def test_read_arm_group_sends_bearer_token_without_logging_it(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured_headers: dict[str, str] = {}
+
+    class _Response:
+        status = 200
+
+        async def __aenter__(self) -> _Response:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        async def json(self, *, content_type: object) -> dict[str, str]:
+            del content_type
+            return {"id": _GROUP_ID, "location": "westus2"}
+
+    class _Session:
+        async def __aenter__(self) -> _Session:
+            return self
+
+        async def __aexit__(self, *exc_info: object) -> None:
+            return None
+
+        def get(self, *args: object, **kwargs: object) -> _Response:
+            del args
+            headers = kwargs["headers"]
+            assert isinstance(headers, dict)
+            captured_headers.update(headers)
+            return _Response()
+
+    monkeypatch.setattr(aca_sdk.aiohttp, "ClientSession", lambda **_: _Session())
+    credential = FakeCredential()
+
+    await aca_sdk._read_arm_group(credential, _GROUP_ID)
+
+    assert captured_headers["Authorization"] == "Bearer test-token"
+
+
+@pytest.mark.asyncio
 async def test_create_passes_explicit_safe_values_and_returns_only_session_handle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -204,6 +245,93 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
     assert environment.group_client.add_port_calls == 0
 
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_reuses_a_stable_operation_label_after_ambiguous_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    request = _request(labels=labels)
+
+    first = await adapter.create(request, persisted_group=_binding())
+    second = await adapter.create(request, persisted_group=_binding())
+
+    assert first.identity.sandbox_id == second.identity.sandbox_id
+    assert len(environment.group_client.create_calls) == 1
+    assert environment.group_client.create_calls[0]["labels"]["operation_label"] == (
+        "op-session-123-1"
+    )
+    await first.close()
+    await second.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "mismatch",
+    ["app_hash", "owner_hash", "session_id", "unexpected_provider_label"],
+)
+async def test_create_rejects_stable_label_collision_with_foreign_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    mismatch: str,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    foreign = environment.add_sandbox("foreign")
+    foreign.labels = {
+        **labels.to_provider_labels(),
+        mismatch: f"other-{mismatch}",
+    }
+
+    with pytest.raises(SandboxProvisioningError, match="collision"):
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert environment.group_client.create_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_rejects_multiple_exact_stable_label_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    for sandbox_id in ("duplicate-a", "duplicate-b"):
+        environment.add_sandbox(sandbox_id).labels = labels.to_provider_labels()
+
+    with pytest.raises(SandboxProvisioningError, match="multiple"):
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
     await adapter.close()
 
 
@@ -451,6 +579,31 @@ async def test_adapter_projects_group_inventory_and_snapshot_deletion(
     assert environment.group_client.deleted_snapshot_ids == ["snapshot-1"]
     assert environment.group_client.deleted_sandbox_ids == [handle.identity.sandbox_id]
     await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_snapshot_delete_translates_sdk_failures_to_transport_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    rejection = HttpResponseError("service rejected the request")
+    rejection.status_code = 503
+
+    async def rejected_delete_snapshot(_: str, **__: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(
+        environment.group_client,
+        "begin_delete_snapshot",
+        rejected_delete_snapshot,
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="Snapshot delete failed"):
+        await adapter.delete_snapshot("snapshot-1")
+
     await adapter.close()
 
 

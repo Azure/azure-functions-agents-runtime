@@ -56,6 +56,10 @@ class RunRowNotFoundError(RowNotFoundError):
     """No run row exists for the given owner partition/session_id/run_id."""
 
 
+class OperationRowNotFoundError(RowNotFoundError):
+    """No durable operation row exists for the given owner partition/session."""
+
+
 class RowAlreadyExistsError(SessionStateStoreError):
     """A create-only write collided with a row that already exists."""
 
@@ -69,6 +73,10 @@ class ConcurrencyConflictError(SessionStateStoreError):
     and :class:`IdempotencyConflictError` for the two admission-specific
     conflicts that get their own typed, business-meaningful errors).
     """
+
+
+class StaleOperationTokenError(ConcurrencyConflictError):
+    """An operation mutation used a token superseded by another controller."""
 
 
 class GenerationConflictError(SessionStateStoreError):
@@ -131,12 +139,14 @@ __all__ = [
     "CorruptEntityError",
     "GenerationConflictError",
     "IdempotencyConflictError",
+    "OperationRowNotFoundError",
     "RowAlreadyExistsError",
     "RowNotFoundError",
     "RunRowNotFoundError",
     "SessionNotAdmissibleError",
     "SessionRowNotFoundError",
     "SessionStateStoreError",
+    "StaleOperationTokenError",
     "StateStoreConfigurationError",
     "StateStoreUnavailableError",
     "TerminalStateConflictError",

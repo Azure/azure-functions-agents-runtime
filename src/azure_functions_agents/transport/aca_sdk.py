@@ -78,6 +78,7 @@ _ARM_SCOPE = f"{_ARM_HOST}/.default"
 _ARM_API_VERSION = "2026-02-01-preview"
 _ARM_REQUEST_TIMEOUT_SECONDS = 30
 _PROVISIONING_ATTEMPT_LABEL = "provisioning_attempt_id"
+_OPERATION_LABEL = "operation_label"
 _CONTROL_OPERATION_TIMEOUT_SECONDS = 30
 _CONTROL_OPERATION_POLL_INTERVAL_SECONDS = 3
 _FAILED_CREATE_LOOKUP_ATTEMPTS = 3
@@ -247,18 +248,49 @@ class AcaSandboxAdapter:
         self._ensure_open()
         _verify_group_binding(persisted_group, self._group)
         egress = _compile_egress_policy(self._factories, request.egress_policy)
-        provisioning_attempt_id = uuid.uuid4().hex
+        provisioning_attempt_id = request.labels.operation_label or uuid.uuid4().hex
+        stable_attempt = request.labels.operation_label is not None
+        if stable_attempt:
+            existing = await self._find_failed_create_sandboxes(
+                provisioning_attempt_id,
+                label_key=_OPERATION_LABEL,
+                expected_labels=request.labels.to_provider_labels(),
+            )
+            if len(existing) == 1:
+                return await self._handle_for_sandbox_id(existing[0])
+            if len(existing) > 1:
+                raise SandboxProvisioningError(
+                    "A durable provisioning operation matches multiple sandboxes."
+                )
         labels = {
             **request.labels.to_provider_labels(),
-            _PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id,
+            (
+                _OPERATION_LABEL if stable_attempt else _PROVISIONING_ATTEMPT_LABEL
+            ): provisioning_attempt_id,
         }
-        poller = await self._begin_create_sandbox(
-            request,
-            labels=labels,
-            egress=egress,
-            provisioning_attempt_id=provisioning_attempt_id,
-        )
-        return await self._await_create_result(poller, provisioning_attempt_id)
+        try:
+            poller = await self._begin_create_sandbox(
+                request,
+                labels=labels,
+                egress=egress,
+                provisioning_attempt_id=provisioning_attempt_id,
+                cleanup_on_failure=not stable_attempt,
+            )
+            return await self._await_create_result(
+                poller,
+                provisioning_attempt_id,
+                cleanup_on_failure=not stable_attempt,
+            )
+        except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            if stable_attempt:
+                existing = await self._find_failed_create_sandboxes(
+                    provisioning_attempt_id,
+                    label_key=_OPERATION_LABEL,
+                    expected_labels=request.labels.to_provider_labels(),
+                )
+                if len(existing) == 1:
+                    return await self._handle_for_sandbox_id(existing[0])
+            raise
 
     async def _begin_create_sandbox(
         self,
@@ -267,6 +299,7 @@ class AcaSandboxAdapter:
         labels: dict[str, str],
         egress: EgressPolicy,
         provisioning_attempt_id: str,
+        cleanup_on_failure: bool,
     ) -> AsyncLROPoller[SandboxClient]:
         """Start the create call, reconciling any partial create on failure."""
 
@@ -298,41 +331,52 @@ class AcaSandboxAdapter:
             )
         except HttpResponseError as exc:
             if _is_capacity_rejection(exc):
-                await self._cleanup_failed_create(provisioning_attempt_id)
+                if cleanup_on_failure:
+                    await self._cleanup_failed_create(provisioning_attempt_id)
                 raise SandboxCapacityError(
                     "Sandbox Group capacity is currently unavailable."
                 ) from exc
             if _is_definitive_client_rejection(exc):
                 raise
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         except asyncio.CancelledError:
-            await self._cleanup_after_cancelled_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_after_cancelled_create(provisioning_attempt_id)
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         return poller
 
     async def _await_create_result(
-        self, poller: AsyncLROPoller[SandboxClient], provisioning_attempt_id: str
+        self,
+        poller: AsyncLROPoller[SandboxClient],
+        provisioning_attempt_id: str,
+        *,
+        cleanup_on_failure: bool,
     ) -> AcaSandboxHandle:
         """Await the poller, reconciling any partial create on failure."""
 
         try:
             sdk_client: SandboxClient = await poller.result()
         except asyncio.CancelledError:
-            await self._cleanup_after_cancelled_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_after_cancelled_create(provisioning_attempt_id)
             raise
         except HttpResponseError as exc:
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             if _is_capacity_rejection(exc):
                 raise SandboxCapacityError(
                     "Sandbox Group capacity is currently unavailable."
                 ) from exc
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
-            await self._cleanup_failed_create(provisioning_attempt_id)
+            if cleanup_on_failure:
+                await self._cleanup_failed_create(provisioning_attempt_id)
             raise
         return await self._make_handle(sdk_client)
 
@@ -432,12 +476,21 @@ class AcaSandboxAdapter:
         self._ensure_open()
         if not sandbox_id:
             raise SandboxProvisioningError("Sandbox ID must be non-empty.")
-        poller = await self._group_client.begin_delete_sandbox(
-            sandbox_id,
-            polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
-            polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
-        )
-        await poller.result()
+        try:
+            poller = await self._group_client.begin_delete_sandbox(
+                sandbox_id,
+                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+            )
+            await poller.result()
+        except ResourceNotFoundError as exc:
+            raise SandboxProvisioningError("Sandbox delete found no target.") from exc
+        except HttpResponseError as exc:
+            if exc.status_code == 404:
+                raise SandboxProvisioningError("Sandbox delete found no target.") from exc
+            raise SandboxProvisioningError("Sandbox delete failed.") from exc
+        except AzureError as exc:
+            raise SandboxProvisioningError("Sandbox delete failed.") from exc
 
     async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
         """Project snapshots so the reconciler can prune provider-retained storage."""
@@ -458,12 +511,21 @@ class AcaSandboxAdapter:
         self._ensure_open()
         if not snapshot_id:
             raise SandboxProvisioningError("Snapshot ID must be non-empty.")
-        poller = await self._group_client.begin_delete_snapshot(
-            snapshot_id,
-            polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
-            polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
-        )
-        await poller.result()
+        try:
+            poller = await self._group_client.begin_delete_snapshot(
+                snapshot_id,
+                polling_timeout=_CONTROL_OPERATION_TIMEOUT_SECONDS,
+                polling_interval=_CONTROL_OPERATION_POLL_INTERVAL_SECONDS,
+            )
+            await poller.result()
+        except ResourceNotFoundError as exc:
+            raise SandboxProvisioningError("Snapshot delete found no target.") from exc
+        except HttpResponseError as exc:
+            if exc.status_code == 404:
+                raise SandboxProvisioningError("Snapshot delete found no target.") from exc
+            raise SandboxProvisioningError("Snapshot delete failed.") from exc
+        except AzureError as exc:
+            raise SandboxProvisioningError("Snapshot delete failed.") from exc
 
     async def _attach_handle(
         self,
@@ -490,6 +552,18 @@ class AcaSandboxAdapter:
             sandbox_id=persisted.sandbox_id,
         )
         return await self._make_handle(sdk_client, expected_sandbox_id=persisted.sandbox_id)
+
+    async def _handle_for_sandbox_id(self, sandbox_id: str) -> AcaSandboxHandle:
+        self._ensure_open()
+        sdk_client = self._factories.sandbox_client(
+            self._factories.endpoint_for_region(self._group.region),
+            self._credential,
+            subscription_id=self._group.subscription_id,
+            resource_group=self._group.resource_group,
+            sandbox_group=self._group.group_name,
+            sandbox_id=sandbox_id,
+        )
+        return await self._make_handle(sdk_client, expected_sandbox_id=sandbox_id)
 
     async def _make_handle(
         self, sdk_client: SandboxClient, *, expected_sandbox_id: str | None = None
@@ -561,16 +635,29 @@ class AcaSandboxAdapter:
                 "Failed sandbox creation could not be reconciled for cleanup."
             ) from exc
 
-    async def _find_failed_create_sandboxes(self, provisioning_attempt_id: str) -> list[str]:
+    async def _find_failed_create_sandboxes(
+        self,
+        provisioning_attempt_id: str,
+        *,
+        label_key: str = _PROVISIONING_ATTEMPT_LABEL,
+        expected_labels: Mapping[str, str] | None = None,
+    ) -> list[str]:
         """List, with bounded retries, the sandbox(es) tagged by one create attempt."""
 
-        labels = {_PROVISIONING_ATTEMPT_LABEL: provisioning_attempt_id}
+        labels = {label_key: provisioning_attempt_id}
         for attempt in range(_FAILED_CREATE_LOOKUP_ATTEMPTS):
-            sandbox_ids = [
-                sandbox.id async for sandbox in self._group_client.list_sandboxes(labels=labels)
+            summaries = [
+                sandbox async for sandbox in self._group_client.list_sandboxes(labels=labels)
             ]
-            if sandbox_ids:
-                return sandbox_ids
+            if summaries:
+                if expected_labels is not None and any(
+                    dict(summary.labels) != dict(expected_labels)
+                    for summary in summaries
+                ):
+                    raise SandboxProvisioningError(
+                        "Provisioning label collision cannot be safely reused."
+                    )
+                return [summary.id for summary in summaries]
             if attempt + 1 < _FAILED_CREATE_LOOKUP_ATTEMPTS:
                 await _sleep(_FAILED_CREATE_LOOKUP_DELAY_SECONDS)
         return []

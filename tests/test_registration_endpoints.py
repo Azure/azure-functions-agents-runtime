@@ -27,6 +27,7 @@ from azure_functions_agents.controller.readiness import (
     StateStoreBinding,
 )
 from azure_functions_agents.execution.backend import RunContext, RunEvent, RunHandle, RunStatus
+from azure_functions_agents.execution.binding import AgentBinding
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _SAFE_SESSION_ID_PATTERN,
@@ -40,6 +41,7 @@ from azure_functions_agents.registration.endpoints import (
 )
 from azure_functions_agents.runner import _SESSION_ID_PATTERN
 from azure_functions_agents.session_state import AppIdentity
+from azure_functions_agents.transport.transport_models import SandboxProvisioningLabels
 from tests.doubles.fake_session_runtime import (
     DEFAULT_GROUP_RESOURCE_ID,
     FakeSandboxSessionHandle,
@@ -142,6 +144,7 @@ def test_sandbox_management_routes_share_one_submission_auth_policy(tmp_path: Pa
         slug="test-agent",
         auth=auth,
         session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
     )
 
     assert {(route["route"], tuple(route["methods"])) for route in app.routes} == {
@@ -153,6 +156,301 @@ def test_sandbox_management_routes_share_one_submission_auth_policy(tmp_path: Pa
     assert {route["auth_level"] for route in app.routes} == {func.AuthLevel.FUNCTION}
     events_route = next(route for route in app.routes if route["route"].endswith("/events"))
     assert get_type_hints(events_route["handler"])["return"] is Response
+
+
+@pytest.mark.asyncio
+async def test_sandbox_management_status_uses_the_registered_output_binding(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    binding = AgentBinding(agent_name="test-agent", output_validator=lambda _: None)
+    captured: dict[str, Any] = {}
+
+    def create_backend(**kwargs: Any) -> object:
+        captured["binding"] = kwargs["binding"]
+        return object()
+
+    async def status_response(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(status_code=200, body={"status": "failed"})
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        create_backend,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_status",
+        status_response,
+    )
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=binding,
+    )
+    route = next(route for route in app.routes if route["route"].endswith("{run_id}"))
+    request = DummyRequest({})
+    request.path_params = {"session_id": "session-1", "run_id": "run-1"}
+
+    response = await route["handler"](request)
+
+    assert response.status_code == 200
+    assert captured["binding"] is binding
+
+
+@pytest.mark.asyncio
+async def test_sandbox_events_preflight_returns_non_streaming_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    calls: list[str] = []
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def missing_status(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        calls.append("status")
+        return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+
+    def unexpected_stream(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("SSE must not start before a successful preflight")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_status",
+        missing_status,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.render_events",
+        unexpected_stream,
+    )
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/events"))
+    request = DummyRequest({})
+    request.path_params = {"session_id": "missing-session", "run_id": "missing-run"}
+
+    response = await route["handler"](request)
+
+    assert response.status_code == 404
+    assert calls == ["status"]
+
+
+@pytest.mark.asyncio
+async def test_sandbox_events_preflight_returns_the_gone_status_without_sse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def gone_status(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(
+            status_code=200,
+            body={
+                "status": "abandoned",
+                "error": {"code": "session_tombstoned"},
+            },
+        )
+
+    def unexpected_stream(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("gone sessions must not start SSE")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_status",
+        gone_status,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.render_events",
+        unexpected_stream,
+    )
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/events"))
+    request = DummyRequest({})
+    request.path_params = {"session_id": "gone-session", "run_id": "gone-run"}
+
+    response = await route["handler"](request)
+
+    assert response.status_code == 200
+    assert json.loads(response.body)["error"]["code"] == "session_tombstoned"
+
+
+@pytest.mark.asyncio
+async def test_sandbox_events_preflight_touches_once_before_starting_sse(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    touches = 0
+    rendered: dict[str, Any] = {}
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def touch(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal touches
+        touches += 1
+
+    async def ready_status(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(status_code=200, body={"status": "running"})
+
+    async def stream() -> Any:
+        if False:
+            yield ""
+
+    def render(*args: Any, **kwargs: Any) -> Any:
+        rendered["args"] = args
+        rendered["kwargs"] = kwargs
+        return stream()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.touch_session_activity",
+        touch,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_status",
+        ready_status,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.render_events",
+        render,
+    )
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/events"))
+    request = DummyRequest({}, headers={"Last-Event-ID": "3"})
+    request.path_params = {"session_id": "session-1", "run_id": "run-1"}
+
+    response = await route["handler"](request)
+
+    assert response.status_code == 200
+    assert touches == 1
+    assert rendered["kwargs"]["after_sequence"] == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("session_id", "run_id"),
+    [
+        ("", "run-1"),
+        ("session-1", ""),
+        ("s" * 129, "run-1"),
+        ("session-1", "r" * 129),
+        ("bad/session", "run-1"),
+        ("session-1", "bad/run"),
+    ],
+)
+async def test_sandbox_management_routes_reject_invalid_path_identifiers(
+    session_id: str,
+    run_id: str,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
+    )
+
+    for route in app.routes:
+        request = DummyRequest({})
+        request.path_params = {"session_id": session_id, "run_id": run_id}
+        response = await route["handler"](request)
+        assert response.status_code == 400
+        assert json.loads(response.body) == {
+            "error": "invalid session or run identifier"
+        }
+
+
+@pytest.mark.asyncio
+async def test_sandbox_management_routes_accept_canonical_boundary_identifiers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    session_id = "s" * 128
+    run_id = "r" * 128
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def status(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(status_code=200, body={"status": "running"})
+
+    async def result(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(status_code=200, body={"status": "running"})
+
+    async def cancel(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(status_code=200, body={"status": "canceled"})
+
+    async def stream() -> Any:
+        if False:
+            yield ""
+
+    async def touch(*_args: Any, **_kwargs: Any) -> None:
+        return None
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_status",
+        status,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_result",
+        result,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.cancel_controller_run",
+        cancel,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.render_events",
+        lambda *_args, **_kwargs: stream(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.touch_session_activity",
+        touch,
+    )
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
+    )
+
+    for route in app.routes:
+        request = DummyRequest({})
+        request.path_params = {"session_id": session_id, "run_id": run_id}
+        response = await route["handler"](request)
+        assert response.status_code == 200
 
 
 @pytest.mark.asyncio
@@ -190,6 +488,7 @@ async def test_builtin_stream_honors_respond_async(
             name="Test Agent",
             is_main=True,
             builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+            response_schema={"type": "object", "required": ["answer"]},
         ),
         session_id=None,
         idempotency_key=None,
@@ -201,6 +500,111 @@ async def test_builtin_stream_honors_respond_async(
 
     assert response.status_code == 202
     assert captured["respond_async"] is True
+    assert callable(captured["binding"].output_validator)
+
+
+@pytest.mark.asyncio
+async def test_builtin_aca_helpers_thread_the_resolved_output_validator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    captured: list[dict[str, Any]] = []
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        response_schema={"type": "object", "required": ["answer"]},
+    )
+
+    async def run_agent(*_args: Any, **kwargs: Any) -> object:
+        captured.append(kwargs)
+        return object()
+
+    def run_agent_stream(*_args: Any, **kwargs: Any) -> Any:
+        captured.append(kwargs)
+
+        async def stream() -> Any:
+            if False:
+                yield ""
+
+        return stream()
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_agent",
+        run_agent,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_agent_stream",
+        run_agent_stream,
+    )
+
+    await _run_builtin_agent(
+        "hello",
+        resolved=resolved,
+        capabilities=AgentCapabilities(),
+        session_id="session-1",
+        session_runtime=_runtime(tmp_path),
+        owner=None,
+    )
+    _run_builtin_agent_stream(
+        "hello",
+        resolved=resolved,
+        capabilities=AgentCapabilities(),
+        session_id="session-1",
+        session_runtime=_runtime(tmp_path),
+        owner=None,
+    )
+
+    assert len(captured) == 2
+    assert all(callable(kwargs["output_validator"]) for kwargs in captured)
+
+
+@pytest.mark.asyncio
+async def test_builtin_mcp_aca_path_threads_the_resolved_output_validator(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    captured: dict[str, Any] = {}
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+        response_schema={"type": "object", "required": ["answer"]},
+    )
+
+    async def run_agent(*_args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            session_id="session-1",
+            content='{"answer":"ok"}',
+            tool_calls=[],
+            delegate_error_count=0,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints._run_agent",
+        run_agent,
+    )
+    register_builtin_endpoints(
+        app,  # type: ignore[arg-type]
+        resolved,
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route.get("mcp_tool_trigger"))
+
+    response = await route["handler"](
+        json.dumps(
+            {
+                "arguments": {"prompt": "hello"},
+                "sessionId": "session-1",
+            }
+        )
+    )
+
+    assert json.loads(response)["session_id"] == "session-1"
+    assert callable(captured["output_validator"])
 
 
 def test_builtin_chat_sync_uses_controller_session_header(
@@ -208,10 +612,11 @@ def test_builtin_chat_sync_uses_controller_session_header(
     tmp_path: Path,
 ) -> None:
     app = FakeFunctionApp()
+    captured: dict[str, Any] = {}
 
     monkeypatch.setattr(
         "azure_functions_agents.registration.endpoints.create_execution_backend",
-        lambda **_kwargs: object(),
+        lambda **kwargs: captured.update(kwargs) or object(),
     )
 
     async def fake_submit_run(*_args: Any, **_kwargs: Any) -> ControllerResponse:
@@ -232,6 +637,7 @@ def test_builtin_chat_sync_uses_controller_session_header(
             is_main=False,
             builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
             source_file=tmp_path / "test.agent.md",
+            response_schema={"type": "object", "required": ["answer"]},
         ),
         AgentCapabilities(),
         session_runtime=_runtime(tmp_path),
@@ -247,6 +653,7 @@ def test_builtin_chat_sync_uses_controller_session_header(
         "response": "answer",
         "tool_calls": [],
     }
+    assert callable(captured["binding"].output_validator)
 
 
 def test_builtin_sandbox_http_maps_unknown_session_through_real_controller_response(
@@ -399,6 +806,7 @@ def _resolved_agent(
     builtin_endpoints: BuiltinEndpointsConfig,
     source_file: str | Path | None = None,
     input_schema: dict[str, Any] | None = None,
+    response_schema: dict[str, Any] | None = None,
     # Deliberately distinct from `name` above (S1): identity/telemetry call
     # sites must key off `slug`, never the mutable display `name` (FRD 0007
     # §4.3, "Display `name` is never an identity"). Defaulted so existing
@@ -424,7 +832,7 @@ def _resolved_agent(
         tool_filter=ToolsFilter(),
         sandbox_config=None,
         input_schema=input_schema,
-        response_schema=None,
+        response_schema=response_schema,
         response_example=None,
         metadata={},
         source_file=str(source) if source is not None else None,
@@ -971,6 +1379,28 @@ def test_extract_mcp_session_id_passes_through_safe_ids() -> None:
     """A caller-supplied id that already matches the safe pattern is kept as-is."""
     assert _extract_mcp_session_id({"sessionId": "session-456"}) == "session-456"
     assert _extract_mcp_session_id({"sessionId": "  trimmed.me_1  "}) == "trimmed.me_1"
+    assert _extract_mcp_session_id({"sessionId": "a" * 63}) == "a" * 63
+
+
+def test_extract_mcp_session_id_hashes_runner_safe_ids_that_exceed_label_limits() -> None:
+    raw = "a" * 64
+
+    sanitized = _extract_mcp_session_id({"sessionId": raw})
+
+    assert sanitized is not None
+    assert sanitized.startswith("mcp-")
+    assert len(sanitized) == 56
+    assert _SAFE_SESSION_ID_PATTERN.fullmatch(sanitized)
+    assert sanitized == _extract_mcp_session_id({"sessionId": raw})
+    assert sanitized != _extract_mcp_session_id({"sessionId": raw + "a"})
+    assert SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash="o1-" + ("a" * 52),
+        app_hash="a1-" + ("b" * 52),
+        session_id=sanitized,
+    ).session_id == sanitized
+    assert _extract_mcp_session_id({"sessionId": ".runner-safe"}) != ".runner-safe"
 
 
 def test_extract_mcp_session_id_returns_none_when_absent_or_blank() -> None:
@@ -1005,6 +1435,14 @@ def test_extract_mcp_session_id_sanitizes_transport_ids() -> None:
     assert sanitized == _extract_mcp_session_id({"sessionId": raw})
     # Different transport id -> different agent session.
     assert sanitized != _extract_mcp_session_id({"sessionId": raw + "-other"})
+    assert len(sanitized) <= 63
+    assert SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash="o1-" + ("a" * 52),
+        app_hash="a1-" + ("b" * 52),
+        session_id=sanitized,
+    ).session_id == sanitized
 
     # Over the 128-char length cap is also brought back into range.
     long_id = "a" * 200

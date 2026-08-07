@@ -340,7 +340,7 @@ def _render_validated_http_response(
     )
 
 
-def _output_validator(resolved: ResolvedAgent) -> Callable[[RunResult], RunError | None] | None:
+def build_output_validator(resolved: ResolvedAgent) -> Callable[[RunResult], RunError | None] | None:
     """Build the controller-side validator used before an ACA success is adopted."""
     if not resolved.response_example and not resolved.response_schema:
         return None
@@ -581,7 +581,7 @@ def make_http_agent_handler(
                     "workflow_enabled": workflows_enabled,
                     "workflow_durable_client": durable_client,
                     "agent_name": resolved.slug,
-                    "output_validator": _output_validator(resolved),
+                    "output_validator": build_output_validator(resolved),
                 }
                 runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
                 if runtime_kwargs is None:

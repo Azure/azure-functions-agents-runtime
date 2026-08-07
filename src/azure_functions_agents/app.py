@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -28,9 +28,10 @@ from .controller.package import build_expected_manifest_binding
 from .controller.readiness import (
     DEFAULT_AUTO_SUSPEND_SECONDS,
     DEFAULT_RECLAIM_IDLE_SECONDS,
+    ActivatedSession,
     SessionRuntimeBinding,
     StateStoreBinding,
-    lifecycle_policy_for_idle,
+    rearm_idle_lifecycle,
 )
 from .controller.reconciler import (
     ReconcilerConfig,
@@ -42,8 +43,10 @@ from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
 from .execution.backend import RunContext, RunStatus
+from .execution.binding import AgentBinding
 from .execution.run_control import RunControlError, SandboxRunControl
 from .journal_paths import heartbeat_path
+from .registration._handlers import build_output_validator
 from .registration.capabilities import build_capabilities, validate_subagent_tool_names
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import (
@@ -124,6 +127,7 @@ def _build_session_reconciler(
     *,
     cadence_seconds: int,
     max_pages: int | None = None,
+    terminal_bindings: Mapping[str, AgentBinding] | None = None,
 ) -> SessionReconciler:
     """Compose provider-neutral reconciliation callbacks at the app boundary."""
     run_control = SandboxRunControl()
@@ -207,8 +211,20 @@ def _build_session_reconciler(
 
     async def lifecycle_repair(session: DurableSessionRecord) -> bool:
         async def rearm(handle: SandboxSessionHandle) -> bool:
-            await handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
-            return True
+            current = await state_binding.store.get_session(
+                session.owner_partition,
+                session.session_id,
+            )
+            return await rearm_idle_lifecycle(
+                runtime,
+                ActivatedSession.create(
+                    handle=handle,
+                    session=current.record,
+                    etag=current.etag,
+                    partition=session.owner_partition,
+                    store=state_binding.store,
+                ),
+            )
 
         return await with_handle(session, rearm) is True
 
@@ -224,12 +240,15 @@ def _build_session_reconciler(
         heartbeat_reader=heartbeat_reader,
         death_verifier=death_verifier,
         lifecycle_repair=lifecycle_repair,
+        terminal_bindings=terminal_bindings,
     )
 
 
 def _build_session_runtime_binding(
     global_config: GlobalConfig,
     script_root: Path,
+    *,
+    terminal_bindings: Mapping[str, AgentBinding] | None = None,
 ) -> SessionRuntimeBinding | None:
     session_runtime = global_config.session_runtime
     if session_runtime is None or session_runtime.aca_sandbox is None:
@@ -268,6 +287,7 @@ def _build_session_runtime_binding(
             state_binding,
             provider,
             cadence_seconds=resolve_reconciler_cadence(),
+            terminal_bindings=terminal_bindings,
         )
         await reconciler.reconcile_session(partition, session_id)
 
@@ -280,6 +300,7 @@ def _build_session_runtime_binding(
             provider,
             cadence_seconds=resolve_reconciler_cadence(),
             max_pages=1,
+            terminal_bindings=terminal_bindings,
         )
         await reconciler.run_once()
 
@@ -381,7 +402,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     # immediately) unless `session_runtime` is configured at all; configuring
     # `aca_sandbox` always fails here (capability gate), never at request time.
     validate_session_runtime(global_config, resolved_agents)
-    session_runtime = _build_session_runtime_binding(global_config, resolved_root)
 
     # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---
     # Must run before any other cross-agent validation: `validate_subagent_references`
@@ -443,6 +463,18 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
 
     catalog: AgentCatalog = build_catalog(catalog_entries)
+    terminal_bindings = {
+        resolved.slug: AgentBinding(
+            agent_name=resolved.slug,
+            output_validator=build_output_validator(resolved),
+        )
+        for resolved in resolved_agents
+    }
+    session_runtime = _build_session_runtime_binding(
+        global_config,
+        resolved_root,
+        terminal_bindings=terminal_bindings,
+    )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:
@@ -538,6 +570,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 slug=resolved.slug,
                 auth=management_auth,
                 session_runtime=session_runtime,
+                binding=terminal_bindings[resolved.slug],
             )
 
         # Collect agent summary info
@@ -580,6 +613,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
                 state_binding,
                 provider,
                 cadence_seconds=cadence,
+                terminal_bindings=terminal_bindings,
             )
             await reconciler.run_once()
 

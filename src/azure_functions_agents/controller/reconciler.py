@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from .._logger import logger
-from ..execution.backend import RunStatus
+from ..execution.backend import RunError, RunStatus
+from ..execution.binding import AgentBinding
+from ..execution.run_control import RunJournalProtocolError
+from ..execution.terminal_output_validation import validate_terminal_output
 from ..sandbox_runtime_limits import (
     DEFAULT_RECONCILER_CADENCE_SECONDS,
     MAX_RECONCILER_CADENCE_SECONDS,
@@ -23,28 +26,36 @@ from ..session_state import (
     DurableIdempotencyRecord,
     DurableOwnerIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     IdempotencyRowKey,
+    OperationRowKey,
+    OperationRowNotFoundError,
     OwnerIdempotencyRowKey,
     OwnerPartition,
-    ReclaimFence,
     RunRowKey,
     RunRowNotFoundError,
+    SessionOperationFence,
+    SessionOperationTarget,
     SessionRead,
     SessionRowKey,
     SessionRowNotFoundError,
     SessionStateContractError,
     SessionStateStore,
     SessionStatus,
+    StaleOperationTokenError,
+    operation_correlation_label,
     parse_row_key,
     validate_session_id,
 )
 from ..transport.ports import SandboxSessionProvider
 from ..transport.transport_models import (
+    SandboxProvisioningError,
     SandboxSnapshot,
     SandboxSummary,
     SandboxTransportError,
 )
+from .journal_integrity import handle_journal_corruption, journal_corruption_status
 from .readiness import terminal_run
 
 _RECLAIMABLE_SESSION_STATUSES = frozenset({"creating", "ready", "quarantined"})
@@ -61,6 +72,7 @@ type _SessionKey = tuple[str, str]
 
 _SESSION_RECONCILIATION_ERRORS = (
     ConcurrencyConflictError,
+    OperationRowNotFoundError,
     RunRowNotFoundError,
     SessionRowNotFoundError,
     SandboxTransportError,
@@ -155,6 +167,7 @@ class SessionReconciler:
         heartbeat_reader: HeartbeatReader | None = None,
         death_verifier: DeathVerifier | None = None,
         lifecycle_repair: LifecycleRepair | None = None,
+        terminal_bindings: Mapping[str, AgentBinding] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._store = store
@@ -167,12 +180,51 @@ class SessionReconciler:
         self._heartbeat_reader = heartbeat_reader
         self._death_verifier = death_verifier
         self._lifecycle_repair = lifecycle_repair
+        self._terminal_bindings = terminal_bindings or {}
         self._now = now
+
+    async def _read_terminal(
+        self,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+    ) -> RunStatus | None:
+        if self._terminal_reader is None:
+            return None
+        try:
+            status = await self._terminal_reader(session, run)
+        except RunJournalProtocolError:
+            corrupted = await handle_journal_corruption(
+                self._store,
+                session.owner_partition,
+                session.session_id,
+                run.run_id,
+                updated_at=_utc(self._now()),
+            )
+            return journal_corruption_status(corrupted)
+        if status is None or status.state != "succeeded":
+            return status
+        binding = self._terminal_bindings.get(run.agent_slug)
+        if binding is None:
+            if not run.agent_slug:
+                return status
+            return RunStatus(
+                run_id=status.run_id,
+                session_id=status.session_id,
+                state="failed",
+                last_sequence=status.last_sequence,
+                result_available=False,
+                error=RunError(
+                    code="terminal_validation_unavailable",
+                    message="Terminal response validation is unavailable.",
+                    fault_domain="app",
+                ),
+            )
+        return validate_terminal_output(binding, status)
 
     async def run_once(self) -> ReconcileReport:
         """Perform one bounded, idempotent pass over Table records and platform inventory."""
         controller_now = _utc(self._now())
-        sessions, runs, idempotencies, service_time = await self._load_working_set()
+        sessions, runs, idempotencies, operations, service_time = await self._load_working_set()
         now = service_time or controller_now
         inventory = {
             item.sandbox_id: item
@@ -219,6 +271,7 @@ class SessionReconciler:
             sessions,
             runs,
             idempotencies,
+            operations,
             now,
             report,
         )
@@ -236,11 +289,13 @@ class SessionReconciler:
         tuple[DurableSessionRecord, ...],
         tuple[DurableRunRecord, ...],
         tuple[DurableIdempotencyRecord | DurableOwnerIdempotencyRecord, ...],
+        tuple[DurableSessionOperation, ...],
         datetime | None,
     ]:
         sessions: list[DurableSessionRecord] = []
         runs: list[DurableRunRecord] = []
         idempotencies: list[DurableIdempotencyRecord | DurableOwnerIdempotencyRecord] = []
+        operations: list[DurableSessionOperation] = []
         service_times: list[datetime] = []
         cursor = await self._store.get_reconciler_cursor(self._app_hash)
         continuation = None if cursor is None else cursor.continuation_token
@@ -262,6 +317,13 @@ class SessionReconciler:
                         continue
                     if run.owner_partition.app_hash == self._app_hash:
                         runs.append(run)
+                elif isinstance(row_key, OperationRowKey):
+                    try:
+                        operation = DurableSessionOperation.from_table_entity(entity)
+                    except SessionStateContractError:
+                        continue
+                    if operation.owner_partition.app_hash == self._app_hash:
+                        operations.append(operation)
                 elif isinstance(row_key, IdempotencyRowKey):
                     try:
                         idempotency = DurableIdempotencyRecord.from_table_entity(entity)
@@ -300,6 +362,7 @@ class SessionReconciler:
             tuple(sessions),
             tuple(runs),
             tuple(idempotencies),
+            tuple(operations),
             max(service_times, default=None),
         )
 
@@ -348,8 +411,16 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
+        if session.active_operation_id is not None:
+            return await self._resume_active_operation(
+                session,
+                run,
+                inventory,
+                now,
+                report,
+            )
         if session.status == "reclaiming":
-            return await self._resume_reclaim_fence(
+            return await self._migrate_legacy_reclaim_operation(
                 session,
                 run,
                 inventory,
@@ -367,11 +438,7 @@ class SessionReconciler:
         if session.sandbox_id not in inventory:
             return await self._fence_missing_active_backing(session, run, now, report)
 
-        terminal = (
-            None
-            if self._terminal_reader is None
-            else await self._terminal_reader(session, run)
-        )
+        terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
             outcome = await self._store.adopt_terminal_run(
                 terminal_run(
@@ -437,15 +504,10 @@ class SessionReconciler:
         if latest.record.sandbox_id is not None and latest.record.sandbox_id in fresh_inventory:
             return report
         current_run = await self._store.get_run(run.owner_partition, run.session_id, run.run_id)
-        fence = await self._store.acquire_reclaim_fence(
-            session=latest.record,
-            run=current_run.record,
-            token=uuid4().hex,
-            updated_at=now,
-        )
+        fence = await self._begin_reclaim_operation(latest.record, current_run.record, now)
         if fence is None:
             return report
-        return await self._continue_reclaim_fence(
+        return await self._continue_reclaim_operation(
             latest.record,
             current_run.record,
             fence,
@@ -484,15 +546,10 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
-        fence = await self._store.acquire_reclaim_fence(
-            session=session,
-            run=run,
-            token=uuid4().hex,
-            updated_at=now,
-        )
+        fence = await self._begin_reclaim_operation(session, run, now)
         if fence is None:
             return report
-        return await self._continue_reclaim_fence(
+        return await self._continue_reclaim_operation(
             session,
             run,
             fence,
@@ -501,7 +558,7 @@ class SessionReconciler:
             report=report,
         )
 
-    async def _resume_reclaim_fence(
+    async def _migrate_legacy_reclaim_operation(
         self,
         session: DurableSessionRecord,
         run: DurableRunRecord,
@@ -509,18 +566,15 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
-        token = session.reclaim_fence_token
-        if token is None:
-            return report
-        fence = await self._store.acquire_reclaim_fence(
-            session=session,
-            run=run,
-            token=token,
-            updated_at=now,
+        fence = await self._begin_reclaim_operation(
+            session,
+            run,
+            now,
+            allow_terminal=True,
         )
         if fence is None:
             return report
-        return await self._continue_reclaim_fence(
+        return await self._continue_reclaim_operation(
             session,
             run,
             fence,
@@ -529,59 +583,273 @@ class SessionReconciler:
             report=report,
         )
 
-    async def _continue_reclaim_fence(
+    async def _resume_active_operation(
         self,
         session: DurableSessionRecord,
         run: DurableRunRecord,
-        fence: ReclaimFence,
+        inventory: dict[str, SandboxSummary],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        fence = await self._store.takeover_expired_operation(
+            owner_partition=session.owner_partition,
+            session_id=session.session_id,
+            token=uuid4().hex,
+            updated_at=now,
+        )
+        if fence is None:
+            return report
+        if fence.kind in {"provision_submit", "submit_run"}:
+            return await self._resume_submit_operation(
+                session,
+                run,
+                fence,
+                inventory,
+                now,
+                report,
+            )
+        if fence.kind != "reclaim_backing" or fence.target.run_id != run.run_id:
+            return report
+        return await self._continue_reclaim_operation(
+            session,
+            run,
+            fence,
+            backing_present=fence.target.sandbox_id in inventory,
+            now=now,
+            report=report,
+        )
+
+    async def _resume_submit_operation(
+        self,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
+        inventory: dict[str, SandboxSummary],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        terminal = await self._read_terminal(session, run)
+        if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
+            adopted = await self._store.adopt_terminal_run(
+                terminal_run(
+                    run,
+                    status=terminal.state,
+                    result_available=terminal.result_available,
+                    reason=_terminal_reason(terminal),
+                    updated_at=now,
+                )
+            )
+            if self._lifecycle_repair is not None:
+                await self._lifecycle_repair(session)
+            return _replace_report(
+                report,
+                adopted_terminal_runs=report.adopted_terminal_runs
+                + int(adopted.run.status in TERMINAL_RUN_STATUSES),
+            )
+        if run.status in TERMINAL_RUN_STATUSES:
+            if self._lifecycle_repair is not None:
+                await self._lifecycle_repair(session)
+            return report
+        if now < run.expires_at + timedelta(seconds=self._config.safety_grace_seconds):
+            return report
+        if (
+            fence.kind == "provision_submit"
+            and (session.sandbox_id is None or fence.target.sandbox_id is None)
+        ):
+            return await self._expire_pre_pointer_provision(
+                session,
+                run,
+                fence,
+                inventory,
+                now,
+                report,
+            )
+        abandoned = await self._store.adopt_terminal_run(
+            terminal_run(
+                run,
+                status="abandoned",
+                result_available=False,
+                reason="submit_operation_expired",
+                updated_at=now,
+            )
+        )
+        if self._lifecycle_repair is not None:
+            await self._lifecycle_repair(session)
+        return _replace_report(
+            report,
+            abandoned_runs=report.abandoned_runs
+            + int(abandoned.run.status == "abandoned"),
+        )
+
+    async def _expire_pre_pointer_provision(
+        self,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
+        inventory: dict[str, SandboxSummary],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        matching = next(
+            (
+                summary
+                for summary in inventory.values()
+                if summary.labels.get("operation_label") == fence.correlation_label
+                and _matches_reclaim_target_label(summary, session)
+            ),
+            None,
+        )
+        if matching is not None:
+            await self._delete_reclaim_target(matching.sandbox_id, session)
+            report = _replace_report(
+                report,
+                deleted_sandboxes=report.deleted_sandboxes + 1,
+            )
+        tombstoned = _tombstoned_operation_session(
+            session,
+            tombstone_reason="provision_operation_expired",
+            updated_at=now,
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=tombstoned,
+            terminal_run=terminal_run(
+                run,
+                status="abandoned",
+                result_available=False,
+                reason="provision_operation_expired",
+                updated_at=now,
+            ),
+            updated_at=now,
+        )
+        return _replace_report(
+            report,
+            abandoned_runs=report.abandoned_runs + 1,
+            tombstoned_sessions=report.tombstoned_sessions + 1,
+        )
+
+    async def _begin_reclaim_operation(
+        self,
+        observed_session: DurableSessionRecord,
+        observed_run: DurableRunRecord,
+        now: datetime,
+        *,
+        allow_terminal: bool = False,
+    ) -> SessionOperationFence | None:
+        current_session = await self._store.get_session(
+            observed_session.owner_partition,
+            observed_session.session_id,
+        )
+        current_run = await self._store.get_run(
+            observed_run.owner_partition,
+            observed_run.session_id,
+            observed_run.run_id,
+        )
+        session = current_session.record
+        run = current_run.record
+        if (
+            session.active_operation_id is not None
+            or session.active_run_id != run.run_id
+            or session.sandbox_id is None
+            or session.generation != run.generation
+            or (not allow_terminal and run.status in TERMINAL_RUN_STATUSES)
+            or session.status not in {"running", "canceling", "reclaiming"}
+        ):
+            return None
+        token = session.reclaim_fence_token or uuid4().hex
+        operation = DurableSessionOperation.create(
+            owner_partition=session.owner_partition,
+            target=SessionOperationTarget.create(
+                session_id=session.session_id,
+                sandbox_id=session.sandbox_id,
+                generation=session.generation,
+                digest_kind=session.digest_kind,
+                digest=session.digest,
+                run_id=run.run_id,
+            ),
+            sequence=session.next_operation_sequence,
+            kind="reclaim_backing",
+            phase="reclaim_fenced",
+            state="active",
+            correlation_label=operation_correlation_label(
+                session.session_id,
+                session.next_operation_sequence,
+            ),
+            token=token,
+            attempt_count=0,
+            error_code=None,
+            lease_expires_at=now + timedelta(seconds=60),
+            next_attempt_at=None,
+            created_at=now,
+            updated_at=now,
+            finished_at=None,
+        )
+        prepared = _session_with_operation(
+            session,
+            operation=operation,
+            status="running" if session.status == "reclaiming" else session.status,
+            idle_policy_armed=False,
+            updated_at=now,
+        )
+        try:
+            return await self._store.begin_operation(
+                previous=session,
+                updated=prepared,
+                operation=operation,
+                etag=current_session.etag,
+            )
+        except ConcurrencyConflictError:
+            return None
+
+    async def _continue_reclaim_operation(
+        self,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
         *,
         backing_present: bool,
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
-        terminal = (
-            None
-            if self._terminal_reader is None or not backing_present
-            else await self._terminal_reader(session, run)
-        )
+        terminal = None if not backing_present else await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
-            outcome = await self._store.resolve_reclaim_fence_terminal(
+            return await self._complete_reclaim_operation(
                 fence=fence,
-                terminal_run=terminal_run(
+                terminal=terminal_run(
                     run,
                     status=terminal.state,
                     result_available=terminal.result_available,
                     reason=_terminal_reason(terminal),
                     updated_at=now,
                 ),
-            )
-            if outcome is None:
-                return report
-            if self._lifecycle_repair is not None:
-                await self._lifecycle_repair(session)
-            return _replace_report(
-                report,
-                adopted_terminal_runs=report.adopted_terminal_runs + int(outcome.slot_released),
+                now=now,
+                report=report,
             )
         current_session = await self._store.get_session(fence.owner_partition, fence.session_id)
-        if not fence.matches(current_session.record):
+        current_operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if not fence.matches(current_session.record, current_operation.record):
             return report
-        current_run = await self._store.get_run(fence.owner_partition, fence.session_id, fence.run_id)
+        target_run_id = fence.target.run_id
+        if target_run_id is None:
+            return report
+        current_run = await self._store.get_run(
+            fence.owner_partition,
+            fence.session_id,
+            target_run_id,
+        )
         if current_run.record.status in TERMINAL_RUN_STATUSES:
-            outcome = await self._store.resolve_reclaim_fence_terminal(
+            return await self._complete_reclaim_operation(
                 fence=fence,
-                terminal_run=current_run.record,
-            )
-            if outcome is None:
-                return report
-            if self._lifecycle_repair is not None:
-                await self._lifecycle_repair(session)
-            return _replace_report(
-                report,
-                adopted_terminal_runs=report.adopted_terminal_runs + int(outcome.slot_released),
+                terminal=current_run.record,
+                now=now,
+                report=report,
             )
         if not backing_present:
-            return await self._tombstone_reclaim_fence(
+            return await self._tombstone_reclaim_operation(
                 current_run.record,
                 fence,
                 now,
@@ -591,25 +859,99 @@ class SessionReconciler:
             fence.owner_partition,
             fence.session_id,
         )
-        if not fence.matches(before_delete.record):
+        before_delete_operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if not fence.matches(before_delete.record, before_delete_operation.record):
             return report
-        await self._provider.delete_sandbox(fence.sandbox_id)
-        return await self._tombstone_reclaim_fence(
+        current_inventory = {
+            item.sandbox_id: item
+            for item in await self._provider.list_sandboxes(
+                labels={"app_hash": self._app_hash}
+            )
+        }
+        summary = current_inventory.get(fence.target.sandbox_id or "")
+        if summary is None or not _matches_reclaim_target_label(summary, before_delete.record):
+            return report
+        fence = await self._store.advance_operation(
+            fence=fence,
+            phase="reclaim_deleting",
+            updated_at=now,
+        )
+        try:
+            await self._delete_reclaim_target(
+                fence.target.sandbox_id or "",
+                before_delete.record,
+            )
+        except SandboxTransportError:
+            await self._store.advance_operation(
+                fence=fence,
+                phase="reclaim_deleting",
+                error_code="sandbox_delete_failed",
+                updated_at=now,
+            )
+            raise
+        return await self._tombstone_reclaim_operation(
             current_run.record,
             fence,
             now,
             report,
         )
 
-    async def _tombstone_reclaim_fence(
+    async def _complete_reclaim_operation(
         self,
-        run: DurableRunRecord,
-        fence: ReclaimFence,
+        *,
+        fence: SessionOperationFence,
+        terminal: DurableRunRecord,
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
-        outcome = await self._store.tombstone_reclaim_fence(
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        released = _released_operation_session(current.record, updated_at=now)
+        await self._store.complete_operation(
             fence=fence,
+            updated_session=released,
+            terminal_run=terminal,
+            updated_at=now,
+        )
+        if self._lifecycle_repair is not None:
+            await self._lifecycle_repair(released)
+        return _replace_report(
+            report,
+            adopted_terminal_runs=report.adopted_terminal_runs + 1,
+        )
+
+    async def _tombstone_reclaim_operation(
+        self,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        snapshots = {
+            snapshot.snapshot_id: snapshot
+            for snapshot in await self._provider.list_snapshots()
+        }
+        for snapshot_id in current.record.snapshot_ids:
+            snapshot = snapshots.get(snapshot_id)
+            if snapshot is None or snapshot.sandbox_id != fence.target.sandbox_id:
+                continue
+            await self._provider.delete_snapshot(snapshot_id)
+            report = _replace_report(
+                report,
+                deleted_snapshots=report.deleted_snapshots + 1,
+            )
+        tombstoned = _tombstoned_operation_session(
+            current.record,
+            tombstone_reason="sandbox_backing_lost",
+            updated_at=now,
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=tombstoned,
             terminal_run=terminal_run(
                 run,
                 status="abandoned",
@@ -617,16 +959,31 @@ class SessionReconciler:
                 reason="sandbox_backing_lost",
                 updated_at=now,
             ),
-            tombstone_reason="sandbox_backing_lost",
             updated_at=now,
         )
-        if outcome is None:
-            return report
         return _replace_report(
             report,
             abandoned_runs=report.abandoned_runs + 1,
             tombstoned_sessions=report.tombstoned_sessions + 1,
         )
+
+    async def _delete_reclaim_target(
+        self,
+        sandbox_id: str,
+        session: DurableSessionRecord,
+    ) -> None:
+        try:
+            await self._provider.delete_sandbox(sandbox_id)
+        except SandboxProvisioningError:
+            inventory = {
+                item.sandbox_id: item
+                for item in await self._provider.list_sandboxes(
+                    labels={"app_hash": self._app_hash}
+                )
+            }
+            if sandbox_id not in inventory:
+                return
+            raise
 
     async def _reconcile_idle(
         self,
@@ -637,8 +994,29 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
+        if session.active_operation_id is not None:
+            operation = await self._store.get_operation(
+                session.owner_partition,
+                session.session_id,
+                session.active_operation_id,
+            )
+            if operation.record.kind == "reclaim_backing":
+                return await self._continue_idle_reclaim_operation(
+                    session,
+                    SessionOperationFence.create(operation.record),
+                    inventory,
+                    snapshots,
+                    now,
+                    report,
+                )
+            if (
+                operation.record.kind in {"provision_submit", "submit_run"}
+                and self._lifecycle_repair is not None
+            ):
+                await self._lifecycle_repair(session)
+            return report
         if session.status == "deleting":
-            return await self._finish_deleting(session, inventory, snapshots, now, report)
+            return await self._begin_reclaim(session, inventory, snapshots, now, report)
         if session.status == "creating":
             if _is_older_than(session.created_at, now, self._config.safety_grace_seconds):
                 return await self._begin_reclaim(session, inventory, snapshots, now, report)
@@ -649,16 +1027,7 @@ class SessionReconciler:
             and session.sandbox_id in inventory
             and self._lifecycle_repair is not None
         ):
-            repaired = await self._lifecycle_repair(session)
-            if repaired:
-                latest = await self._store.get_session(session.owner_partition, session.session_id)
-                if latest.record.status == "ready" and not latest.record.idle_policy_armed:
-                    session = _rearmed_session(latest, now)
-                    await self._store.update_session(
-                        previous=latest.record,
-                        updated=session,
-                        etag=latest.etag,
-                    )
+            await self._lifecycle_repair(session)
         if session.status in _STATUSES_REQUIRING_BACKING and (
             session.sandbox_id is None or session.sandbox_id not in inventory
         ):
@@ -681,15 +1050,8 @@ class SessionReconciler:
                 )
                 report = _replace_report(report, evicted_results=report.evicted_results + 1)
 
-        no_run_candidate = session.status == "ready" and not runs
         due = session.expires_at <= now - timedelta(seconds=self._config.safety_grace_seconds)
         if session.status in _RECLAIMABLE_SESSION_STATUSES and due:
-            return await self._begin_reclaim(session, inventory, snapshots, now, report)
-        if no_run_candidate and _is_older_than(
-            session.created_at,
-            now,
-            self._config.safety_grace_seconds,
-        ):
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
         return report
 
@@ -708,22 +1070,23 @@ class SessionReconciler:
         ):
             return report
         fresh_inventory = {
-            item.sandbox_id
+            item.sandbox_id: item
             for item in await self._provider.list_sandboxes(
                 labels={"app_hash": self._app_hash}
             )
         }
         if latest.record.sandbox_id is not None and latest.record.sandbox_id in fresh_inventory:
             return report
-        await self._store.tombstone_session(
-            previous=latest.record,
-            etag=latest.etag,
-            tombstone_reason="sandbox_backing_lost",
-            updated_at=now,
-        )
-        return _replace_report(
+        snapshots = {
+            snapshot.snapshot_id: snapshot
+            for snapshot in await self._provider.list_snapshots()
+        }
+        return await self._begin_reclaim(
+            latest.record,
+            fresh_inventory,
+            snapshots,
+            now,
             report,
-            tombstoned_sessions=report.tombstoned_sessions + 1,
         )
 
     async def _begin_reclaim(
@@ -737,22 +1100,129 @@ class SessionReconciler:
         latest = await self._store.get_session(session.owner_partition, session.session_id)
         if (
             latest.record.active_run_id is not None
+            or latest.record.active_operation_id is not None
             or latest.record.status != session.status
             or latest.record.sandbox_id != session.sandbox_id
             or latest.record.created_at != session.created_at
             or latest.record.expires_at != session.expires_at
         ):
             return report
-        deleting = _with_status(latest, "deleting", now)
+        sequence = latest.record.operation_sequence + 1
+        operation = DurableSessionOperation.create(
+            owner_partition=latest.record.owner_partition,
+            target=SessionOperationTarget.create(
+                session_id=latest.record.session_id,
+                sandbox_id=latest.record.sandbox_id,
+                generation=latest.record.generation,
+                digest_kind=latest.record.digest_kind,
+                digest=latest.record.digest,
+                run_id=None,
+            ),
+            sequence=sequence,
+            kind="reclaim_backing",
+            phase="reclaim_fenced",
+            state="active",
+            correlation_label=operation_correlation_label(latest.record.session_id, sequence),
+            token=uuid4().hex,
+            attempt_count=0,
+            error_code=None,
+            lease_expires_at=now + timedelta(seconds=60),
+            next_attempt_at=None,
+            created_at=now,
+            updated_at=now,
+            finished_at=None,
+        )
+        fenced = _session_with_operation(
+            latest.record,
+            operation=operation,
+            status=latest.record.status,
+            idle_policy_armed=False,
+            updated_at=now,
+        )
         try:
-            await self._store.update_session(
+            fence = await self._store.begin_operation(
                 previous=latest.record,
-                updated=deleting,
+                updated=fenced,
+                operation=operation,
                 etag=latest.etag,
             )
         except ConcurrencyConflictError:
             return report
-        return await self._finish_deleting(deleting, inventory, snapshots, now, report)
+        return await self._continue_idle_reclaim_operation(
+            fenced,
+            fence,
+            inventory,
+            snapshots,
+            now,
+            report,
+        )
+
+    async def _continue_idle_reclaim_operation(
+        self,
+        session: DurableSessionRecord,
+        fence: SessionOperationFence,
+        inventory: dict[str, SandboxSummary],
+        snapshots: dict[str, SandboxSnapshot],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if not fence.matches(current.record, operation.record):
+            return report
+        target_sandbox_id = fence.target.sandbox_id
+        if target_sandbox_id is not None and target_sandbox_id in inventory:
+            if not _matches_reclaim_target_label(
+                inventory[target_sandbox_id],
+                current.record,
+            ):
+                return report
+            fence = await self._store.advance_operation(
+                fence=fence,
+                phase="reclaim_deleting",
+                updated_at=now,
+            )
+            await self._delete_reclaim_target(
+                target_sandbox_id,
+                current.record,
+            )
+            report = _replace_report(
+                report,
+                deleted_sandboxes=report.deleted_sandboxes + 1,
+            )
+        fence = await self._store.advance_operation(
+            fence=fence,
+            phase="reclaim_snapshots",
+            updated_at=now,
+        )
+        for snapshot_id in current.record.snapshot_ids:
+            snapshot = snapshots.get(snapshot_id)
+            if snapshot is None or snapshot.sandbox_id != target_sandbox_id:
+                continue
+            await self._provider.delete_snapshot(snapshot_id)
+            report = _replace_report(
+                report,
+                deleted_snapshots=report.deleted_snapshots + 1,
+            )
+        latest = await self._store.get_session(fence.owner_partition, fence.session_id)
+        tombstoned = _tombstoned_operation_session(
+            latest.record,
+            tombstone_reason="reclaimed_idle_session",
+            updated_at=now,
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=tombstoned,
+            updated_at=now,
+        )
+        return _replace_report(
+            report,
+            tombstoned_sessions=report.tombstoned_sessions + 1,
+        )
 
     async def _finish_deleting(
         self,
@@ -809,6 +1279,10 @@ class SessionReconciler:
                 labels={"app_hash": self._app_hash}
             )
         }
+        snapshots = {
+            snapshot.snapshot_id: snapshot
+            for snapshot in await self._provider.list_snapshots()
+        }
         now = _utc(self._now())
         try:
             if session.active_run_id is None:
@@ -816,15 +1290,22 @@ class SessionReconciler:
                     session,
                     (),
                     inventory,
-                    {},
+                    snapshots,
                     now,
                     ReconcileReport(),
                 )
-            run_read = await self._store.get_run(
-                owner_partition,
-                session_id,
-                session.active_run_id,
-            )
+            try:
+                run_read = await self._store.get_run(
+                    owner_partition,
+                    session_id,
+                    session.active_run_id,
+                )
+            except RunRowNotFoundError:
+                return await self._recover_missing_submit_run(
+                    session,
+                    now,
+                    ReconcileReport(),
+                )
             return await self._reconcile_active(
                 session,
                 run_read.record,
@@ -840,6 +1321,67 @@ class SessionReconciler:
             )
             return ReconcileReport()
 
+    async def _recover_missing_submit_run(
+        self,
+        session: DurableSessionRecord,
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        if session.status in {"tombstoned", "deleting", "deleted"}:
+            return report
+        if session.active_operation_id is None:
+            return report
+        try:
+            operation = await self._store.get_operation(
+                session.owner_partition,
+                session.session_id,
+                session.active_operation_id,
+            )
+        except OperationRowNotFoundError:
+            return report
+        if operation.record.kind not in {"provision_submit", "submit_run"}:
+            return report
+        if (
+            operation.record.lease_expires_at is not None
+            and operation.record.lease_expires_at > now
+        ):
+            return report
+        if (
+            operation.record.kind == "provision_submit"
+            and (session.sandbox_id is None or operation.record.target.sandbox_id is None)
+        ):
+            tombstoned = _tombstoned_operation_session(
+                session,
+                tombstone_reason="provision_run_missing",
+                updated_at=now,
+            )
+            try:
+                await self._store.abort_operation(
+                    fence=SessionOperationFence.create(operation.record),
+                    updated_session=tombstoned,
+                    error_code="provision_run_missing",
+                    updated_at=now,
+                )
+            except StaleOperationTokenError:
+                return report
+            return _replace_report(
+                report,
+                tombstoned_sessions=report.tombstoned_sessions + 1,
+            )
+        released = _released_operation_session(session, updated_at=now)
+        try:
+            await self._store.abort_operation(
+                fence=SessionOperationFence.create(operation.record),
+                updated_session=released,
+                error_code="submit_run_missing",
+                updated_at=now,
+            )
+        except StaleOperationTokenError:
+            return report
+        if self._lifecycle_repair is not None:
+            await self._lifecycle_repair(released)
+        return report
+
     async def _reconcile_labeled_orphans(
         self,
         inventory: dict[str, SandboxSummary],
@@ -848,11 +1390,18 @@ class SessionReconciler:
         report: ReconcileReport,
     ) -> ReconcileReport:
         sessions_by_sandbox: dict[str, DurableSessionRecord | None] = {}
+        snapshots_by_sandbox: dict[str, list[SandboxSnapshot]] = {}
+        for snapshot in snapshots:
+            if snapshot.sandbox_id is not None:
+                snapshots_by_sandbox.setdefault(snapshot.sandbox_id, []).append(snapshot)
+        orphan_snapshot_sandboxes: set[str] = set()
         for sandbox in inventory.values():
             session, is_verifiable = await self._session_for_labeled_sandbox(sandbox)
             if not is_verifiable:
                 continue
             sessions_by_sandbox[sandbox.sandbox_id] = session
+            if await self._is_active_provision_sandbox(session, sandbox, now):
+                continue
             if (
                 session is None
                 or session.sandbox_id != sandbox.sandbox_id
@@ -861,14 +1410,46 @@ class SessionReconciler:
                 now,
                 self._config.safety_grace_seconds,
             ):
-                await self._provider.delete_sandbox(sandbox.sandbox_id)
-                report = _replace_report(
-                    report,
-                    deleted_sandboxes=report.deleted_sandboxes + 1,
-                )
+                orphan_snapshot_sandboxes.add(sandbox.sandbox_id)
+                snapshots_deleted = True
+                for snapshot in snapshots_by_sandbox.get(sandbox.sandbox_id, ()):
+                    try:
+                        deleted = await self._delete_verified_orphan_snapshot(
+                            snapshot,
+                            sandbox,
+                        )
+                    except SandboxTransportError:
+                        logger.warning(
+                            "Sandbox orphan snapshot cleanup deferred: sandbox_id=%s",
+                            sandbox.sandbox_id,
+                        )
+                        snapshots_deleted = False
+                        break
+                    if deleted:
+                        report = _replace_report(
+                            report,
+                            deleted_snapshots=report.deleted_snapshots + 1,
+                        )
+                if not snapshots_deleted:
+                    continue
+                try:
+                    deleted = await self._delete_verified_orphan_sandbox(sandbox)
+                except SandboxTransportError:
+                    logger.warning(
+                        "Sandbox orphan cleanup deferred: sandbox_id=%s",
+                        sandbox.sandbox_id,
+                    )
+                    continue
+                if deleted:
+                    report = _replace_report(
+                        report,
+                        deleted_sandboxes=report.deleted_sandboxes + 1,
+                    )
 
         for snapshot in snapshots:
             if snapshot.sandbox_id is None:
+                continue
+            if snapshot.sandbox_id in orphan_snapshot_sandboxes:
                 continue
             session = sessions_by_sandbox.get(snapshot.sandbox_id)
             if snapshot.sandbox_id not in sessions_by_sandbox:
@@ -888,11 +1469,86 @@ class SessionReconciler:
                 )
         return report
 
+    async def _delete_verified_orphan_snapshot(
+        self,
+        snapshot: SandboxSnapshot,
+        sandbox: SandboxSummary,
+    ) -> bool:
+        """Delete one snapshot only after its app-owned orphan backing was proven."""
+        if snapshot.sandbox_id != sandbox.sandbox_id:
+            return False
+        try:
+            await self._provider.delete_snapshot(snapshot.snapshot_id)
+            return True
+        except SandboxTransportError:
+            refreshed = await self._provider.list_snapshots()
+            if not any(
+                item.snapshot_id == snapshot.snapshot_id
+                and item.sandbox_id == sandbox.sandbox_id
+                for item in refreshed
+            ):
+                return False
+            raise
+
+    async def _delete_verified_orphan_sandbox(self, sandbox: SandboxSummary) -> bool:
+        """Treat a missing orphan as deleted only after re-proving the app-scoped target."""
+        try:
+            await self._provider.delete_sandbox(sandbox.sandbox_id)
+            return True
+        except SandboxTransportError:
+            refreshed = await self._provider.list_sandboxes(
+                labels={"app_hash": self._app_hash}
+            )
+            if not any(item.sandbox_id == sandbox.sandbox_id for item in refreshed):
+                return False
+            raise
+
+    async def _is_active_provision_sandbox(
+        self,
+        session: DurableSessionRecord | None,
+        sandbox: SandboxSummary,
+        now: datetime,
+    ) -> bool:
+        if session is None or session.active_operation_id is None:
+            return False
+        try:
+            operation = await self._store.get_operation(
+                session.owner_partition,
+                session.session_id,
+                session.active_operation_id,
+            )
+        except OperationRowNotFoundError:
+            return False
+        target = operation.record.target
+        matches = (
+            operation.record.kind == "provision_submit"
+            and operation.record.correlation_label
+            == sandbox.labels.get("operation_label")
+            and target.session_id == session.session_id
+            and target.generation == session.generation
+            and target.digest_kind == session.digest_kind
+            and target.digest == session.digest
+            and target.sandbox_id in {None, sandbox.sandbox_id}
+        )
+        if (
+            matches
+            and (
+                operation.record.state != "active"
+                or (
+                    operation.record.lease_expires_at is not None
+                    and operation.record.lease_expires_at <= now
+                )
+            )
+        ):
+            await self.reconcile_session(session.owner_partition, session.session_id)
+        return matches
+
     async def _prune_expired_records(
         self,
         sessions: tuple[DurableSessionRecord, ...],
         runs: tuple[DurableRunRecord, ...],
         idempotencies: tuple[DurableIdempotencyRecord | DurableOwnerIdempotencyRecord, ...],
+        operations: tuple[DurableSessionOperation, ...],
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
@@ -907,6 +1563,10 @@ class SessionReconciler:
                 if (
                     owner_idempotency_read is not None
                     and owner_idempotency_read.record.expires_at <= now
+                    and await self._owner_idempotency_is_prunable(
+                        owner_idempotency_read.record,
+                        now,
+                    )
                 ):
                     with suppress(ConcurrencyConflictError):
                         await self._store.delete_owner_idempotency(
@@ -924,6 +1584,33 @@ class SessionReconciler:
                     await self._store.delete_idempotency(
                         previous=idempotency_read.record,
                         etag=idempotency_read.etag,
+                    )
+
+        for operation in operations:
+            if (
+                operation.state == "active"
+                or operation.finished_at is None
+                or operation.finished_at
+                + timedelta(seconds=self._config.terminal_retention_seconds)
+                > now
+            ):
+                continue
+            operation_read = await self._store.get_operation(
+                operation.owner_partition,
+                operation.target.session_id,
+                operation.operation_id,
+            )
+            if (
+                operation_read.record.state != "active"
+                and operation_read.record.finished_at is not None
+                and operation_read.record.finished_at
+                + timedelta(seconds=self._config.terminal_retention_seconds)
+                <= now
+            ):
+                with suppress(ConcurrencyConflictError, OperationRowNotFoundError):
+                    await self._store.delete_operation(
+                        previous=operation_read.record,
+                        etag=operation_read.etag,
                     )
 
         sessions_by_key = {
@@ -992,6 +1679,47 @@ class SessionReconciler:
                         etag=session_read.etag,
                     )
         return report
+
+    async def _owner_idempotency_is_prunable(
+        self,
+        record: DurableOwnerIdempotencyRecord,
+        now: datetime,
+    ) -> bool:
+        try:
+            session = await self._store.get_session(
+                record.owner_partition,
+                record.session_id,
+            )
+        except SessionRowNotFoundError:
+            try:
+                await self._store.get_run(
+                    record.owner_partition,
+                    record.session_id,
+                    record.run_id,
+                )
+            except RunRowNotFoundError:
+                return True
+            return False
+        if (
+            session.record.active_operation_id is not None
+            or session.record.active_run_id is not None
+            or session.record.expires_at > now
+        ):
+            return False
+        try:
+            run = await self._store.get_run(
+                record.owner_partition,
+                record.session_id,
+                record.run_id,
+            )
+        except RunRowNotFoundError:
+            return session.record.status in {"tombstoned", "deleted"}
+        return (
+            run.record.status in TERMINAL_RUN_STATUSES
+            and run.record.updated_at
+            + timedelta(seconds=self._config.terminal_retention_seconds)
+            <= now
+        )
 
     async def _session_for_labeled_sandbox(
         self,
@@ -1079,14 +1807,19 @@ def _session_reference_filter(session: DurableSessionRecord) -> str:
     partition = _odata_literal(session.owner_partition.partition_key)
     session_id = _odata_literal(session.session_id)
     run_prefix = f"run:{session.session_id}:"
+    operation_prefix = f"operation:{session.session_id}:"
     idempotency_prefix = f"idem:{session.session_id}:"
     owner_idempotency_prefix = "owner-idem:"
     run_upper_bound = run_prefix + "~"
+    operation_upper_bound = operation_prefix + "~"
     idempotency_upper_bound = idempotency_prefix + "~"
     owner_idempotency_upper_bound = owner_idempotency_prefix + "~"
     return (
         f"PartitionKey eq {partition} and ("
         f"(RowKey ge {_odata_literal(run_prefix)} and RowKey lt {_odata_literal(run_upper_bound)})"
+        " or "
+        f"(RowKey ge {_odata_literal(operation_prefix)} and "
+        f"RowKey lt {_odata_literal(operation_upper_bound)})"
         " or "
         f"(RowKey ge {_odata_literal(idempotency_prefix)} and "
         f"RowKey lt {_odata_literal(idempotency_upper_bound)})"
@@ -1105,6 +1838,17 @@ def _active_run(
     if session.active_run_id is None:
         return None
     return next((run for run in runs if run.run_id == session.active_run_id), None)
+
+
+def _matches_reclaim_target_label(
+    summary: SandboxSummary,
+    session: DurableSessionRecord,
+) -> bool:
+    return (
+        summary.labels.get("app_hash") == session.owner_partition.app_hash
+        and summary.labels.get("session_id") == session.session_id
+        and summary.labels.get("owner_hash") == session.owner_partition.owner_hash
+    )
 
 
 def _with_status(read: SessionRead, status: SessionStatus, updated_at: datetime) -> DurableSessionRecord:
@@ -1129,14 +1873,20 @@ def _with_status(read: SessionRead, status: SessionStatus, updated_at: datetime)
         tombstone_reason=record.tombstone_reason,
         created_at=record.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=record.reclaim_fence_token,
+        active_operation_id=record.active_operation_id,
+        next_operation_sequence=record.next_operation_sequence,
     )
 
 
-def _rearmed_session(read: SessionRead, now: datetime) -> DurableSessionRecord:
-    record = read.record
-    idle_window = record.expires_at - record.last_activity_at
-    if idle_window <= timedelta(0):
-        idle_window = timedelta(seconds=300)
+def _session_with_operation(
+    record: DurableSessionRecord,
+    *,
+    operation: DurableSessionOperation,
+    status: SessionStatus,
+    idle_policy_armed: bool,
+    updated_at: datetime,
+) -> DurableSessionRecord:
     return DurableSessionRecord.create(
         owner_partition=record.owner_partition,
         session_id=record.session_id,
@@ -1145,10 +1895,41 @@ def _rearmed_session(read: SessionRead, now: datetime) -> DurableSessionRecord:
         digest_kind=record.digest_kind,
         digest=record.digest,
         protocol=record.protocol,
-        status="ready",
-        last_activity_at=now,
-        expires_at=now + idle_window,
-        idle_policy_armed=True,
+        status=status,
+        last_activity_at=record.last_activity_at,
+        expires_at=record.expires_at,
+        idle_policy_armed=idle_policy_armed,
+        active_run_id=record.active_run_id,
+        snapshot_ids=record.snapshot_ids,
+        region=record.region,
+        state_store_fingerprint=record.state_store_fingerprint,
+        quarantine_reason=record.quarantine_reason,
+        tombstone_reason=record.tombstone_reason,
+        created_at=record.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=operation.operation_id,
+        next_operation_sequence=operation.sequence + 1,
+    )
+
+
+def _released_operation_session(
+    record: DurableSessionRecord,
+    *,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=record.owner_partition,
+        session_id=record.session_id,
+        sandbox_id=record.sandbox_id,
+        generation=record.generation,
+        digest_kind=record.digest_kind,
+        digest=record.digest,
+        protocol=record.protocol,
+        status="quarantined" if record.status == "quarantined" else "ready",
+        last_activity_at=updated_at,
+        expires_at=record.expires_at,
+        idle_policy_armed=False,
         active_run_id=None,
         snapshot_ids=record.snapshot_ids,
         region=record.region,
@@ -1156,7 +1937,42 @@ def _rearmed_session(read: SessionRead, now: datetime) -> DurableSessionRecord:
         quarantine_reason=record.quarantine_reason,
         tombstone_reason=record.tombstone_reason,
         created_at=record.created_at,
-        updated_at=now,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=None,
+        next_operation_sequence=record.next_operation_sequence,
+    )
+
+
+def _tombstoned_operation_session(
+    record: DurableSessionRecord,
+    *,
+    tombstone_reason: str,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=record.owner_partition,
+        session_id=record.session_id,
+        sandbox_id=record.sandbox_id,
+        generation=record.generation,
+        digest_kind=record.digest_kind,
+        digest=record.digest,
+        protocol=record.protocol,
+        status="tombstoned",
+        last_activity_at=record.last_activity_at,
+        expires_at=record.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=record.snapshot_ids,
+        region=record.region,
+        state_store_fingerprint=record.state_store_fingerprint,
+        quarantine_reason=record.quarantine_reason,
+        tombstone_reason=tombstone_reason,
+        created_at=record.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=None,
+        next_operation_sequence=record.next_operation_sequence,
     )
 
 

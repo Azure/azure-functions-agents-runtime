@@ -35,6 +35,9 @@ class FakeBackend:
         self.started = False
         self.raise_on_start: Exception | None = None
         self.raise_on_get: Exception | None = None
+        self.raise_on_cancel: Exception | None = None
+        self.hang_on_get = False
+        self.hang_on_cancel = False
 
     async def start_run(self, request: StartRunRequest) -> RunHandle:
         del request
@@ -52,6 +55,8 @@ class FakeBackend:
         assert context.run_id == self.status.run_id
         if self.raise_on_get is not None:
             raise self.raise_on_get
+        if self.hang_on_get:
+            await asyncio.Event().wait()
         return self.status
 
     def read_events(self, context: RunContext, after_sequence: int) -> AsyncIterator[RunEvent]:
@@ -67,6 +72,10 @@ class FakeBackend:
 
     async def cancel_run(self, context: RunContext) -> RunStatus:
         assert context.run_id == self.status.run_id
+        if self.raise_on_cancel is not None:
+            raise self.raise_on_cancel
+        if self.hang_on_cancel:
+            await asyncio.Event().wait()
         self.cancelled = True
         self.status = RunStatus(
             run_id=self.status.run_id,
@@ -177,8 +186,88 @@ async def test_sync_wall_expiry_cancels_before_returning_typed_timeout() -> None
         "error": "run_deadline_exceeded",
         "reason": "run_deadline_exceeded",
         "retry_with": "respond-async",
+        "session_id": "session-1",
+        "run_id": "run-1",
     }
     assert response.headers["x-ms-session-id"] == "session-1"
+
+
+def _cleanup_budget() -> RequestBudget:
+    return RequestBudget(
+        wall_deadline=0.0,
+        setup=SetupBudget.create(deadline=1.0, clock=lambda: 0.0),
+        _clock=lambda: 0.0,
+    )
+
+
+@pytest.mark.asyncio
+async def test_sync_deadline_bounds_a_hanging_status_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.controller.budget.CLEANUP_HEADROOM_SECONDS",
+        0.01,
+    )
+    backend = FakeBackend(_status(state="running"))
+    backend.hang_on_get = True
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=False,
+        budget=_cleanup_budget(),
+    )
+
+    assert response.status_code == 504
+    assert isinstance(response.body, dict)
+    assert response.body["run_id"] == "run-1"
+    assert response.body["session_id"] == "session-1"
+    assert not backend.cancelled
+
+
+@pytest.mark.asyncio
+async def test_sync_deadline_bounds_a_hanging_cancel_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "azure_functions_agents.controller.budget.CLEANUP_HEADROOM_SECONDS",
+        0.01,
+    )
+    backend = FakeBackend(_status(state="running"))
+    backend.hang_on_cancel = True
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=False,
+        budget=_cleanup_budget(),
+    )
+
+    assert response.status_code == 504
+    assert isinstance(response.body, dict)
+    assert response.body["run_id"] == "run-1"
+    assert response.body["session_id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_sync_deadline_provider_cleanup_error_returns_typed_timeout() -> None:
+    backend = FakeBackend(_status(state="running"))
+    backend.raise_on_get = RuntimeError("provider unavailable")
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=False,
+        budget=_cleanup_budget(),
+    )
+
+    assert response.status_code == 504
+    assert isinstance(response.body, dict)
+    assert response.body["run_id"] == "run-1"
+    assert response.body["session_id"] == "session-1"
 
 
 @pytest.mark.asyncio
@@ -251,6 +340,46 @@ async def test_failed_status_remains_readable_when_no_result_is_available() -> N
     assert isinstance(status_response.body, dict)
     assert status_response.body["error"] == {"code": "run_failed", "message": "failed"}
     assert result_response.status_code == 410
+
+
+@pytest.mark.asyncio
+async def test_succeeded_unmaterialized_result_is_temporarily_unavailable() -> None:
+    backend = FakeBackend(_status(state="succeeded", result_available=True))
+    context = RunContext(run_id="run-1", session_id="session-1")
+
+    response = await read_result(backend, context)  # type: ignore[arg-type]
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "result_temporarily_unavailable",
+        "state": "succeeded",
+    }
+    assert response.headers == {"Retry-After": "2"}
+
+
+@pytest.mark.asyncio
+async def test_result_endpoint_recovers_when_a_success_result_materializes() -> None:
+    backend = FakeBackend(_status(state="succeeded", result_available=True))
+    context = RunContext(run_id="run-1", session_id="session-1")
+
+    first = await read_result(backend, context)  # type: ignore[arg-type]
+    backend.status = _status(
+        state="succeeded",
+        result_available=True,
+        result=RunResult(
+            content="answer",
+            content_intermediate=[],
+            tool_calls=[],
+            reasoning=None,
+            delegate_error_count=0,
+        ),
+    )
+    second = await read_result(backend, context)  # type: ignore[arg-type]
+
+    assert first.status_code == 503
+    assert second.status_code == 200
+    assert isinstance(second.body, dict)
+    assert second.body["result"]["response"] == "answer"
 
 
 @pytest.mark.asyncio

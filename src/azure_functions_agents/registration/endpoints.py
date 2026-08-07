@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
@@ -30,7 +31,7 @@ from ..controller.http import (
 )
 from ..controller.readiness import SessionRuntimeBinding, touch_session_activity
 from ..controller.streaming import render_events
-from ..execution.backend import RunContext, StartRunRequest
+from ..execution.backend import SESSION_TOMBSTONED_ERROR_CODE, RunContext, StartRunRequest
 from ..execution.binding import AgentBinding
 from ..execution.compat import (
     render_sse_event,
@@ -39,7 +40,15 @@ from ..execution.compat import (
 )
 from ..execution.factory import create_execution_backend
 from ..execution.setup_budget import synchronous_wait_seconds
-from ..session_state import FunctionAppPrincipal, OwnerPrincipal, resolve_owner_context
+from ..session_state import (
+    FunctionAppPrincipal,
+    OwnerPrincipal,
+    SessionStateContractError,
+    encode_label_safe_digest,
+    resolve_owner_context,
+    validate_run_id,
+    validate_session_id,
+)
 from ._auth import (
     AuthError,
     authorize_entra_request,
@@ -51,6 +60,7 @@ from ._handlers import (
     _controller_session_id,
     _session_runtime_kwargs,
     _set_run_result_attributes,
+    build_output_validator,
     build_sandbox_tools_for_session,
 )
 from ._naming import _function_name_from_source, _safe_function_name
@@ -137,6 +147,9 @@ def _run_agent_stream(
 # dependency-free module) so this layer stays valid without eagerly importing
 # the heavy ``runner`` module.
 _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
+_PROVIDER_LABEL_VALUE_PATTERN = re.compile(
+    r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
+)
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -144,7 +157,11 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     value = value.strip()
-    if _SAFE_SESSION_ID_PATTERN.match(value):
+    if (
+        len(value) <= 63
+        and _SAFE_SESSION_ID_PATTERN.match(value)
+        and _PROVIDER_LABEL_VALUE_PATTERN.fullmatch(value)
+    ):
         return value
     # The MCP extension mints its own transport session id (e.g. the
     # streamable-HTTP ``Mcp-Session-Id``), whose format we do not control and
@@ -152,8 +169,8 @@ def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
     # cap. Map any such value deterministically into the safe space so the same
     # MCP session still resolves to the same agent session (conversation
     # continuity) without tripping the runner's validation.
-    digest = hashlib.sha256(value.encode("utf-8")).hexdigest()
-    return f"mcp-{digest}"
+    digest = hashlib.sha256(value.encode("utf-8")).digest()
+    return f"mcp-{encode_label_safe_digest(digest)}"
 
 
 def _index_path() -> Path:
@@ -266,6 +283,7 @@ async def _run_builtin_agent(
         "agent_name": resolved.slug,
         "subagents": resolved.subagents,
         "catalog": catalog,
+        "output_validator": build_output_validator(resolved),
     }
     runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
     if runtime_kwargs is None:
@@ -313,6 +331,7 @@ def _run_builtin_agent_stream(
         "display_name": resolved.name,
         "subagents": resolved.subagents,
         "catalog": catalog,
+        "output_validator": build_output_validator(resolved),
     }
     runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
     if runtime_kwargs is None:
@@ -434,7 +453,10 @@ def _register_http_chat(
                 if session_runtime is not None:
                     budget = RequestBudget.start(authored_timeout=resolved.timeout)
                     backend = create_execution_backend(
-                        binding=AgentBinding(agent_name=resolved.slug),
+                        binding=AgentBinding(
+                            agent_name=resolved.slug,
+                            output_validator=build_output_validator(resolved),
+                        ),
                         session_runtime=session_runtime,
                         owner=owner,
                         setup_budget=budget.setup,
@@ -542,7 +564,10 @@ async def _start_aca_stream(
     """Accept a built-in stream through the shared LRO path, then render journal SSE."""
     budget = RequestBudget.start(authored_timeout=resolved.timeout)
     backend = create_execution_backend(
-        binding=AgentBinding(agent_name=resolved.slug),
+        binding=AgentBinding(
+            agent_name=resolved.slug,
+            output_validator=build_output_validator(resolved),
+        ),
         session_runtime=session_runtime,
         owner=owner,
         setup_budget=budget.setup,
@@ -934,6 +959,7 @@ def register_sandbox_management_endpoints(
     slug: str,
     auth: EndpointAuthConfig,
     session_runtime: SessionRuntimeBinding,
+    binding: AgentBinding,
 ) -> None:
     """Register one authenticated status/result/events/cancel set for an ACA agent."""
     base_function_name = _safe_function_name(f"agent_{slug}_sandbox_management")
@@ -950,11 +976,17 @@ def register_sandbox_management_endpoints(
         run_id = path_params.get("run_id")
         if not isinstance(session_id, str) or not isinstance(run_id, str):
             return _json_error("missing session or run identifier", status_code=400)
-        return owner, RunContext(session_id=session_id, run_id=run_id)
+        try:
+            return owner, RunContext(
+                session_id=validate_session_id(session_id),
+                run_id=validate_run_id(run_id),
+            )
+        except (SessionStateContractError, ValueError):
+            return _json_error("invalid session or run identifier", status_code=400)
 
     def backend_for(owner: OwnerPrincipal | None) -> Any:
         return create_execution_backend(
-            binding=AgentBinding(agent_name=slug),
+            binding=binding,
             session_runtime=session_runtime,
             owner=owner,
         )
@@ -996,10 +1028,21 @@ def register_sandbox_management_endpoints(
             after_sequence = parse_last_event_id(req.headers)
         except ValueError as exc:
             return _json_error(str(exc), status_code=400)
+        backend = backend_for(owner)
+        preflight = await read_status(backend, context)
+        if preflight.status_code != 200:
+            return _controller_response_to_fastapi(preflight)
+        body = preflight.body
+        error = body.get("error") if isinstance(body, dict) else None
+        if (
+            isinstance(error, dict)
+            and error.get("code") == SESSION_TOMBSTONED_ERROR_CODE
+        ):
+            return _controller_response_to_fastapi(preflight)
         await touch_for(owner, context)()
         return StreamingResponse(
             render_events(
-                backend_for(owner),
+                backend,
                 context,
                 after_sequence=after_sequence,
             ),

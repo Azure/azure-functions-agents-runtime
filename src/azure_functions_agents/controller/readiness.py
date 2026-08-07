@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
+from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from .._logger import logger
 from .._observability import current_span
+from ..config import DEFAULT_TIMEOUT
 from ..journal_paths import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
@@ -21,18 +23,37 @@ from ..journal_paths import (
 )
 from ..sandbox_runtime_limits import lifecycle_auto_delete_seconds
 from ..session_state import (
+    ActiveRunConflictError,
     AppIdentity,
+    ConcurrencyConflictError,
+    DurableOperationPhase,
+    DurableOwnerIdempotencyRecord,
     DurableRunRecord,
     DurableRunStatus,
+    DurableSessionOperation,
     DurableSessionRecord,
+    OperationRowNotFoundError,
     OwnerContext,
     OwnerPartition,
+    ProvisionSubmitOutcome,
+    ProvisionSubmitRecords,
+    RunRowNotFoundError,
+    SessionOperationFence,
+    SessionOperationTarget,
+    SessionRead,
     SessionStateStore,
+    StaleOperationTokenError,
+    operation_correlation_label,
+    operation_id_for_sequence,
+    owner_idempotency_expiry,
     owner_partition,
     verify_app_hash,
     verify_owner_hash,
 )
-from ..session_state.errors import SessionRowNotFoundError
+from ..session_state.errors import (
+    SessionNotAdmissibleError,
+    SessionRowNotFoundError,
+)
 from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.manifest import ExpectedSandboxManifestBinding, SandboxManifestMismatchError
 from ..transport.ports import SandboxSessionHandle, SandboxSessionProvider
@@ -46,6 +67,7 @@ from ..transport.transport_models import (
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
 )
+from .idempotency import IdempotencyAttempt
 from .package import (
     CapturedContentPackage,
     ContentBindingMismatchError,
@@ -60,6 +82,9 @@ from .package import (
 DEFAULT_AUTO_SUSPEND_SECONDS = 300
 DEFAULT_RECLAIM_IDLE_SECONDS = 86_400
 DEFAULT_PROTOCOL_VERSION = "1"
+_TOUCHABLE_SESSION_STATUSES = frozenset(
+    {"ready", "running", "canceling", "suspending", "suspended", "resuming"}
+)
 QUARANTINE_REASONS: frozenset[str] = frozenset(
     {
         "sandbox_manifest_mismatch",
@@ -376,6 +401,14 @@ class ActivatedSession:
         )
 
 
+@dataclass(frozen=True, slots=True)
+class ProvisionedSubmission:
+    """A reserved first run and, unless replayed, its provisioned live sandbox."""
+
+    outcome: ProvisionSubmitOutcome
+    activated: ActivatedSession | None
+
+
 async def activate_session(
     runtime: SessionRuntimeBinding,
     owner: OwnerContext,
@@ -534,6 +567,9 @@ def session_with_admitted_run(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
     )
 
 
@@ -557,6 +593,7 @@ def terminal_run(
         expires_at=run.expires_at,
         created_at=run.created_at,
         updated_at=updated_at,
+        agent_slug=run.agent_slug,
     )
 
 
@@ -574,6 +611,8 @@ async def disarm_idle_lifecycle(
     activated: ActivatedSession,
 ) -> ActivatedSession:
     """Durably coordinate an idle-policy disable before a run can be admitted."""
+    if activated.session.active_operation_id is not None:
+        raise SessionNotAdmissibleError("session has an active durable controller operation")
     now = datetime.now(UTC)
     disarmed_session = _session_with_idle_policy_disarmed(activated.session, updated_at=now)
     etag = await activated.store.update_session(
@@ -608,35 +647,46 @@ async def disarm_idle_lifecycle(
 async def rearm_idle_lifecycle(
     runtime: SessionRuntimeBinding,
     activated: ActivatedSession,
-) -> None:
-    """Restore the controller-owned complete policy and durable idle accounting."""
-    await restore_idle_lifecycle_if_unowned(runtime, activated)
-
-
-async def restore_idle_lifecycle_if_unowned(
-    runtime: SessionRuntimeBinding,
-    activated: ActivatedSession,
 ) -> bool:
-    """Re-arm idle policy only after a fresh read proves no run holds the slot."""
-    current = await activated.store.get_session(activated.partition, activated.session.session_id)
+    """Finalize an active submit operation or repair a legacy false lifecycle marker."""
+    current = await activated.store.get_session(
+        activated.partition,
+        activated.session.session_id,
+    )
+    if current.record.active_operation_id is not None:
+        try:
+            operation = await activated.store.get_operation(
+                activated.partition,
+                activated.session.session_id,
+                current.record.active_operation_id,
+            )
+        except OperationRowNotFoundError:
+            return False
+        if (
+            operation.record.kind not in {"provision_submit", "submit_run"}
+            or operation.record.target.run_id is None
+        ):
+            return False
+        return await finalize_submit_operation(
+            runtime,
+            activated,
+            expected_run_id=operation.record.target.run_id,
+        )
     if current.record.active_run_id is not None or current.record.status in {
         "deleting",
         "deleted",
         "tombstoned",
     }:
         return False
-    await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
-    updated = _session_with_idle_policy_armed(
-        current.record,
-        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
-        updated_at=datetime.now(UTC),
-    )
-    await activated.store.update_session(
-        previous=current.record,
-        updated=updated,
-        etag=current.etag,
-    )
-    return True
+    return await _repair_legacy_idle_lifecycle(runtime, activated, current.record, current.etag)
+
+
+async def restore_idle_lifecycle_if_unowned(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+) -> bool:
+    """Restore idle policy only when no run or different operation owns the session."""
+    return await rearm_idle_lifecycle(runtime, activated)
 
 
 async def touch_session_activity(
@@ -647,34 +697,57 @@ async def touch_session_activity(
     """Reset one authorized session's idle wall clock for a management request."""
     state_binding = await runtime.get_state_store()
     partition = owner_partition(owner)
-    current = await state_binding.store.get_session(partition, session_id)
-    now = datetime.now(UTC)
-    updated = DurableSessionRecord.create(
-        owner_partition=current.record.owner_partition,
-        session_id=current.record.session_id,
-        sandbox_id=current.record.sandbox_id,
-        generation=current.record.generation,
-        digest_kind=current.record.digest_kind,
-        digest=current.record.digest,
-        protocol=current.record.protocol,
-        status=current.record.status,
-        last_activity_at=now,
-        expires_at=now + timedelta(seconds=runtime.reclaim_idle_seconds),
-        idle_policy_armed=current.record.idle_policy_armed,
-        active_run_id=current.record.active_run_id,
-        snapshot_ids=current.record.snapshot_ids,
-        region=current.record.region,
-        state_store_fingerprint=current.record.state_store_fingerprint,
-        quarantine_reason=current.record.quarantine_reason,
-        tombstone_reason=current.record.tombstone_reason,
-        created_at=current.record.created_at,
-        updated_at=now,
-        reclaim_fence_token=current.record.reclaim_fence_token,
-    )
-    await state_binding.store.update_session(
-        previous=current.record,
-        updated=updated,
-        etag=current.etag,
+    for attempt in range(2):
+        current = await state_binding.store.get_session(partition, session_id)
+        if current.record.status not in _TOUCHABLE_SESSION_STATUSES:
+            return
+        updated = _session_with_touched_activity(
+            current.record,
+            reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+            updated_at=datetime.now(UTC),
+        )
+        try:
+            await state_binding.store.update_session(
+                previous=current.record,
+                updated=updated,
+                etag=current.etag,
+            )
+        except ConcurrencyConflictError:
+            if attempt == 1:
+                return
+            continue
+        return
+
+
+def _session_with_touched_activity(
+    session: DurableSessionRecord,
+    *,
+    reclaim_idle_seconds: int,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=updated_at,
+        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
     )
 
 
@@ -689,6 +762,405 @@ def session_with_idle_policy_armed(
         session,
         reclaim_idle_seconds=reclaim_idle_seconds,
         updated_at=updated_at,
+    )
+
+
+async def begin_submit_operation(
+    activated: ActivatedSession,
+    run: DurableRunRecord,
+    *,
+    agent_slug: str = "",
+) -> tuple[ActivatedSession, SessionOperationFence]:
+    """Fence an existing idle session before its lifecycle policy is disabled."""
+    current = await activated.store.get_session(
+        activated.partition,
+        activated.session.session_id,
+    )
+    if current.record.active_run_id is not None:
+        raise ActiveRunConflictError(
+            "session already has an active run",
+            active_run_id=current.record.active_run_id,
+        )
+    if (
+        current.record.active_operation_id is not None
+        or current.record.sandbox_id is None
+        or current.record.status not in {"ready", "suspended"}
+    ):
+        raise SessionNotAdmissibleError("session cannot begin a submitted run operation")
+    now = run.updated_at
+    sequence = current.record.operation_sequence + 1
+    operation = DurableSessionOperation.create(
+        owner_partition=current.record.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=current.record.session_id,
+            sandbox_id=current.record.sandbox_id,
+            generation=current.record.generation,
+            digest_kind=current.record.digest_kind,
+            digest=current.record.digest,
+            run_id=run.run_id,
+        ),
+        sequence=sequence,
+        kind="submit_run",
+        phase="submit_disarm",
+        state="active",
+        correlation_label=operation_correlation_label(current.record.session_id, sequence),
+        token=uuid4().hex,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=now + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=now,
+        updated_at=now,
+        finished_at=None,
+        agent_slug=agent_slug,
+    )
+    prepared = _session_with_active_operation(
+        current.record,
+        operation=operation,
+        idle_policy_armed=False,
+        updated_at=now,
+    )
+    fence = await activated.store.begin_operation(
+        previous=current.record,
+        updated=prepared,
+        operation=operation,
+        etag=current.etag,
+    )
+    current_prepared = await activated.store.get_session(
+        activated.partition,
+        activated.session.session_id,
+    )
+    return (
+        ActivatedSession.create(
+            handle=activated.handle,
+            session=current_prepared.record,
+            etag=current_prepared.etag,
+            partition=activated.partition,
+            store=activated.store,
+        ),
+        fence,
+    )
+
+
+async def disarm_submit_lifecycle(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+    fence: SessionOperationFence,
+) -> tuple[ActivatedSession, SessionOperationFence]:
+    """Disable suspend only while the same durable submit fence is current."""
+    try:
+        current = await activated.handle.get_lifecycle_policy()
+        disabled = SandboxLifecyclePolicy.create(
+            auto_suspend_seconds=None,
+            auto_suspend_mode=current.auto_suspend_mode,
+            auto_delete_seconds=current.auto_delete_seconds,
+        )
+        await activated.handle.set_lifecycle_policy(disabled)
+    except BaseException:
+        with suppress(StaleOperationTokenError):
+            await activated.store.advance_operation(
+                fence=fence,
+                phase="submit_disarm",
+                error_code="lifecycle_policy_disable_failed",
+                updated_at=datetime.now(UTC),
+            )
+        raise
+    advanced = await activated.store.advance_operation(
+        fence=fence,
+        phase="submit_admission",
+        updated_at=datetime.now(UTC),
+    )
+    current_session = await activated.store.get_session(
+        activated.partition,
+        activated.session.session_id,
+    )
+    return (
+        ActivatedSession.create(
+            handle=activated.handle,
+            session=current_session.record,
+            etag=current_session.etag,
+            partition=activated.partition,
+            store=activated.store,
+        ),
+        advanced,
+    )
+
+
+async def finalize_submit_operation(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+    *,
+    expected_run_id: str,
+) -> bool:
+    """Re-arm a terminal submitted run before releasing its durable operation."""
+    current = await activated.store.get_session(
+        activated.partition,
+        activated.session.session_id,
+    )
+    if current.record.active_operation_id is None:
+        return False
+    if current.record.status in {"tombstoned", "deleting", "deleted"}:
+        return False
+    try:
+        operation = await activated.store.get_operation(
+            activated.partition,
+            activated.session.session_id,
+            current.record.active_operation_id,
+        )
+    except OperationRowNotFoundError:
+        return False
+    if operation.record.target.run_id != expected_run_id:
+        return False
+    fence = await activated.store.resume_operation(
+        owner_partition=activated.partition,
+        session_id=activated.session.session_id,
+        token=uuid4().hex,
+        updated_at=datetime.now(UTC),
+    )
+    if fence is None or fence.kind not in {"provision_submit", "submit_run"}:
+        return False
+    if (
+        fence.target.sandbox_id != activated.session.sandbox_id
+        or fence.target.generation != activated.session.generation
+        or fence.target.run_id is None
+        or fence.target.run_id != expected_run_id
+    ):
+        return False
+    try:
+        run = await activated.store.get_run(
+            activated.partition,
+            activated.session.session_id,
+            fence.target.run_id,
+        )
+    except RunRowNotFoundError:
+        await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+        released = _session_after_missing_submit_run(
+            current.record,
+            reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+            updated_at=datetime.now(UTC),
+        )
+        await activated.store.abort_operation(
+            fence=fence,
+            updated_session=released,
+            error_code="submit_run_missing",
+            updated_at=released.updated_at,
+        )
+        return True
+    if run.record.status not in {"succeeded", "failed", "canceled", "timed_out", "abandoned"}:
+        return False
+    rearm_session = _session_before_submit_rearm(
+        current.record,
+        updated_at=datetime.now(UTC),
+    )
+    phase: DurableOperationPhase = (
+        "provision_rearm" if fence.kind == "provision_submit" else "submit_rearm"
+    )
+    fence = await activated.store.advance_operation(
+        fence=fence,
+        phase=phase,
+        updated_at=rearm_session.updated_at,
+        updated_session=rearm_session,
+    )
+    try:
+        await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+    except BaseException:
+        with suppress(StaleOperationTokenError):
+            await activated.store.advance_operation(
+                fence=fence,
+                phase=phase,
+                error_code="lifecycle_policy_apply_failed",
+                updated_at=datetime.now(UTC),
+            )
+        raise
+    armed = _session_after_submit_rearm(
+        rearm_session,
+        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+        updated_at=datetime.now(UTC),
+    )
+    try:
+        await activated.store.complete_operation(
+            fence=fence,
+            updated_session=armed,
+            updated_at=armed.updated_at,
+        )
+    except StaleOperationTokenError:
+        return False
+    return True
+
+
+async def abort_submit_operation(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+    fence: SessionOperationFence,
+) -> None:
+    """Restore idle policy and release a submit operation that never admitted its run."""
+    current = await activated.store.get_session(
+        activated.partition,
+        activated.session.session_id,
+    )
+    if current.record.active_run_id is not None:
+        return
+    if current.record.status in {"tombstoned", "deleting", "deleted"}:
+        return
+    await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+    released = _session_after_submit_rearm(
+        current.record,
+        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+        updated_at=datetime.now(UTC),
+    )
+    await activated.store.abort_operation(
+        fence=fence,
+        updated_session=released,
+        error_code="submit_admission_failed",
+        updated_at=released.updated_at,
+    )
+
+
+async def _repair_legacy_idle_lifecycle(
+    runtime: SessionRuntimeBinding,
+    activated: ActivatedSession,
+    current: DurableSessionRecord,
+    etag: str,
+) -> bool:
+    await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+    updated = _session_with_idle_policy_armed(
+        current,
+        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
+        updated_at=datetime.now(UTC),
+    )
+    await activated.store.update_session(
+        previous=current,
+        updated=updated,
+        etag=etag,
+    )
+    return True
+
+
+def _session_with_active_operation(
+    session: DurableSessionRecord,
+    *,
+    operation: DurableSessionOperation,
+    idle_policy_armed: bool,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=idle_policy_armed,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+
+
+def _session_before_submit_rearm(
+    session: DurableSessionRecord,
+    *,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="quarantined" if session.status == "quarantined" else "ready",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
+    )
+
+
+def _session_after_submit_rearm(
+    session: DurableSessionRecord,
+    *,
+    reclaim_idle_seconds: int,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=updated_at,
+        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        idle_policy_armed=True,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=None,
+        next_operation_sequence=session.next_operation_sequence,
+    )
+
+
+def _session_after_missing_submit_run(
+    session: DurableSessionRecord,
+    *,
+    reclaim_idle_seconds: int,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="quarantined" if session.status == "quarantined" else "ready",
+        last_activity_at=updated_at,
+        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        idle_policy_armed=True,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        reclaim_fence_token=None,
+        active_operation_id=None,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -718,6 +1190,8 @@ def _session_with_idle_policy_disarmed(
         created_at=session.created_at,
         updated_at=updated_at,
         reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
     )
 
 
@@ -749,6 +1223,490 @@ def _session_with_idle_policy_armed(
         created_at=session.created_at,
         updated_at=updated_at,
         reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
+    )
+
+
+async def provision_new_session_submit(
+    runtime: SessionRuntimeBinding,
+    owner: OwnerContext,
+    *,
+    session_id: str,
+    run_id: str,
+    timeout: float | None,
+    attempt: IdempotencyAttempt | None,
+    setup_deadline: SetupDeadline,
+) -> ProvisionedSubmission:
+    """Reserve the first run before any sandbox create, then provision its operation."""
+    if runtime.creation_source is None:
+        raise SessionCreationUnavailableError(
+            "No runtime bootstrap source is available for new sandbox sessions."
+        )
+    state_binding = await _within_setup_budget(runtime.get_state_store(), setup_deadline)
+    package = await _capture_current_package(runtime.script_root, setup_deadline)
+    provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
+    partition = owner_partition(owner)
+    now = datetime.now(UTC)
+    sequence = 1
+    operation = DurableSessionOperation.create(
+        owner_partition=partition,
+        target=SessionOperationTarget.create(
+            session_id=session_id,
+            sandbox_id=None,
+            generation=1,
+            digest_kind=package.digest_kind,
+            digest=package.digest,
+            run_id=run_id,
+        ),
+        sequence=sequence,
+        kind="provision_submit",
+        phase="provision_create",
+        state="active",
+        correlation_label=operation_correlation_label(session_id, sequence),
+        token=uuid4().hex,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=now + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=now,
+        updated_at=now,
+        finished_at=None,
+        agent_slug=owner.agent_slug,
+    )
+    session = DurableSessionRecord.create(
+        owner_partition=partition,
+        session_id=session_id,
+        sandbox_id=None,
+        generation=1,
+        digest_kind=package.digest_kind,
+        digest=package.digest,
+        protocol=runtime.protocol_version,
+        status="creating",
+        last_activity_at=now,
+        expires_at=now + timedelta(seconds=runtime.reclaim_idle_seconds),
+        idle_policy_armed=False,
+        active_run_id=run_id,
+        snapshot_ids=(),
+        region=provider.group.region,
+        state_store_fingerprint=state_binding.state_store_fingerprint,
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=now,
+        updated_at=now,
+        active_operation_id=operation_id_for_sequence(sequence),
+        operation_sequence=sequence,
+    )
+    run = DurableRunRecord.create(
+        owner_partition=partition,
+        session_id=session_id,
+        run_id=run_id,
+        generation=session.generation,
+        status="accepted",
+        result_available=False,
+        status_reason=None,
+        expires_at=now + timedelta(
+            seconds=timeout if timeout is not None else DEFAULT_TIMEOUT
+        ),
+        created_at=now,
+        updated_at=now,
+        agent_slug=owner.agent_slug,
+    )
+    owner_idempotency = (
+        None
+        if attempt is None
+        else DurableOwnerIdempotencyRecord.create(
+            owner_partition=partition,
+            idempotency_hash=attempt.key_hash,
+            request_hash=attempt.request_hash,
+            session_id=session_id,
+            run_id=run_id,
+            expires_at=owner_idempotency_expiry(
+                session.expires_at,
+                run.expires_at,
+                operation.lease_expires_at,
+                now,
+            ),
+            created_at=now,
+        )
+    )
+    outcome = await _within_setup_budget(
+        state_binding.store.begin_provision_submit(
+            ProvisionSubmitRecords.create(
+                session,
+                run,
+                operation,
+                owner_idempotency,
+            )
+        ),
+        setup_deadline,
+    )
+    if outcome.replayed:
+        existing_session = await _within_setup_budget(
+            state_binding.store.get_session(partition, outcome.run.session_id),
+            setup_deadline,
+        )
+        if existing_session.record.active_operation_id is None:
+            return ProvisionedSubmission(outcome=outcome, activated=None)
+        existing_operation = await _within_setup_budget(
+            state_binding.store.get_operation(
+                partition,
+                outcome.run.session_id,
+                existing_session.record.active_operation_id,
+            ),
+            setup_deadline,
+        )
+        if existing_operation.record.kind != "provision_submit":
+            return ProvisionedSubmission(outcome=outcome, activated=None)
+        fence = await _within_setup_budget(
+            state_binding.store.takeover_expired_operation(
+                owner_partition=partition,
+                session_id=outcome.run.session_id,
+                token=uuid4().hex,
+                updated_at=datetime.now(UTC),
+            ),
+            setup_deadline,
+        )
+        if fence is None:
+            return ProvisionedSubmission(outcome=outcome, activated=None)
+        activated = await _provision_reserved_session(
+            runtime,
+            state_binding,
+            provider,
+            existing_session.record,
+            fence,
+            package,
+            setup_deadline,
+        )
+        return ProvisionedSubmission(outcome=outcome, activated=activated)
+    assert outcome.fence is not None
+    activated = await _provision_reserved_session(
+        runtime,
+        state_binding,
+        provider,
+        session,
+        outcome.fence,
+        package,
+        setup_deadline,
+    )
+    try:
+        await _within_setup_budget(runtime.reconcile_after_create(), setup_deadline)
+    except BaseException:
+        try:
+            await activated.handle.close()
+        except Exception:
+            logger.exception("Could not close sandbox handle after post-create reconciliation failure")
+        raise
+    return ProvisionedSubmission(outcome=outcome, activated=activated)
+
+
+async def _provision_reserved_session(
+    runtime: SessionRuntimeBinding,
+    state_binding: StateStoreBinding,
+    provider: SandboxSessionProvider,
+    session: DurableSessionRecord,
+    fence: SessionOperationFence,
+    package: CapturedContentPackage,
+    setup_deadline: SetupDeadline,
+) -> ActivatedSession:
+    source = runtime.creation_source
+    if source is None:
+        raise SessionCreationUnavailableError(
+            "No runtime bootstrap source is available for new sandbox sessions."
+        )
+    group = SandboxGroupBinding.create(
+        runtime.sandbox_group_resource_id,
+        provider.group.region,
+    )
+    operation = await _within_setup_budget(
+        state_binding.store.get_operation(
+            session.owner_partition,
+            session.session_id,
+            fence.operation_id,
+        ),
+        setup_deadline,
+    )
+    phase = operation.record.phase
+    if phase not in {
+        "provision_create",
+        "provision_lifecycle",
+        "provision_content",
+        "provision_manifest",
+        "provision_journal",
+        "provision_launching",
+        "provision_rearm",
+    }:
+        raise SessionActivationError("Provision operation is no longer resumable.")
+    create_request = SandboxCreateRequest.create(
+        source=source,
+        labels=SandboxProvisioningLabels.create(
+            owner_hash_version=session.owner_partition.owner_hash_version,
+            owner_kind=session.owner_partition.owner_kind,
+            owner_hash=session.owner_partition.owner_hash,
+            app_hash=session.owner_partition.app_hash,
+            session_id=session.session_id,
+            operation_label=fence.correlation_label,
+        ),
+        remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
+        auto_suspend_seconds=runtime.auto_suspend_seconds,
+        auto_suspend_mode="Disk",
+    )
+    current = await _within_setup_budget(
+        state_binding.store.get_session(session.owner_partition, session.session_id),
+        setup_deadline,
+    )
+    if phase in {"provision_journal", "provision_launching", "provision_rearm"}:
+        if current.record.sandbox_id is None:
+            raise SessionActivationError("Provisioned session has no sandbox pointer.")
+        expected = build_expected_manifest_binding(
+            current.record,
+            sandbox_group_resource_id=runtime.sandbox_group_resource_id,
+            state_store_fingerprint=state_binding.state_store_fingerprint,
+        )
+        handle = await _within_setup_budget(
+            provider.attach(
+                PersistedSandboxBinding.create(
+                    current.record.sandbox_id,
+                    SandboxGroupBinding.create(
+                        runtime.sandbox_group_resource_id,
+                        current.record.region,
+                    ),
+                ),
+                expected,
+                readiness_timeout_seconds=_remaining_setup_seconds(setup_deadline),
+            ),
+            setup_deadline,
+        )
+        return ActivatedSession.create(
+            handle=handle,
+            session=current.record,
+            etag=current.etag,
+            partition=session.owner_partition,
+            store=state_binding.store,
+        )
+    if phase == "provision_create":
+        fence = await _within_setup_budget(
+            state_binding.store.advance_operation(
+                fence=fence,
+                phase="provision_create",
+                updated_at=datetime.now(UTC),
+            ),
+            setup_deadline,
+        )
+    try:
+        handle = await _within_setup_budget(
+            provider.create(create_request, persisted_group=group),
+            setup_deadline,
+        )
+    except SandboxCapacityError:
+        await _within_setup_budget(runtime.reap_for_capacity(), setup_deadline)
+        handle = await _within_setup_budget(
+            provider.create(create_request, persisted_group=group),
+            setup_deadline,
+        )
+    try:
+        return await _finish_created_provision(
+            runtime,
+            state_binding,
+            session,
+            fence,
+            package,
+            phase,
+            current,
+            handle,
+            setup_deadline,
+        )
+    except BaseException:
+        try:
+            await handle.close()
+        except Exception:
+            logger.exception("Could not close sandbox handle after provisioning failure")
+        raise
+
+
+async def _finish_created_provision(
+    runtime: SessionRuntimeBinding,
+    state_binding: StateStoreBinding,
+    session: DurableSessionRecord,
+    fence: SessionOperationFence,
+    package: CapturedContentPackage,
+    phase: DurableOperationPhase,
+    current: SessionRead,
+    handle: SandboxSessionHandle,
+    setup_deadline: SetupDeadline,
+) -> ActivatedSession:
+    if phase == "provision_create":
+        bound_session = _session_with_sandbox_for_operation(
+            current.record,
+            sandbox_id=handle.identity.sandbox_id,
+            updated_at=datetime.now(UTC),
+        )
+        bound_target = SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=handle.identity.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=session.active_run_id,
+        )
+        fence = await _within_setup_budget(
+            state_binding.store.advance_operation(
+                fence=fence,
+                phase="provision_lifecycle",
+                updated_at=bound_session.updated_at,
+                updated_session=bound_session,
+                updated_target=bound_target,
+            ),
+            setup_deadline,
+        )
+        phase = "provision_lifecycle"
+        current = await _within_setup_budget(
+            state_binding.store.get_session(session.owner_partition, session.session_id),
+            setup_deadline,
+        )
+    else:
+        bound_session = current.record
+    if phase == "provision_lifecycle":
+        await _within_setup_budget(
+            handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime)),
+            setup_deadline,
+        )
+        fence = await _within_setup_budget(
+            state_binding.store.advance_operation(
+                fence=fence,
+                phase="provision_content",
+                updated_at=datetime.now(UTC),
+            ),
+            setup_deadline,
+        )
+        phase = "provision_content"
+    expected = build_expected_manifest_binding(
+        bound_session,
+        sandbox_group_resource_id=runtime.sandbox_group_resource_id,
+        state_store_fingerprint=state_binding.state_store_fingerprint,
+    )
+    if phase == "provision_content":
+        await _within_setup_budget(
+            deliver_content_package(handle, package, expected, handle.identity),
+            setup_deadline,
+        )
+        fence = await _within_setup_budget(
+            state_binding.store.advance_operation(
+                fence=fence,
+                phase="provision_manifest",
+                updated_at=datetime.now(UTC),
+            ),
+            setup_deadline,
+        )
+        phase = "provision_manifest"
+    if phase == "provision_manifest":
+        await _wait_for_created_manifest(
+            handle,
+            expected=expected,
+            setup_deadline=setup_deadline,
+        )
+        await _within_setup_budget(
+            _verify_optional_harness_artifacts(handle, bound_session),
+            setup_deadline,
+        )
+        current_policy = await _within_setup_budget(
+            handle.get_lifecycle_policy(),
+            setup_deadline,
+        )
+        await _within_setup_budget(
+            handle.set_lifecycle_policy(
+                SandboxLifecyclePolicy.create(
+                    auto_suspend_seconds=None,
+                    auto_suspend_mode=current_policy.auto_suspend_mode,
+                    auto_delete_seconds=current_policy.auto_delete_seconds,
+                )
+            ),
+            setup_deadline,
+        )
+        running_session = _running_provisioned_session(
+            bound_session,
+            updated_at=datetime.now(UTC),
+        )
+        await _within_setup_budget(
+            state_binding.store.advance_operation(
+                fence=fence,
+                phase="provision_journal",
+                updated_at=running_session.updated_at,
+                updated_session=running_session,
+            ),
+            setup_deadline,
+        )
+    current = await _within_setup_budget(
+        state_binding.store.get_session(session.owner_partition, session.session_id),
+        setup_deadline,
+    )
+    return ActivatedSession.create(
+        handle=handle,
+        session=current.record,
+        etag=current.etag,
+        partition=session.owner_partition,
+        store=state_binding.store,
+    )
+
+
+def _session_with_sandbox_for_operation(
+    session: DurableSessionRecord,
+    *,
+    sandbox_id: str,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="creating",
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
+    )
+
+
+def _running_provisioned_session(
+    session: DurableSessionRecord,
+    *,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="running",
+        last_activity_at=updated_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -1081,6 +2039,9 @@ def _session_with_sandbox(
         tombstone_reason=None,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
     )
 
 
@@ -1105,6 +2066,9 @@ def _ready_session(session: DurableSessionRecord, *, updated_at: datetime) -> Du
         tombstone_reason=None,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
     )
 
 
@@ -1135,6 +2099,9 @@ def _quarantined_session(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
     )
 
 

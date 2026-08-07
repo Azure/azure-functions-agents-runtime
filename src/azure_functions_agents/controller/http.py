@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, field
 
+from .._logger import logger
 from ..execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
@@ -125,10 +126,18 @@ async def submit_run(
     try:
         status, _events = await budget.wait_for(collect_terminal_run(backend, context))
     except RunDeadlineExceededError:
-        status = await backend.get_run(context)
-        if status.state in TERMINAL_RUN_STATUSES:
-            return _synchronous_status_response(status)
-        await backend.cancel_run(context)
+        try:
+            status = await budget.wait_for_cleanup(backend.get_run(context))
+            if status.state in TERMINAL_RUN_STATUSES:
+                return _synchronous_status_response(status)
+            await budget.wait_for_cleanup(backend.cancel_run(context))
+        except Exception as exc:
+            logger.warning(
+                "Synchronous run cleanup deferred: session_id=%s run_id=%s error=%s",
+                context.session_id,
+                context.run_id,
+                type(exc).__name__,
+            )
         return _run_timeout_response(context)
     return _synchronous_status_response(status)
 
@@ -146,6 +155,10 @@ async def read_status(
         return ControllerResponse(status_code=200, body=status_payload(await backend.get_run(context)))
     except (RunRowNotFoundError, SessionRowNotFoundError):
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+    except SessionActivationNotFoundError:
+        return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+    except SessionActivationGoneError:
+        return ControllerResponse(status_code=410, body={"error": "session_gone"})
 
 
 async def read_result(
@@ -169,6 +182,19 @@ async def read_result(
             status_code=410,
             body={"error": "result_unavailable", "state": status.state},
         )
+    if (
+        status.state == "succeeded"
+        and status.result_available
+        and status.result is None
+    ):
+        return ControllerResponse(
+            status_code=503,
+            body={
+                "error": "result_temporarily_unavailable",
+                "state": status.state,
+            },
+            headers={"Retry-After": "2"},
+        )
     return ControllerResponse(status_code=200, body=status_payload(status))
 
 
@@ -188,6 +214,10 @@ async def cancel_run(
         )
     except (RunRowNotFoundError, SessionRowNotFoundError):
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+    except SessionActivationNotFoundError:
+        return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+    except SessionActivationGoneError:
+        return ControllerResponse(status_code=410, body={"error": "session_gone"})
 
 
 def status_payload(status: RunStatus) -> dict[str, object]:
@@ -286,6 +316,8 @@ def _run_timeout_response(context: RunContext) -> ControllerResponse:
             "error": "run_deadline_exceeded",
             "reason": "run_deadline_exceeded",
             "retry_with": "respond-async",
+            "session_id": context.session_id,
+            "run_id": context.run_id,
         },
         headers={
             "x-ms-retry-with": "respond-async",

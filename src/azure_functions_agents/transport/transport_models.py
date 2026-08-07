@@ -301,6 +301,7 @@ class SandboxProvisioningLabels:
     owner_hash: str
     app_hash: str
     session_id: str
+    operation_label: str | None = None
 
     @classmethod
     def create(
@@ -311,6 +312,7 @@ class SandboxProvisioningLabels:
         session_id: str,
         *,
         owner_kind: str = "function_app",
+        operation_label: str | None = None,
     ) -> SandboxProvisioningLabels:
         return cls(
             owner_hash_version=_require_provider_label_value(
@@ -320,18 +322,26 @@ class SandboxProvisioningLabels:
             owner_hash=_require_provider_label_value(owner_hash, "owner_hash"),
             app_hash=_require_provider_label_value(app_hash, "app_hash"),
             session_id=_require_provider_label_value(session_id, "session_id"),
+            operation_label=(
+                None
+                if operation_label is None
+                else _require_provider_label_value(operation_label, "operation_label")
+            ),
         )
 
     def to_provider_labels(self) -> dict[str, str]:
         """Return only safe, versioned fingerprint labels for provisioning."""
 
-        return {
+        labels = {
             "owner_hash_version": self.owner_hash_version,
             "owner_kind": self.owner_kind,
             "owner_hash": self.owner_hash,
             "app_hash": self.app_hash,
             "session_id": self.session_id,
         }
+        if self.operation_label is not None:
+            labels["operation_label"] = self.operation_label
+        return labels
 
 
 @dataclass(frozen=True, slots=True)

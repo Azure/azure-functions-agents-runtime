@@ -6,23 +6,31 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from .._logger import logger
 from ..config import DEFAULT_TIMEOUT
 from ..controller.idempotency import (
     IdempotencyAttempt,
     IdempotencyResultUnavailableError,
     build_idempotency_attempt,
 )
+from ..controller.journal_integrity import (
+    JOURNAL_CORRUPT_ERROR_CODE,
+    handle_journal_corruption,
+    journal_corruption_error,
+    journal_corruption_status,
+)
 from ..controller.readiness import (
     ActivatedSession,
     SessionActivationError,
     SessionActivationGoneError,
+    SessionActivationNotFoundError,
     SessionRuntimeBinding,
     _within_setup_budget,
+    abort_submit_operation,
     activate_session,
-    disarm_idle_lifecycle,
-    rearm_idle_lifecycle,
-    restore_idle_lifecycle_if_unowned,
+    begin_submit_operation,
+    disarm_submit_lifecycle,
+    finalize_submit_operation,
+    provision_new_session_submit,
     revalidate_before_submit,
     session_with_admitted_run,
     terminal_run,
@@ -33,17 +41,17 @@ from ..session_state import (
     AdmissionOutcome,
     AdmissionRecords,
     DurableIdempotencyRecord,
-    DurableOwnerIdempotencyRecord,
     DurableRunRecord,
     DurableSessionRecord,
     IdempotencyConflictError,
-    NewSessionAdmissionRecords,
     OwnerContext,
     OwnerPartition,
     mint_run_id,
     mint_session_id,
+    owner_idempotency_expiry,
     owner_partition,
 )
+from ..transport.transport_models import SandboxFileNotFoundError
 from .backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
@@ -58,10 +66,12 @@ from .backend import (
 from .binding import AgentBinding
 from .run_control import (
     RunEnvelope,
+    RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
     SandboxRunControl,
 )
 from .setup_budget import SetupBudget
+from .terminal_output_validation import validate_terminal_output
 
 
 class AcaSandboxExecutionBackend:
@@ -114,89 +124,162 @@ class AcaSandboxExecutionBackend:
             timeout=request.timeout,
             idempotency_key=request.idempotency_key,
         )
-        if is_new_session and attempt is not None:
-            replay = await _preflight_new_session_replay(
+        if not is_new_session and attempt is not None:
+            replay = await _session_idempotency_replay(
                 self._runtime,
                 partition,
+                session_id,
                 attempt,
                 setup_budget,
             )
             if replay is not None:
-                return _run_handle(replay)
+                _ensure_replay_result_available(replay)
+                return await self._resume_journal_submission(
+                    replay,
+                    request,
+                    setup_budget,
+                )
         async with self._runtime.hold_session(
             partition,
             session_id,
             setup_deadline=setup_budget,
         ):
-            activated = await activate_session(
-                self._runtime,
-                self._owner,
-                session_id,
-                setup_budget,
-                allow_create=request.session_id is None,
-            )
+            activated: ActivatedSession | None = None
             try:
-                prepared = await _within_setup_budget(
-                    disarm_idle_lifecycle(self._runtime, activated),
-                    setup_budget,
-                )
-                run = _new_run(prepared.session, run_id, timeout=request.timeout)
-                admitted_session = session_with_admitted_run(
-                    prepared.session,
-                    run_id,
-                    updated_at=run.updated_at,
-                )
-                try:
-                    outcome = await _admit_run(
-                        prepared,
-                        run,
-                        admitted_session,
+                if is_new_session:
+                    provisioned = await provision_new_session_submit(
+                        self._runtime,
+                        self._owner,
+                        session_id=session_id,
+                        run_id=run_id,
+                        timeout=request.timeout,
                         attempt=attempt,
-                        is_new_session=is_new_session,
-                        setup_budget=setup_budget,
+                        setup_deadline=setup_budget,
                     )
-                except Exception:
-                    await _restore_after_unadmitted(self._runtime, prepared)
-                    raise
-                if outcome.replayed:
-                    if is_new_session:
-                        await _retire_losing_new_session_candidate(prepared, self._runtime)
-                    await _restore_after_unadmitted(self._runtime, prepared)
-                    if outcome.run.status == "succeeded" and not outcome.run.result_available:
-                        raise IdempotencyResultUnavailableError(
-                            "The idempotent run completed but its result is no longer available."
+                    if provisioned.outcome.replayed:
+                        _ensure_replay_result_available(provisioned.outcome.run)
+                        if provisioned.activated is not None:
+                            await provisioned.activated.handle.close()
+                        if provisioned.activated is None and (
+                            provisioned.outcome.run.status not in TERMINAL_RUN_STATUSES
+                        ):
+                            return _run_handle(provisioned.outcome.run)
+                        return await self._resume_journal_submission(
+                            provisioned.outcome.run,
+                            request,
+                            setup_budget,
                         )
-                    return _run_handle(outcome.run)
-
-                try:
-                    await _within_setup_budget(
-                        revalidate_before_submit(prepared, outcome.run),
+                    assert provisioned.activated is not None
+                    activated = provisioned.activated
+                    outcome = AdmissionOutcome(
+                        run=provisioned.outcome.run,
+                        run_etag=provisioned.outcome.run_etag,
+                        session_etag=provisioned.outcome.session_etag,
+                        replayed=False,
+                    )
+                else:
+                    activated = await activate_session(
+                        self._runtime,
+                        self._owner,
+                        session_id,
+                        setup_budget,
+                        allow_create=False,
+                    )
+                    run = _new_run(
+                        activated.session,
+                        run_id,
+                        timeout=request.timeout,
+                        agent_slug=self._agent_name,
+                    )
+                    prepared, fence = await _within_setup_budget(
+                        begin_submit_operation(
+                            activated,
+                            run,
+                            agent_slug=self._agent_name,
+                        ),
                         setup_budget,
                     )
-                except Exception:
-                    await _restore_after_unadmitted(self._runtime, prepared)
-                    raise
-                try:
-                    status = await self._run_control.submit(
-                        prepared.handle,
+                    prepared, fence = await _within_setup_budget(
+                        disarm_submit_lifecycle(self._runtime, prepared, fence),
+                        setup_budget,
+                    )
+                    admitted_session = session_with_admitted_run(
+                        prepared.session,
                         run_id,
-                        RunEnvelope.create(
-                            run_id=run_id,
-                            session_id=session_id,
-                            agent_name=self._agent_name,
-                            prompt=request.prompt,
-                            timeout=request.timeout,
+                        updated_at=run.updated_at,
+                    )
+                    idempotency = (
+                        None
+                        if attempt is None
+                        else DurableIdempotencyRecord.create(
+                            owner_partition=prepared.partition,
+                            session_id=run.session_id,
+                            idempotency_hash=attempt.key_hash,
+                            request_hash=attempt.request_hash,
+                            run_id=run.run_id,
+                            expires_at=owner_idempotency_expiry(
+                                prepared.session.expires_at,
+                                run.expires_at,
+                                None,
+                                run.created_at,
+                            ),
+                            created_at=run.created_at,
+                        )
+                    )
+                    try:
+                        outcome = await _within_setup_budget(
+                            prepared.store.admit_operation_run(
+                                fence=fence,
+                                records=AdmissionRecords.create(
+                                    admitted_session,
+                                    run,
+                                    idempotency,
+                                ),
+                            ),
+                            setup_budget,
+                        )
+                    except Exception:
+                        await abort_submit_operation(self._runtime, prepared, fence)
+                        raise
+                    if outcome.replayed:
+                        await abort_submit_operation(self._runtime, prepared, fence)
+                        _ensure_replay_result_available(outcome.run)
+                        return _run_handle(outcome.run)
+                    current = await _within_setup_budget(
+                        prepared.store.get_session(
+                            prepared.partition,
+                            prepared.session.session_id,
                         ),
-                        timeout_seconds=setup_budget.remaining_setup_seconds(),
+                        setup_budget,
+                    )
+                    activated = ActivatedSession.create(
+                        handle=prepared.handle,
+                        session=current.record,
+                        etag=outcome.session_etag or current.etag,
+                        partition=prepared.partition,
+                        store=prepared.store,
+                    )
+
+                assert activated is not None
+                await _within_setup_budget(
+                    revalidate_before_submit(activated, outcome.run),
+                    setup_budget,
+                )
+                try:
+                    status = await self._submit_fenced_journal(
+                        activated,
+                        outcome.run,
+                        request,
+                        setup_budget,
                     )
                 except RunSubmissionDefinitiveFailureError:
-                    await _adopt_failed_submission(self._runtime, prepared, outcome.run)
+                    await _adopt_failed_submission(self._runtime, activated, outcome.run)
                     raise
                 await _adopt_if_terminal(
                     self._runtime,
-                    prepared,
+                    activated,
                     outcome.run,
-                    _validate_terminal_output(self._binding, status),
+                    validate_terminal_output(self._binding, status),
                 )
                 return RunHandle(
                     run_id=outcome.run.run_id,
@@ -205,7 +288,114 @@ class AcaSandboxExecutionBackend:
                     created_at=outcome.run.created_at,
                 )
             finally:
-                await activated.handle.close()
+                if activated is not None:
+                    await activated.handle.close()
+
+    async def _submit_fenced_journal(
+        self,
+        activated: ActivatedSession,
+        run: DurableRunRecord,
+        request: StartRunRequest,
+        setup_budget: SetupBudget,
+    ) -> RunStatus:
+        fence = await activated.store.claim_operation_journal(
+            owner_partition=activated.partition,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            token=mint_run_id(),
+            updated_at=datetime.now(UTC),
+        )
+        if fence is None:
+            try:
+                return await self._run_control.get_status(
+                    activated.handle,
+                    RunContext(run_id=run.run_id, session_id=run.session_id),
+                )
+            except RunJournalProtocolError:
+                await self._handle_runtime_journal_corruption(
+                    activated,
+                    RunContext(run_id=run.run_id, session_id=run.session_id),
+                )
+                raise SessionActivationNotFoundError(
+                    "Session run journal cannot be trusted."
+                ) from None
+            except SandboxFileNotFoundError as exc:
+                raise ActiveRunConflictError(
+                    "another controller owns the journal launch",
+                    active_run_id=run.run_id,
+                ) from exc
+        try:
+            return await self._run_control.submit(
+                activated.handle,
+                run.run_id,
+                RunEnvelope.create(
+                    run_id=run.run_id,
+                    session_id=run.session_id,
+                    agent_name=self._agent_name,
+                    prompt=request.prompt,
+                    timeout=request.timeout,
+                ),
+                timeout_seconds=setup_budget.remaining_setup_seconds(),
+            )
+        except RunJournalProtocolError:
+            await self._handle_runtime_journal_corruption(
+                activated,
+                RunContext(run_id=run.run_id, session_id=run.session_id),
+            )
+            raise SessionActivationNotFoundError(
+                "Session run journal cannot be trusted."
+            ) from None
+
+    async def _handle_runtime_journal_corruption(
+        self,
+        activated: ActivatedSession,
+        context: RunContext,
+    ) -> DurableRunRecord:
+        """Fail, quarantine, and finalize only the matching durable submit operation."""
+        corrupted = await handle_journal_corruption(
+            activated.store,
+            activated.partition,
+            context.session_id,
+            context.run_id,
+        )
+        await finalize_submit_operation(
+            self._runtime,
+            activated,
+            expected_run_id=context.run_id,
+        )
+        return corrupted
+
+    async def _resume_journal_submission(
+        self,
+        run: DurableRunRecord,
+        request: StartRunRequest,
+        setup_budget: SetupBudget,
+    ) -> RunHandle:
+        if run.status in TERMINAL_RUN_STATUSES:
+            return _run_handle(run)
+        activated = await activate_session(
+            self._runtime,
+            self._owner,
+            run.session_id,
+            setup_budget,
+            allow_create=False,
+        )
+        try:
+            status = await self._submit_fenced_journal(
+                activated,
+                run,
+                request,
+                setup_budget,
+            )
+            await _adopt_if_terminal(
+                self._runtime,
+                activated,
+                run,
+                validate_terminal_output(self._binding, status),
+            )
+            return _run_handle(run)
+        finally:
+            await activated.handle.close()
 
     async def get_run(self, context: RunContext) -> RunStatus:
         """Prefer a reachable live journal and retain the Table row as fallback."""
@@ -252,7 +442,7 @@ class AcaSandboxExecutionBackend:
             return _durable_status(refreshed.record)
         try:
             status = await self._run_control.get_status(activated.handle, context)
-            status = _validate_terminal_output(self._binding, status)
+            status = validate_terminal_output(self._binding, status)
             adopted = await _adopt_if_terminal(
                 self._runtime,
                 activated,
@@ -275,6 +465,9 @@ class AcaSandboxExecutionBackend:
                 if refreshed.record.status in TERMINAL_RUN_STATUSES:
                     return _durable_status(refreshed.record)
             return status
+        except RunJournalProtocolError:
+            corrupted = await self._handle_runtime_journal_corruption(activated, context)
+            return journal_corruption_status(corrupted)
         finally:
             await activated.handle.close()
 
@@ -286,13 +479,16 @@ class AcaSandboxExecutionBackend:
         """Tail a reachable sandbox journal without cancelling on reader disconnect."""
 
         async def stream() -> AsyncIterator[RunEvent]:
-            activated = await activate_session(
-                self._runtime,
-                self._owner,
-                context.session_id,
-                SetupBudget.start(),
-                allow_create=False,
-            )
+            try:
+                activated = await activate_session(
+                    self._runtime,
+                    self._owner,
+                    context.session_id,
+                    SetupBudget.start(),
+                    allow_create=False,
+                )
+            except SessionActivationError:
+                return
             try:
                 async for event in self._run_control.read_events(
                     activated.handle,
@@ -301,6 +497,9 @@ class AcaSandboxExecutionBackend:
                 ):
                     yield event
                 await self.get_run(context)
+            except RunJournalProtocolError:
+                await self._handle_runtime_journal_corruption(activated, context)
+                return
             finally:
                 await activated.handle.close()
 
@@ -331,200 +530,41 @@ class AcaSandboxExecutionBackend:
                     ),
                     setup_budget,
                 )
-                status = await self._run_control.cancel(activated.handle, context)
-                await _adopt_if_terminal(
+                try:
+                    status = await self._run_control.cancel(activated.handle, context)
+                except RunJournalProtocolError:
+                    corrupted = await self._handle_runtime_journal_corruption(
+                        activated,
+                        context,
+                    )
+                    return journal_corruption_status(corrupted)
+                validated = validate_terminal_output(self._binding, status)
+                adopted = await _adopt_if_terminal(
                     self._runtime,
                     activated,
                     run_read.record,
-                    _validate_terminal_output(self._binding, status),
+                    validated,
                 )
-                return status
+                if adopted is None:
+                    return validated
+                projection = _durable_status(adopted, error=validated.error)
+                if (
+                    adopted.status == "succeeded"
+                    and adopted.result_available
+                    and validated.result is not None
+                ):
+                    return RunStatus(
+                        run_id=projection.run_id,
+                        session_id=projection.session_id,
+                        state=projection.state,
+                        last_sequence=validated.last_sequence,
+                        result_available=projection.result_available,
+                        result=validated.result,
+                        error=projection.error,
+                    )
+                return projection
             finally:
                 await activated.handle.close()
-
-
-async def _restore_after_unadmitted(
-    runtime: SessionRuntimeBinding,
-    activated: ActivatedSession,
-) -> None:
-    """Best-effort re-arm after an admission path leaves no active run owner."""
-    try:
-        await restore_idle_lifecycle_if_unowned(runtime, activated)
-    except Exception:
-        logger.exception("Could not restore sandbox idle policy after admission did not complete")
-
-
-async def _preflight_new_session_replay(
-    runtime: SessionRuntimeBinding,
-    partition: OwnerPartition,
-    attempt: IdempotencyAttempt,
-    setup_budget: SetupBudget,
-) -> DurableRunRecord | None:
-    """Return a durable owner-key winner before creating a competing sandbox."""
-    state_binding = await _within_setup_budget(runtime.get_state_store(), setup_budget)
-    existing = await _within_setup_budget(
-        state_binding.store.get_owner_idempotency(partition, attempt.key_hash),
-        setup_budget,
-    )
-    if existing is None:
-        return None
-    if existing.record.expires_at <= datetime.now(UTC):
-        await _within_setup_budget(
-            state_binding.store.delete_owner_idempotency(
-                previous=existing.record,
-                etag=existing.etag,
-            ),
-            setup_budget,
-        )
-        return None
-    if existing.record.request_hash != attempt.request_hash:
-        raise IdempotencyConflictError(
-            "idempotency key already used with a different payload",
-            existing_run_id=existing.record.run_id,
-        )
-    return (
-        await _within_setup_budget(
-            state_binding.store.get_run(
-                partition,
-                existing.record.session_id,
-                existing.record.run_id,
-            ),
-            setup_budget,
-        )
-    ).record
-
-
-async def _admit_run(
-    activated: ActivatedSession,
-    run: DurableRunRecord,
-    admitted_session: DurableSessionRecord,
-    *,
-    attempt: IdempotencyAttempt | None,
-    is_new_session: bool,
-    setup_budget: SetupBudget,
-) -> AdmissionOutcome:
-    """Choose the session or owner idempotency EGT without mixing their invariants."""
-    if is_new_session and attempt is not None:
-        owner_idempotency = DurableOwnerIdempotencyRecord.create(
-            owner_partition=activated.partition,
-            idempotency_hash=attempt.key_hash,
-            request_hash=attempt.request_hash,
-            session_id=run.session_id,
-            run_id=run.run_id,
-            expires_at=activated.session.expires_at,
-            created_at=run.created_at,
-        )
-        return await _within_setup_budget(
-            activated.store.admit_new_session_run(
-                NewSessionAdmissionRecords.create(
-                    admitted_session,
-                    run,
-                    owner_idempotency,
-                ),
-                expected_session_etag=activated.etag,
-            ),
-            setup_budget,
-        )
-    idempotency = (
-        None
-        if attempt is None
-        else DurableIdempotencyRecord.create(
-            owner_partition=activated.partition,
-            session_id=run.session_id,
-            idempotency_hash=attempt.key_hash,
-            request_hash=attempt.request_hash,
-            run_id=run.run_id,
-            expires_at=activated.session.expires_at,
-            created_at=run.created_at,
-        )
-    )
-    return await _within_setup_budget(
-        activated.store.admit_run(
-            AdmissionRecords.create(admitted_session, run, idempotency),
-            expected_session_etag=activated.etag,
-        ),
-        setup_budget,
-    )
-
-
-async def _retire_losing_new_session_candidate(
-    activated: ActivatedSession,
-    runtime: SessionRuntimeBinding,
-) -> None:
-    """Leave a durable deleting trail before removing a first-call race loser."""
-    try:
-        current = await activated.store.get_session(
-            activated.partition,
-            activated.session.session_id,
-        )
-        if current.record.active_run_id is not None or current.record.status not in {
-            "creating",
-            "ready",
-            "suspended",
-            "deleting",
-        }:
-            return
-        deleting = (
-            current.record
-            if current.record.status == "deleting"
-            else _session_with_status(
-                current.record,
-                status="deleting",
-                updated_at=datetime.now(UTC),
-            )
-        )
-        if current.record.status != "deleting":
-            await activated.store.update_session(
-                previous=current.record,
-                updated=deleting,
-                etag=current.etag,
-            )
-        await activated.handle.delete()
-        provider = await runtime.get_provider()
-        for snapshot_id in deleting.snapshot_ids:
-            await provider.delete_snapshot(snapshot_id)
-        reread = await activated.store.get_session(
-            activated.partition,
-            activated.session.session_id,
-        )
-        if reread.record.status == "deleting" and reread.record.active_run_id is None:
-            await activated.store.tombstone_session(
-                previous=reread.record,
-                etag=reread.etag,
-                tombstone_reason="new_session_idempotency_loser",
-                updated_at=datetime.now(UTC),
-            )
-    except Exception:
-            logger.exception("Could not fully retire a losing new-session idempotency candidate")
-
-
-def _session_with_status(
-    session: DurableSessionRecord,
-    *,
-    status: str,
-    updated_at: datetime,
-) -> DurableSessionRecord:
-    return DurableSessionRecord.create(
-        owner_partition=session.owner_partition,
-        session_id=session.session_id,
-        sandbox_id=session.sandbox_id,
-        generation=session.generation,
-        digest_kind=session.digest_kind,
-        digest=session.digest,
-        protocol=session.protocol,
-        status=status,  # type: ignore[arg-type]
-        last_activity_at=session.last_activity_at,
-        expires_at=session.expires_at,
-        idle_policy_armed=session.idle_policy_armed,
-        active_run_id=None,
-        snapshot_ids=session.snapshot_ids,
-        region=session.region,
-        state_store_fingerprint=session.state_store_fingerprint,
-        quarantine_reason=session.quarantine_reason,
-        tombstone_reason=session.tombstone_reason,
-        created_at=session.created_at,
-        updated_at=updated_at,
-    )
 
 
 def _run_handle(run: DurableRunRecord) -> RunHandle:
@@ -536,11 +576,55 @@ def _run_handle(run: DurableRunRecord) -> RunHandle:
     )
 
 
+def _ensure_replay_result_available(run: DurableRunRecord) -> None:
+    """Reject only an evicted successful replay before any journal work is resumed."""
+    if run.status == "succeeded" and not run.result_available:
+        raise IdempotencyResultUnavailableError(
+            "The idempotent run completed but its result is no longer available."
+        )
+
+
+async def _session_idempotency_replay(
+    runtime: SessionRuntimeBinding,
+    partition: OwnerPartition,
+    session_id: str,
+    attempt: IdempotencyAttempt,
+    setup_budget: SetupBudget,
+) -> DurableRunRecord | None:
+    state_binding = await _within_setup_budget(runtime.get_state_store(), setup_budget)
+    existing = await _within_setup_budget(
+        state_binding.store.get_idempotency(
+            partition,
+            session_id,
+            attempt.key_hash,
+        ),
+        setup_budget,
+    )
+    if existing is None:
+        return None
+    if existing.record.request_hash != attempt.request_hash:
+        raise IdempotencyConflictError(
+            "idempotency key already used with a different payload",
+            existing_run_id=existing.record.run_id,
+        )
+    return (
+        await _within_setup_budget(
+            state_binding.store.get_run(
+                partition,
+                session_id,
+                existing.record.run_id,
+            ),
+            setup_budget,
+        )
+    ).record
+
+
 def _new_run(
     session: DurableSessionRecord,
     run_id: str,
     *,
     timeout: float | None,
+    agent_slug: str = "",
 ) -> DurableRunRecord:
     now = datetime.now(UTC)
     return DurableRunRecord.create(
@@ -554,6 +638,7 @@ def _new_run(
         expires_at=now + timedelta(seconds=timeout if timeout is not None else DEFAULT_TIMEOUT),
         created_at=now,
         updated_at=now,
+        agent_slug=agent_slug,
     )
 
 
@@ -569,9 +654,12 @@ async def _adopt_failed_submission(
         reason="submission_failed",
         updated_at=datetime.now(UTC),
     )
-    outcome = await activated.store.adopt_terminal_run(failed)
-    if outcome.slot_released:
-        await rearm_idle_lifecycle(runtime, activated)
+    await activated.store.adopt_terminal_run(failed)
+    await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
 
 
 async def _adopt_if_terminal(
@@ -584,8 +672,11 @@ async def _adopt_if_terminal(
     if terminal is None:
         return None
     outcome = await activated.store.adopt_terminal_run(terminal)
-    if outcome.slot_released:
-        await rearm_idle_lifecycle(runtime, activated)
+    await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
     return outcome.run
 
 
@@ -636,23 +727,6 @@ def _terminal_record(
     return None
 
 
-def _validate_terminal_output(binding: AgentBinding, status: RunStatus) -> RunStatus:
-    """Turn a failed controller-side output contract into a durable failed run."""
-    if status.state != "succeeded" or status.result is None or binding.output_validator is None:
-        return status
-    error = binding.output_validator(status.result)
-    if error is None:
-        return status
-    return RunStatus(
-        run_id=status.run_id,
-        session_id=status.session_id,
-        state="failed",
-        last_sequence=status.last_sequence,
-        result_available=False,
-        error=error,
-    )
-
-
 def _durable_status(
     run: DurableRunRecord,
     *,
@@ -666,12 +740,18 @@ def _durable_status(
         last_sequence=0,
         result_available=run.result_available if result_available is None else result_available,
         result=None,
-        error=_durable_error(run.status) if error is None else error,
+        error=(
+            _durable_error(run.status, reason=run.status_reason)
+            if error is None
+            else error
+        ),
     )
 
 
-def _durable_error(state: RunState) -> RunError | None:
+def _durable_error(state: RunState, *, reason: str | None = None) -> RunError | None:
     if state == "failed":
+        if reason == JOURNAL_CORRUPT_ERROR_CODE:
+            return journal_corruption_error()
         return RunError(code="run_failed", message="Run failed in the sandbox.", fault_domain="sandbox")
     if state == "timed_out":
         return RunError(

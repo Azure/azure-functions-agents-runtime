@@ -13,16 +13,22 @@ from azure_functions_agents.session_state import (
     AppIdentity,
     DurableIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    OperationRowKey,
     OwnerPartition,
+    SessionOperationTarget,
     SessionStateContractError,
     decode_snapshot_ids,
     encode_snapshot_ids,
+    operation_correlation_label,
     owner_partition,
     validate_generation,
     validate_generation_transition,
+    validate_operation_phase_transition,
 )
+from azure_functions_agents.transport.transport_models import SandboxProvisioningLabels
 
 _NOW = datetime(2026, 7, 30, 16, 0, tzinfo=UTC)
 _SESSION_ID = "session-1"
@@ -79,6 +85,42 @@ def _run(*, partition: OwnerPartition | None = None) -> DurableRunRecord:
         expires_at=_NOW + timedelta(minutes=15),
         created_at=_NOW,
         updated_at=_NOW,
+        agent_slug="main",
+    )
+
+
+def _operation(
+    *,
+    partition: OwnerPartition | None = None,
+    sequence: int = 1,
+    kind: str = "reclaim_backing",
+) -> DurableSessionOperation:
+    run_id = _RUN_ID
+    phase = "reclaim_fenced" if kind == "reclaim_backing" else "submit_disarm"
+    return DurableSessionOperation.create(
+        owner_partition=partition or _partition(),
+        target=SessionOperationTarget.create(
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            run_id=run_id,
+        ),
+        sequence=sequence,
+        kind=kind,  # type: ignore[arg-type]
+        phase=phase,  # type: ignore[arg-type]
+        state="active",
+        correlation_label=operation_correlation_label(_SESSION_ID, sequence),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+        agent_slug="main",
     )
 
 
@@ -124,6 +166,8 @@ def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
         "quarantine_reason": "",
         "tombstone_reason": "",
         "reclaim_fence_token": "",
+        "active_operation_id": "",
+        "operation_sequence": 0,
         "created_at": _NOW,
         "updated_at": _NOW,
     }
@@ -134,8 +178,90 @@ def test_session_rows_without_new_scope_or_fence_properties_remain_readable() ->
     entity = _session().to_table_entity()
     entity.pop("app_hash")
     entity.pop("reclaim_fence_token")
+    entity.pop("active_operation_id")
+    entity.pop("operation_sequence")
 
     assert DurableSessionRecord.from_table_entity(entity) == _session()
+
+
+def test_v1_and_stage_one_operation_counters_migrate_lazily() -> None:
+    v1 = _session().to_table_entity()
+    v1.pop("operation_sequence")
+    v1.pop("active_operation_id")
+    assert DurableSessionRecord.from_table_entity(v1).operation_sequence == 0
+
+    stage_one = _session().to_table_entity()
+    stage_one.pop("operation_sequence")
+    stage_one["next_operation_sequence"] = 1
+    assert DurableSessionRecord.from_table_entity(stage_one).operation_sequence == 0
+
+
+def test_operation_rows_bind_a_monotonic_sequence_to_the_session_target() -> None:
+    operation = _operation()
+    entity = operation.to_table_entity()
+
+    assert entity["RowKey"] == "operation:session-1:1"
+    assert entity["operation_id"] == "op-1"
+    assert entity["agent_slug"] == "main"
+    assert isinstance(operation.row_key, OperationRowKey)
+    assert DurableSessionOperation.from_table_entity(entity) == operation
+
+    with pytest.raises(SessionStateContractError, match="phase does not match"):
+        DurableSessionOperation.create(
+            owner_partition=operation.owner_partition,
+            target=operation.target,
+            sequence=operation.sequence,
+            kind="reclaim_backing",
+            phase="submit_disarm",
+            state="active",
+            correlation_label=operation.correlation_label,
+            token=operation.token,
+            attempt_count=0,
+            error_code=None,
+            lease_expires_at=operation.lease_expires_at,
+            next_attempt_at=None,
+            created_at=_NOW,
+            updated_at=_NOW,
+            finished_at=None,
+        )
+
+    validate_operation_phase_transition(
+        "submit_run",
+        "submit_journal",
+        "submit_launching",
+    )
+    validate_operation_phase_transition(
+        "submit_run",
+        "submit_launching",
+        "submit_launching",
+    )
+    with pytest.raises(SessionStateContractError, match="not monotonic"):
+        validate_operation_phase_transition(
+            "submit_run",
+            "submit_launching",
+            "submit_journal",
+        )
+
+
+@pytest.mark.parametrize("sequence", [1, 999, 1000, 10**100])
+def test_operation_correlation_label_is_fixed_size_and_provider_safe(sequence: int) -> None:
+    label = operation_correlation_label("s" * 63, sequence)
+
+    assert label.startswith("op-")
+    assert len(label) == 55
+    assert label == operation_correlation_label("s" * 63, sequence)
+    assert label != operation_correlation_label("s" * 63, sequence + 1)
+    assert (
+        SandboxProvisioningLabels.create(
+            owner_hash_version="o1",
+            owner_kind="function_app",
+            owner_hash="o1-" + ("a" * 52),
+            app_hash="a1-" + ("b" * 52),
+            session_id="session-1",
+            operation_label=label,
+        ).operation_label
+        == label
+    )
 
 
 def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> None:
@@ -148,7 +274,11 @@ def test_run_and_idempotency_entities_round_trip_without_raw_key_material() -> N
     assert run_entity["RowKey"] == "run:session-1:run-1"
     assert run_entity["generation"] == 1
     assert run_entity["status_reason"] == ""
+    assert run_entity["agent_slug"] == "main"
     assert DurableRunRecord.from_table_entity(run_entity) == run
+    legacy_run = dict(run_entity)
+    legacy_run.pop("agent_slug")
+    assert DurableRunRecord.from_table_entity(legacy_run).agent_slug == ""
     assert idempotency_entity["RowKey"] == f"idem:session-1:{'c' * 64}"
     assert set(idempotency_entity) == {
         "PartitionKey",

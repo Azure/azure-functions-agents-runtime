@@ -18,6 +18,7 @@ from .session_models import (
     FunctionAppOwnerContext,
     FunctionAppPrincipal,
     IdempotencyRowKey,
+    OperationRowKey,
     OwnerContext,
     OwnerPartition,
     OwnerPrincipal,
@@ -303,6 +304,10 @@ def session_row_key(session_id: str) -> SessionRowKey:
 
 def run_row_key(session_id: str, run_id: str) -> RunRowKey:
     return RunRowKey.create(validate_session_id(session_id), validate_run_id(run_id))
+
+
+def operation_row_key(session_id: str, sequence: int) -> OperationRowKey:
+    return OperationRowKey.create(validate_session_id(session_id), sequence)
 
 
 def hash_idempotency_key(idempotency_key: str) -> str:

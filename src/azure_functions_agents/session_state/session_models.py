@@ -2,23 +2,25 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import unicodedata
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal, cast
 from uuid import UUID
 
 from .._session_id import SESSION_ID_PATTERN
-from ._label_encoding import LABEL_SAFE_PAYLOAD_GROUP
+from ._label_encoding import LABEL_SAFE_PAYLOAD_GROUP, encode_label_safe_digest
 
 TABLE_NAME = "AzureFunctionsAgentsSessions"
 ROW_SCHEMA_VERSION = 1
 MAX_SNAPSHOT_IDS = 64
 MAX_SNAPSHOT_IDS_SERIALIZED_BYTES = 8192
 STATE_STORE_FINGERPRINT_VERSION = "s1"
+OWNER_IDEMPOTENCY_RECOVERY_SECONDS = 3600
 
 type OwnerKind = Literal["entra_user", "function_app", "trigger_binding"]
 type SessionStatus = Literal[
@@ -45,6 +47,27 @@ type DurableRunStatus = Literal[
     "timed_out",
     "abandoned",
 ]
+type DurableOperationKind = Literal["provision_submit", "submit_run", "reclaim_backing"]
+type DurableOperationPhase = Literal[
+    "provision_create",
+    "provision_lifecycle",
+    "provision_content",
+    "provision_manifest",
+    "provision_journal",
+    "provision_launching",
+    "provision_rearm",
+    "submit_disarm",
+    "submit_admission",
+    "submit_journal",
+    "submit_launching",
+    "submit_rearm",
+    "reclaim_fenced",
+    "reclaim_deleting",
+    "reclaim_snapshots",
+    "completed",
+    "aborted",
+]
+type DurableOperationState = Literal["active", "completed", "aborted"]
 type TableEntityValue = str | int | bool | datetime
 type TableEntity = dict[str, TableEntityValue]
 
@@ -77,6 +100,89 @@ _RUN_STATUSES: frozenset[str] = frozenset(
         "abandoned",
     }
 )
+_OPERATION_KINDS: frozenset[str] = frozenset(
+    {"provision_submit", "submit_run", "reclaim_backing"}
+)
+_OPERATION_STATES: frozenset[str] = frozenset({"active", "completed", "aborted"})
+_OPERATION_PHASES: frozenset[str] = frozenset(
+    {
+        "provision_create",
+        "provision_lifecycle",
+        "provision_content",
+        "provision_manifest",
+        "provision_journal",
+        "provision_launching",
+        "provision_rearm",
+        "submit_disarm",
+        "submit_admission",
+        "submit_journal",
+        "submit_launching",
+        "submit_rearm",
+        "reclaim_fenced",
+        "reclaim_deleting",
+        "reclaim_snapshots",
+        "completed",
+        "aborted",
+    }
+)
+_OPERATION_PHASES_BY_KIND: Mapping[str, frozenset[str]] = {
+    "provision_submit": frozenset(
+        {
+            "provision_create",
+            "provision_lifecycle",
+            "provision_content",
+            "provision_manifest",
+            "provision_journal",
+            "provision_launching",
+            "provision_rearm",
+            "completed",
+            "aborted",
+        }
+    ),
+    "submit_run": frozenset(
+        {
+            "submit_disarm",
+            "submit_admission",
+            "submit_journal",
+            "submit_launching",
+            "submit_rearm",
+            "completed",
+            "aborted",
+        }
+    ),
+    "reclaim_backing": frozenset(
+        {
+            "reclaim_fenced",
+            "reclaim_deleting",
+            "reclaim_snapshots",
+            "completed",
+            "aborted",
+        }
+    ),
+}
+_OPERATION_PHASE_TRANSITIONS: Mapping[str, Mapping[str, frozenset[str]]] = {
+    "provision_submit": {
+        "provision_create": frozenset({"provision_lifecycle"}),
+        "provision_lifecycle": frozenset({"provision_content"}),
+        "provision_content": frozenset({"provision_manifest"}),
+        "provision_manifest": frozenset({"provision_journal"}),
+        "provision_journal": frozenset({"provision_launching", "provision_rearm"}),
+        "provision_launching": frozenset({"provision_rearm"}),
+        "provision_rearm": frozenset(),
+    },
+    "submit_run": {
+        "submit_disarm": frozenset({"submit_admission"}),
+        "submit_admission": frozenset({"submit_journal"}),
+        "submit_journal": frozenset({"submit_launching", "submit_rearm"}),
+        "submit_launching": frozenset({"submit_rearm"}),
+        "submit_rearm": frozenset(),
+    },
+    "reclaim_backing": {
+        "reclaim_fenced": frozenset({"reclaim_deleting", "reclaim_snapshots"}),
+        "reclaim_deleting": frozenset({"reclaim_snapshots"}),
+        "reclaim_snapshots": frozenset(),
+    },
+}
 # Label-safe (base32) app/owner hash: e.g. "a1-<52 lower-case base32 chars>". ACA
 # Sandbox labels reject values over 63 characters, so this is the ONE canonical
 # shape used everywhere -- Table partition keys, manifests, paths, and ACA labels
@@ -87,12 +193,13 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 _STATE_STORE_FINGERPRINT_PATTERN = re.compile(rf"^{STATE_STORE_FINGERPRINT_VERSION}-{LABEL_SAFE_PAYLOAD_GROUP}$")
 _REASON_PATTERN = re.compile(r"^[a-z][a-z0-9_.-]{0,127}$")
 _REGION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
+_OPERATION_ID_PATTERN = re.compile(r"^op-([1-9][0-9]*)$")
+_OPERATION_LABEL_PATTERN = re.compile(r"^op-[a-z0-9-]{1,60}$")
 _STATUSES_REQUIRING_ACTIVE_RUN: frozenset[str] = frozenset(
     {"running", "canceling", "reclaiming"}
 )
 _STATUSES_FORBIDDING_ACTIVE_RUN: frozenset[str] = frozenset(
     {
-        "creating",
         "ready",
         "suspending",
         "suspended",
@@ -242,6 +349,88 @@ def validate_generation(generation: int) -> int:
     if isinstance(generation, bool) or not isinstance(generation, int) or generation < 1:
         raise SessionStateContractError("generation must be an integer >= 1")
     return generation
+
+
+def validate_operation_sequence(sequence: int) -> int:
+    """Validate a strictly positive, session-local operation sequence."""
+    if isinstance(sequence, bool) or not isinstance(sequence, int) or sequence < 1:
+        raise SessionStateContractError("operation sequence must be an integer >= 1")
+    return sequence
+
+
+def operation_id_for_sequence(sequence: int) -> str:
+    """Return the canonical operation identifier for one session-local sequence."""
+    return f"op-{validate_operation_sequence(sequence)}"
+
+
+def parse_operation_id(operation_id: str) -> int:
+    """Parse the canonical operation identifier without accepting aliases."""
+    match = _OPERATION_ID_PATTERN.fullmatch(operation_id)
+    if match is None:
+        raise SessionStateContractError("operation_id must match op-<positive-sequence>")
+    sequence = validate_operation_sequence(int(match.group(1)))
+    if operation_id != operation_id_for_sequence(sequence):
+        raise SessionStateContractError("operation_id must be canonically encoded")
+    return sequence
+
+
+def operation_correlation_label(session_id: str, sequence: int) -> str:
+    """Return a stable provider-safe correlation label for one operation."""
+    normalized_session_id = _validate_opaque_id(session_id, "session_id")
+    normalized_sequence = validate_operation_sequence(sequence)
+    label = "op-" + encode_label_safe_digest(
+        hashlib.sha256(
+            _frame_operation_label_components(
+                (normalized_session_id, str(normalized_sequence)),
+            )
+        ).digest()
+    )
+    if _OPERATION_LABEL_PATTERN.fullmatch(label) is None:
+        raise SessionStateContractError("operation correlation label is invalid")
+    return label
+
+
+def _frame_operation_label_components(components: tuple[str, str]) -> bytes:
+    """Frame normalized label inputs so distinct session/sequence pairs cannot collide."""
+    framed = bytearray(len(components).to_bytes(4, "big"))
+    for component in components:
+        encoded = unicodedata.normalize("NFC", component).encode("utf-8")
+        framed.extend(len(encoded).to_bytes(4, "big"))
+        framed.extend(encoded)
+    return bytes(framed)
+
+
+def owner_idempotency_expiry(
+    session_expires_at: datetime,
+    run_expires_at: datetime,
+    operation_lease_expires_at: datetime | None,
+    now: datetime,
+) -> datetime:
+    """Retain first-session idempotency through every active recovery horizon."""
+    return max(
+        _utc_datetime(session_expires_at, "session_expires_at"),
+        _utc_datetime(run_expires_at, "run_expires_at"),
+        (
+            _utc_datetime(operation_lease_expires_at, "operation_lease_expires_at")
+            if operation_lease_expires_at is not None
+            else now
+        )
+        + timedelta(seconds=OWNER_IDEMPOTENCY_RECOVERY_SECONDS),
+        _utc_datetime(now, "now"),
+    )
+
+
+def validate_operation_phase_transition(
+    kind: DurableOperationKind,
+    previous: DurableOperationPhase,
+    candidate: DurableOperationPhase,
+) -> None:
+    """Reject phase rollback or cross-flow jumps while allowing an idempotent retry."""
+    if candidate == previous:
+        return
+    allowed = _OPERATION_PHASE_TRANSITIONS.get(kind, {}).get(previous, frozenset())
+    if candidate not in allowed:
+        raise SessionStateContractError("operation phase transition is not monotonic")
 
 
 def validate_generation_transition(
@@ -543,7 +732,27 @@ class OwnerIdempotencyRowKey:
         return f"owner-idem:{self.idempotency_hash}"
 
 
-type DurableRowKey = SessionRowKey | RunRowKey | IdempotencyRowKey | OwnerIdempotencyRowKey
+@dataclass(frozen=True, slots=True)
+class OperationRowKey:
+    """One monotonic durable operation row beneath a session."""
+
+    session_id: str
+    sequence: int
+
+    @classmethod
+    def create(cls, session_id: str, sequence: int) -> OperationRowKey:
+        return cls(
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            sequence=validate_operation_sequence(sequence),
+        )
+
+    def __str__(self) -> str:
+        return f"operation:{self.session_id}:{self.sequence}"
+
+
+type DurableRowKey = (
+    SessionRowKey | RunRowKey | IdempotencyRowKey | OwnerIdempotencyRowKey | OperationRowKey
+)
 
 
 def parse_row_key(value: str) -> DurableRowKey:
@@ -557,6 +766,10 @@ def parse_row_key(value: str) -> DurableRowKey:
         return IdempotencyRowKey.create(parts[1], parts[2])
     if len(parts) == 2 and parts[0] == "owner-idem":
         return OwnerIdempotencyRowKey.create(parts[1])
+    if len(parts) == 3 and parts[0] == "operation":
+        if re.fullmatch(r"[1-9][0-9]*", parts[2]) is None:
+            raise SessionStateContractError("operation row key sequence must be canonical")
+        return OperationRowKey.create(parts[1], int(parts[2]))
     raise SessionStateContractError("invalid durable row key")
 
 def _validate_snapshot_id(value: str) -> str:
@@ -626,6 +839,8 @@ class DurableSessionRecord:
     created_at: datetime
     updated_at: datetime
     reclaim_fence_token: str | None = None
+    active_operation_id: str | None = None
+    operation_sequence: int = 0
 
     @classmethod
     def create(
@@ -651,6 +866,9 @@ class DurableSessionRecord:
         created_at: datetime,
         updated_at: datetime,
         reclaim_fence_token: str | None = None,
+        active_operation_id: str | None = None,
+        operation_sequence: int | None = None,
+        next_operation_sequence: int | None = None,
     ) -> DurableSessionRecord:
         if status not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
@@ -677,6 +895,39 @@ class DurableSessionRecord:
         if status != "reclaiming" and normalized_fence_token is not None:
             raise SessionStateContractError(
                 "only reclaiming sessions may retain reclaim_fence_token"
+            )
+        normalized_operation_id = (
+            None
+            if active_operation_id is None
+            else operation_id_for_sequence(parse_operation_id(active_operation_id))
+        )
+        if operation_sequence is None:
+            if next_operation_sequence is None:
+                normalized_operation_sequence = 0
+            else:
+                normalized_operation_sequence = validate_operation_sequence(
+                    next_operation_sequence
+                ) - 1
+        elif next_operation_sequence is not None:
+            raise SessionStateContractError(
+                "operation_sequence and next_operation_sequence are mutually exclusive"
+            )
+        else:
+            if (
+                isinstance(operation_sequence, bool)
+                or not isinstance(operation_sequence, int)
+                or operation_sequence < 0
+            ):
+                raise SessionStateContractError(
+                    "operation_sequence must be a non-negative integer"
+                )
+            normalized_operation_sequence = operation_sequence
+        if (
+            normalized_operation_id is not None
+            and parse_operation_id(normalized_operation_id) > normalized_operation_sequence
+        ):
+            raise SessionStateContractError(
+                "operation_sequence must cover active_operation_id"
             )
         normalized_snapshots = tuple(snapshot_ids)
         encode_snapshot_ids(normalized_snapshots)
@@ -714,11 +965,18 @@ class DurableSessionRecord:
             created_at=created_at_n,
             updated_at=updated_at_n,
             reclaim_fence_token=normalized_fence_token,
+            active_operation_id=normalized_operation_id,
+            operation_sequence=normalized_operation_sequence,
         )
 
     @property
     def row_key(self) -> SessionRowKey:
         return SessionRowKey.create(self.session_id)
+
+    @property
+    def next_operation_sequence(self) -> int:
+        """Return the next monotonic sequence while preserving stage-one callers."""
+        return self.operation_sequence + 1
 
     def to_table_entity(self) -> TableEntity:
         entity = _base_entity(self.owner_partition, self.row_key)
@@ -740,6 +998,8 @@ class DurableSessionRecord:
                 "quarantine_reason": self.quarantine_reason or "",
                 "tombstone_reason": self.tombstone_reason or "",
                 "reclaim_fence_token": self.reclaim_fence_token or "",
+                "active_operation_id": self.active_operation_id or "",
+                "operation_sequence": self.operation_sequence,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
             }
@@ -783,7 +1043,250 @@ class DurableSessionRecord:
                 entity,
                 "reclaim_fence_token",
             ),
+            active_operation_id=_optional_entity_str_or_none(
+                entity,
+                "active_operation_id",
+            ),
+            operation_sequence=_read_operation_sequence(entity),
         )
+
+
+@dataclass(frozen=True, slots=True)
+class SessionOperationTarget:
+    """The immutable session binding that an operation is allowed to affect."""
+
+    session_id: str
+    sandbox_id: str | None
+    generation: int
+    digest_kind: str
+    digest: str
+    run_id: str | None
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        session_id: str,
+        sandbox_id: str | None,
+        generation: int,
+        digest_kind: str,
+        digest: str,
+        run_id: str | None,
+    ) -> SessionOperationTarget:
+        return cls(
+            session_id=_validate_opaque_id(session_id, "session_id"),
+            sandbox_id=_optional_bounded_text(sandbox_id, "sandbox_id", max_bytes=256),
+            generation=validate_generation(generation),
+            digest_kind=_bounded_text(digest_kind, "digest_kind", max_bytes=64),
+            digest=_bounded_text(digest, "digest", max_bytes=256),
+            run_id=(
+                None
+                if run_id is None
+                else _validate_opaque_id(run_id, "run_id")
+            ),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DurableSessionOperation:
+    """A same-partition fenced controller operation with a durable resume token."""
+
+    owner_partition: OwnerPartition
+    target: SessionOperationTarget
+    sequence: int
+    kind: DurableOperationKind
+    phase: DurableOperationPhase
+    state: DurableOperationState
+    correlation_label: str
+    token: str
+    attempt_count: int
+    error_code: str | None
+    lease_expires_at: datetime | None
+    next_attempt_at: datetime | None
+    created_at: datetime
+    updated_at: datetime
+    finished_at: datetime | None
+    agent_slug: str = ""
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        owner_partition: OwnerPartition,
+        target: SessionOperationTarget,
+        sequence: int,
+        kind: DurableOperationKind,
+        phase: DurableOperationPhase,
+        state: DurableOperationState,
+        correlation_label: str,
+        token: str,
+        attempt_count: int,
+        error_code: str | None,
+        lease_expires_at: datetime | None,
+        next_attempt_at: datetime | None,
+        created_at: datetime,
+        updated_at: datetime,
+        finished_at: datetime | None,
+        agent_slug: str = "",
+    ) -> DurableSessionOperation:
+        if kind not in _OPERATION_KINDS:
+            raise SessionStateContractError("unsupported durable operation kind")
+        if phase not in _OPERATION_PHASES or phase not in _OPERATION_PHASES_BY_KIND[kind]:
+            raise SessionStateContractError("operation phase does not match operation kind")
+        if state not in _OPERATION_STATES:
+            raise SessionStateContractError("unsupported durable operation state")
+        if state == "active":
+            if phase in {"completed", "aborted"} or finished_at is not None:
+                raise SessionStateContractError("active operations cannot be terminal")
+        elif phase != state:
+            raise SessionStateContractError("terminal operation state and phase must agree")
+        normalized_target = SessionOperationTarget.create(
+            session_id=target.session_id,
+            sandbox_id=target.sandbox_id,
+            generation=target.generation,
+            digest_kind=target.digest_kind,
+            digest=target.digest,
+            run_id=target.run_id,
+        )
+        if kind == "provision_submit" and normalized_target.run_id is None:
+            raise SessionStateContractError(
+                "provision operations require an accepted run target"
+            )
+        if kind == "submit_run" and normalized_target.run_id is None:
+            raise SessionStateContractError("submit operations require an accepted run target")
+        if isinstance(attempt_count, bool) or not isinstance(attempt_count, int) or attempt_count < 0:
+            raise SessionStateContractError("operation attempt_count must be a non-negative integer")
+        created_at_n = _utc_datetime(created_at, "created_at")
+        updated_at_n = _utc_datetime(updated_at, "updated_at")
+        if updated_at_n < created_at_n:
+            raise SessionStateContractError("updated_at must not precede created_at")
+        finished_at_n = (
+            None if finished_at is None else _utc_datetime(finished_at, "finished_at")
+        )
+        if state != "active" and finished_at_n is None:
+            raise SessionStateContractError("terminal operations require finished_at")
+        if finished_at_n is not None and finished_at_n < created_at_n:
+            raise SessionStateContractError("finished_at must not precede created_at")
+        lease_expires_at_n = (
+            None
+            if lease_expires_at is None
+            else _utc_datetime(lease_expires_at, "lease_expires_at")
+        )
+        next_attempt_at_n = (
+            None
+            if next_attempt_at is None
+            else _utc_datetime(next_attempt_at, "next_attempt_at")
+        )
+        correlation_label_n = _bounded_text(
+            correlation_label,
+            "operation correlation_label",
+            max_bytes=63,
+        )
+        if _OPERATION_LABEL_PATTERN.fullmatch(correlation_label_n) is None:
+            raise SessionStateContractError("operation correlation_label is invalid")
+        return cls(
+            owner_partition=owner_partition,
+            target=normalized_target,
+            sequence=validate_operation_sequence(sequence),
+            kind=kind,
+            phase=phase,
+            state=state,
+            correlation_label=correlation_label_n,
+            token=_bounded_text(token, "operation token", max_bytes=128),
+            attempt_count=attempt_count,
+            error_code=_validate_reason(error_code, "operation error_code"),
+            lease_expires_at=lease_expires_at_n,
+            next_attempt_at=next_attempt_at_n,
+            created_at=created_at_n,
+            updated_at=updated_at_n,
+            finished_at=finished_at_n,
+            agent_slug="" if not agent_slug else _normalize_agent_slug(agent_slug),
+        )
+
+    @property
+    def operation_id(self) -> str:
+        return operation_id_for_sequence(self.sequence)
+
+    @property
+    def row_key(self) -> OperationRowKey:
+        return OperationRowKey.create(self.target.session_id, self.sequence)
+
+    def to_table_entity(self) -> TableEntity:
+        entity = _base_entity(self.owner_partition, self.row_key)
+        entity.update(
+            {
+                "operation_id": self.operation_id,
+                "kind": self.kind,
+                "phase": self.phase,
+                "state": self.state,
+                "target_sandbox_id": self.target.sandbox_id or "",
+                "target_generation": self.target.generation,
+                "target_digest_kind": self.target.digest_kind,
+                "target_digest": self.target.digest,
+                "target_run_id": self.target.run_id or "",
+                "correlation_label": self.correlation_label,
+                "token": self.token,
+                "attempt_count": self.attempt_count,
+                "error_code": self.error_code or "",
+                "agent_slug": self.agent_slug,
+                "created_at": self.created_at,
+                "updated_at": self.updated_at,
+            }
+        )
+        if self.finished_at is not None:
+            entity["finished_at"] = self.finished_at
+        if self.lease_expires_at is not None:
+            entity["lease_expires_at"] = self.lease_expires_at
+        if self.next_attempt_at is not None:
+            entity["next_attempt_at"] = self.next_attempt_at
+        return entity
+
+    @classmethod
+    def from_table_entity(cls, entity: Mapping[str, object]) -> DurableSessionOperation:
+        partition = _read_partition(entity)
+        row_key = parse_row_key(_require_str(entity, "RowKey"))
+        if not isinstance(row_key, OperationRowKey):
+            raise SessionStateContractError("entity RowKey is not an operation row")
+        _validate_entity_header(entity, partition)
+        sequence = row_key.sequence
+        operation_id = _require_str(entity, "operation_id")
+        if operation_id != operation_id_for_sequence(sequence):
+            raise SessionStateContractError("operation_id does not match operation row key")
+        kind = _require_str(entity, "kind")
+        phase = _require_str(entity, "phase")
+        state = _require_str(entity, "state")
+        return cls.create(
+            owner_partition=partition,
+            target=SessionOperationTarget.create(
+                session_id=row_key.session_id,
+                sandbox_id=_optional_entity_str(entity, "target_sandbox_id"),
+                generation=_require_int(entity, "target_generation"),
+                digest_kind=_require_str(entity, "target_digest_kind"),
+                digest=_require_str(entity, "target_digest"),
+                run_id=_optional_entity_str(entity, "target_run_id"),
+            ),
+            sequence=sequence,
+            kind=cast(DurableOperationKind, kind),
+            phase=cast(DurableOperationPhase, phase),
+            state=cast(DurableOperationState, state),
+            correlation_label=_require_str(entity, "correlation_label"),
+            token=_require_str(entity, "token"),
+            attempt_count=_require_int(entity, "attempt_count"),
+            error_code=_optional_entity_str(entity, "error_code"),
+            lease_expires_at=_optional_entity_datetime_or_none(
+                entity,
+                "lease_expires_at",
+            ),
+            next_attempt_at=_optional_entity_datetime_or_none(
+                entity,
+                "next_attempt_at",
+            ),
+            agent_slug=_optional_entity_str_or_none(entity, "agent_slug") or "",
+            created_at=_require_datetime(entity, "created_at"),
+            updated_at=_require_datetime(entity, "updated_at"),
+            finished_at=_optional_entity_datetime_or_none(entity, "finished_at"),
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class DurableRunRecord:
@@ -799,6 +1302,7 @@ class DurableRunRecord:
     expires_at: datetime
     created_at: datetime
     updated_at: datetime
+    agent_slug: str = ""
 
     @classmethod
     def create(
@@ -814,6 +1318,7 @@ class DurableRunRecord:
         expires_at: datetime,
         created_at: datetime,
         updated_at: datetime,
+        agent_slug: str = "",
     ) -> DurableRunRecord:
         if status not in _RUN_STATUSES:
             raise SessionStateContractError("unsupported run status")
@@ -837,6 +1342,7 @@ class DurableRunRecord:
             expires_at=_utc_datetime(expires_at, "expires_at"),
             created_at=created_at_n,
             updated_at=updated_at_n,
+            agent_slug="" if not agent_slug else _normalize_agent_slug(agent_slug),
         )
 
     @property
@@ -854,6 +1360,7 @@ class DurableRunRecord:
                 "expires_at": self.expires_at,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
+                "agent_slug": self.agent_slug,
             }
         )
         return entity
@@ -882,6 +1389,7 @@ class DurableRunRecord:
             expires_at=_require_datetime(entity, "expires_at"),
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
+            agent_slug=_optional_entity_str_or_none(entity, "agent_slug") or "",
         )
 
 
@@ -1114,6 +1622,68 @@ class NewSessionAdmissionRecords:
         return cls(session=session, run=run, owner_idempotency=owner_idempotency)
 
 
+@dataclass(frozen=True, slots=True)
+class ProvisionSubmitRecords:
+    """Rows atomically reserved before a first-session sandbox create."""
+
+    session: DurableSessionRecord
+    run: DurableRunRecord
+    operation: DurableSessionOperation
+    owner_idempotency: DurableOwnerIdempotencyRecord | None = None
+
+    @classmethod
+    def create(
+        cls,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        operation: DurableSessionOperation,
+        owner_idempotency: DurableOwnerIdempotencyRecord | None = None,
+    ) -> ProvisionSubmitRecords:
+        partition_key = session.owner_partition.partition_key
+        if (
+            run.owner_partition.partition_key != partition_key
+            or operation.owner_partition.partition_key != partition_key
+            or (
+                owner_idempotency is not None
+                and owner_idempotency.owner_partition.partition_key != partition_key
+            )
+        ):
+            raise SessionStateContractError(
+                "provision submit rows must share one owner partition"
+            )
+        if (
+            session.status != "creating"
+            or session.active_run_id != run.run_id
+            or session.active_operation_id != operation.operation_id
+            or session.operation_sequence != operation.sequence
+            or run.session_id != session.session_id
+            or operation.target.session_id != session.session_id
+            or operation.target.run_id != run.run_id
+            or operation.kind != "provision_submit"
+            or operation.target.sandbox_id is not None
+            or operation.target.generation != session.generation
+            or operation.target.digest_kind != session.digest_kind
+            or operation.target.digest != session.digest
+            or (operation.agent_slug and operation.agent_slug != run.agent_slug)
+        ):
+            raise SessionStateContractError(
+                "provision submit rows must reserve one creating session binding"
+            )
+        if owner_idempotency is not None and (
+            owner_idempotency.session_id != session.session_id
+            or owner_idempotency.run_id != run.run_id
+        ):
+            raise SessionStateContractError(
+                "owner idempotency must identify the reserved provision run"
+            )
+        return cls(
+            session=session,
+            run=run,
+            operation=operation,
+            owner_idempotency=owner_idempotency,
+        )
+
+
 def _read_partition(entity: Mapping[str, object]) -> OwnerPartition:
     return OwnerPartition.parse(_require_str(entity, "PartitionKey"))
 
@@ -1156,6 +1726,30 @@ def _optional_entity_str_or_none(
     return _optional_entity_str(entity, field_name)
 
 
+def _optional_entity_int_or_default(
+    entity: Mapping[str, object],
+    field_name: str,
+    *,
+    default: int,
+) -> int:
+    if field_name not in entity:
+        return default
+    return _require_int(entity, field_name)
+
+
+def _read_operation_sequence(entity: Mapping[str, object]) -> int:
+    if "operation_sequence" in entity:
+        value = _require_int(entity, "operation_sequence")
+        if value < 0:
+            raise SessionStateContractError("operation_sequence must be non-negative")
+        return value
+    if "next_operation_sequence" in entity:
+        return validate_operation_sequence(
+            _require_int(entity, "next_operation_sequence")
+        ) - 1
+    return 0
+
+
 def _require_int(entity: Mapping[str, object], field_name: str) -> int:
     value = entity.get(field_name)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -1168,3 +1762,12 @@ def _require_datetime(entity: Mapping[str, object], field_name: str) -> datetime
     if not isinstance(value, datetime):
         raise SessionStateContractError(f"{field_name} must be a datetime")
     return value
+
+
+def _optional_entity_datetime_or_none(
+    entity: Mapping[str, object],
+    field_name: str,
+) -> datetime | None:
+    if field_name not in entity:
+        return None
+    return _require_datetime(entity, field_name)

@@ -20,6 +20,13 @@ class RunDeadlineExceededError(TimeoutError):
     """The synchronous controller wall deadline elapsed after a run was accepted."""
 
 
+class RunCleanupDeadlineExceededError(RunDeadlineExceededError):
+    """Bounded post-deadline cleanup exceeded the reserved Functions headroom."""
+
+
+CLEANUP_HEADROOM_SECONDS = 45.0
+
+
 @dataclass(frozen=True, slots=True)
 class RequestBudget:
     """Absolute request deadlines anchored once after auth and input validation."""
@@ -56,6 +63,15 @@ class RequestBudget:
             raise RunDeadlineExceededError("Synchronous run deadline exceeded.")
         return remaining
 
+    def remaining_cleanup_seconds(self) -> float:
+        """Return cleanup headroom measured from the same original monotonic anchor."""
+        remaining = self.wall_deadline + CLEANUP_HEADROOM_SECONDS - self._clock()
+        if remaining <= 0:
+            raise RunCleanupDeadlineExceededError(
+                "Synchronous cleanup deadline exceeded."
+            )
+        return remaining
+
     async def wait_for[T](self, operation: Awaitable[T]) -> T:
         """Await work within the shared wall deadline without creating a second clock."""
         try:
@@ -69,6 +85,22 @@ class RequestBudget:
                 return await operation
         except TimeoutError:
             raise RunDeadlineExceededError("Synchronous run deadline exceeded.") from None
+
+    async def wait_for_cleanup[T](self, operation: Awaitable[T]) -> T:
+        """Await bounded post-deadline cleanup without exceeding platform headroom."""
+        try:
+            remaining = self.remaining_cleanup_seconds()
+        except RunCleanupDeadlineExceededError:
+            if inspect.iscoroutine(operation):
+                operation.close()
+            raise
+        try:
+            async with asyncio.timeout(remaining):
+                return await operation
+        except TimeoutError:
+            raise RunCleanupDeadlineExceededError(
+                "Synchronous cleanup deadline exceeded."
+            ) from None
 
 
 def validate_async_setup_timeout(authored_timeout: float | None) -> float:

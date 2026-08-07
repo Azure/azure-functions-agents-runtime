@@ -29,6 +29,7 @@ from uuid import uuid4
 
 import pytest
 
+from azure_functions_agents.controller.reconciler import SessionReconciler
 from azure_functions_agents.session_state import (
     ActiveRunConflictError,
     AdmissionRecords,
@@ -36,21 +37,32 @@ from azure_functions_agents.session_state import (
     ConcurrencyConflictError,
     CorruptEntityError,
     DurableIdempotencyRecord,
+    DurableOwnerIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
     GenerationConflictError,
     IdempotencyConflictError,
+    OperationRowNotFoundError,
     OwnerPartition,
+    ProvisionSubmitRecords,
     RowAlreadyExistsError,
     RunRowNotFoundError,
+    SessionNotAdmissibleError,
+    SessionOperationTarget,
     SessionRowNotFoundError,
+    SessionStateStoreError,
+    StaleOperationTokenError,
     StateStoreUnavailableError,
     TerminalStateConflictError,
     compute_state_store_fingerprint,
+    operation_correlation_label,
+    operation_id_for_sequence,
     owner_partition,
 )
 from azure_functions_agents.session_state.store import AzureTableSessionStateStore
+from azure_functions_agents.transport.transport_models import SandboxSummary
 from tests.endtoend._storage_probe import DEV_CONNECTION_STRING
 
 
@@ -210,6 +222,135 @@ def _admitted_session(session: DurableSessionRecord, run_id: str) -> DurableSess
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        reclaim_fence_token=session.reclaim_fence_token,
+        active_operation_id=session.active_operation_id,
+        next_operation_sequence=session.next_operation_sequence,
+    )
+
+
+def _operation(
+    session: DurableSessionRecord,
+    *,
+    kind: str,
+    active_run_id: str | None,
+    token: str,
+) -> DurableSessionOperation:
+    return DurableSessionOperation.create(
+        owner_partition=session.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=active_run_id,
+        ),
+        sequence=session.next_operation_sequence,
+        kind=kind,  # type: ignore[arg-type]
+        phase=(
+            "reclaim_fenced" if kind == "reclaim_backing" else "submit_admission"
+        ),  # type: ignore[arg-type]
+        state="active",
+        correlation_label=operation_correlation_label(
+            session.session_id,
+            session.next_operation_sequence,
+        ),
+        token=token,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+
+
+def _session_with_operation(
+    session: DurableSessionRecord,
+    operation: DurableSessionOperation,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=_NOW,
+        reclaim_fence_token=None,
+        active_operation_id=operation.operation_id,
+        next_operation_sequence=operation.sequence + 1,
+    )
+
+
+def _session_after_operation(
+    session: DurableSessionRecord,
+    *,
+    status: str = "ready",
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=status,  # type: ignore[arg-type]
+        last_activity_at=_NOW,
+        expires_at=session.expires_at,
+        idle_policy_armed=status == "ready",
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=_NOW,
+        reclaim_fence_token=None,
+        active_operation_id=None,
+        next_operation_sequence=session.next_operation_sequence,
+    )
+
+
+def _session_before_submit_rearm(session: DurableSessionRecord) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status="ready",
+        last_activity_at=_NOW,
+        expires_at=session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=_NOW,
+        reclaim_fence_token=None,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -253,6 +394,83 @@ def _idempotency(
         run_id=run_id,
         expires_at=_NOW + timedelta(hours=1),
         created_at=_NOW,
+    )
+
+
+def _provision_submit_records(
+    *,
+    partition: OwnerPartition,
+    session_id: str = "session-provision",
+    run_id: str = "run-provision",
+) -> ProvisionSubmitRecords:
+    sequence = 1
+    operation = DurableSessionOperation.create(
+        owner_partition=partition,
+        target=SessionOperationTarget.create(
+            session_id=session_id,
+            sandbox_id=None,
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            run_id=run_id,
+        ),
+        sequence=sequence,
+        kind="provision_submit",
+        phase="provision_create",
+        state="active",
+        correlation_label=operation_correlation_label(session_id, sequence),
+        token="f" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    session = DurableSessionRecord.create(
+        owner_partition=partition,
+        session_id=session_id,
+        sandbox_id=None,
+        generation=1,
+        digest_kind="funcs_zip",
+        digest="sha256:" + ("b" * 64),
+        protocol="1",
+        status="creating",
+        last_activity_at=_NOW,
+        expires_at=_NOW + timedelta(hours=24),
+        idle_policy_armed=False,
+        active_run_id=run_id,
+        snapshot_ids=(),
+        region="westus2",
+        state_store_fingerprint="s1-" + "a" * 52,
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        active_operation_id=operation_id_for_sequence(sequence),
+        operation_sequence=sequence,
+    )
+    run = _run(
+        partition=partition,
+        session_id=session_id,
+        run_id=run_id,
+        status="accepted",
+    )
+    owner_idempotency = DurableOwnerIdempotencyRecord.create(
+        owner_partition=partition,
+        idempotency_hash=_hash("provision-key"),
+        request_hash=_hash("provision-payload"),
+        session_id=session_id,
+        run_id=run_id,
+        expires_at=session.expires_at,
+        created_at=_NOW,
+    )
+    return ProvisionSubmitRecords.create(
+        session,
+        run,
+        operation,
+        owner_idempotency,
     )
 
 
@@ -303,7 +521,7 @@ async def test_session_run_idempotency_round_trip_and_key_shape() -> None:
 
 
 @pytest.mark.asyncio
-async def test_reclaim_fence_and_cursor_use_real_etag_guards() -> None:
+async def test_durable_operation_lifecycle_and_cursor_use_real_egt_guards() -> None:
     async with _one_store() as store:
         partition = _partition()
         run = _run(partition=partition)
@@ -316,34 +534,52 @@ async def test_reclaim_fence_and_cursor_use_real_etag_guards() -> None:
         )
         await store.create_session(session)
         await store.create_run(run)
-
-        fence = await store.acquire_reclaim_fence(
-            session=session,
-            run=run,
-            token="fence-token",
-            updated_at=_NOW,
+        session_read = await store.get_session(partition, session.session_id)
+        operation = _operation(
+            session_read.record,
+            kind="reclaim_backing",
+            active_run_id=run.run_id,
+            token="a" * 32,
+        )
+        fenced = _session_with_operation(session_read.record, operation)
+        fence = await store.begin_operation(
+            previous=session_read.record,
+            updated=fenced,
+            operation=operation,
+            etag=session_read.etag,
         )
 
-        assert fence is not None
-        fenced = await store.get_session(partition, session.session_id)
-        resumed = await store.acquire_reclaim_fence(
-            session=fenced.record,
-            run=run,
-            token=fence.token,
+        stored = await store.get_session(partition, session.session_id)
+        assert stored.record.status == "running"
+        assert stored.record.active_operation_id == operation.operation_id
+        resumed = await store.resume_operation(
+            owner_partition=partition,
+            session_id=session.session_id,
+            token="b" * 32,
             updated_at=_NOW,
         )
-        assert resumed == fence
+        assert resumed is not None
+        with pytest.raises(StaleOperationTokenError):
+            await store.advance_operation(
+                fence=fence,
+                phase="reclaim_deleting",
+                updated_at=_NOW,
+            )
+        resumed = await store.advance_operation(
+            fence=resumed,
+            phase="reclaim_deleting",
+            updated_at=_NOW,
+        )
         terminal = replace(run, status="succeeded", result_available=False)
-        adopted = await store.adopt_terminal_run(terminal)
-        assert adopted.slot_released is False
-        assert (await store.get_session(partition, session.session_id)).record.status == "reclaiming"
-
-        released = await store.resolve_reclaim_fence_terminal(
-            fence=fence,
+        completed = await store.complete_operation(
+            fence=resumed,
+            updated_session=_session_after_operation(
+                (await store.get_session(partition, session.session_id)).record
+            ),
             terminal_run=terminal,
+            updated_at=_NOW,
         )
-        assert released is not None
-        assert released.slot_released is True
+        assert completed.operation.state == "completed"
         assert (await store.get_session(partition, session.session_id)).record.status == "ready"
 
         first = await store.advance_reconciler_cursor(
@@ -363,6 +599,431 @@ async def test_reclaim_fence_and_cursor_use_real_etag_guards() -> None:
                 previous=first,
                 continuation_token="stale",
             )
+
+
+@pytest.mark.asyncio
+async def test_durable_operation_abort_and_pruning_use_real_etags() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        session = replace(_session(partition=partition), sandbox_id="sandbox-1")
+        await store.create_session(session)
+        session_read = await store.get_session(partition, session.session_id)
+        operation = _operation(
+            session_read.record,
+            kind="reclaim_backing",
+            active_run_id=None,
+            token="c" * 32,
+        )
+        fence = await store.begin_operation(
+            previous=session_read.record,
+            updated=_session_with_operation(session_read.record, operation),
+            operation=operation,
+            etag=session_read.etag,
+        )
+        aborted = await store.abort_operation(
+            fence=fence,
+            updated_session=_session_after_operation(
+                (await store.get_session(partition, session.session_id)).record
+            ),
+            error_code="lifecycle_policy_apply_failed",
+            updated_at=_NOW,
+        )
+        assert aborted.operation.state == "aborted"
+        await store.delete_operation(
+            previous=aborted.operation,
+            etag=aborted.operation_etag,
+        )
+        with pytest.raises(OperationRowNotFoundError):
+            await store.get_operation(
+                partition,
+                session.session_id,
+                aborted.operation.operation_id,
+            )
+
+
+@pytest.mark.asyncio
+async def test_provision_submit_reserves_owner_claim_run_and_operation_in_one_egt() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        records = _provision_submit_records(partition=partition)
+
+        reserved = await store.begin_provision_submit(records)
+
+        assert reserved.replayed is False
+        assert reserved.fence is not None
+        session = await store.get_session(partition, records.session.session_id)
+        run = await store.get_run(
+            partition,
+            records.session.session_id,
+            records.run.run_id,
+        )
+        operation = await store.get_operation(
+            partition,
+            records.session.session_id,
+            records.operation.operation_id,
+        )
+        owner = await store.get_owner_idempotency(
+            partition,
+            records.owner_idempotency.idempotency_hash,  # type: ignore[union-attr]
+        )
+        assert session.record.active_operation_id == records.operation.operation_id
+        assert session.record.active_run_id == records.run.run_id
+        assert run.record.status == "accepted"
+        assert operation.record.phase == "provision_create"
+        assert owner is not None
+
+        replay = await store.begin_provision_submit(records)
+        assert replay.replayed is True
+        assert replay.run.run_id == records.run.run_id
+
+
+@pytest.mark.asyncio
+async def test_submit_admission_advances_the_existing_operation_in_one_egt() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        session = replace(_session(partition=partition), sandbox_id="sandbox-1")
+        await store.create_session(session)
+        read = await store.get_session(partition, session.session_id)
+        run = _run(partition=partition, run_id="run-submit", status="accepted")
+        operation = _operation(
+            read.record,
+            kind="submit_run",
+            active_run_id=run.run_id,
+            token="g" * 32,
+        )
+        fence = await store.begin_operation(
+            previous=read.record,
+            updated=_session_with_operation(read.record, operation),
+            operation=operation,
+            etag=read.etag,
+        )
+        admitted = _admitted_session(
+            (await store.get_session(partition, session.session_id)).record,
+            run.run_id,
+        )
+
+        outcome = await store.admit_operation_run(
+            fence=fence,
+            records=AdmissionRecords.create(admitted, run),
+        )
+
+        assert outcome.replayed is False
+        stored = await store.get_session(partition, session.session_id)
+        stored_operation = await store.get_operation(
+            partition,
+            session.session_id,
+            operation.operation_id,
+        )
+        assert stored.record.active_run_id == run.run_id
+        assert stored.record.active_operation_id == operation.operation_id
+        assert stored_operation.record.phase == "submit_journal"
+
+
+@pytest.mark.asyncio
+async def test_submit_admission_rejects_wrong_predecessor_phase() -> None:
+    async with _one_store() as store:
+        partition = _partition()
+        session = replace(_session(partition=partition), sandbox_id="sandbox-1")
+        await store.create_session(session)
+        read = await store.get_session(partition, session.session_id)
+        run = _run(partition=partition, run_id="run-wrong-phase", status="accepted")
+        operation = replace(
+            _operation(
+                read.record,
+                kind="submit_run",
+                active_run_id=run.run_id,
+                token="n" * 32,
+            ),
+            phase="submit_disarm",
+        )
+        fence = await store.begin_operation(
+            previous=read.record,
+            updated=_session_with_operation(read.record, operation),
+            operation=operation,
+            etag=read.etag,
+        )
+        admitted = _admitted_session(
+            (await store.get_session(partition, session.session_id)).record,
+            run.run_id,
+        )
+
+        with pytest.raises(SessionStateStoreError, match="submit_admission"):
+            await store.admit_operation_run(
+                fence=fence,
+                records=AdmissionRecords.create(admitted, run),
+            )
+
+
+@pytest.mark.asyncio
+async def test_terminal_submit_rearm_keeps_second_controller_non_admissible() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        session = replace(_session(partition=partition), sandbox_id="sandbox-1")
+        await store_a.create_session(session)
+        read = await store_a.get_session(partition, session.session_id)
+        run = _run(partition=partition, run_id="run-terminal", status="accepted")
+        operation = _operation(
+            read.record,
+            kind="submit_run",
+            active_run_id=run.run_id,
+            token="h" * 32,
+        )
+        fence = await store_a.begin_operation(
+            previous=read.record,
+            updated=_session_with_operation(read.record, operation),
+            operation=operation,
+            etag=read.etag,
+        )
+        admitted = _admitted_session(
+            (await store_a.get_session(partition, session.session_id)).record,
+            run.run_id,
+        )
+        await store_a.admit_operation_run(
+            fence=fence,
+            records=AdmissionRecords.create(admitted, run),
+        )
+        await store_a.adopt_terminal_run(replace(run, status="succeeded"))
+        current = await store_a.get_session(partition, session.session_id)
+        fence = await store_a.advance_operation(
+            fence=fence,
+            phase="submit_rearm",
+            updated_at=_NOW,
+            updated_session=_session_before_submit_rearm(current.record),
+        )
+        contender_run = _run(
+            partition=partition,
+            run_id="run-contender",
+            status="accepted",
+        )
+        contender_session = _admitted_session(
+            (await store_b.get_session(partition, session.session_id)).record,
+            contender_run.run_id,
+        )
+
+        with pytest.raises(SessionNotAdmissibleError):
+            await store_b.admit_run(AdmissionRecords.create(contender_session, contender_run))
+
+        assert fence.operation_id == operation.operation_id
+
+
+@pytest.mark.asyncio
+async def test_journal_invalidation_overrides_a_prior_terminal_success() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        session = _session(partition=partition)
+        await store_a.create_session(session)
+        run = _run(partition=partition, status="accepted")
+        admitted = _admitted_session(session, run.run_id)
+        await store_a.admit_run(AdmissionRecords.create(admitted, run))
+        succeeded = _run(partition=partition, status="succeeded", result_available=True)
+        await store_a.adopt_terminal_run(succeeded)
+
+        first = await store_b.invalidate_journal_run(
+            owner_partition=partition,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            updated_at=_NOW + timedelta(seconds=1),
+        )
+        repeated = await store_a.invalidate_journal_run(
+            owner_partition=partition,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            updated_at=_NOW + timedelta(seconds=2),
+        )
+        stored = await store_a.get_run(partition, run.session_id, run.run_id)
+
+        assert first.run.status == "failed"
+        assert not first.run.result_available
+        assert repeated.run.status == "failed"
+        assert stored.record.status == "failed"
+        assert stored.record.status_reason == "journal_corrupt"
+        assert not stored.record.result_available
+
+
+@pytest.mark.asyncio
+async def test_two_controllers_take_over_one_expired_operation_lease() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        session = _admitted_session(
+            replace(_session(partition=partition), sandbox_id="sandbox-1"),
+            "run-1",
+        )
+        run = _run(partition=partition, status="accepted")
+        await store_a.create_session(session)
+        await store_a.create_run(run)
+        session_read = await store_a.get_session(partition, session.session_id)
+        operation = replace(
+            _operation(
+                session_read.record,
+                kind="reclaim_backing",
+                active_run_id=run.run_id,
+                token="a" * 32,
+            ),
+            lease_expires_at=_NOW - timedelta(seconds=1),
+        )
+        fenced = _session_with_operation(session_read.record, operation)
+        original = await store_a.begin_operation(
+            previous=session_read.record,
+            updated=fenced,
+            operation=operation,
+            etag=session_read.etag,
+        )
+
+        first, second = await asyncio.gather(
+            store_a.takeover_expired_operation(
+                owner_partition=partition,
+                session_id=session.session_id,
+                token="b" * 32,
+                updated_at=_NOW,
+            ),
+            store_b.takeover_expired_operation(
+                owner_partition=partition,
+                session_id=session.session_id,
+                token="c" * 32,
+                updated_at=_NOW,
+            ),
+        )
+
+        winners = [fence for fence in (first, second) if fence is not None]
+        assert len(winners) == 1
+        with pytest.raises(StaleOperationTokenError):
+            await store_a.advance_operation(
+                fence=original,
+                phase="reclaim_deleting",
+                updated_at=_NOW,
+            )
+
+
+@pytest.mark.asyncio
+async def test_two_controllers_journal_claim_and_takeover_reject_stale_token() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        session = replace(_session(partition=partition), sandbox_id="sandbox-1")
+        await store_a.create_session(session)
+        read = await store_a.get_session(partition, session.session_id)
+        run = _run(partition=partition, run_id="run-claim", status="accepted")
+        operation = _operation(
+            read.record,
+            kind="submit_run",
+            active_run_id=run.run_id,
+            token="j" * 32,
+        )
+        fence = await store_a.begin_operation(
+            previous=read.record,
+            updated=_session_with_operation(read.record, operation),
+            operation=operation,
+            etag=read.etag,
+        )
+        admitted = _admitted_session(
+            (await store_a.get_session(partition, session.session_id)).record,
+            run.run_id,
+        )
+        await store_a.admit_operation_run(
+            fence=fence,
+            records=AdmissionRecords.create(admitted, run),
+        )
+
+        first = await store_a.claim_operation_journal(
+            owner_partition=partition,
+            session_id=session.session_id,
+            run_id=run.run_id,
+            token="k" * 32,
+            updated_at=_NOW,
+        )
+        blocked = await store_b.claim_operation_journal(
+            owner_partition=partition,
+            session_id=session.session_id,
+            run_id=run.run_id,
+            token="l" * 32,
+            updated_at=_NOW,
+        )
+        assert first is not None
+        assert blocked is None
+
+        takeover = await store_b.claim_operation_journal(
+            owner_partition=partition,
+            session_id=session.session_id,
+            run_id=run.run_id,
+            token="m" * 32,
+            updated_at=_NOW + timedelta(seconds=61),
+        )
+        assert takeover is not None
+        with pytest.raises(StaleOperationTokenError):
+            await store_a.advance_operation(
+                fence=first,
+                phase="submit_launching",
+                updated_at=_NOW + timedelta(seconds=61),
+            )
+
+
+@pytest.mark.asyncio
+async def test_reclaimer_resumes_a_crashed_durable_operation_with_real_egt() -> None:
+    class Provider:
+        def __init__(self, sandbox: SandboxSummary) -> None:
+            self.sandbox = sandbox
+            self.deleted: list[str] = []
+
+        async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+            if labels.get("app_hash") != partition.app_hash:
+                return ()
+            return (self.sandbox,)
+
+        async def list_snapshots(self) -> tuple[object, ...]:
+            return ()
+
+        async def delete_sandbox(self, sandbox_id: str) -> None:
+            self.deleted.append(sandbox_id)
+
+        async def delete_snapshot(self, snapshot_id: str) -> None:
+            del snapshot_id
+
+    async with _one_store() as store:
+        partition = _partition()
+        run = _run(partition=partition)
+        session = _admitted_session(
+            replace(_session(partition=partition), sandbox_id="sandbox-1"),
+            run.run_id,
+        )
+        await store.create_session(session)
+        await store.create_run(run)
+        session_read = await store.get_session(partition, session.session_id)
+        operation = _operation(
+            session_read.record,
+            kind="reclaim_backing",
+            active_run_id=run.run_id,
+            token="e" * 32,
+        )
+        await store.begin_operation(
+            previous=session_read.record,
+            updated=_session_with_operation(session_read.record, operation),
+            operation=operation,
+            etag=session_read.etag,
+        )
+        provider = Provider(
+            SandboxSummary.create(
+                sandbox_id="sandbox-1",
+                labels={
+                    "app_hash": partition.app_hash,
+                    "owner_hash": partition.owner_hash,
+                    "session_id": session.session_id,
+                },
+            )
+        )
+
+        report = await SessionReconciler(
+            store=store,
+            provider=provider,  # type: ignore[arg-type]
+            app_hash=partition.app_hash,
+            now=lambda: _NOW + timedelta(seconds=61),
+        ).reconcile_session(partition, session.session_id)
+
+        assert report.abandoned_runs == 1
+        assert report.tombstoned_sessions == 1
+        assert provider.deleted == ["sandbox-1"]
+        assert (await store.get_session(partition, session.session_id)).record.status == "tombstoned"
+        assert (
+            await store.get_operation(partition, session.session_id, operation.operation_id)
+        ).record.state == "completed"
 
 
 @pytest.mark.asyncio
@@ -420,6 +1081,46 @@ async def test_two_controllers_race_exactly_one_admits() -> None:
 
         stored = await store_a.get_session(partition, "session-1")
         assert stored.record.active_run_id == winner_run_id
+
+
+@pytest.mark.asyncio
+async def test_two_controllers_race_rearm_operation_against_admission() -> None:
+    async with _two_controller_stores() as (store_a, store_b):
+        partition = _partition()
+        session = replace(_session(partition=partition), sandbox_id="sandbox-1")
+        await store_a.create_session(session)
+        current = await store_a.get_session(partition, session.session_id)
+        run = _run(partition=partition, run_id="run-admission")
+        operation = _operation(
+            current.record,
+            kind="submit_run",
+            active_run_id=run.run_id,
+            token="d" * 32,
+        )
+        operation_session = _session_with_operation(current.record, operation)
+        admitted_session = _admitted_session(current.record, run.run_id)
+
+        results = await asyncio.gather(
+            store_a.begin_operation(
+                previous=current.record,
+                updated=operation_session,
+                operation=operation,
+                etag=current.etag,
+            ),
+            store_b.admit_run(AdmissionRecords.create(admitted_session, run)),
+            return_exceptions=True,
+        )
+
+        successes = [result for result in results if not isinstance(result, BaseException)]
+        failures = [result for result in results if isinstance(result, BaseException)]
+        assert len(successes) == 1, results
+        assert len(failures) == 1, results
+        assert isinstance(failures[0], (ConcurrencyConflictError, SessionNotAdmissibleError))
+
+        stored = await store_a.get_session(partition, session.session_id)
+        assert (stored.record.active_operation_id is not None) != (
+            stored.record.active_run_id is not None
+        )
 
 
 @pytest.mark.asyncio

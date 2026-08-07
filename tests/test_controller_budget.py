@@ -1,10 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from azure_functions_agents.controller.budget import RequestBudget, RunDeadlineExceededError
+from azure_functions_agents.controller.budget import (
+    CLEANUP_HEADROOM_SECONDS,
+    RequestBudget,
+    RunCleanupDeadlineExceededError,
+    RunDeadlineExceededError,
+)
 from azure_functions_agents.controller.readiness import (
     SessionRuntimeBinding,
     StateStoreBinding,
@@ -43,6 +49,34 @@ def test_request_budget_rejects_an_elapsed_wall_deadline() -> None:
 
     with pytest.raises(RunDeadlineExceededError):
         budget.remaining_wall_seconds()
+
+
+def test_request_budget_reserves_bounded_cleanup_headroom_from_the_same_anchor() -> None:
+    budget = RequestBudget(
+        wall_deadline=180.0,
+        setup=SetupBudget.create(deadline=30.0, clock=lambda: 0.0),
+        _clock=lambda: 180.0,
+    )
+
+    assert budget.remaining_cleanup_seconds() == CLEANUP_HEADROOM_SECONDS
+
+
+@pytest.mark.asyncio
+async def test_request_budget_closes_cleanup_coroutine_after_headroom_expires() -> None:
+    budget = RequestBudget(
+        wall_deadline=0.0,
+        setup=SetupBudget.create(deadline=1.0, clock=lambda: 0.0),
+        _clock=lambda: CLEANUP_HEADROOM_SECONDS + 1.0,
+    )
+
+    async def pending() -> None:
+        await asyncio.Event().wait()
+
+    operation = pending()
+    with pytest.raises(RunCleanupDeadlineExceededError):
+        await budget.wait_for_cleanup(operation)
+
+    assert operation.cr_frame is None
 
 
 @pytest.mark.asyncio

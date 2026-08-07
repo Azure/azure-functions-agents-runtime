@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -8,6 +9,7 @@ from uuid import uuid4
 
 import pytest
 
+import azure_functions_agents.controller.readiness as readiness_module
 from azure_functions_agents.controller.readiness import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
@@ -20,16 +22,25 @@ from azure_functions_agents.controller.readiness import (
     SessionRuntimeBinding,
     StateStoreBinding,
     activate_session,
+    begin_submit_operation,
+    disarm_submit_lifecycle,
+    finalize_submit_operation,
+    provision_new_session_submit,
     revalidate_before_submit,
     session_with_admitted_run,
+    touch_session_activity,
 )
 from azure_functions_agents.controller.reconciler import SessionReconciler
 from azure_functions_agents.execution.setup_budget import SetupBudget
 from azure_functions_agents.session_state import (
+    AdmissionRecords,
     AppIdentity,
+    ConcurrencyConflictError,
     DurableRunRecord,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    SessionNotAdmissibleError,
+    SessionOperationTarget,
     StateStoreUnavailableError,
     owner_partition,
 )
@@ -112,6 +123,7 @@ def _runtime(
     *,
     source: DiskSource | None = _TEST_SOURCE,
     fingerprint: str = _FINGERPRINT,
+    post_create_reconciler: Callable[[], Awaitable[None]] | None = None,
 ) -> SessionRuntimeBinding:
     async def provider_factory() -> _FakeProvider:
         return provider
@@ -129,12 +141,133 @@ def _runtime(
         provider_factory=provider_factory,
         state_store_factory=state_store_factory,
         creation_source=source,
+        post_create_reconciler=post_create_reconciler,
     )
 
 
 def _script_root(tmp_path: Path) -> Path:
     (tmp_path / "function_app.py").write_text("app = object()\n", encoding="utf-8")
     return tmp_path
+
+
+class _CountingHandle(_FakeHandle):
+    def __init__(self) -> None:
+        super().__init__()
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        await super().close()
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_keeps_successful_created_handle_open(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    handle = _CountingHandle()
+    store = _FakeStore()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+
+    provisioned = await provision_new_session_submit(
+        runtime,
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert provisioned.activated is not None
+    assert provisioned.activated.handle is handle
+    assert handle.close_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["lifecycle", "content", "manifest", "phase"])
+async def test_reserved_provision_closes_created_handle_after_post_create_failure(
+    failure_phase: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class _PhaseFailureStore(_FakeStore):
+        async def advance_operation(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            if failure_phase == "phase" and kwargs["phase"] == "provision_lifecycle":
+                raise ConcurrencyConflictError("phase write failed")
+            return await super().advance_operation(**kwargs)
+
+    class _LifecycleFailureHandle(_CountingHandle):
+        async def set_lifecycle_policy(self, policy):  # type: ignore[no-untyped-def]
+            if failure_phase == "lifecycle":
+                raise SandboxFileOperationError("lifecycle failed")
+            await super().set_lifecycle_policy(policy)
+
+    async def fail_content(*_args: object, **_kwargs: object) -> None:
+        raise readiness_module.ContentPackagingError("content failed")
+
+    async def fail_manifest(*_args: object, **_kwargs: object) -> None:
+        raise readiness_module.LiveManifestNotReadyError("manifest failed")
+
+    if failure_phase == "content":
+        monkeypatch.setattr(readiness_module, "deliver_content_package", fail_content)
+    if failure_phase == "manifest":
+        monkeypatch.setattr(readiness_module, "_wait_for_created_manifest", fail_manifest)
+
+    script_root = _script_root(tmp_path)
+    handle = _LifecycleFailureHandle()
+    store = _PhaseFailureStore()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+
+    with pytest.raises(
+        (
+            SandboxFileOperationError,
+            SessionActivationError,
+            readiness_module.ContentPackagingError,
+            readiness_module.LiveManifestNotReadyError,
+            ConcurrencyConflictError,
+        )
+    ):
+        await provision_new_session_submit(
+            runtime,
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert handle.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_closes_handle_when_post_create_reconcile_fails(
+    tmp_path: Path,
+) -> None:
+    async def fail_reconcile() -> None:
+        raise RuntimeError("post-create reconcile failed")
+
+    script_root = _script_root(tmp_path)
+    handle = _CountingHandle()
+    store = _FakeStore()
+    runtime = _runtime(
+        script_root,
+        _FakeProvider(handle),
+        store,
+        post_create_reconciler=fail_reconcile,
+    )
+
+    with pytest.raises(RuntimeError, match="post-create reconcile failed"):
+        await provision_new_session_submit(
+            runtime,
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert handle.close_calls == 1
 
 
 @pytest.mark.asyncio
@@ -169,6 +302,129 @@ async def test_session_locks_do_not_serialize_distinct_owners(
         release_first.set()
         await first
         await second
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+        ("status", "touches"),
+        [
+            ("ready", True),
+            ("running", True),
+            ("canceling", True),
+            ("suspending", True),
+            ("suspended", True),
+            ("resuming", True),
+            ("failed", False),
+            ("quarantined", False),
+            ("tombstoned", False),
+            ("deleting", False),
+            ("deleted", False),
+            ("reclaiming", False),
+        ],
+)
+async def test_management_touch_only_renews_live_session_retention(
+        status: str,
+        touches: bool,
+        tmp_path: Path,
+) -> None:
+        script_root = _script_root(tmp_path)
+        base = _session(script_root)
+        if status in {"running", "canceling", "reclaiming"}:
+            record = session_with_admitted_run(base, "run-1", updated_at=base.updated_at)
+            record = replace(
+                record,
+                status=status,
+                reclaim_fence_token="fence-token" if status == "reclaiming" else None,
+            )
+        else:
+            record = replace(base, status=status)
+        store = _FakeStore(record)
+        runtime = _runtime(script_root, _FakeProvider(_FakeHandle()), store)
+        previous = record
+
+        await touch_session_activity(runtime, _owner(), record.session_id)
+
+        assert store.session is not None
+        if touches:
+            assert store.session.expires_at > previous.expires_at
+            assert store.operations == [f"update:{status}"]
+        else:
+            assert store.session == previous
+            assert store.operations == []
+
+
+@pytest.mark.asyncio
+async def test_management_touch_retries_once_from_a_fresh_session_read(
+    tmp_path: Path,
+) -> None:
+    class _ConflictOnceStore(_FakeStore):
+            def __init__(self, session: DurableSessionRecord) -> None:
+                super().__init__(session)
+                self.update_attempts = 0
+
+            async def update_session(self, **kwargs: object) -> str:  # type: ignore[no-untyped-def]
+                self.update_attempts += 1
+                if self.update_attempts == 1:
+                    assert self.session is not None
+                    self.session = replace(
+                        self.session,
+                        idle_policy_armed=False,
+                        snapshot_ids=("newer-snapshot",),
+                    )
+                    self.etag = "newer-etag"
+                    raise ConcurrencyConflictError("session changed")
+                return await super().update_session(**kwargs)
+
+    script_root = _script_root(tmp_path)
+    store = _ConflictOnceStore(_session(script_root))
+    runtime = _runtime(script_root, _FakeProvider(_FakeHandle()), store)
+
+    await touch_session_activity(runtime, _owner(), "session-1")
+
+    assert store.update_attempts == 2
+    assert store.session is not None
+    assert not store.session.idle_policy_armed
+    assert store.session.snapshot_ids == ("newer-snapshot",)
+    assert store.operations == ["update:ready"]
+
+
+@pytest.mark.asyncio
+async def test_management_touch_ignores_only_a_second_etag_conflict(
+    tmp_path: Path,
+) -> None:
+    class _AlwaysConflictStore(_FakeStore):
+            def __init__(self, session: DurableSessionRecord) -> None:
+                super().__init__(session)
+                self.update_attempts = 0
+
+            async def update_session(self, **_kwargs: object) -> str:  # type: ignore[no-untyped-def]
+                self.update_attempts += 1
+                raise ConcurrencyConflictError("session changed")
+
+    script_root = _script_root(tmp_path)
+    store = _AlwaysConflictStore(_session(script_root))
+    runtime = _runtime(script_root, _FakeProvider(_FakeHandle()), store)
+
+    await touch_session_activity(runtime, _owner(), "session-1")
+
+    assert store.update_attempts == 2
+    assert store.operations == []
+
+
+@pytest.mark.asyncio
+async def test_management_touch_propagates_non_concurrency_store_errors(
+    tmp_path: Path,
+) -> None:
+    class _UnavailableStore(_FakeStore):
+            async def update_session(self, **_kwargs: object) -> str:  # type: ignore[no-untyped-def]
+                raise StateStoreUnavailableError("unavailable")
+
+    script_root = _script_root(tmp_path)
+    store = _UnavailableStore(_session(script_root))
+    runtime = _runtime(script_root, _FakeProvider(_FakeHandle()), store)
+
+    with pytest.raises(StateStoreUnavailableError, match="unavailable"):
+            await touch_session_activity(runtime, _owner(), "session-1")
 
 
 @pytest.mark.asyncio
@@ -620,3 +876,350 @@ async def test_pre_submit_change_releases_slot_before_quarantine(tmp_path: Path)
     assert store.session is not None
     assert store.session.status == "quarantined"
     assert store.session.active_run_id is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_submit_fences_admission_before_lifecycle_write(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _FakeStore(session)
+    admission_blocked = False
+
+    class AdmissionProbeHandle(_FakeHandle):
+        async def set_lifecycle_policy(self, policy):  # type: ignore[no-untyped-def]
+            nonlocal admission_blocked
+            if policy.auto_suspend_seconds is not None:
+                assert store.session is not None
+                candidate = session_with_admitted_run(
+                    store.session,
+                    "run-2",
+                    updated_at=datetime.now(UTC),
+                )
+                with pytest.raises(SessionNotAdmissibleError):
+                    await store.admit_run(
+                        AdmissionRecords.create(
+                            candidate,
+                            replace(_run(session), run_id="run-2"),
+                        )
+                    )
+                admission_blocked = True
+            await super().set_lifecycle_policy(policy)
+
+    handle = AdmissionProbeHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+    run = _run(session)
+    prepared, fence = await begin_submit_operation(activated, run)
+    prepared, fence = await disarm_submit_lifecycle(runtime, prepared, fence)
+    admitted = session_with_admitted_run(
+        prepared.session,
+        run.run_id,
+        updated_at=run.updated_at,
+    )
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run),
+    )
+    await store.adopt_terminal_run(replace(run, status="succeeded"))
+
+    assert await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
+    assert admission_blocked
+    assert store.session is not None
+    assert store.session.active_operation_id is None
+    assert store.session.idle_policy_armed
+    operation = next(iter(store.durable_operations.values()))
+    assert operation.kind == "submit_run"
+    assert operation.state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_submit_rearm_resumes_a_durable_operation_after_lifecycle_failure(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _FakeStore(session)
+
+    class FailOnceHandle(_FakeHandle):
+        def __init__(self) -> None:
+            super().__init__()
+            self.fail_once = True
+
+        async def set_lifecycle_policy(self, policy):  # type: ignore[no-untyped-def]
+            if self.fail_once and policy.auto_suspend_seconds is not None:
+                self.fail_once = False
+                raise SandboxFileOperationError("transient lifecycle failure")
+            await super().set_lifecycle_policy(policy)
+
+    handle = FailOnceHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+    run = _run(session)
+    prepared, fence = await begin_submit_operation(activated, run)
+    prepared, fence = await disarm_submit_lifecycle(runtime, prepared, fence)
+    admitted = session_with_admitted_run(
+        prepared.session,
+        run.run_id,
+        updated_at=run.updated_at,
+    )
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run),
+    )
+    await store.adopt_terminal_run(replace(run, status="succeeded"))
+
+    with pytest.raises(SandboxFileOperationError):
+        await finalize_submit_operation(
+            runtime,
+            activated,
+            expected_run_id=run.run_id,
+        )
+
+    assert store.session is not None
+    operation_id = store.session.active_operation_id
+    assert operation_id is not None
+    assert store.durable_operations[operation_id].error_code == "lifecycle_policy_apply_failed"
+
+    assert await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
+    assert store.session.active_operation_id is None
+    assert store.durable_operations[operation_id].state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_finalize_submit_operation_aborts_a_missing_run_without_stranding(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _FakeStore(session)
+    handle = _FakeHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+    run = _run(session)
+    prepared, fence = await begin_submit_operation(activated, run)
+    prepared, fence = await disarm_submit_lifecycle(runtime, prepared, fence)
+    admitted = session_with_admitted_run(
+        prepared.session,
+        run.run_id,
+        updated_at=run.updated_at,
+    )
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run),
+    )
+    store.runs.pop(run.run_id)
+
+    assert await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    assert next(iter(store.durable_operations.values())).state == "aborted"
+
+
+@pytest.mark.asyncio
+async def test_finalize_submit_operation_preserves_security_quarantine(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _FakeStore(session)
+    handle = _FakeHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+    run = _run(session)
+    prepared, fence = await begin_submit_operation(activated, run)
+    prepared, fence = await disarm_submit_lifecycle(runtime, prepared, fence)
+    admitted = session_with_admitted_run(
+        prepared.session,
+        run.run_id,
+        updated_at=run.updated_at,
+    )
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run),
+    )
+    await store.adopt_terminal_run(replace(run, status="failed"))
+    assert store.session is not None
+    quarantined = DurableSessionRecord.create(
+        owner_partition=store.session.owner_partition,
+        session_id=store.session.session_id,
+        sandbox_id=store.session.sandbox_id,
+        generation=store.session.generation,
+        digest_kind=store.session.digest_kind,
+        digest=store.session.digest,
+        protocol=store.session.protocol,
+        status="quarantined",
+        last_activity_at=store.session.last_activity_at,
+        expires_at=store.session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=store.session.snapshot_ids,
+        region=store.session.region,
+        state_store_fingerprint=store.session.state_store_fingerprint,
+        quarantine_reason="sandbox_manifest_mismatch",
+        tombstone_reason=None,
+        created_at=store.session.created_at,
+        updated_at=datetime.now(UTC),
+        active_operation_id=store.session.active_operation_id,
+        operation_sequence=store.session.operation_sequence,
+    )
+    store.session = quarantined
+
+    assert await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
+    assert store.session.status == "quarantined"
+    assert store.session.quarantine_reason == "sandbox_manifest_mismatch"
+    candidate = session_with_admitted_run(
+        store.session,
+        "run-2",
+        updated_at=datetime.now(UTC),
+    )
+    with pytest.raises(SessionNotAdmissibleError):
+        await store.admit_run(
+            AdmissionRecords.create(candidate, replace(run, run_id="run-2"))
+        )
+
+
+@pytest.mark.asyncio
+async def test_missing_run_finalization_preserves_security_quarantine(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _FakeStore(session)
+    handle = _FakeHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+    run = _run(session)
+    prepared, fence = await begin_submit_operation(activated, run)
+    prepared, fence = await disarm_submit_lifecycle(runtime, prepared, fence)
+    admitted = session_with_admitted_run(
+        prepared.session,
+        run.run_id,
+        updated_at=run.updated_at,
+    )
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run),
+    )
+    assert store.session is not None
+    store.session = DurableSessionRecord.create(
+        owner_partition=store.session.owner_partition,
+        session_id=store.session.session_id,
+        sandbox_id=store.session.sandbox_id,
+        generation=store.session.generation,
+        digest_kind=store.session.digest_kind,
+        digest=store.session.digest,
+        protocol=store.session.protocol,
+        status="quarantined",
+        last_activity_at=store.session.last_activity_at,
+        expires_at=store.session.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=store.session.snapshot_ids,
+        region=store.session.region,
+        state_store_fingerprint=store.session.state_store_fingerprint,
+        quarantine_reason="sandbox_manifest_mismatch",
+        tombstone_reason=None,
+        created_at=store.session.created_at,
+        updated_at=datetime.now(UTC),
+        active_operation_id=store.session.active_operation_id,
+        operation_sequence=store.session.operation_sequence,
+    )
+    store.runs.pop(run.run_id)
+
+    assert await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=run.run_id,
+    )
+    assert store.session.status == "quarantined"
+    assert store.session.quarantine_reason == "sandbox_manifest_mismatch"
+    assert store.session.active_operation_id is None
+
+
+@pytest.mark.asyncio
+async def test_terminal_poll_does_not_take_over_a_newer_submit_operation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = _FakeStore(session)
+    handle = _FakeHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+    old_run = _run(session)
+    _prepared, fence = await begin_submit_operation(activated, old_run)
+    newer_target = SessionOperationTarget.create(
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        run_id="run-2",
+    )
+    store.durable_operations[fence.operation_id] = replace(
+        store.durable_operations[fence.operation_id],
+        target=newer_target,
+    )
+
+    assert not await finalize_submit_operation(
+        runtime,
+        activated,
+        expected_run_id=old_run.run_id,
+    )
+    assert store.durable_operations[fence.operation_id].target.run_id == "run-2"
+    assert "resume_operation" not in store.operations
+    assert len(handle.lifecycle_policy_history) == 1

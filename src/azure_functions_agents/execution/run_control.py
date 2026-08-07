@@ -12,7 +12,14 @@ from datetime import UTC, datetime
 from itertools import pairwise
 from typing import Annotated
 
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StringConstraints,
+    ValidationError,
+    model_validator,
+)
 
 from ..journal_paths import (
     INBOX_PATH as _INBOX_PATH,
@@ -154,6 +161,20 @@ class _JournalRunStatus(BaseModel):
     result_available: bool
     error: _JournalRunError | None = None
 
+    @model_validator(mode="after")
+    def _validate_terminal_shape(self) -> _JournalRunStatus:
+        if self.state == "succeeded":
+            if not self.result_available or self.error is not None:
+                raise ValueError("succeeded journal status must include its result and no error")
+            return self
+        if self.result_available:
+            raise ValueError("non-succeeded journal status must not advertise a result")
+        if self.state in {"failed", "timed_out", "abandoned"} and self.error is None:
+            raise ValueError("terminal failure journal status requires an error")
+        if self.state in {"accepted", "running", "canceled"} and self.error is not None:
+            raise ValueError("non-failure journal status must not include an error")
+        return self
+
 
 class _JournalRunResult(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
@@ -221,6 +242,8 @@ class SandboxRunControl:
             return await self.get_status(handle, context)
         except SandboxFileNotFoundError:
             pass
+        except RunJournalProtocolError:
+            raise
         except Exception as exc:
             raise RunSubmissionIndeterminateError(
                 "Existing run state could not be confirmed before launch."
@@ -261,6 +284,8 @@ class SandboxRunControl:
 
         try:
             return await self._wait_for_acceptance(handle, context, deadline)
+        except RunJournalProtocolError:
+            raise
         except Exception as exc:
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but journal acceptance was not confirmed."
@@ -275,7 +300,12 @@ class SandboxRunControl:
         journal_status = await self._read_status(handle, context)
         result: RunResult | None = None
         if journal_status.state == "succeeded" and journal_status.result_available:
-            result = await self._read_result(handle, context)
+            try:
+                result = await self._read_result(handle, context)
+            except SandboxFileNotFoundError:
+                raise RunJournalProtocolError(
+                    "Sandbox run journal result is missing."
+                ) from None
         error = (
             None
             if journal_status.error is None
@@ -491,7 +521,14 @@ class SandboxRunControl:
     @staticmethod
     async def _with_deadline[T](operation: Awaitable[T], deadline: float) -> T:
         try:
-            async with asyncio.timeout(_remaining_seconds(deadline)):
+            remaining = _remaining_seconds(deadline)
+        except RunControlTimeoutError:
+            close = getattr(operation, "close", None)
+            if close is not None:
+                close()
+            raise
+        try:
+            async with asyncio.timeout(remaining):
                 return await operation
         except TimeoutError:
             raise RunControlTimeoutError(

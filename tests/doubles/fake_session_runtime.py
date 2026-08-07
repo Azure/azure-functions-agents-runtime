@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import replace
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from azure_functions_agents.controller.package import CONTENT_MANIFEST_SEED_PATH
 from azure_functions_agents.session_state import (
@@ -13,17 +13,23 @@ from azure_functions_agents.session_state import (
     AdmissionOutcome,
     AdmissionRecords,
     AdoptionOutcome,
+    DurableIdempotencyRecord,
     DurableOwnerIdempotencyRecord,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     IdempotencyConflictError,
     NewSessionAdmissionRecords,
+    OperationOutcome,
+    OperationRead,
     OwnerIdempotencyRead,
     OwnerPartition,
-    ReclaimFence,
+    ProvisionSubmitOutcome,
+    ProvisionSubmitRecords,
     ReconcilerCursorRead,
     RunRead,
     SessionNotAdmissibleError,
+    SessionOperationFence,
     SessionRead,
     TableEntityPage,
 )
@@ -133,6 +139,10 @@ class FakeSandboxSessionProvider:
         persisted_group: SandboxGroupBinding,
     ) -> FakeSandboxSessionHandle:
         assert persisted_group.region == self.group.region
+        if request.labels.operation_label is not None:
+            for sandbox in self.sandboxes.values():
+                if sandbox.labels.get("operation_label") == request.labels.operation_label:
+                    return sandbox
         self.create_calls.append(request)
         if self.create_errors:
             raise self.create_errors.pop(0)
@@ -192,8 +202,11 @@ class FakeSessionStateStore:
         self.adopted: list[DurableRunRecord] = []
         self.operations: list[str] = []
         self.runs: dict[str, DurableRunRecord] = {}
+        self.durable_operations: dict[str, DurableSessionOperation] = {}
         self.owner_idempotency: dict[str, DurableOwnerIdempotencyRecord] = {}
         self.owner_idempotency_etags: dict[str, str] = {}
+        self.idempotency: dict[str, DurableIdempotencyRecord] = {}
+        self.idempotency_etags: dict[str, str] = {}
         self.admission_expected_session_etags: list[str | None] = []
         self.reconciler_cursors: dict[str, ReconcilerCursorRead] = {}
 
@@ -226,6 +239,8 @@ class FakeSessionStateStore:
         del backing_rebind
         assert self.session == previous
         assert self.etag == etag
+        assert previous.active_operation_id == updated.active_operation_id
+        assert previous.next_operation_sequence == updated.next_operation_sequence
         self.session = updated
         self.etag = f"etag-{len(self.operations) + 3}"
         self.operations.append(f"update:{updated.status}")
@@ -262,6 +277,8 @@ class FakeSessionStateStore:
         if expected_session_etag is not None:
             assert self.etag == expected_session_etag
         self.admission_expected_session_etags.append(expected_session_etag)
+        if self.session.active_operation_id is not None:
+            raise SessionNotAdmissibleError("session has an active durable controller operation")
         if self.session.active_run_id is not None:
             raise ActiveRunConflictError(
                 "session already has an active run",
@@ -271,8 +288,55 @@ class FakeSessionStateStore:
             raise SessionNotAdmissibleError("session lifecycle state cannot accept a new run")
         self.session = records.session
         self.runs[records.run.run_id] = records.run
+        if records.idempotency is not None:
+            self.idempotency[records.idempotency.idempotency_hash] = records.idempotency
+            self.idempotency_etags[records.idempotency.idempotency_hash] = "idem-etag"
         self.operations.append("admit")
         self.etag = "etag-admitted"
+        return AdmissionOutcome(
+            run=records.run,
+            run_etag="run-etag",
+            session_etag=self.etag,
+            replayed=False,
+        )
+
+    async def admit_operation_run(
+        self,
+        *,
+        fence: SessionOperationFence,
+        records: AdmissionRecords,
+    ) -> AdmissionOutcome:
+        from azure_functions_agents.session_state import StaleOperationTokenError
+
+        assert self.session is not None
+        operation = self.durable_operations[fence.operation_id]
+        if not fence.matches(self.session, operation):
+            raise StaleOperationTokenError("stale")
+        if self.session.active_run_id == records.run.run_id:
+            return AdmissionOutcome(
+                run=self.runs[records.run.run_id],
+                run_etag="run-etag",
+                session_etag=self.etag,
+                replayed=True,
+            )
+        if operation.phase != "submit_admission":
+            from azure_functions_agents.session_state import SessionStateStoreError
+
+            raise SessionStateStoreError(
+                "submit operation must reach submit_admission before run admission"
+            )
+        self.session = records.session
+        self.runs[records.run.run_id] = records.run
+        if records.idempotency is not None:
+            self.idempotency[records.idempotency.idempotency_hash] = records.idempotency
+            self.idempotency_etags[records.idempotency.idempotency_hash] = "idem-etag"
+        self.durable_operations[fence.operation_id] = replace(
+            operation,
+            phase="submit_journal",
+            updated_at=records.run.updated_at,
+        )
+        self.etag = "etag-operation-admitted"
+        self.operations.append("admit_operation_run")
         return AdmissionOutcome(
             run=records.run,
             run_etag="run-etag",
@@ -310,11 +374,23 @@ class FakeSessionStateStore:
         owner_partition: OwnerPartition,
         session_id: str,
         idempotency_hash: str,
-    ) -> None:
-        del owner_partition, session_id, idempotency_hash
-        return None
+    ):
+        del owner_partition, session_id
+        from azure_functions_agents.session_state import IdempotencyRead
 
-    async def delete_idempotency(self, **_: object) -> None:
+        record = self.idempotency.get(idempotency_hash)
+        if record is None:
+            return None
+        return IdempotencyRead(
+            record=record,
+            etag=self.idempotency_etags[idempotency_hash],
+        )
+
+    async def delete_idempotency(self, **kwargs: object) -> None:
+        previous = kwargs.get("previous")
+        if isinstance(previous, DurableIdempotencyRecord):
+            self.idempotency.pop(previous.idempotency_hash, None)
+            self.idempotency_etags.pop(previous.idempotency_hash, None)
         self.operations.append("delete_idempotency")
 
     async def admit_new_session_run(
@@ -337,6 +413,8 @@ class FakeSessionStateStore:
                 session_etag=None,
                 replayed=True,
             )
+        if self.session is not None and self.session.active_operation_id is not None:
+            raise SessionNotAdmissibleError("session has an active durable controller operation")
         outcome = await self.admit_run(
             AdmissionRecords.create(records.session, records.run),
             expected_session_etag=expected_session_etag,
@@ -353,7 +431,277 @@ class FakeSessionStateStore:
         run_id: str,
     ) -> RunRead:
         del partition, session_id
-        return RunRead(record=self.runs[run_id], etag="run-etag")
+        try:
+            record = self.runs[run_id]
+        except KeyError as exc:
+            from azure_functions_agents.session_state import RunRowNotFoundError
+
+            raise RunRowNotFoundError("missing") from exc
+        return RunRead(record=record, etag="run-etag")
+
+    async def get_operation(
+        self,
+        partition: OwnerPartition,
+        session_id: str,
+        operation_id: str,
+    ) -> OperationRead:
+        del partition, session_id
+        from azure_functions_agents.session_state import OperationRowNotFoundError
+
+        try:
+            operation = self.durable_operations[operation_id]
+        except KeyError as exc:
+            raise OperationRowNotFoundError("missing") from exc
+        return OperationRead(record=operation, etag=f"operation-{operation.attempt_count}")
+
+    async def begin_operation(
+        self,
+        *,
+        previous: DurableSessionRecord,
+        updated: DurableSessionRecord,
+        operation: DurableSessionOperation,
+        etag: str,
+    ) -> SessionOperationFence:
+        assert self.session == previous
+        assert self.etag == etag
+        assert previous.active_operation_id is None
+        assert updated.active_operation_id == operation.operation_id
+        self.session = updated
+        self.durable_operations[operation.operation_id] = operation
+        self.etag = "etag-operation-begun"
+        self.operations.append("begin_operation")
+        return SessionOperationFence.create(operation)
+
+    async def begin_provision_submit(
+        self,
+        records: ProvisionSubmitRecords,
+    ) -> ProvisionSubmitOutcome:
+        owner_idempotency = records.owner_idempotency
+        if owner_idempotency is not None:
+            existing = self.owner_idempotency.get(owner_idempotency.idempotency_hash)
+            if existing is not None:
+                if existing.request_hash != owner_idempotency.request_hash:
+                    raise IdempotencyConflictError(
+                        "idempotency key already used with a different payload",
+                        existing_run_id=existing.run_id,
+                    )
+                run = self.runs[existing.run_id]
+                return ProvisionSubmitOutcome(
+                    run=run,
+                    run_etag="run-etag",
+                    session_etag=None,
+                    fence=None,
+                    replayed=True,
+                )
+        if self.session is not None:
+            raise AssertionError("session row already exists")
+        self.session = records.session
+        self.runs[records.run.run_id] = records.run
+        self.durable_operations[records.operation.operation_id] = records.operation
+        if owner_idempotency is not None:
+            self.owner_idempotency[owner_idempotency.idempotency_hash] = owner_idempotency
+            self.owner_idempotency_etags[owner_idempotency.idempotency_hash] = "owner-idem-etag"
+        self.etag = "etag-provision-reserved"
+        self.operations.append("begin_provision_submit")
+        return ProvisionSubmitOutcome(
+            run=records.run,
+            run_etag="run-etag",
+            session_etag=self.etag,
+            fence=SessionOperationFence.create(records.operation),
+            replayed=False,
+        )
+
+    async def resume_operation(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        token: str,
+        updated_at: datetime,
+    ) -> SessionOperationFence | None:
+        del owner_partition, session_id
+        if self.session is None or self.session.active_operation_id is None:
+            return None
+        operation = self.durable_operations[self.session.active_operation_id]
+        resumed = replace(
+            operation,
+            token=token,
+            attempt_count=operation.attempt_count + 1,
+            error_code=None,
+            updated_at=updated_at,
+        )
+        self.durable_operations[resumed.operation_id] = resumed
+        self.etag = "etag-operation-resumed"
+        self.operations.append("resume_operation")
+        return SessionOperationFence.create(resumed)
+
+    async def takeover_expired_operation(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        token: str,
+        updated_at: datetime,
+    ) -> SessionOperationFence | None:
+        del owner_partition, session_id
+        if self.session is None or self.session.active_operation_id is None:
+            return None
+        operation = self.durable_operations[self.session.active_operation_id]
+        if (
+            operation.lease_expires_at is not None
+            and operation.lease_expires_at > updated_at
+        ):
+            return None
+        resumed = replace(
+            operation,
+            token=token,
+            attempt_count=operation.attempt_count + 1,
+            error_code=None,
+            lease_expires_at=updated_at + timedelta(seconds=60),
+            updated_at=updated_at,
+        )
+        self.durable_operations[resumed.operation_id] = resumed
+        self.etag = "etag-operation-taken-over"
+        self.operations.append("takeover_expired_operation")
+        return SessionOperationFence.create(resumed)
+
+    async def claim_operation_journal(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        token: str,
+        updated_at: datetime,
+    ) -> SessionOperationFence | None:
+        del owner_partition, session_id
+        if self.session is None or self.session.active_operation_id is None:
+            return None
+        operation = self.durable_operations[self.session.active_operation_id]
+        if (
+            operation.target.run_id != run_id
+            or self.session.active_run_id != run_id
+            or operation.phase in {"provision_launching", "submit_launching"}
+        ):
+            return None
+        phase = (
+            "provision_launching"
+            if operation.kind == "provision_submit"
+            else "submit_launching"
+        )
+        claimed = replace(
+            operation,
+            token=token,
+            phase=phase,
+            attempt_count=operation.attempt_count + 1,
+            updated_at=updated_at,
+        )
+        self.durable_operations[claimed.operation_id] = claimed
+        self.etag = "etag-journal-claimed"
+        self.operations.append("claim_operation_journal")
+        return SessionOperationFence.create(claimed)
+
+    async def advance_operation(
+        self,
+        *,
+        fence: SessionOperationFence,
+        phase: str,
+        updated_at: datetime,
+        error_code: str | None = None,
+        updated_session: DurableSessionRecord | None = None,
+        updated_target: object | None = None,
+    ) -> SessionOperationFence:
+        from azure_functions_agents.session_state import StaleOperationTokenError
+
+        assert self.session is not None
+        operation = self.durable_operations[fence.operation_id]
+        if not fence.matches(self.session, operation):
+            raise StaleOperationTokenError("stale")
+        advanced = replace(
+            operation,
+            phase=phase,
+            error_code=error_code,
+            updated_at=updated_at,
+            target=operation.target if updated_target is None else updated_target,
+        )
+        self.durable_operations[advanced.operation_id] = advanced
+        if updated_session is not None:
+            self.session = updated_session
+        self.etag = "etag-operation-advanced"
+        self.operations.append("advance_operation")
+        return SessionOperationFence.create(advanced)
+
+    async def complete_operation(
+        self,
+        *,
+        fence: SessionOperationFence,
+        updated_session: DurableSessionRecord,
+        updated_at: datetime,
+        terminal_run: DurableRunRecord | None = None,
+    ) -> OperationOutcome:
+        return await self._finish_operation(
+            fence=fence,
+            updated_session=updated_session,
+            updated_at=updated_at,
+            terminal_run=terminal_run,
+            error_code=None,
+            state="completed",
+        )
+
+    async def abort_operation(
+        self,
+        *,
+        fence: SessionOperationFence,
+        updated_session: DurableSessionRecord,
+        error_code: str,
+        updated_at: datetime,
+    ) -> OperationOutcome:
+        return await self._finish_operation(
+            fence=fence,
+            updated_session=updated_session,
+            updated_at=updated_at,
+            terminal_run=None,
+            error_code=error_code,
+            state="aborted",
+        )
+
+    async def _finish_operation(
+        self,
+        *,
+        fence: SessionOperationFence,
+        updated_session: DurableSessionRecord,
+        updated_at: datetime,
+        terminal_run: DurableRunRecord | None,
+        error_code: str | None,
+        state: str,
+    ) -> OperationOutcome:
+        from azure_functions_agents.session_state import StaleOperationTokenError
+
+        assert self.session is not None
+        operation = self.durable_operations[fence.operation_id]
+        if not fence.matches(self.session, operation):
+            raise StaleOperationTokenError("stale")
+        completed = replace(
+            operation,
+            phase=state,
+            state=state,
+            error_code=error_code,
+            updated_at=updated_at,
+            finished_at=updated_at,
+        )
+        self.durable_operations[completed.operation_id] = completed
+        if terminal_run is not None:
+            self.runs[terminal_run.run_id] = terminal_run
+        self.session = updated_session
+        self.etag = f"etag-operation-{state}"
+        self.operations.append(f"{state}_operation")
+        return OperationOutcome(
+            operation=completed,
+            operation_etag="operation-etag",
+            session_etag=self.etag,
+            run=terminal_run,
+            run_etag=None if terminal_run is None else "run-etag",
+        )
 
     async def adopt_terminal_run(self, terminal_run: DurableRunRecord) -> AdoptionOutcome:
         assert self.session is not None
@@ -362,6 +710,7 @@ class FakeSessionStateStore:
             if (
                 self.session.status != "reclaiming"
                 and self.session.active_run_id == terminal_run.run_id
+                and self.session.active_operation_id is None
             ):
                 self.session = replace(
                     self.session,
@@ -375,7 +724,7 @@ class FakeSessionStateStore:
         self.adopted.append(terminal_run)
         self.operations.append("adopt")
         self.runs[terminal_run.run_id] = terminal_run
-        if self.session.status == "reclaiming":
+        if self.session.status == "reclaiming" or self.session.active_operation_id is not None:
             return AdoptionOutcome(run=terminal_run, run_etag="run-etag", slot_released=False)
         self.session = replace(
             self.session,
@@ -386,90 +735,52 @@ class FakeSessionStateStore:
         self.etag = "etag-released"
         return AdoptionOutcome(run=terminal_run, run_etag="run-etag", slot_released=True)
 
-    async def acquire_reclaim_fence(
+    async def invalidate_journal_run(
         self,
         *,
-        session: DurableSessionRecord,
-        run: DurableRunRecord,
-        token: str,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
         updated_at: datetime,
-    ) -> ReclaimFence | None:
-        if self.session is None or self.runs.get(run.run_id) is None:
-            return None
-        current_run = self.runs[run.run_id]
-        if self.session.status == "reclaiming":
-            if (
-                self.session.reclaim_fence_token != token
-                or self.session.active_run_id != run.run_id
-                or self.session.sandbox_id != session.sandbox_id
-                or self.session.generation != run.generation
-            ):
-                return None
-            return ReclaimFence.create(session=self.session, run=current_run, token=token)
-        if self.session != session or current_run != run:
-            return None
-        if self.session.status not in {"running", "canceling"}:
-            return None
-        fence = ReclaimFence.create(session=session, run=run, token=token)
-        self.session = replace(
-            session,
-            status="reclaiming",
-            idle_policy_armed=False,
-            reclaim_fence_token=token,
+    ) -> AdoptionOutcome:
+        del owner_partition, session_id
+        assert self.session is not None
+        current = self.runs[run_id]
+        invalidated = DurableRunRecord.create(
+            owner_partition=current.owner_partition,
+            session_id=current.session_id,
+            run_id=current.run_id,
+            generation=current.generation,
+            status="failed",
+            result_available=False,
+            status_reason="journal_corrupt",
+            expires_at=current.expires_at,
+            created_at=current.created_at,
             updated_at=updated_at,
+            agent_slug=current.agent_slug,
         )
-        self.operations.append("fence")
-        self.etag = "etag-fenced"
-        return fence
-
-    async def resolve_reclaim_fence_terminal(
-        self,
-        *,
-        fence: ReclaimFence,
-        terminal_run: DurableRunRecord,
-    ) -> AdoptionOutcome | None:
-        if self.session is None or not fence.matches(self.session):
-            return None
-        current = self.runs[fence.run_id]
-        if current.status not in TERMINAL_RUN_STATUSES:
-            self.runs[fence.run_id] = terminal_run
-            current = terminal_run
-        self.session = replace(
-            self.session,
-            status="ready",
-            active_run_id=None,
-            reclaim_fence_token=None,
-            updated_at=current.updated_at,
+        changed = invalidated != current
+        if changed:
+            self.runs[run_id] = invalidated
+            self.operations.append("invalidate_journal")
+        owns_slot = (
+            self.session.active_run_id == run_id
+            and self.session.status in {"running", "canceling"}
+            and self.session.active_operation_id is None
         )
-        self.operations.append("resolve_fence")
-        self.etag = "etag-fence-resolved"
-        return AdoptionOutcome(run=current, run_etag="run-etag", slot_released=True)
-
-    async def tombstone_reclaim_fence(
-        self,
-        *,
-        fence: ReclaimFence,
-        terminal_run: DurableRunRecord,
-        tombstone_reason: str,
-        updated_at: datetime,
-    ) -> AdoptionOutcome | None:
-        if self.session is None or not fence.matches(self.session):
-            return None
-        current = self.runs[fence.run_id]
-        if current.status not in TERMINAL_RUN_STATUSES:
-            self.runs[fence.run_id] = terminal_run
-            current = terminal_run
-        self.session = replace(
-            self.session,
-            status="tombstoned",
-            active_run_id=None,
-            reclaim_fence_token=None,
-            tombstone_reason=tombstone_reason,
-            updated_at=updated_at,
+        if owns_slot:
+            self.session = replace(
+                self.session,
+                status="ready",
+                active_run_id=None,
+                updated_at=updated_at,
+            )
+            self.etag = "etag-released"
+        return AdoptionOutcome(
+            run=invalidated,
+            run_etag="run-etag",
+            slot_released=owns_slot,
         )
-        self.operations.append("tombstone_fence")
-        self.etag = "etag-fence-tombstoned"
-        return AdoptionOutcome(run=current, run_etag="run-etag", slot_released=True)
 
     async def get_reconciler_cursor(self, app_hash: str) -> ReconcilerCursorRead | None:
         return self.reconciler_cursors.get(app_hash)
@@ -499,6 +810,16 @@ class FakeSessionStateStore:
         del etag
         self.runs.pop(previous.run_id, None)
         self.operations.append("delete_run")
+
+    async def delete_operation(
+        self,
+        *,
+        previous: DurableSessionOperation,
+        etag: str,
+    ) -> None:
+        del etag
+        self.durable_operations.pop(previous.operation_id, None)
+        self.operations.append("delete_operation")
 
     async def delete_session(self, *, previous: DurableSessionRecord, etag: str) -> None:
         assert self.session == previous
@@ -534,6 +855,8 @@ class FakeSessionStateStore:
         if self.session is not None:
             entities.append(self.session.to_table_entity())
         entities.extend(record.to_table_entity() for record in self.runs.values())
+        entities.extend(record.to_table_entity() for record in self.durable_operations.values())
+        entities.extend(record.to_table_entity() for record in self.idempotency.values())
         entities.extend(record.to_table_entity() for record in self.owner_idempotency.values())
         return TableEntityPage(
             entities=tuple(entities[:top] if top is not None else entities),
