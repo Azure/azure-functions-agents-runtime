@@ -16,9 +16,15 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._logger import logger
 from .._observability import current_span
 from ..config import DEFAULT_TIMEOUT
+from ..harness.bootstrap_report import (
+    BootstrapErrorReport,
+    BootstrapReportError,
+    parse_bootstrap_error_report,
+)
 from ..harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from ..journal_paths import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
+    BOOTSTRAP_ERROR_PATH,
     HARNESS_PROTOCOL_PATH,
     validate_checkpoint_name,
 )
@@ -96,6 +102,7 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
         "protocol_version_mismatch",
         "capability_mismatch",
         "checkpoint_corrupt",
+        "bootstrap_failure",
         "journal_corrupt",
         "generation_rollback",
         "platform_binding_mismatch",
@@ -1391,17 +1398,33 @@ async def _provision_reserved_session(
             setup_deadline,
         )
     try:
-        return await _finish_created_provision(
-            runtime,
-            state_binding,
-            session,
-            fence,
-            package,
-            phase,
-            current,
-            handle,
-            setup_deadline,
-        )
+        try:
+            return await _finish_created_provision(
+                runtime,
+                state_binding,
+                session,
+                fence,
+                package,
+                phase,
+                current,
+                handle,
+                setup_deadline,
+            )
+        except SessionReadinessArtifactError as exc:
+            latest = await _within_setup_budget(
+                state_binding.store.get_session(session.owner_partition, session.session_id),
+                setup_deadline,
+            )
+            await _quarantine_detected_binding(
+                state_binding.store,
+                latest.record,
+                latest.etag,
+                reason=exc.reason,
+            )
+            _record_security_event(exc.reason, frozenset({"harness_artifact"}))
+            raise SessionActivationNotFoundError(
+                "Session sandbox readiness artifacts cannot be trusted."
+            ) from None
     except BaseException:
         try:
             await handle.close()
@@ -1782,11 +1805,31 @@ async def _wait_for_created_manifest(
             )
             return
         except LiveManifestNotReadyError:
+            report = await _read_bootstrap_error_report(handle, setup_deadline)
+            if report is not None and report.permanent:
+                raise SessionReadinessArtifactError("bootstrap_failure") from None
             delay = min(
                 _MANIFEST_RETRY_INTERVAL_SECONDS,
                 _remaining_setup_seconds(setup_deadline),
             )
             await _within_setup_budget(asyncio.sleep(delay), setup_deadline)
+
+
+async def _read_bootstrap_error_report(
+    handle: SandboxSessionHandle,
+    setup_deadline: SetupDeadline,
+) -> BootstrapErrorReport | None:
+    try:
+        payload = await _within_setup_budget(
+            handle.read_file(BOOTSTRAP_ERROR_PATH),
+            setup_deadline,
+        )
+    except SandboxFileNotFoundError:
+        return None
+    try:
+        return parse_bootstrap_error_report(payload)
+    except BootstrapReportError:
+        raise SessionReadinessArtifactError("bootstrap_failure") from None
 
 
 async def _within_setup_budget[T](

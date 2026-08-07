@@ -34,6 +34,11 @@ the single sandbox root, writes output to `bootstrap.log`, publishes readiness, 
 run is then a separately supervised
 `python -m azure_functions_agents.harness --run-id ...` process.
 
+The create profile supplies `/app` and its captured site-packages directory in
+`PYTHONPATH`. Bootstrap writes a persistent `sitecustomize.py` so fresh harness
+interpreters also process delivered `.pth` files rather than relying on the
+bootstrap process's in-memory `sys.path`.
+
 The verified public-disk ABI pairing is CPython 3.13 on Debian 12 with glibc
 2.36 and CPython 3.14 on Ubuntu 24.04 with glibc 2.39. This is a current
 platform fact, not an immutable public-image contract. The bootstrap reads the
@@ -94,7 +99,8 @@ key setting when the static proxy-header route is desired instead.
 A managed identity attached to the customer-owned Sandbox Group is directly
 available to guest code through the platform identity endpoint. Egress policy
 controls destinations where a token can be used; it does not prevent token
-acquisition.
+acquisition. The runtime does not attach, remove, or strip this identity; the
+controller identity remains separate and is the sole state writer.
 
 Use a dedicated, least-privileged group user-assigned identity. Do not reuse
 the controller identity and do not grant the group identity state-store,

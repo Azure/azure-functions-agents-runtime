@@ -49,3 +49,37 @@ def test_unknown_trace_capability_fails_closed() -> None:
 
     with pytest.raises(CapabilityCoverageError, match="unknown"):
         validate_capability_coverage((), (trace,))
+
+
+def test_generic_trace_cannot_claim_a_different_capability() -> None:
+    trace = parse_trace(
+        {
+            "name": "bootstrap_ready",
+            "capabilities": ["bootstrap_v1", "delegation_v1"],
+            "events": [{"type": "session", "data": {"status": "ready"}}],
+            "terminal_state": "succeeded",
+        }
+    )
+    delegation = next(
+        descriptor for descriptor in HARNESS_CAPABILITIES if descriptor.name == "delegation_v1"
+    )
+
+    with pytest.raises(CapabilityCoverageError, match="exercised"):
+        validate_capability_coverage((delegation,), (trace,))
+
+
+def test_capability_trace_requires_its_semantic_event() -> None:
+    trace = parse_trace(
+        {
+            "name": "atomic_commit",
+            "capabilities": ["atomic_commit_v1"],
+            "events": [{"type": "done", "data": {"state": "succeeded"}}],
+            "terminal_state": "succeeded",
+        }
+    )
+    atomic_commit = next(
+        descriptor for descriptor in HARNESS_CAPABILITIES if descriptor.name == "atomic_commit_v1"
+    )
+
+    with pytest.raises(CapabilityCoverageError, match="exercised"):
+        validate_capability_coverage((atomic_commit,), (trace,))

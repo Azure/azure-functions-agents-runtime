@@ -27,6 +27,7 @@ BOOTSTRAP_DIGEST_NAME = "bootstrap.sha256"
 LIVE_MANIFEST_NAME = "manifest.json"
 ERROR_REPORT_NAME = "bootstrap.error.json"
 CONTENT_DIGEST_MARKER_NAME = ".content_digest"
+SITECUSTOMIZE_NAME = "sitecustomize.py"
 APPLICATION_DIRECTORY = Path("/app")
 EX_CONFIG = 78
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
@@ -131,6 +132,7 @@ def prepare_sandbox(
     archive_bytes = _verify_content_digest(session_directory, seed)
     _verify_archive_abi(archive_bytes)
     _stage_content(archive_bytes, str(seed["digest"]), application_directory)
+    _install_persistent_import_paths(application_directory)
     _configure_import_paths(application_directory)
     _verify_protocol(str(seed["protocol_version"]))
     os.environ[SANDBOX_MARKER_ENV_VAR] = "1"
@@ -409,6 +411,30 @@ def _configure_import_paths(application_directory: Path) -> None:
     module_path = getattr(stdlib_json, "__file__", None)
     if module_path is not None and _is_within(Path(module_path), application_directory):
         raise BootstrapFailure("stdlib_shadowing", "Sandbox application shadows the standard library.")
+
+
+def _install_persistent_import_paths(application_directory: Path) -> None:
+    site_packages = application_directory / ".python_packages" / "lib" / "site-packages"
+    destination = application_directory / SITECUSTOMIZE_NAME
+    source = (
+        "import site\n"
+        f"site.addsitedir({str(application_directory)!r})\n"
+        f"site.addsitedir({str(site_packages)!r})\n"
+    ).encode()
+    temporary = destination.with_name(f".{destination.name}.tmp")
+    try:
+        with temporary.open("wb") as output:
+            output.write(source)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, destination)
+        _fsync_directory(application_directory)
+    except OSError:
+        temporary.unlink(missing_ok=True)
+        raise BootstrapFailure(
+            "persistent_import_path_failure",
+            "Sandbox import path setup failed.",
+        ) from None
 
 
 def _reject_stdlib_shadowing(application_directory: Path) -> None:

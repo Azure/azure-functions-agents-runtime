@@ -3,12 +3,19 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import subprocess
+import sys
 import zipfile
 from pathlib import Path
 
 import pytest
 
 from azure_functions_agents.harness import bootstrap
+
+
+def _cpython_abi() -> str:
+    return f"{sys.version_info.major}{sys.version_info.minor}"
 
 
 def _archive(entries: dict[str, bytes]) -> bytes:
@@ -100,6 +107,59 @@ def test_prepare_sandbox_verifies_content_and_publishes_manifest(
     assert bootstrap.SANDBOX_MARKER_ENV_VAR in bootstrap.os.environ
 
 
+def test_bootstrap_persists_import_paths_for_a_fresh_harness_interpreter(
+    tmp_path: Path,
+    _linux_bootstrap: None,
+) -> None:
+    session, bootstrap_path = _write_session(
+        tmp_path,
+        _archive(
+            {
+                "azure_functions_agents/__init__.py": b"",
+                "azure_functions_agents/harness/__init__.py": b"MARKER = 'harness'\n",
+                "azure_functions_agents/harness/__main__.py": b"from . import MARKER\n",
+                (
+                    ".python_packages/lib/site-packages/runtime_paths.pth"
+                ): b"extra_modules\n",
+                (
+                    ".python_packages/lib/site-packages/extra_modules/delivered_dependency.py"
+                ): b"MARKER = 'dependency'\n",
+            }
+        ),
+    )
+    application = tmp_path / "app"
+    bootstrap.prepare_sandbox(
+        session,
+        application_directory=application,
+        bootstrap_path=bootstrap_path,
+    )
+    site_packages = application / ".python_packages" / "lib" / "site-packages"
+    environment = {
+        **os.environ,
+        "PYTHONPATH": os.pathsep.join((str(application), str(site_packages))),
+    }
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import azure_functions_agents.harness as harness; "
+                "import delivered_dependency; "
+                "print(harness.MARKER, delivered_dependency.MARKER)"
+            ),
+        ],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "harness dependency"
+
+
 def test_prepare_sandbox_rejects_digest_mismatch_without_publishing(
     tmp_path: Path,
     _linux_bootstrap: None,
@@ -184,7 +244,14 @@ def test_prepare_sandbox_rejects_incompatible_compiled_python(
 ) -> None:
     session, bootstrap_path = _write_session(
         tmp_path,
-        _archive({"package/module.cpython-314-x86_64-linux-gnu.so": b"binary"}),
+        _archive(
+            {
+                (
+                    "package/module.cpython-"
+                    f"{sys.version_info.major}{sys.version_info.minor + 1}-x86_64-linux-gnu.so"
+                ): b"binary"
+            }
+        ),
     )
 
     with pytest.raises(bootstrap.BootstrapFailure, match="Python ABI"):
@@ -203,7 +270,7 @@ def test_prepare_sandbox_rejects_musl_compiled_extension(
 ) -> None:
     session, bootstrap_path = _write_session(
         tmp_path,
-        _archive({"package/module.cpython-313-x86_64-linux-musl.so": b"binary"}),
+        _archive({f"package/module.cpython-{_cpython_abi()}-x86_64-linux-musl.so": b"binary"}),
     )
 
     with pytest.raises(bootstrap.BootstrapFailure, match="platform"):
@@ -225,7 +292,10 @@ def test_prepare_sandbox_rejects_musllinux_wheel_tag(
         _archive(
             {
                 "package-1.0.dist-info/WHEEL": (
-                    b"Wheel-Version: 1.0\nTag: cp313-cp313-musllinux_1_2_x86_64\n"
+                    (
+                        "Wheel-Version: 1.0\n"
+                        f"Tag: cp{_cpython_abi()}-cp{_cpython_abi()}-musllinux_1_2_x86_64\n"
+                    ).encode()
                 )
             }
         ),
@@ -252,7 +322,10 @@ def test_prepare_sandbox_rejects_wheel_requiring_newer_glibc(
         _archive(
             {
                 "package-1.0.dist-info/WHEEL": (
-                    b"Wheel-Version: 1.0\nTag: cp313-cp313-manylinux_2_39_x86_64\n"
+                    (
+                        "Wheel-Version: 1.0\n"
+                        f"Tag: cp{_cpython_abi()}-cp{_cpython_abi()}-manylinux_2_39_x86_64\n"
+                    ).encode()
                 )
             }
         ),

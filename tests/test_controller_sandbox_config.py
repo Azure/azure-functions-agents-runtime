@@ -7,6 +7,7 @@ from azure_functions_agents.controller.sandbox_config import (
     MODEL_API_KEY_PLACEHOLDER,
     SANDBOX_DISK_ENV,
     SANDBOX_DISK_ID_ENV,
+    SANDBOX_PYTHONPATH,
     build_bootstrap_entrypoint,
     build_sandbox_create_profile,
     build_sandbox_create_request,
@@ -38,6 +39,7 @@ def test_build_sandbox_environment_forwards_only_documented_sources() -> None:
         "CUSTOM_FLAG": "enabled",
         "DATABASE_PASSWORD": "explicit-value",
         "AZURE_FUNCTIONS_AGENTS_SANDBOX": "1",
+        "PYTHONPATH": SANDBOX_PYTHONPATH,
     }
     with pytest.raises(TypeError):
         forwarded["OTHER"] = "value"  # type: ignore[index]
@@ -132,8 +134,15 @@ def test_create_request_uses_disk_safe_supervisor_and_full_inspection() -> None:
     assert request.environment == {
         "CUSTOM_FLAG": "enabled",
         "AZURE_FUNCTIONS_AGENTS_SANDBOX": "1",
+        "PYTHONPATH": SANDBOX_PYTHONPATH,
     }
     assert request.egress_policy.traffic_inspection == "Full"
+
+
+def test_explicit_pythonpath_is_appended_after_runtime_import_paths() -> None:
+    forwarded = build_sandbox_environment({"SandboxEnv__PYTHONPATH": "/customer/modules"})
+
+    assert forwarded["PYTHONPATH"] == f"{SANDBOX_PYTHONPATH}:/customer/modules"
 
 
 def test_bootstrap_entrypoint_runs_once_after_content_is_ready() -> None:

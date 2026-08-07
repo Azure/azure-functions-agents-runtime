@@ -28,6 +28,9 @@ from ..transport.transport_models import (
 SANDBOX_ENV_PREFIX = "SandboxEnv__"
 SANDBOX_DISK_ENV = "AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK"
 SANDBOX_DISK_ID_ENV = "AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID"
+SANDBOX_APPLICATION_DIRECTORY = "/app"
+SANDBOX_SITE_PACKAGES_DIRECTORY = f"{SANDBOX_APPLICATION_DIRECTORY}/.python_packages/lib/site-packages"
+SANDBOX_PYTHONPATH = f"{SANDBOX_APPLICATION_DIRECTORY}:{SANDBOX_SITE_PACKAGES_DIRECTORY}"
 SANDBOX_SESSION_DIRECTORY = SESSION_PATH
 MODEL_API_KEY_PLACEHOLDER = "sandbox-proxy-managed"
 _PROXY_MANAGED_KEY_ENV_NAMES = ("AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")
@@ -110,6 +113,7 @@ def build_sandbox_environment(
         forwarded[target] = value
     forwarded[SANDBOX_MARKER_ENV_VAR] = "1"
     _add_model_key_placeholders(source, forwarded)
+    _add_harness_import_paths(forwarded)
     return MappingProxyType(forwarded)
 
 
@@ -272,3 +276,12 @@ def _add_model_key_placeholders(
             raise SandboxProvisioningError("Sandbox environment values must be strings.")
         if value and name not in forwarded:
             forwarded[name] = MODEL_API_KEY_PLACEHOLDER
+
+
+def _add_harness_import_paths(forwarded: dict[str, str]) -> None:
+    customer_path = forwarded.get("PYTHONPATH")
+    forwarded["PYTHONPATH"] = (
+        SANDBOX_PYTHONPATH
+        if not customer_path
+        else f"{SANDBOX_PYTHONPATH}:{customer_path}"
+    )

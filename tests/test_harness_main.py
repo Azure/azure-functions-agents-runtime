@@ -12,12 +12,11 @@ from types import SimpleNamespace
 import pytest
 
 import azure_functions_agents.harness.__main__ as harness_main
-from azure_functions_agents.conformance.capability_map import validate_capability_coverage
+from azure_functions_agents.conformance.capability_map import trace_exercises_capability
 from azure_functions_agents.conformance.trace import parse_trace
 from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
 from azure_functions_agents.harness.atomic_commit import AtomicCommitError, AtomicCommitStore
 from azure_functions_agents.harness.journal_writer import HarnessJournalError
-from azure_functions_agents.harness.sandbox_capabilities import HARNESS_CAPABILITIES
 
 
 def test_python_module_entrypoint_exposes_the_harness_run_argument() -> None:
@@ -28,6 +27,7 @@ def test_python_module_entrypoint_exposes_the_harness_run_argument() -> None:
         [sys.executable, "-m", "azure_functions_agents.harness", "--help"],
         capture_output=True,
         check=False,
+        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
         cwd=source_root.parent,
         env=environment,
         text=True,
@@ -91,16 +91,16 @@ async def test_per_run_entrypoint_writes_controller_readable_journal(
     assert status["state"] == "succeeded"
     assert result["content"] == "hello"
     assert result["delegate_error_count"] == 2
-    assert [event["type"] for event in trace["events"]] == ["session", "delta", "done"]
-    assert set(trace["capabilities"]) == {
+    assert [event["type"] for event in trace["events"]] == [
+        "session",
+        "delta",
+        "atomic_commit",
+        "done",
+    ]
+    assert trace["capabilities"] == ["atomic_commit_v1"]
+    assert trace_exercises_capability(
+        parse_trace((run_directory / "conformance.trace.json").read_bytes()),
         "atomic_commit_v1",
-        "watchdog_v1",
-        "bootstrap_v1",
-        "delegation_v1",
-    }
-    validate_capability_coverage(
-        HARNESS_CAPABILITIES,
-        (parse_trace((run_directory / "conformance.trace.json").read_bytes()),),
     )
 
 
@@ -143,6 +143,35 @@ async def test_duplicate_terminal_launch_does_not_rewrite_journal(
 
     assert exit_code == 0
     assert (run_directory / "status.json").read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_active_run_claim_prevents_a_second_harness_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "e" * 32
+    journal_root = tmp_path / "journal"
+    inbox = journal_root / "inbox" / f"{run_id}.json"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "session_id": "session-1",
+                "agent_name": "agent",
+                "prompt": "hello",
+                "timeout": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+    monkeypatch.setattr(harness_main, "acquire_run_claim", lambda _: None)
+
+    assert await harness_main._run(run_id, journal_root, tmp_path / "app") == 0
+
+    assert not (journal_root / "runs" / run_id / "status.json").exists()
 
 
 @pytest.mark.asyncio

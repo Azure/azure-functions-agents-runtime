@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 import azure_functions_agents.controller.readiness as readiness_module
+from azure_functions_agents.controller.package import LiveManifestNotReadyError
 from azure_functions_agents.controller.readiness import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
@@ -35,6 +36,7 @@ from azure_functions_agents.controller.readiness import (
 from azure_functions_agents.controller.reconciler import SessionReconciler
 from azure_functions_agents.execution.setup_budget import SetupBudget
 from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
+from azure_functions_agents.journal_paths import BOOTSTRAP_ERROR_PATH
 from azure_functions_agents.session_state import (
     AdmissionRecords,
     AppIdentity,
@@ -655,6 +657,109 @@ async def test_optional_checkpoint_pointer_accepts_a_canonical_uuid_name(tmp_pat
 
     assert activated.session.status == "ready"
     await activated.handle.close()
+
+
+@pytest.mark.asyncio
+async def test_permanent_bootstrap_error_report_quarantines_provisioned_session(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def no_live_manifest(*_args: object, **_kwargs: object) -> None:
+        raise LiveManifestNotReadyError("not ready")
+
+    script_root = _script_root(tmp_path)
+    handle = _FakeHandle("new-sandbox")
+    handle.seed_file(
+        BOOTSTRAP_ERROR_PATH,
+        b'{"code":"content_digest_mismatch","message":"content invalid","permanent":true}',
+    )
+    store = _FakeStore()
+    monkeypatch.setattr(readiness_module, "read_live_manifest_binding", no_live_manifest)
+
+    with pytest.raises(SessionActivationNotFoundError):
+        await provision_new_session_submit(
+            _runtime(script_root, _FakeProvider(handle), store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert store.session is not None
+    assert store.session.status == "quarantined"
+    assert store.session.quarantine_reason == "bootstrap_failure"
+    assert store.adopted[0].status == "failed"
+    assert store.adopted[0].status_reason == "bootstrap_failure"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "report",
+    [
+        None,
+        b'{"code":"retrying","message":"try again","permanent":false}',
+    ],
+)
+async def test_missing_or_transient_bootstrap_report_keeps_manifest_polling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    report: bytes | None,
+) -> None:
+    calls = 0
+
+    async def eventual_manifest(*_args: object, **_kwargs: object) -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise LiveManifestNotReadyError("not ready")
+
+    async def no_sleep(_delay: float) -> None:
+        return None
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    handle = _FakeHandle()
+    if report is not None:
+        handle.seed_file(BOOTSTRAP_ERROR_PATH, report)
+    expected = readiness_module.build_expected_manifest_binding(
+        session,
+        sandbox_group_resource_id=_GROUP_RESOURCE_ID,
+        state_store_fingerprint=_FINGERPRINT,
+    )
+    monkeypatch.setattr(readiness_module, "read_live_manifest_binding", eventual_manifest)
+    monkeypatch.setattr(readiness_module.asyncio, "sleep", no_sleep)
+
+    await readiness_module._wait_for_created_manifest(
+        handle,
+        expected=expected,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert calls == 2
+
+
+@pytest.mark.asyncio
+async def test_malformed_bootstrap_error_report_fails_closed(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    handle = _FakeHandle()
+    handle.seed_file(BOOTSTRAP_ERROR_PATH, b"not-json")
+    expected = readiness_module.build_expected_manifest_binding(
+        session,
+        sandbox_group_resource_id=_GROUP_RESOURCE_ID,
+        state_store_fingerprint=_FINGERPRINT,
+    )
+
+    with pytest.raises(readiness_module.SessionReadinessArtifactError) as error:
+        await readiness_module._wait_for_created_manifest(
+            handle,
+            expected=expected,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert error.value.reason == "bootstrap_failure"
 
 
 @pytest.mark.asyncio
