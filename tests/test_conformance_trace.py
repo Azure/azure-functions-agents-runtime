@@ -19,7 +19,7 @@ def test_all_golden_traces_are_valid_semantic_documents() -> None:
     traces = [parse_trace(path.read_bytes()) for path in sorted(_TRACE_DIRECTORY.glob("*.json"))]
 
     assert len(traces) == 13
-    assert {trace.name for trace in traces} >= {"bootstrap-ready", "delegation", "egress"}
+    assert {trace.name for trace in traces} >= {"bootstrap_ready", "delegation", "egress"}
 
 
 def test_semantic_normalization_ignores_model_wording_and_timing() -> None:

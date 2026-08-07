@@ -11,22 +11,22 @@ from . import register_harness_capability_provider
 _PROVIDER_NAME = "sandbox_runtime"
 _SANDBOX_CAPABILITIES: Mapping[str, str] = MappingProxyType(
     {
-        "bootstrap": "bootstrap-v1",
-        "delegation": "delegation-v1",
+        "bootstrap": "bootstrap_v1",
+        "delegation": "delegation_v1",
     }
 )
 REQUIRED_HARNESS_CAPABILITIES: Mapping[str, str] = MappingProxyType(
     {
-        "atomic_commit": "atomic-commit-v1",
-        "watchdog": "watchdog-v1",
+        "atomic_commit": "atomic_commit_v1",
+        "watchdog": "watchdog_v1",
         **_SANDBOX_CAPABILITIES,
     }
 )
 HARNESS_CAPABILITIES = (
-    CapabilityDescriptor(name="atomic-commit-v1", features=("atomic_commit",)),
-    CapabilityDescriptor(name="watchdog-v1", features=("watchdog",)),
-    CapabilityDescriptor(name="bootstrap-v1", features=("bootstrap",)),
-    CapabilityDescriptor(name="delegation-v1", features=("delegation",)),
+    CapabilityDescriptor(name="atomic_commit_v1", features=("atomic_commit",)),
+    CapabilityDescriptor(name="watchdog_v1", features=("watchdog",)),
+    CapabilityDescriptor(name="bootstrap_v1", features=("bootstrap",)),
+    CapabilityDescriptor(name="delegation_v1", features=("delegation",)),
 )
 _registered = False
 

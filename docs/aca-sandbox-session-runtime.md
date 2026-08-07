@@ -174,8 +174,8 @@ single-level delegated role: specialists are fresh per call, receive their own
 static capabilities, and never create another sandbox, session, or top-level
 run.
 
-Harness capabilities are described by one exact map: `atomic-commit-v1`,
-`watchdog-v1`, `bootstrap-v1`, and `delegation-v1`. Unknown features fail
+Harness capabilities are described by one exact map: `atomic_commit_v1`,
+`watchdog_v1`, `bootstrap_v1`, and `delegation_v1`. Unknown features fail
 closed, and every advertised capability requires a runtime-produced semantic
 trace. Those traces compare event order, stable fields, and terminal state
 while excluding reasoning text, wording, timing, and provider metadata.

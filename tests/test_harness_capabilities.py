@@ -12,8 +12,8 @@ def test_base_capabilities_are_available_from_a_frozen_snapshot() -> None:
     snapshot = registry.freeze()
 
     assert dict(snapshot) == {
-        "atomic_commit": "atomic-commit-v1",
-        "watchdog": "watchdog-v1",
+        "atomic_commit": "atomic_commit_v1",
+        "watchdog": "watchdog_v1",
     }
     with pytest.raises(TypeError):
         snapshot["new"] = "value"  # type: ignore[index]
@@ -38,8 +38,8 @@ def test_capability_provider_is_closed_on_duplicates_unknowns_and_late_registrat
 
 def test_sandbox_capability_contract_extends_the_base_map_exactly() -> None:
     assert dict(REQUIRED_HARNESS_CAPABILITIES) == {
-        "atomic_commit": "atomic-commit-v1",
-        "watchdog": "watchdog-v1",
-        "bootstrap": "bootstrap-v1",
-        "delegation": "delegation-v1",
+        "atomic_commit": "atomic_commit_v1",
+        "watchdog": "watchdog_v1",
+        "bootstrap": "bootstrap_v1",
+        "delegation": "delegation_v1",
     }

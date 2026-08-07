@@ -1,0 +1,1 @@
+{"name":"atomic_commit","capabilities":["atomic_commit_v1"],"events":[{"type":"session","data":{"checkpoint":"recovered"}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}

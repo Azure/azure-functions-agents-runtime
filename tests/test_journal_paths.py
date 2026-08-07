@@ -78,11 +78,12 @@ def test_checkpoint_names_are_canonical_uuid4_values() -> None:
 @pytest.mark.parametrize(
     "value",
     [
-        "checkpoint-not-a-uuid",
-        "checkpoint-00000000-0000-0000-0000-000000000000",
-        "checkpoint-../outside",
-        "../checkpoint-" + uuid4().hex,
-        "checkpoint-" + str(uuid4()),
+        "checkpoint_not_a_uuid",
+        "checkpoint_00000000-0000-0000-0000-000000000000",
+        "checkpoint_../outside",
+        "../checkpoint_" + uuid4().hex,
+        "checkpoint_" + str(uuid4()),
+        "checkpoint-" + uuid4().hex,
     ],
 )
 def test_checkpoint_names_reject_noncanonical_or_unsafe_values(value: str) -> None:

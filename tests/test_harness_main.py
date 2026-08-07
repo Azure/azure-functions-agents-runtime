@@ -73,10 +73,10 @@ async def test_per_run_entrypoint_writes_controller_readable_journal(
     assert result["delegate_error_count"] == 2
     assert [event["type"] for event in trace["events"]] == ["session", "delta", "done"]
     assert set(trace["capabilities"]) == {
-        "atomic-commit-v1",
-        "watchdog-v1",
-        "bootstrap-v1",
-        "delegation-v1",
+        "atomic_commit_v1",
+        "watchdog_v1",
+        "bootstrap_v1",
+        "delegation_v1",
     }
     validate_capability_coverage(
         HARNESS_CAPABILITIES,

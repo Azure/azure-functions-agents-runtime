@@ -1354,10 +1354,10 @@ publishing the live manifest.
 The frozen capability map is exactly:
 
 ```text
-atomic_commit -> atomic-commit-v1
-watchdog      -> watchdog-v1
-bootstrap     -> bootstrap-v1
-delegation    -> delegation-v1
+atomic_commit -> atomic_commit_v1
+watchdog      -> watchdog_v1
+bootstrap     -> bootstrap_v1
+delegation    -> delegation_v1
 ```
 
 Every capability requires a runtime-produced semantic trace. Hand-authored

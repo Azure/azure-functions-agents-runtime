@@ -1,0 +1,1 @@
+{"name":"bootstrap_ready","capabilities":["bootstrap_v1"],"events":[{"type":"session","data":{"status":"ready"}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}

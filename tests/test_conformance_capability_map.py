@@ -32,7 +32,7 @@ def test_unknown_feature_fails_closed() -> None:
 def test_advertised_capability_without_a_trace_fails_closed() -> None:
     with pytest.raises(CapabilityCoverageError, match="lacks"):
         validate_capability_coverage(
-            (CapabilityDescriptor(name="delegation-v1", features=("delegation",)),),
+            (CapabilityDescriptor(name="delegation_v1", features=("delegation",)),),
             (),
         )
 

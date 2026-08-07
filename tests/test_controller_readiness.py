@@ -187,7 +187,7 @@ async def test_profile_readiness_requires_exact_protocol_capabilities(tmp_path: 
 
     handle.seed_file(
         HARNESS_PROTOCOL_PATH,
-        b'{"protocol_version":"1","capabilities":{"bootstrap":"bootstrap-v1"}}',
+        b'{"protocol_version":"1","capabilities":{"bootstrap":"bootstrap_v1"}}',
     )
     with pytest.raises(readiness_module.SessionReadinessArtifactError, match="capability_mismatch"):
         await readiness_module._verify_optional_harness_artifacts(
@@ -617,7 +617,7 @@ async def test_optional_harness_protocol_rejects_duplicate_keys_and_coercion(
 async def test_optional_checkpoint_pointer_requires_a_canonical_uuid_name(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     handle = _FakeHandle("new-sandbox")
-    handle.seed_file(ATOMIC_CHECKPOINT_POINTER_PATH, b"checkpoint-not-a-uuid\n")
+    handle.seed_file(ATOMIC_CHECKPOINT_POINTER_PATH, b"checkpoint_not_a_uuid\n")
     provider = _FakeProvider(handle)
     store = _FakeStore()
 
@@ -640,7 +640,7 @@ async def test_optional_checkpoint_pointer_accepts_a_canonical_uuid_name(tmp_pat
     handle = _FakeHandle("new-sandbox")
     handle.seed_file(
         ATOMIC_CHECKPOINT_POINTER_PATH,
-        f"checkpoint-{uuid4().hex}\n".encode("ascii"),
+        f"checkpoint_{uuid4().hex}\n".encode("ascii"),
     )
     provider = _FakeProvider(handle)
     store = _FakeStore()
