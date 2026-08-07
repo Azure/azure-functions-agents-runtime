@@ -1,0 +1,1 @@
+{"name":"mcp-tool","capabilities":[],"events":[{"type":"tool_start","data":{"tool_name":"remote_tool"}},{"type":"tool_end","data":{"tool_name":"remote_tool","success":true}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}

@@ -10,8 +10,8 @@ from types import MappingProxyType
 SANDBOX_MARKER_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_SANDBOX"
 _BASE_CAPABILITIES: Mapping[str, str] = MappingProxyType(
     {
-        "atomic_commit": "atomic-commit-v1",
-        "watchdog": "watchdog-v1",
+        "atomic_commit": "atomic_commit_v1",
+        "watchdog": "watchdog_v1",
     }
 )
 

@@ -6,6 +6,7 @@ from azure_functions_agents.config.env import (
     _to_bool,
     has_unresolved_placeholders,
     resolve_env_vars_in_data,
+    runtime_backend_env_value,
     substitute_env_vars_in_text,
     substitute_env_vars_in_value,
 )
@@ -145,6 +146,20 @@ def test_substitute_env_vars_in_value_empty_env_var_resolves_to_empty_string(
 ) -> None:
     monkeypatch.setenv("EMPTY", "")
     assert substitute_env_vars_in_value("$EMPTY") == ""
+
+
+def test_backend_environment_falls_back_only_for_runtime_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("MODEL", raising=False)
+    monkeypatch.setenv("SandboxEnv__MODEL", "sandbox-model")
+
+    assert runtime_backend_env_value("MODEL") == "sandbox-model"
+    assert substitute_env_vars_in_value("$MODEL") == "$MODEL"
+
+    monkeypatch.setenv("MODEL", "host-model")
+
+    assert runtime_backend_env_value("MODEL") == "host-model"
 
 
 def test_substitute_env_vars_in_value_undefined_inline_stays_literal() -> None:

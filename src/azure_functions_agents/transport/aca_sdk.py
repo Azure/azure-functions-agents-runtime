@@ -42,7 +42,13 @@ from .transport_models import (
     ProvisionedSandboxIdentity,
     SandboxCapacityError,
     SandboxCreateRequest,
+    SandboxEgressHeader,
+    SandboxEgressHostRule,
     SandboxEgressPolicy,
+    SandboxEgressRule,
+    SandboxEgressRuleAction,
+    SandboxEgressRuleMatch,
+    SandboxEgressSecretRef,
     SandboxExecResult,
     SandboxFileEntry,
     SandboxFileNotFoundError,
@@ -66,7 +72,14 @@ if TYPE_CHECKING:
     from azure.containerapps.sandbox import (
         AutoDeletePolicy,
         AutoSuspendPolicy,
+        EgressHeader,
+        EgressHeaderValueRef,
+        EgressHostRule,
         EgressPolicy,
+        EgressRule,
+        EgressRuleAction,
+        EgressRuleMatch,
+        EgressSecretRef,
         ExecResult,
         FileInfo,
         LifecyclePolicy,
@@ -100,6 +113,13 @@ class SdkFactories:
     sandbox_group_client: Callable[..., SandboxGroupClient]
     sandbox_client: Callable[..., SandboxClient]
     egress_policy: Callable[..., EgressPolicy]
+    egress_host_rule: Callable[..., EgressHostRule]
+    egress_rule: Callable[..., EgressRule]
+    egress_rule_match: Callable[..., EgressRuleMatch]
+    egress_rule_action: Callable[..., EgressRuleAction]
+    egress_header: Callable[..., EgressHeader]
+    egress_header_value_ref: Callable[..., EgressHeaderValueRef]
+    egress_secret_ref: Callable[..., EgressSecretRef]
     lifecycle_policy: Callable[..., LifecyclePolicy]
     auto_suspend_policy: Callable[..., AutoSuspendPolicy]
     auto_delete_policy: Callable[..., AutoDeletePolicy]
@@ -126,6 +146,13 @@ def _load_sdk_factories() -> SdkFactories:
         sandbox_group_client=async_sdk.SandboxGroupClient,
         sandbox_client=async_sdk.SandboxClient,
         egress_policy=sdk.EgressPolicy,
+        egress_host_rule=sdk.EgressHostRule,
+        egress_rule=sdk.EgressRule,
+        egress_rule_match=sdk.EgressRuleMatch,
+        egress_rule_action=sdk.EgressRuleAction,
+        egress_header=sdk.EgressHeader,
+        egress_header_value_ref=sdk.EgressHeaderValueRef,
+        egress_secret_ref=sdk.EgressSecretRef,
         lifecycle_policy=sdk.LifecyclePolicy,
         auto_suspend_policy=sdk.AutoSuspendPolicy,
         auto_delete_policy=sdk.AutoDeletePolicy,
@@ -466,7 +493,7 @@ class AcaSandboxAdapter:
                     sandbox_id=sandbox.id,
                     labels=dict(sandbox.labels),
                     created_at=_sdk_timestamp(sandbox.created_at),
-                    modified_at=_sdk_timestamp(sandbox.modified_at),
+                    modified_at=None,
                 )
             )
         return tuple(summaries)
@@ -501,7 +528,7 @@ class AcaSandboxAdapter:
                 SandboxSnapshot.create(
                     snapshot_id=snapshot.id,
                     sandbox_id=snapshot.sandbox_id,
-                    created_at=_sdk_timestamp(snapshot.created_at),
+                    created_at=_sdk_timestamp(snapshot.created_at_utc),
                 )
             )
         return tuple(snapshots)
@@ -797,8 +824,10 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
     async def get_lifecycle_policy(self) -> SandboxLifecyclePolicy:
         """Read the complete lifecycle projection from the individual sandbox."""
         self._ensure_open()
-        policy = await self._sdk_client.get_lifecycle_policy()
-        return _project_lifecycle_policy(policy)
+        sandbox = await self._sdk_client.get()
+        if sandbox.lifecycle is None:
+            raise SandboxProvisioningError("Sandbox lifecycle policy is unavailable.")
+        return _project_lifecycle_policy(sandbox.lifecycle)
 
     async def set_lifecycle_policy(self, policy: SandboxLifecyclePolicy) -> None:
         """Set both auto-suspend and auto-delete together; never inherit group policy."""
@@ -809,13 +838,15 @@ class AcaSandboxHandle(SandboxFileTransport, SandboxProcessTransport):
             None
             if policy.auto_suspend_seconds is None
             else self._factories.auto_suspend_policy(
-                auto_suspend_seconds=policy.auto_suspend_seconds,
+                enabled=True,
+                interval=policy.auto_suspend_seconds,
                 mode=policy.auto_suspend_mode,
             )
         )
         lifecycle = self._factories.lifecycle_policy(
             auto_suspend=auto_suspend,
             auto_delete=self._factories.auto_delete_policy(
+                enabled=True,
                 delete_interval_seconds=policy.auto_delete_seconds
             ),
         )
@@ -874,25 +905,105 @@ def _verify_group_binding(persisted: SandboxGroupBinding, resolved: SandboxGroup
 
 
 def _compile_egress_policy(factories: SdkFactories, policy: SandboxEgressPolicy) -> EgressPolicy:
-    """Create only an explicit Deny + inspected SDK policy."""
+    """Translate the runtime-owned egress IR at the sole preview-SDK boundary."""
 
-    if policy.default_action != "Deny" or policy.traffic_inspection not in {"Full", "Partial"}:
+    if policy.default_action != "Deny" or policy.traffic_inspection != "Full":
         raise SandboxProvisioningError("Sandbox egress policy is not fail-closed.")
     return factories.egress_policy(
         default_action="Deny",
-        traffic_inspection=policy.traffic_inspection,
+        traffic_inspection="Full",
+        host_rules=[
+            _compile_egress_host_rule(factories, rule)
+            for rule in policy.host_rules
+        ],
+        rules=[_compile_egress_rule(factories, rule) for rule in policy.rules],
     )
+
+
+def _compile_egress_host_rule(
+    factories: SdkFactories, rule: SandboxEgressHostRule
+) -> EgressHostRule:
+    return factories.egress_host_rule(pattern=rule.host, action=rule.action)
+
+
+def _compile_egress_rule(factories: SdkFactories, rule: SandboxEgressRule) -> EgressRule:
+    return factories.egress_rule(
+        name=rule.name,
+        match=_compile_egress_rule_match(factories, rule.match),
+        action=_compile_egress_rule_action(factories, rule.action),
+    )
+
+
+def _compile_egress_rule_match(
+    factories: SdkFactories, match: SandboxEgressRuleMatch
+) -> EgressRuleMatch:
+    kwargs: dict[str, object] = {"host": match.host}
+    if match.path is not None:
+        kwargs["path"] = match.path
+    if match.methods:
+        kwargs["methods"] = list(match.methods)
+    return factories.egress_rule_match(**kwargs)
+
+
+def _compile_egress_rule_action(
+    factories: SdkFactories, action: SandboxEgressRuleAction
+) -> EgressRuleAction:
+    kwargs: dict[str, object] = {"type": action.type}
+    if action.host is not None:
+        kwargs["host"] = action.host
+    if action.path is not None:
+        kwargs["path"] = action.path
+    if action.scheme is not None:
+        kwargs["scheme"] = action.scheme
+    if action.headers:
+        kwargs["headers"] = [
+            _compile_egress_header(factories, header) for header in action.headers
+        ]
+    return factories.egress_rule_action(**kwargs)
+
+
+def _compile_egress_header(
+    factories: SdkFactories, header: SandboxEgressHeader
+) -> EgressHeader:
+    kwargs: dict[str, object] = {
+        "operation": header.operation,
+        "name": header.name,
+    }
+    if header.value is not None:
+        kwargs["value"] = header.value
+    elif header.secret_ref is not None:
+        kwargs["value_ref"] = _compile_egress_secret_ref(factories, header.secret_ref)
+    return factories.egress_header(**kwargs)
+
+
+def _compile_egress_secret_ref(
+    factories: SdkFactories, secret_ref: SandboxEgressSecretRef
+) -> EgressHeaderValueRef:
+    provider_secret_ref = factories.egress_secret_ref(
+        secret_id=secret_ref.secret_id,
+        secret_key=secret_ref.secret_key,
+        format=secret_ref.format,
+    )
+    return factories.egress_header_value_ref(secret_ref=provider_secret_ref)
 
 
 def _project_lifecycle_policy(policy: LifecyclePolicy) -> SandboxLifecyclePolicy:
     """Project the SDK lifecycle response while keeping its shape adapter-local."""
-    if policy.auto_suspend is None:
+    if policy.auto_suspend is None or not policy.auto_suspend.enabled:
+        if policy.auto_delete is None or policy.auto_delete.delete_interval_seconds is None:
+            raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
         return SandboxLifecyclePolicy.create(
             auto_suspend_seconds=None,
             auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
         )
+    if policy.auto_suspend.interval is None or policy.auto_delete is None:
+        raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
+    if policy.auto_delete.delete_interval_seconds is None:
+        raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
+    if policy.auto_suspend.mode is None:
+        raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
     return SandboxLifecyclePolicy.create(
-        auto_suspend_seconds=policy.auto_suspend.auto_suspend_seconds,
+        auto_suspend_seconds=policy.auto_suspend.interval,
         auto_suspend_mode=policy.auto_suspend.mode,
         auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
     )

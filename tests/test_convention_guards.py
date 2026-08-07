@@ -28,6 +28,12 @@ _CONCRETE_RUNTIME_TYPES = frozenset(
         "AcaSandboxHandle",
     }
 )
+_CANONICAL_PATH_MODULES = frozenset(
+    {
+        "src/azure_functions_agents/journal_paths.py",
+        "src/azure_functions_agents/transport/manifest.py",
+    }
+)
 
 
 def _repository_root() -> Path:
@@ -195,6 +201,16 @@ def _concrete_runtime_cast_lines(tree: ast.AST) -> list[int]:
     return findings
 
 
+def _hardcoded_var_lib_lines(tree: ast.AST) -> list[int]:
+    return [
+        node.lineno
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and "/var/lib" in node.value
+    ]
+
+
 def test_frozen_dataclass_guard_detects_direct_post_init_only() -> None:
     frozen_tree = ast.parse(
         """
@@ -219,6 +235,12 @@ class Mutable:
 
     assert _frozen_dataclass_has_post_init(frozen_tree) == [6]
     assert _frozen_dataclass_has_post_init(mutable_tree) == []
+
+
+def test_hardcoded_var_lib_guard_detects_literal_paths() -> None:
+    tree = ast.parse('ROOT = "/var/lib/example"\n')
+
+    assert _hardcoded_var_lib_lines(tree) == [1]
 
 
 def test_provenance_guard_detects_only_governed_text_locations() -> None:
@@ -279,6 +301,27 @@ def test_source_module_basenames_are_unique() -> None:
     assert not collisions, "\n".join(
         f"{name}: {', '.join(paths)}" for name, paths in sorted(collisions.items())
     )
+
+
+def test_source_paths_are_centralized_in_canonical_path_modules() -> None:
+    root = _repository_root()
+    excluded = Path(__file__).resolve()
+    paths = [
+        path
+        for directory in (root / "src", root / "tests")
+        for path in _python_files(directory)
+        if path != excluded
+    ]
+    findings = [
+        f"{path.relative_to(root)}:{line}"
+        for path in paths
+        if str(path.relative_to(root)).replace("\\", "/") not in _CANONICAL_PATH_MODULES
+        for line in _hardcoded_var_lib_lines(
+            ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        )
+    ]
+
+    assert not findings, "\n".join(findings)
 
 
 def test_execution_and_controller_code_stay_behind_protocols() -> None:

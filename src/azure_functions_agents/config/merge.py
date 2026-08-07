@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from azure_functions_agents._slug import _function_name_from_source
-from azure_functions_agents.config.env import runtime_env_value
+from azure_functions_agents.config.env import runtime_backend_env_value
 from azure_functions_agents.config.schema import (
     AgentSpec,
     BuiltinEndpointsConfig,
@@ -43,7 +43,7 @@ def _resolve_builtin_endpoints(
 
 
 def _resolve_model(spec: AgentSpec, global_config: GlobalConfig) -> str | None:
-    env_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
+    env_model = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
     return spec.model or global_config.model or env_model or None
 
 
@@ -52,7 +52,7 @@ def _resolve_timeout(spec: AgentSpec, global_config: GlobalConfig) -> float:
         return spec.timeout
     if global_config.timeout is not None:
         return global_config.timeout
-    env_timeout = runtime_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
+    env_timeout = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
     if env_timeout:
         try:
             return float(env_timeout)

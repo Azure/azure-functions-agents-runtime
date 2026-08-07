@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from dataclasses import replace
 from datetime import datetime, timedelta
 
 from azure_functions_agents.controller.package import CONTENT_MANIFEST_SEED_PATH
+from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
+from azure_functions_agents.journal_paths import HARNESS_PROTOCOL_PATH
 from azure_functions_agents.session_state import (
     TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
@@ -77,11 +80,28 @@ class FakeSandboxSessionHandle(FakeSandboxTransport):
             auto_delete_seconds=90_300,
         )
         self.lifecycle_policy_history: list[SandboxLifecyclePolicy] = [self.lifecycle_policy]
+        self.seed_file(
+            HARNESS_PROTOCOL_PATH,
+            (
+                '{"protocol_version":"1","capabilities":'
+                + json.dumps(dict(REQUIRED_HARNESS_CAPABILITIES), sort_keys=True)
+                + "}\n"
+            ).encode("utf-8"),
+        )
 
     async def write_file(self, path: str, content: bytes, *, create_dirs: bool = False) -> None:
         await super().write_file(path, content, create_dirs=create_dirs)
         if path == CONTENT_MANIFEST_SEED_PATH:
             self.seed_file(SESSION_MANIFEST_PATH, content)
+        if path.endswith("/.boot-ready") and HARNESS_PROTOCOL_PATH not in self._files:
+            self.seed_file(
+                HARNESS_PROTOCOL_PATH,
+                (
+                    '{"protocol_version":"1","capabilities":'
+                    + json.dumps(dict(REQUIRED_HARNESS_CAPABILITIES), sort_keys=True)
+                    + "}\n"
+                ).encode("utf-8"),
+            )
 
     async def stop(self) -> None:
         self.stop_calls += 1

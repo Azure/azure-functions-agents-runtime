@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import textwrap
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -14,6 +15,7 @@ from azure_functions_agents.config.schema import (
     GlobalConfig,
     SessionRuntimeConfig,
 )
+from azure_functions_agents.discovery.mcp import MCPDiscoveryResult, MCPServerDefinition
 from azure_functions_agents.session_state import AppIdentity
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
@@ -77,6 +79,49 @@ def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(
     assert runtime is not None
     assert runtime.app_identity == app_identity
     assert runtime.sandbox_group_resource_id.endswith("/sandboxGroups/group")
+
+
+def test_sandbox_profile_egress_includes_only_reachable_mcp_servers() -> None:
+    config = GlobalConfig(
+        session_runtime=SessionRuntimeConfig(
+            aca_sandbox=AcaSandboxConfig(
+                sandbox_group_resource_id=(
+                    "/subscriptions/sub/resourceGroups/rg/providers/"
+                    "Microsoft.App/sandboxGroups/group"
+                )
+            )
+        )
+    )
+    mcp_result = MCPDiscoveryResult(
+        servers={},
+        failed_loads=[],
+        definitions={
+            "reachable": MCPServerDefinition.create(
+                "reachable",
+                {"url": "https://reachable.example.com"},
+            ),
+            "excluded": MCPServerDefinition.create(
+                "excluded",
+                {"url": "https://excluded.example.com"},
+            ),
+        },
+    )
+    resolved_agents = [
+        SimpleNamespace(web_request_config=None, enabled_mcp_names=["reachable"])
+    ]
+
+    profile = app_module._build_sandbox_create_profile(  # type: ignore[arg-type]
+        config,
+        resolved_agents,
+        mcp_result,
+    )
+
+    assert profile is not None
+    allowed_hosts = {
+        rule.host for rule in profile.egress_policy.host_rules if rule.action == "Allow"
+    }
+    assert "reachable.example.com" in allowed_hosts
+    assert "excluded.example.com" not in allowed_hosts
 
 
 def test_create_function_app_fails_fast_on_duplicate_function_names(

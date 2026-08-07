@@ -53,6 +53,26 @@ def test_commit_rejects_working_file_traversal(tmp_path) -> None:
         store.commit(conversation=b"state", working_files={"../escape": b"bad"})
 
 
+def test_checkpoint_recovery_preserves_unrelated_shared_session_children(tmp_path) -> None:
+    (tmp_path / "content").mkdir()
+    sentinel = tmp_path / "content" / "archive.bin"
+    sentinel.write_bytes(b"content")
+    store = AtomicCommitStore(tmp_path)
+    store.commit(conversation=b"state", working_files={})
+
+    store.recover()
+
+    assert sentinel.read_bytes() == b"content"
+
+
+def test_checkpoint_and_pointer_share_the_atomic_store_filesystem(tmp_path) -> None:
+    store = AtomicCommitStore(tmp_path)
+    checkpoint = store.commit(conversation=b"state", working_files={})
+
+    assert checkpoint.path.stat().st_dev == tmp_path.stat().st_dev
+    assert (tmp_path / "current").stat().st_dev == tmp_path.stat().st_dev
+
+
 @pytest.mark.skipif(os.name != "posix", reason="directory fsync is a POSIX durability primitive")
 def test_commit_uses_directory_fsync_on_posix(tmp_path) -> None:
     calls: list[int] = []

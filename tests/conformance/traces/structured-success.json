@@ -1,0 +1,1 @@
+{"name":"structured-success","capabilities":[],"events":[{"type":"message","data":{"structured_output":true}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}

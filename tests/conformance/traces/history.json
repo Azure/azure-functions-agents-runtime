@@ -1,0 +1,1 @@
+{"name":"history","capabilities":[],"events":[{"type":"session","data":{"history_loaded":true}},{"type":"message","data":{"role":"assistant"}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}
