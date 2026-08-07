@@ -54,6 +54,13 @@ from azure_functions_agents.execution.run_control import (
     SandboxRunControl,
 )
 from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.journal_paths import (
+    inbox_path,
+    process_path,
+    result_path,
+    run_path,
+    status_path,
+)
 from azure_functions_agents.registration.endpoints import _run_agent_stream
 from azure_functions_agents.session_state import (
     ActiveRunConflictError,
@@ -308,10 +315,10 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(
                 state="accepted",
                 run_id=run_id,
@@ -369,10 +376,10 @@ async def test_new_submit_reserves_owner_claim_run_and_operation_before_create(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -481,10 +488,10 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -533,10 +540,10 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -605,7 +612,7 @@ async def test_concurrent_retry_cannot_take_an_unexpired_journal_launch(
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         await release_launch.wait()
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=run.session_id),
         )
 
@@ -653,10 +660,10 @@ async def test_provision_content_failure_leaves_a_resumable_operation(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -706,10 +713,10 @@ async def test_provision_lifecycle_failure_leaves_a_resumable_operation(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -766,10 +773,10 @@ async def test_provision_manifest_failure_leaves_a_resumable_operation(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -809,10 +816,10 @@ async def test_new_session_creation_awaits_bounded_post_create_reconciliation(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -851,10 +858,10 @@ async def test_capacity_failure_reaps_once_before_retrying_new_session_creation(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -911,7 +918,7 @@ async def test_active_conflict_reconciles_once_before_returning_or_admitting(
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=session.session_id),
         )
 
@@ -948,7 +955,7 @@ async def test_nonterminal_status_poll_uses_targeted_reconciliation(
     provider = FakeSandboxSessionProvider(handle)
     calls = 0
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="running"),
     )
 
@@ -1280,7 +1287,7 @@ async def test_terminal_stream_releases_slot_for_followup_run(
                         ),
                     )
                     self.seed_file(
-                        f"/var/lib/azure-functions-agents/runs/{self.terminal_run_id}/result.json",
+                        result_path(self.terminal_run_id),
                         json.dumps(
                             {
                                 "content": "answer",
@@ -1306,16 +1313,16 @@ async def test_terminal_stream_releases_slot_for_followup_run(
     async def accept_then_complete(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         launched_run_ids.append(run_id)
-        status_path = f"/var/lib/azure-functions-agents/runs/{run_id}/status.json"
+        journal_status_path = status_path(run_id)
         handle.seed_file(
-            status_path,
+            journal_status_path,
             _status(state="accepted", run_id=run_id, session_id=session.session_id),
         )
         if len(launched_run_ids) != 1:
             handle.event_path = None
             return
-        handle.event_path = f"/var/lib/azure-functions-agents/runs/{run_id}/events.jsonl"
-        handle.status_path = status_path
+        handle.event_path = f"{run_path(run_id)}/events.jsonl"
+        handle.status_path = journal_status_path
         handle.terminal_run_id = run_id
         handle.seed_file(
             handle.event_path,
@@ -1379,11 +1386,11 @@ async def test_client_disconnect_leaves_streamed_run_active(
     async def accept_with_delta(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=session.session_id),
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/events.jsonl",
+            f"{run_path(run_id)}/events.jsonl",
             json.dumps(
                 {
                     "sequence": 1,
@@ -1438,11 +1445,11 @@ async def test_backend_reads_replayable_events_and_adopts_terminal_result(tmp_pa
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="succeeded", last_sequence=5, result_available=True),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/events.jsonl",
+        f"{run_path('run-1')}/events.jsonl",
         (
             "\n".join(
                 [
@@ -1476,7 +1483,7 @@ async def test_backend_reads_replayable_events_and_adopts_terminal_result(tmp_pa
         ).encode("utf-8"),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        result_path("run-1"),
         json.dumps(
             {
                 "content": "answer",
@@ -1523,11 +1530,11 @@ async def test_durable_result_eviction_masks_a_live_success_result_without_resur
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="succeeded", result_available=True),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        result_path("run-1"),
         json.dumps(
             {
                 "content": "stale live result",
@@ -1620,17 +1627,17 @@ async def test_backend_cancels_through_the_live_handle_and_adopts_the_terminal_r
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="running"),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/process.json",
+        process_path("run-1"),
         b'{"process_group_id":42}',
     )
 
     async def journal_canceled(_command: str) -> None:
         handle.seed_file(
-            "/var/lib/azure-functions-agents/runs/run-1/status.json",
+            status_path("run-1"),
             _status(state="canceled"),
         )
 
@@ -1661,11 +1668,11 @@ async def test_cancel_natural_success_with_invalid_output_returns_failed_project
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="succeeded", result_available=True),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        result_path("run-1"),
         json.dumps(
             {
                 "content": "not-valid",
@@ -1712,11 +1719,11 @@ async def test_cancel_natural_success_preserves_a_valid_result(
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="succeeded", result_available=True),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        result_path("run-1"),
         json.dumps(
             {
                 "content": '{"answer":"ok"}',
@@ -1827,10 +1834,10 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         inbox = json.loads(
-            await handle.read_file(f"/var/lib/azure-functions-agents/inbox/{run_id}.json")
+            await handle.read_file(inbox_path(run_id))
         )
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
         )
 
@@ -1886,7 +1893,7 @@ async def test_live_same_key_provision_replay_does_not_take_over_or_double_creat
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=next(iter(store.runs.values())).session_id),
         )
 
@@ -1933,7 +1940,7 @@ async def test_existing_session_evicted_success_replay_returns_gone_without_laun
     async def accept(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             _status(state="accepted", run_id=run_id, session_id=session.session_id),
         )
 
@@ -2006,11 +2013,11 @@ async def test_controller_output_validation_terminalizes_async_success_as_failed
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="succeeded", result_available=True),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/result.json",
+        result_path("run-1"),
         json.dumps(
             {
                 "content": "not-json",
@@ -2065,7 +2072,7 @@ async def test_malformed_status_quarantines_after_terminalizing_the_run(tmp_path
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         b'{"run_id":"run-1","run_id":"secret","session_id":"session-1"}',
     )
     backend = AcaSandboxExecutionBackend(
@@ -2126,7 +2133,7 @@ async def test_missing_advertised_journal_result_quarantines_management_status(
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="succeeded", result_available=True),
     )
     backend = AcaSandboxExecutionBackend(
@@ -2166,11 +2173,11 @@ async def test_corrupt_event_stream_emits_redacted_terminal_error_and_closes(
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="running"),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/events.jsonl",
+        f"{run_path('run-1')}/events.jsonl",
         b'{"sequence":1,"sequence":2,"type":"delta","data":{"secret":"raw"}}\n',
     )
     backend = AcaSandboxExecutionBackend(
@@ -2213,11 +2220,11 @@ async def test_gapped_event_stream_quarantines_without_exposing_event_contents(
     handle = FakeSandboxSessionHandle()
     provider = FakeSandboxSessionProvider(handle)
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="running", last_sequence=3),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/events.jsonl",
+        f"{run_path('run-1')}/events.jsonl",
         (
             b'{"sequence":1,"type":"delta","data":{"content":"safe"},'
             b'"timestamp":"2026-08-03T00:00:00+00:00"}\n'
@@ -2305,7 +2312,7 @@ async def test_submission_corrupt_existing_status_quarantines_and_releases_opera
         _script_root(tmp_path)
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         b'{"run_id":"run-1","run_id":"raw","session_id":"session-1"}',
     )
 
@@ -2340,7 +2347,7 @@ async def test_submission_corrupt_acceptance_quarantines_without_relaunching(
     async def corrupt_acceptance(command: str) -> None:
         run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
         handle.seed_file(
-            f"/var/lib/azure-functions-agents/runs/{run_id}/status.json",
+            status_path(run_id),
             b'{"run_id":"run-1","session_id":"session-1","state":"accepted"',
         )
 
@@ -2376,7 +2383,7 @@ async def test_status_corruption_finalizes_the_matching_submit_operation(
         _script_root(tmp_path)
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         b'{"run_id":"run-1","run_id":"forged","session_id":"session-1"}',
     )
 
@@ -2397,7 +2404,7 @@ async def test_cancel_corruption_finalizes_the_matching_submit_operation(
         _script_root(tmp_path)
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         b'{"run_id":"run-1","run_id":"forged","session_id":"session-1"}',
     )
 
@@ -2418,11 +2425,11 @@ async def test_event_corruption_finalizes_the_matching_submit_operation(
         _script_root(tmp_path)
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         _status(state="running"),
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/events.jsonl",
+        f"{run_path('run-1')}/events.jsonl",
         b'{"sequence":1,"sequence":2,"type":"delta","data":{},"timestamp":"2026-08-03T00:00:00+00:00"}\n',
     )
 
@@ -2466,7 +2473,7 @@ async def test_app_timer_terminal_reader_quarantines_a_corrupt_journal(
         state_store_fingerprint=_FINGERPRINT,
     )
     handle.seed_file(
-        "/var/lib/azure-functions-agents/runs/run-1/status.json",
+        status_path("run-1"),
         b'{"run_id":"run-1","session_id":"session-1","state":"running"',
     )
 

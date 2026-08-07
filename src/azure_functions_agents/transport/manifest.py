@@ -8,6 +8,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 
+from ..journal_paths import SESSION_MANIFEST_PATH as _JOURNAL_SESSION_MANIFEST_PATH
 from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from .transport_models import (
     ProvisionedSandboxIdentity,
@@ -18,11 +19,7 @@ from .transport_models import (
 
 type _ManifestText = Annotated[str, StringConstraints(min_length=1)]
 type _ManifestCount = Annotated[int, Field(ge=0)]
-
-# Wire contract: the harness writes its manifest at exactly this path inside
-# every sandbox, so both sides must agree on this literal string.
-SESSION_MANIFEST_PATH = "/var/lib/azurefunctions-agents-runtime/session/manifest.json"
-
+SESSION_MANIFEST_PATH = _JOURNAL_SESSION_MANIFEST_PATH
 
 class SandboxManifestMismatchError(Exception):
     """A redacted mismatch between authoritative state and a live sandbox manifest."""

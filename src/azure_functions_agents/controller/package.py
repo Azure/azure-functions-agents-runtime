@@ -20,6 +20,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, TYPE_CHECKING
 
+from ..journal_paths import (
+    CONTENT_ARCHIVE_PATH,
+    CONTENT_DIGEST_SIDECAR_PATH,
+    CONTENT_MANIFEST_SEED_PATH,
+    CONTENT_PATH,
+)
 from ..session_state.session_models import DurableSessionRecord
 from ..transport.manifest import (
     SESSION_MANIFEST_PATH,
@@ -40,13 +46,7 @@ from ..transport.transport_models import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
 
-# Content paths sit beside the harness-owned live manifest so both sides read
-# one wire root; deriving them from that constant keeps the two from drifting.
-_SESSION_DIR_PATH = SESSION_MANIFEST_PATH.rsplit("/", 1)[0]
-CONTENT_DIR_PATH = f"{_SESSION_DIR_PATH}/content"
-CONTENT_ARCHIVE_PATH = f"{CONTENT_DIR_PATH}/app.zip"
-CONTENT_DIGEST_SIDECAR_PATH = f"{CONTENT_DIR_PATH}/app.sha256"
-CONTENT_MANIFEST_SEED_PATH = f"{CONTENT_DIR_PATH}/manifest.seed.json"
+CONTENT_DIR_PATH = CONTENT_PATH
 
 FUNCS_ZIP_DIGEST_KIND = "funcs_zip"
 MANIFEST_VERSION = 1

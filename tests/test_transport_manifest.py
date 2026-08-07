@@ -7,7 +7,9 @@ from dataclasses import asdict, replace
 
 import pytest
 
+from azure_functions_agents.journal_paths import SESSION_MANIFEST_PATH as JOURNAL_MANIFEST_PATH
 from azure_functions_agents.transport.manifest import (
+    SESSION_MANIFEST_PATH,
     ExpectedSandboxManifestBinding,
     SandboxManifestMismatchError,
     parse_sandbox_manifest_binding,
@@ -21,6 +23,10 @@ _GROUP = (
     "providers/Microsoft.App/sandboxGroups/session-group"
 )
 _STATE_STORE_FINGERPRINT = "s1-" + ("f" * 52)
+
+
+def test_manifest_path_is_reexported_from_central_journal_paths() -> None:
+    assert SESSION_MANIFEST_PATH == JOURNAL_MANIFEST_PATH
 
 
 def _expected() -> ExpectedSandboxManifestBinding:

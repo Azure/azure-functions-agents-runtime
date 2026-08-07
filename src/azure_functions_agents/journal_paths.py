@@ -4,11 +4,18 @@ from __future__ import annotations
 
 from uuid import UUID
 
-JOURNAL_ROOT_PATH = "/var/lib/azure-functions-agents"
+SANDBOX_ROOT_PATH = "/var/lib/azurefunctions-agents-runtime"
+JOURNAL_ROOT_PATH = SANDBOX_ROOT_PATH
+SESSION_PATH = f"{SANDBOX_ROOT_PATH}/session"
+CONTENT_PATH = f"{SESSION_PATH}/content"
+CONTENT_ARCHIVE_PATH = f"{CONTENT_PATH}/app.zip"
+CONTENT_DIGEST_SIDECAR_PATH = f"{CONTENT_PATH}/app.sha256"
+CONTENT_MANIFEST_SEED_PATH = f"{CONTENT_PATH}/manifest.seed.json"
+SESSION_MANIFEST_PATH = f"{SESSION_PATH}/manifest.json"
 INBOX_PATH = f"{JOURNAL_ROOT_PATH}/inbox"
 RUNS_PATH = f"{JOURNAL_ROOT_PATH}/runs"
 HARNESS_PROTOCOL_PATH = f"{JOURNAL_ROOT_PATH}/protocol.json"
-ATOMIC_CHECKPOINT_POINTER_PATH = f"{JOURNAL_ROOT_PATH}/session/current"
+ATOMIC_CHECKPOINT_POINTER_PATH = f"{SESSION_PATH}/current"
 CHECKPOINT_NAME_PREFIX = "checkpoint-"
 HEARTBEAT_FILENAME = "heartbeat.json"
 PROCESS_FILENAME = "process.json"
