@@ -16,7 +16,7 @@ from azure_functions_agents.conformance.capability_map import validate_capabilit
 from azure_functions_agents.conformance.trace import parse_trace
 from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
 from azure_functions_agents.harness.atomic_commit import AtomicCommitError, AtomicCommitStore
-from azure_functions_agents.harness.journal_writer import HarnessJournalError
+from azure_functions_agents.harness.journal_writer import HarnessJournalError, acquire_run_claim
 from azure_functions_agents.harness.sandbox_capabilities import HARNESS_CAPABILITIES
 
 
@@ -143,6 +143,39 @@ async def test_duplicate_terminal_launch_does_not_rewrite_journal(
 
     assert exit_code == 0
     assert (run_directory / "status.json").read_bytes() == before
+
+
+@pytest.mark.asyncio
+async def test_active_run_claim_prevents_a_second_harness_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "e" * 32
+    journal_root = tmp_path / "journal"
+    inbox = journal_root / "inbox" / f"{run_id}.json"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "session_id": "session-1",
+                "agent_name": "agent",
+                "prompt": "hello",
+                "timeout": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+    claim = acquire_run_claim(journal_root / "runs" / run_id)
+    assert claim is not None
+
+    try:
+        assert await harness_main._run(run_id, journal_root, tmp_path / "app") == 0
+    finally:
+        claim.release()
+
+    assert not (journal_root / "runs" / run_id / "status.json").exists()
 
 
 @pytest.mark.asyncio

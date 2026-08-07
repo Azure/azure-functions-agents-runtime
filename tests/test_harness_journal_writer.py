@@ -1,16 +1,21 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
+import os
+import time
 from pathlib import Path
 
 import pytest
 
 from azure_functions_agents.execution import run_control
 from azure_functions_agents.execution.backend import RunError, RunResult
+from azure_functions_agents.harness.atomic_commit import AtomicCommitStore
 from azure_functions_agents.harness.journal_writer import (
     HarnessJournalError,
     HarnessRunEnvelope,
     JournalWriter,
+    acquire_run_claim,
 )
 
 
@@ -90,6 +95,72 @@ def test_writer_rejects_noncontiguous_existing_event_history(tmp_path: Path) -> 
 
     with pytest.raises(HarnessJournalError, match="contiguous"):
         JournalWriter(envelope, journal_root=tmp_path)
+
+
+def test_run_claim_recovers_a_dead_process_owner(tmp_path: Path) -> None:
+    run_directory = tmp_path / "runs" / ("a" * 32)
+    run_directory.mkdir(parents=True)
+    (run_directory / ".run_claim.json").write_text(
+        '{"pid":999999999,"process_group_id":999999999,"token":"stale"}',
+        encoding="utf-8",
+    )
+
+    claim = acquire_run_claim(run_directory)
+
+    assert claim is not None
+    assert claim.recovered is True
+    claim.release()
+
+
+def _claim_worker(
+    run_directory: Path,
+    checkpoint_root: Path,
+    marker_path: Path,
+    barrier,
+) -> None:
+    barrier.wait()
+    claim = acquire_run_claim(run_directory)
+    if claim is None:
+        return
+    try:
+        with marker_path.open("a", encoding="utf-8") as marker:
+            marker.write(f"{os.getpid()}\n")
+            marker.flush()
+            os.fsync(marker.fileno())
+        time.sleep(0.5)
+        AtomicCommitStore(checkpoint_root).commit(conversation=b"state", working_files={})
+    finally:
+        claim.release()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="run claims use the Linux harness process contract")
+def test_concurrent_processes_execute_one_claim_and_preserve_checkpoint(tmp_path: Path) -> None:
+    run_directory = tmp_path / "runs" / ("b" * 32)
+    checkpoint_root = tmp_path / "session"
+    marker_path = tmp_path / "executions.txt"
+    context = multiprocessing.get_context("fork")
+    barrier = context.Barrier(2)
+    workers = [
+        context.Process(
+            target=_claim_worker,
+            args=(run_directory, checkpoint_root, marker_path, barrier),
+        )
+        for _ in range(2)
+    ]
+    for worker in workers:
+        worker.start()
+    for worker in workers:
+        worker.join(10)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join()
+            raise AssertionError("Concurrent claim worker did not exit.")
+        assert worker.exitcode == 0
+
+    assert marker_path.read_text(encoding="utf-8").count("\n") == 1
+    checkpoint = AtomicCommitStore(checkpoint_root).recover()
+    assert checkpoint is not None
+    assert (checkpoint.path / "conversation.json").read_bytes() == b"state"
 
 
 @pytest.mark.parametrize(

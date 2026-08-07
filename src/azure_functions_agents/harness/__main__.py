@@ -17,7 +17,12 @@ from ..session_state import validate_run_id
 from . import _ensure_sandbox
 from .atomic_commit import AtomicCommitError, AtomicCommitStore
 from .delegation import rebuild_agent_catalog
-from .journal_writer import HarnessJournalError, HarnessRunEnvelope, JournalWriter
+from .journal_writer import (
+    HarnessJournalError,
+    HarnessRunEnvelope,
+    JournalWriter,
+    acquire_run_claim,
+)
 from .sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from .watchdog import Watchdog, WatchdogTimeoutError
 
@@ -57,8 +62,29 @@ async def _run(run_id: str, journal_root: Path, app_root: Path) -> int:
     except ValueError:
         raise HarnessJournalError("Sandbox run identifier is invalid.") from None
     envelope = _read_envelope(journal_root, run_id)
+    claim = acquire_run_claim(journal_root / "runs" / run_id)
+    if claim is None:
+        return 0
+    try:
+        return await _run_claimed(
+            envelope,
+            journal_root,
+            app_root,
+            recovered_claim=claim.recovered,
+        )
+    finally:
+        claim.release()
+
+
+async def _run_claimed(
+    envelope: HarnessRunEnvelope,
+    journal_root: Path,
+    app_root: Path,
+    *,
+    recovered_claim: bool,
+) -> int:
     writer = JournalWriter(envelope, journal_root=journal_root)
-    if writer.status_exists():
+    if writer.terminal_exists() or (writer.status_exists() and not recovered_claim):
         return 0
     writer.write_process_group(_process_group_id())
     writer.write_accepted()

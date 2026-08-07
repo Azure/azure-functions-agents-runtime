@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 import os
+import time
+import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,10 +26,164 @@ from ..session_state import validate_run_id, validate_session_id
 from ..strict_json import DuplicateJsonKeyError, decode_json_object
 
 type JournalTerminalState = Literal["succeeded", "failed", "canceled", "timed_out", "abandoned"]
+_RUN_CLAIM_FILENAME = ".run_claim.json"
+_RUN_CLAIM_STALE_SECONDS = 5.0
 
 
 class HarnessJournalError(RuntimeError):
     """A sandbox run journal document was malformed or unsafe."""
+
+
+@dataclass(slots=True)
+class RunClaim:
+    """An exclusive filesystem claim for one harness run."""
+
+    path: Path
+    token: str
+    descriptor: int
+    recovered: bool
+    _released: bool = False
+
+    def release(self) -> None:
+        """Release this claim without removing a successor's claim."""
+
+        if self._released:
+            return
+        self._released = True
+        try:
+            os.close(self.descriptor)
+        finally:
+            if _claim_token(self.path) == self.token:
+                self.path.unlink(missing_ok=True)
+                _sync_directory(self.path.parent)
+
+
+def acquire_run_claim(
+    run_directory: Path,
+    *,
+    stale_after_seconds: float = _RUN_CLAIM_STALE_SECONDS,
+) -> RunClaim | None:
+    """Acquire one cross-process run claim, recovering only dead or stale owners."""
+
+    if stale_after_seconds < 0:
+        raise ValueError("stale_after_seconds must not be negative")
+    run_directory.mkdir(parents=True, exist_ok=True)
+    path = run_directory / _RUN_CLAIM_FILENAME
+    recovered = False
+    while True:
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            if not _claim_is_stale(path, stale_after_seconds):
+                return None
+            try:
+                path.unlink()
+                _sync_directory(run_directory)
+            except FileNotFoundError:
+                pass
+            recovered = True
+            continue
+        token = uuid.uuid4().hex
+        try:
+            payload = json.dumps(
+                {
+                    "pid": os.getpid(),
+                    "process_group_id": _process_group_id(),
+                    "token": token,
+                },
+                separators=(",", ":"),
+                sort_keys=True,
+            ).encode("utf-8")
+            os.write(descriptor, payload)
+            os.fsync(descriptor)
+            _sync_directory(run_directory)
+            return RunClaim(
+                path=path,
+                token=token,
+                descriptor=descriptor,
+                recovered=recovered,
+            )
+        except BaseException:
+            os.close(descriptor)
+            path.unlink(missing_ok=True)
+            _sync_directory(run_directory)
+            raise
+
+
+def _claim_is_stale(path: Path, stale_after_seconds: float) -> bool:
+    try:
+        metadata = _read_claim(path)
+        age = time.time() - path.stat().st_mtime
+    except FileNotFoundError:
+        return False
+    if metadata is not None:
+        pid = metadata.get("pid")
+        process_group_id = metadata.get("process_group_id")
+        if (
+            isinstance(pid, int)
+            and not isinstance(pid, bool)
+            and pid > 0
+            and isinstance(process_group_id, int)
+            and not isinstance(process_group_id, bool)
+            and process_group_id > 0
+        ):
+            return not _process_is_alive(pid)
+    return age >= stale_after_seconds
+
+
+def _read_claim(path: Path) -> dict[str, object] | None:
+    try:
+        return decode_json_object(path.read_bytes())
+    except (
+        DuplicateJsonKeyError,
+        TypeError,
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+    ):
+        return None
+
+
+def _claim_token(path: Path) -> str | None:
+    try:
+        claim = _read_claim(path)
+    except FileNotFoundError:
+        return None
+    if claim is None:
+        return None
+    token = claim.get("token")
+    return token if isinstance(token, str) else None
+
+
+def _process_group_id() -> int:
+    return int(getattr(os, "getpgrp", os.getpid)())
+
+
+def _process_is_alive(pid: int) -> bool:
+    if os.name == "nt":
+        return pid == os.getpid()
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def _sync_directory(path: Path) -> None:
+    if os.name != "posix":
+        return
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
 
 
 class _InboxDocument(BaseModel):
