@@ -17,12 +17,7 @@ from ..session_state import validate_run_id
 from . import _ensure_sandbox
 from .atomic_commit import AtomicCommitError, AtomicCommitStore
 from .delegation import rebuild_agent_catalog
-from .journal_writer import (
-    HarnessJournalError,
-    HarnessRunEnvelope,
-    JournalWriter,
-    acquire_run_claim,
-)
+from .journal_writer import HarnessJournalError, HarnessRunEnvelope, JournalWriter
 from .sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from .watchdog import Watchdog, WatchdogTimeoutError
 
@@ -62,29 +57,8 @@ async def _run(run_id: str, journal_root: Path, app_root: Path) -> int:
     except ValueError:
         raise HarnessJournalError("Sandbox run identifier is invalid.") from None
     envelope = _read_envelope(journal_root, run_id)
-    claim = acquire_run_claim(journal_root / "runs" / run_id)
-    if claim is None:
-        return 0
-    try:
-        return await _run_claimed(
-            envelope,
-            journal_root,
-            app_root,
-            recovered_claim=claim.recovered,
-        )
-    finally:
-        claim.release()
-
-
-async def _run_claimed(
-    envelope: HarnessRunEnvelope,
-    journal_root: Path,
-    app_root: Path,
-    *,
-    recovered_claim: bool,
-) -> int:
     writer = JournalWriter(envelope, journal_root=journal_root)
-    if writer.terminal_exists() or (writer.status_exists() and not recovered_claim):
+    if writer.status_exists():
         return 0
     writer.write_process_group(_process_group_id())
     writer.write_accepted()
@@ -103,10 +77,9 @@ async def _run_claimed(
             conversation=_conversation_snapshot(work_directory, envelope.session_id),
             working_files=_collect_working_files(work_directory, envelope.session_id),
         )
-        writer.append_event("atomic_commit", {"state": "committed"})
         writer.write_success(result)
         writer.write_conformance_trace(
-            capabilities=_successful_trace_capabilities(result),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="succeeded",
         )
         return 0
@@ -120,7 +93,7 @@ async def _run_claimed(
             ),
         )
         writer.write_conformance_trace(
-            capabilities=_capability_trace("watchdog"),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="timed_out",
         )
     except asyncio.CancelledError:
@@ -133,14 +106,14 @@ async def _run_claimed(
             ),
         )
         writer.write_conformance_trace(
-            capabilities=_capability_trace("watchdog"),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="canceled",
         )
         raise
     except HarnessRunFailureError as exc:
         writer.write_failure("failed", exc.error)
         writer.write_conformance_trace(
-            capabilities=(),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="failed",
         )
     except MemoryError:
@@ -153,7 +126,7 @@ async def _run_claimed(
             ),
         )
         writer.write_conformance_trace(
-            capabilities=_capability_trace("watchdog"),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="failed",
         )
     except OSError as exc:
@@ -172,7 +145,7 @@ async def _run_claimed(
         )
         writer.write_failure("failed", error)
         writer.write_conformance_trace(
-            capabilities=(),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="failed",
         )
     except (AtomicCommitError, HarnessJournalError) as exc:
@@ -185,7 +158,7 @@ async def _run_claimed(
             ),
         )
         writer.write_conformance_trace(
-            capabilities=(),
+            capabilities=tuple(REQUIRED_HARNESS_CAPABILITIES.values()),
             terminal_state="failed",
         )
         del exc
@@ -349,21 +322,6 @@ def _conversation_snapshot(work_directory: Path, session_id: str) -> bytes:
 
 def _history_path(work_directory: Path, session_id: str) -> Path:
     return work_directory / ".history" / f"{session_id}.jsonl"
-
-
-def _successful_trace_capabilities(result: RunResult) -> tuple[str, ...]:
-    capabilities = [_capability_trace("atomic_commit")[0]]
-    if any(
-        isinstance(tool_name := call.get("tool_name"), str)
-        and tool_name.startswith("delegate_")
-        for call in result.tool_calls
-    ):
-        capabilities.append(_capability_trace("delegation")[0])
-    return tuple(capabilities)
-
-
-def _capability_trace(feature: str) -> tuple[str, ...]:
-    return (REQUIRED_HARNESS_CAPABILITIES[feature],)
 
 
 def _process_group_id() -> int:
