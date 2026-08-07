@@ -240,7 +240,7 @@ class FakeSessionStateStore:
         assert self.session == previous
         assert self.etag == etag
         assert previous.active_operation_id == updated.active_operation_id
-        assert previous.next_operation_sequence == updated.next_operation_sequence
+        assert previous.operation_sequence == updated.operation_sequence
         self.session = updated
         self.etag = f"etag-{len(self.operations) + 3}"
         self.operations.append(f"update:{updated.status}")
@@ -708,8 +708,7 @@ class FakeSessionStateStore:
         existing = self.runs.get(terminal_run.run_id)
         if existing is not None and existing.status in TERMINAL_RUN_STATUSES:
             if (
-                self.session.status != "reclaiming"
-                and self.session.active_run_id == terminal_run.run_id
+                self.session.active_run_id == terminal_run.run_id
                 and self.session.active_operation_id is None
             ):
                 self.session = replace(
@@ -724,7 +723,7 @@ class FakeSessionStateStore:
         self.adopted.append(terminal_run)
         self.operations.append("adopt")
         self.runs[terminal_run.run_id] = terminal_run
-        if self.session.status == "reclaiming" or self.session.active_operation_id is not None:
+        if self.session.active_operation_id is not None:
             return AdoptionOutcome(run=terminal_run, run_etag="run-etag", slot_released=False)
         self.session = replace(
             self.session,

@@ -89,8 +89,7 @@ type _TransactionOp = tuple[str, TableEntity] | tuple[str, TableEntity, Mapping[
 # exactly once.
 _TERMINAL_RUN_STATUSES = TERMINAL_RUN_STATUSES
 
-# A reclaiming session retains its active-run ID as a destructive-recovery
-# fence, but terminal adoption must not release that slot.
+# Terminal adoption may release only these active-run owning session states.
 _STATUSES_OWNING_ACTIVE_RUN = frozenset({"running", "canceling"})
 
 # A new run can start from an idle session, or after readiness resumed a suspended one.
@@ -585,7 +584,7 @@ class AzureTableSessionStateStore:
         )
         if (
             previous.active_operation_id != updated.active_operation_id
-            or previous.next_operation_sequence != updated.next_operation_sequence
+            or previous.operation_sequence != updated.operation_sequence
         ):
             raise SessionStateStoreError(
                 "session operation pointers may only change through operation methods"
@@ -607,7 +606,7 @@ class AzureTableSessionStateStore:
         tombstone_reason: str,
         updated_at: datetime,
     ) -> str:
-        if previous.reclaim_fence_token is not None or previous.active_operation_id is not None:
+        if previous.active_operation_id is not None:
             raise SessionStateStoreError(
                 "a fenced session must be finalized through its durable operation"
             )
@@ -631,9 +630,8 @@ class AzureTableSessionStateStore:
             tombstone_reason=tombstone_reason,
             created_at=previous.created_at,
             updated_at=updated_at,
-            reclaim_fence_token=None,
             active_operation_id=None,
-            next_operation_sequence=previous.next_operation_sequence,
+            operation_sequence=previous.operation_sequence,
         )
         return await self.update_session(previous=previous, updated=tombstoned, etag=etag)
 
@@ -2151,9 +2149,8 @@ def _release_active_run(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -2272,7 +2269,6 @@ def _validate_operation_begin(
         or updated.active_run_id != previous.active_run_id
         or updated.active_operation_id != operation.operation_id
         or updated.operation_sequence != operation.sequence
-        or updated.reclaim_fence_token is not None
     ):
         raise SessionStateStoreError("operation begin does not preserve the session binding")
 
@@ -2316,7 +2312,6 @@ def _validate_operation_advance_session(
         or updated.digest != previous.digest
         or updated.active_operation_id != previous.active_operation_id
         or updated.operation_sequence != previous.operation_sequence
-        or updated.reclaim_fence_token is not None
         or (
             target.sandbox_id is not None
             and updated.sandbox_id != target.sandbox_id
@@ -2342,7 +2337,6 @@ def _validate_operation_completion(
         or updated_session.generation != current_session.generation
         or updated_session.active_operation_id is not None
         or updated_session.operation_sequence != current_session.operation_sequence
-        or updated_session.reclaim_fence_token is not None
     ):
         raise SessionStateStoreError("operation completion does not preserve the session binding")
     target_run_id = operation.target.run_id

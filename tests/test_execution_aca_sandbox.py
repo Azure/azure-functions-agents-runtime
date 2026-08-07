@@ -33,6 +33,7 @@ from azure_functions_agents.controller.readiness import (
     session_with_admitted_run,
     terminal_run,
 )
+from azure_functions_agents.controller.reconciler import ReconcileReport
 from azure_functions_agents.controller.streaming import render_events
 from azure_functions_agents.execution.aca_sandbox import (
     AcaSandboxExecutionBackend,
@@ -61,12 +62,16 @@ from azure_functions_agents.session_state import (
     AppIdentity,
     ConcurrencyConflictError,
     DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
     IdempotencyConflictError,
     OwnerPartition,
     ProvisionSubmitOutcome,
+    SessionOperationFence,
+    SessionOperationTarget,
     SessionRead,
+    operation_correlation_label,
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import (
@@ -128,6 +133,8 @@ def _session(script_root: Path, *, status: str = "ready") -> DurableSessionRecor
         tombstone_reason=None,
         created_at=now,
         updated_at=now,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -219,6 +226,8 @@ def _quarantined_session(session: DurableSessionRecord) -> DurableSessionRecord:
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=session.updated_at,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -2472,6 +2481,168 @@ async def test_app_timer_terminal_reader_quarantines_a_corrupt_journal(
     assert store.runs[run.run_id].status == "failed"
     assert store.session is not None
     assert store.session.status == "quarantined"
+
+
+@pytest.mark.asyncio
+async def test_app_reconciler_rearms_intact_reclaim_before_completion(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    base = _session(script_root)
+    run = _run(base, state="succeeded")
+    operation = DurableSessionOperation.create(
+        owner_partition=base.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=base.session_id,
+            sandbox_id=base.sandbox_id,
+            generation=base.generation,
+            digest_kind=base.digest_kind,
+            digest=base.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="reclaim_backing",
+        phase="reclaim_fenced",
+        state="active",
+        correlation_label=operation_correlation_label(base.session_id, 1),
+        token="f" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=None,
+        next_attempt_at=None,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        finished_at=None,
+    )
+    session = replace(
+        base,
+        status="running",
+        idle_policy_armed=False,
+        active_run_id=run.run_id,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    lifecycle_phases: list[str] = []
+
+    class ProbeHandle(FakeSandboxSessionHandle):
+        async def set_lifecycle_policy(self, policy):  # type: ignore[no-untyped-def]
+            assert store.session is not None
+            assert store.session.active_operation_id == operation.operation_id
+            assert store.session.active_run_id == run.run_id
+            lifecycle_phases.append(store.durable_operations[operation.operation_id].phase)
+            await super().set_lifecycle_policy(policy)
+
+    handle = ProbeHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    runtime = _runtime(script_root, provider, store)
+    state_binding = StateStoreBinding.create(
+        store=store,
+        state_store_fingerprint=_FINGERPRINT,
+    )
+
+    report = await app_module._build_session_reconciler(
+        runtime,
+        state_binding,
+        provider,
+        cadence_seconds=60,
+    )._complete_reclaim_operation(
+        fence=SessionOperationFence.create(operation),
+        terminal=run,
+        now=run.updated_at,
+        report=ReconcileReport(),
+    )
+
+    assert report.adopted_terminal_runs == 1
+    assert lifecycle_phases == ["reclaim_rearm"]
+    assert len(handle.lifecycle_policy_history) == 2
+    assert handle.lifecycle_policy.auto_suspend_seconds == runtime.auto_suspend_seconds
+    assert handle.lifecycle_policy.auto_delete_seconds == (
+        runtime.reclaim_idle_seconds + 3_900
+    )
+    assert store.session is not None
+    assert store.session.active_operation_id is None
+    assert store.session.idle_policy_armed
+
+
+@pytest.mark.asyncio
+async def test_app_reconciler_skips_remote_lifecycle_when_fence_turns_stale(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    base = _session(script_root)
+    run = _run(base, state="succeeded")
+    operation = DurableSessionOperation.create(
+        owner_partition=base.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=base.session_id,
+            sandbox_id=base.sandbox_id,
+            generation=base.generation,
+            digest_kind=base.digest_kind,
+            digest=base.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="reclaim_backing",
+        phase="reclaim_fenced",
+        state="active",
+        correlation_label=operation_correlation_label(base.session_id, 1),
+        token="f" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=None,
+        next_attempt_at=None,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        finished_at=None,
+    )
+    session = replace(
+        base,
+        status="running",
+        idle_policy_armed=False,
+        active_run_id=run.run_id,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    handle = FakeSandboxSessionHandle()
+
+    class StaleAttachProvider(FakeSandboxSessionProvider):
+        async def attach(self, *args: object, **kwargs: object) -> FakeSandboxSessionHandle:
+            attached = await super().attach(*args, **kwargs)
+            current = store.durable_operations[operation.operation_id]
+            store.durable_operations[operation.operation_id] = replace(
+                current,
+                token="e" * 32,
+            )
+            return attached
+
+    provider = StaleAttachProvider(handle)
+    runtime = _runtime(script_root, provider, store)
+    state_binding = StateStoreBinding.create(
+        store=store,
+        state_store_fingerprint=_FINGERPRINT,
+    )
+
+    report = await app_module._build_session_reconciler(
+        runtime,
+        state_binding,
+        provider,
+        cadence_seconds=60,
+    )._complete_reclaim_operation(
+        fence=SessionOperationFence.create(operation),
+        terminal=run,
+        now=run.updated_at,
+        report=ReconcileReport(),
+    )
+
+    assert report.adopted_terminal_runs == 0
+    assert len(handle.lifecycle_policy_history) == 1
+    assert store.session is not None
+    assert store.session.active_operation_id == operation.operation_id
+    assert not store.session.idle_policy_armed
 
 
 @pytest.mark.asyncio

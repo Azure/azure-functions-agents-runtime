@@ -24,6 +24,7 @@ from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ConcurrencyConflictError,
     DurableIdempotencyRecord,
+    DurableOperationPhase,
     DurableOwnerIdempotencyRecord,
     DurableRunRecord,
     DurableSessionOperation,
@@ -56,7 +57,7 @@ from ..transport.transport_models import (
     SandboxTransportError,
 )
 from .journal_integrity import handle_journal_corruption, journal_corruption_status
-from .readiness import terminal_run
+from .readiness import DEFAULT_RECLAIM_IDLE_SECONDS, terminal_run
 
 _RECLAIMABLE_SESSION_STATUSES = frozenset({"creating", "ready", "quarantined"})
 _STATUSES_REQUIRING_BACKING = frozenset(
@@ -67,7 +68,7 @@ RECONCILER_CADENCE_SETTING = "AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS"
 type TerminalReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[RunStatus | None]]
 type DeathVerifier = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[bool | None]]
 type HeartbeatReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[datetime | None]]
-type LifecycleRepair = Callable[[DurableSessionRecord], Awaitable[bool]]
+type IdleLifecycleApplier = Callable[[SessionOperationFence], Awaitable[bool]]
 type _SessionKey = tuple[str, str]
 
 _SESSION_RECONCILIATION_ERRORS = (
@@ -166,7 +167,8 @@ class SessionReconciler:
         terminal_reader: TerminalReader | None = None,
         heartbeat_reader: HeartbeatReader | None = None,
         death_verifier: DeathVerifier | None = None,
-        lifecycle_repair: LifecycleRepair | None = None,
+        idle_lifecycle_applier: IdleLifecycleApplier | None = None,
+        reclaim_idle_seconds: int = DEFAULT_RECLAIM_IDLE_SECONDS,
         terminal_bindings: Mapping[str, AgentBinding] | None = None,
         now: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
@@ -179,7 +181,10 @@ class SessionReconciler:
         self._terminal_reader = terminal_reader
         self._heartbeat_reader = heartbeat_reader
         self._death_verifier = death_verifier
-        self._lifecycle_repair = lifecycle_repair
+        if reclaim_idle_seconds <= 0:
+            raise ValueError("reclaim_idle_seconds must be positive")
+        self._idle_lifecycle_applier = idle_lifecycle_applier
+        self._reclaim_idle_seconds = reclaim_idle_seconds
         self._terminal_bindings = terminal_bindings or {}
         self._now = now
 
@@ -419,18 +424,8 @@ class SessionReconciler:
                 now,
                 report,
             )
-        if session.status == "reclaiming":
-            return await self._migrate_legacy_reclaim_operation(
-                session,
-                run,
-                inventory,
-                now,
-                report,
-            )
         if run.status in TERMINAL_RUN_STATUSES:
             outcome = await self._store.adopt_terminal_run(run)
-            if outcome.slot_released and self._lifecycle_repair is not None:
-                await self._lifecycle_repair(session)
             return _replace_report(
                 report,
                 adopted_terminal_runs=report.adopted_terminal_runs + int(outcome.slot_released),
@@ -449,8 +444,6 @@ class SessionReconciler:
                     updated_at=now,
                 )
             )
-            if outcome.slot_released and self._lifecycle_repair is not None:
-                await self._lifecycle_repair(session)
             return _replace_report(
                 report,
                 adopted_terminal_runs=report.adopted_terminal_runs + int(outcome.slot_released),
@@ -532,8 +525,6 @@ class SessionReconciler:
                 updated_at=now,
             )
         )
-        if outcome.slot_released and self._lifecycle_repair is not None:
-            await self._lifecycle_repair(session)
         return _replace_report(
             report,
             abandoned_runs=report.abandoned_runs + int(outcome.slot_released),
@@ -554,31 +545,6 @@ class SessionReconciler:
             run,
             fence,
             backing_present=True,
-            now=now,
-            report=report,
-        )
-
-    async def _migrate_legacy_reclaim_operation(
-        self,
-        session: DurableSessionRecord,
-        run: DurableRunRecord,
-        inventory: dict[str, SandboxSummary],
-        now: datetime,
-        report: ReconcileReport,
-    ) -> ReconcileReport:
-        fence = await self._begin_reclaim_operation(
-            session,
-            run,
-            now,
-            allow_terminal=True,
-        )
-        if fence is None:
-            return report
-        return await self._continue_reclaim_operation(
-            session,
-            run,
-            fence,
-            backing_present=session.sandbox_id in inventory,
             now=now,
             report=report,
         )
@@ -630,25 +596,27 @@ class SessionReconciler:
     ) -> ReconcileReport:
         terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
-            adopted = await self._store.adopt_terminal_run(
-                terminal_run(
+            finalized = await self._finish_reusable_operation(
+                fence=fence,
+                terminal=terminal_run(
                     run,
                     status=terminal.state,
                     result_available=terminal.result_available,
                     reason=_terminal_reason(terminal),
                     updated_at=now,
-                )
+                ),
+                now=now,
             )
-            if self._lifecycle_repair is not None:
-                await self._lifecycle_repair(session)
             return _replace_report(
                 report,
-                adopted_terminal_runs=report.adopted_terminal_runs
-                + int(adopted.run.status in TERMINAL_RUN_STATUSES),
+                adopted_terminal_runs=report.adopted_terminal_runs + int(finalized),
             )
         if run.status in TERMINAL_RUN_STATUSES:
-            if self._lifecycle_repair is not None:
-                await self._lifecycle_repair(session)
+            await self._finish_reusable_operation(
+                fence=fence,
+                terminal=run,
+                now=now,
+            )
             return report
         if now < run.expires_at + timedelta(seconds=self._config.safety_grace_seconds):
             return report
@@ -664,21 +632,20 @@ class SessionReconciler:
                 now,
                 report,
             )
-        abandoned = await self._store.adopt_terminal_run(
-            terminal_run(
+        finalized = await self._finish_reusable_operation(
+            fence=fence,
+            terminal=terminal_run(
                 run,
                 status="abandoned",
                 result_available=False,
                 reason="submit_operation_expired",
                 updated_at=now,
-            )
+            ),
+            now=now,
         )
-        if self._lifecycle_repair is not None:
-            await self._lifecycle_repair(session)
         return _replace_report(
             report,
-            abandoned_runs=report.abandoned_runs
-            + int(abandoned.run.status == "abandoned"),
+            abandoned_runs=report.abandoned_runs + int(finalized),
         )
 
     async def _expire_pre_pointer_provision(
@@ -733,8 +700,6 @@ class SessionReconciler:
         observed_session: DurableSessionRecord,
         observed_run: DurableRunRecord,
         now: datetime,
-        *,
-        allow_terminal: bool = False,
     ) -> SessionOperationFence | None:
         current_session = await self._store.get_session(
             observed_session.owner_partition,
@@ -752,11 +717,11 @@ class SessionReconciler:
             or session.active_run_id != run.run_id
             or session.sandbox_id is None
             or session.generation != run.generation
-            or (not allow_terminal and run.status in TERMINAL_RUN_STATUSES)
-            or session.status not in {"running", "canceling", "reclaiming"}
+            or run.status in TERMINAL_RUN_STATUSES
+            or session.status not in {"running", "canceling"}
         ):
             return None
-        token = session.reclaim_fence_token or uuid4().hex
+        sequence = session.operation_sequence + 1
         operation = DurableSessionOperation.create(
             owner_partition=session.owner_partition,
             target=SessionOperationTarget.create(
@@ -767,15 +732,15 @@ class SessionReconciler:
                 digest=session.digest,
                 run_id=run.run_id,
             ),
-            sequence=session.next_operation_sequence,
+            sequence=sequence,
             kind="reclaim_backing",
             phase="reclaim_fenced",
             state="active",
             correlation_label=operation_correlation_label(
                 session.session_id,
-                session.next_operation_sequence,
+                sequence,
             ),
-            token=token,
+            token=uuid4().hex,
             attempt_count=0,
             error_code=None,
             lease_expires_at=now + timedelta(seconds=60),
@@ -787,7 +752,7 @@ class SessionReconciler:
         prepared = _session_with_operation(
             session,
             operation=operation,
-            status="running" if session.status == "reclaiming" else session.status,
+            status=session.status,
             idle_policy_armed=False,
             updated_at=now,
         )
@@ -812,7 +777,19 @@ class SessionReconciler:
         report: ReconcileReport,
     ) -> ReconcileReport:
         terminal = None if not backing_present else await self._read_terminal(session, run)
-        if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
+        current_session = await self._store.get_session(fence.owner_partition, fence.session_id)
+        current_operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if not fence.matches(current_session.record, current_operation.record):
+            return report
+        if (
+            terminal is not None
+            and terminal.state in TERMINAL_RUN_STATUSES
+            and _can_rearm_reclaim_operation(current_operation.record)
+        ):
             return await self._complete_reclaim_operation(
                 fence=fence,
                 terminal=terminal_run(
@@ -825,14 +802,6 @@ class SessionReconciler:
                 now=now,
                 report=report,
             )
-        current_session = await self._store.get_session(fence.owner_partition, fence.session_id)
-        current_operation = await self._store.get_operation(
-            fence.owner_partition,
-            fence.session_id,
-            fence.operation_id,
-        )
-        if not fence.matches(current_session.record, current_operation.record):
-            return report
         target_run_id = fence.target.run_id
         if target_run_id is None:
             return report
@@ -841,7 +810,10 @@ class SessionReconciler:
             fence.session_id,
             target_run_id,
         )
-        if current_run.record.status in TERMINAL_RUN_STATUSES:
+        if (
+            current_run.record.status in TERMINAL_RUN_STATUSES
+            and _can_rearm_reclaim_operation(current_operation.record)
+        ):
             return await self._complete_reclaim_operation(
                 fence=fence,
                 terminal=current_run.record,
@@ -908,20 +880,93 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
-        current = await self._store.get_session(fence.owner_partition, fence.session_id)
-        released = _released_operation_session(current.record, updated_at=now)
-        await self._store.complete_operation(
+        finalized = await self._finish_reusable_operation(
             fence=fence,
-            updated_session=released,
-            terminal_run=terminal,
-            updated_at=now,
+            terminal=terminal,
+            now=now,
         )
-        if self._lifecycle_repair is not None:
-            await self._lifecycle_repair(released)
         return _replace_report(
             report,
-            adopted_terminal_runs=report.adopted_terminal_runs + 1,
+            adopted_terminal_runs=report.adopted_terminal_runs + int(finalized),
         )
+
+    async def _finish_reusable_operation(
+        self,
+        *,
+        fence: SessionOperationFence,
+        terminal: DurableRunRecord | None = None,
+        abort_error_code: str | None = None,
+        now: datetime,
+    ) -> bool:
+        """Apply idle policy under a current fence before releasing a reusable session."""
+        if (terminal is None) == (abort_error_code is None):
+            raise ValueError("exactly one terminal outcome or abort error is required")
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if not _matches_reusable_operation(fence, current.record, operation.record):
+            return False
+        phase = _idle_rearm_phase(fence)
+        try:
+            rearm_fence = await self._store.advance_operation(
+                fence=fence,
+                phase=phase,
+                updated_at=now,
+            )
+        except StaleOperationTokenError:
+            return False
+        if self._idle_lifecycle_applier is None:
+            await self._record_idle_lifecycle_failure(rearm_fence, phase, now)
+            return False
+        try:
+            applied = await self._idle_lifecycle_applier(rearm_fence)
+        except BaseException:
+            await self._record_idle_lifecycle_failure(rearm_fence, phase, now)
+            raise
+        if not applied:
+            await self._record_idle_lifecycle_failure(rearm_fence, phase, now)
+            return False
+        armed = _armed_operation_session(
+            current.record,
+            reclaim_idle_seconds=self._reclaim_idle_seconds,
+            updated_at=now,
+        )
+        try:
+            if terminal is not None:
+                await self._store.complete_operation(
+                    fence=rearm_fence,
+                    updated_session=armed,
+                    terminal_run=terminal,
+                    updated_at=now,
+                )
+            else:
+                assert abort_error_code is not None
+                await self._store.abort_operation(
+                    fence=rearm_fence,
+                    updated_session=armed,
+                    error_code=abort_error_code,
+                    updated_at=now,
+                )
+        except StaleOperationTokenError:
+            return False
+        return True
+
+    async def _record_idle_lifecycle_failure(
+        self,
+        fence: SessionOperationFence,
+        phase: DurableOperationPhase,
+        now: datetime,
+    ) -> None:
+        with suppress(StaleOperationTokenError):
+            await self._store.advance_operation(
+                fence=fence,
+                phase=phase,
+                error_code="lifecycle_policy_apply_failed",
+                updated_at=now,
+            )
 
     async def _tombstone_reclaim_operation(
         self,
@@ -949,21 +994,26 @@ class SessionReconciler:
             tombstone_reason="sandbox_backing_lost",
             updated_at=now,
         )
-        await self._store.complete_operation(
-            fence=fence,
-            updated_session=tombstoned,
-            terminal_run=terminal_run(
+        terminal = (
+            None
+            if run.status in TERMINAL_RUN_STATUSES
+            else terminal_run(
                 run,
                 status="abandoned",
                 result_available=False,
                 reason="sandbox_backing_lost",
                 updated_at=now,
-            ),
+            )
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=tombstoned,
+            terminal_run=terminal,
             updated_at=now,
         )
         return _replace_report(
             report,
-            abandoned_runs=report.abandoned_runs + 1,
+            abandoned_runs=report.abandoned_runs + int(terminal is not None),
             tombstoned_sessions=report.tombstoned_sessions + 1,
         )
 
@@ -1001,6 +1051,12 @@ class SessionReconciler:
                 session.active_operation_id,
             )
             if operation.record.kind == "reclaim_backing":
+                if operation.record.target.run_id is not None:
+                    return await self._resume_detached_operation(
+                        session,
+                        now,
+                        report,
+                    )
                 return await self._continue_idle_reclaim_operation(
                     session,
                     SessionOperationFence.create(operation.record),
@@ -1009,25 +1065,13 @@ class SessionReconciler:
                     now,
                     report,
                 )
-            if (
-                operation.record.kind in {"provision_submit", "submit_run"}
-                and self._lifecycle_repair is not None
-            ):
-                await self._lifecycle_repair(session)
-            return report
+            return await self._resume_detached_operation(session, now, report)
         if session.status == "deleting":
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
         if session.status == "creating":
             if _is_older_than(session.created_at, now, self._config.safety_grace_seconds):
                 return await self._begin_reclaim(session, inventory, snapshots, now, report)
             return report
-        if (
-            session.status == "ready"
-            and not session.idle_policy_armed
-            and session.sandbox_id in inventory
-            and self._lifecycle_repair is not None
-        ):
-            await self._lifecycle_repair(session)
         if session.status in _STATUSES_REQUIRING_BACKING and (
             session.sandbox_id is None or session.sandbox_id not in inventory
         ):
@@ -1053,6 +1097,61 @@ class SessionReconciler:
         due = session.expires_at <= now - timedelta(seconds=self._config.safety_grace_seconds)
         if session.status in _RECLAIMABLE_SESSION_STATUSES and due:
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
+        return report
+
+    async def _resume_detached_operation(
+        self,
+        session: DurableSessionRecord,
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        """Resume only an expired operation whose session slot was already released."""
+        fence = await self._store.takeover_expired_operation(
+            owner_partition=session.owner_partition,
+            session_id=session.session_id,
+            token=uuid4().hex,
+            updated_at=now,
+        )
+        if fence is None or fence.target.run_id is None:
+            return report
+        if fence.kind == "reclaim_backing":
+            try:
+                run = await self._store.get_run(
+                    fence.owner_partition,
+                    fence.session_id,
+                    fence.target.run_id,
+                )
+            except RunRowNotFoundError:
+                return report
+            if run.record.status not in TERMINAL_RUN_STATUSES:
+                return report
+            return await self._complete_reclaim_operation(
+                fence=fence,
+                terminal=run.record,
+                now=now,
+                report=report,
+            )
+        if fence.kind not in {"provision_submit", "submit_run"}:
+            return report
+        try:
+            run = await self._store.get_run(
+                fence.owner_partition,
+                fence.session_id,
+                fence.target.run_id,
+            )
+        except RunRowNotFoundError:
+            return await self._recover_missing_submit_run(
+                session,
+                now,
+                report,
+                fence=fence,
+            )
+        if run.record.status in TERMINAL_RUN_STATUSES:
+            await self._finish_reusable_operation(
+                fence=fence,
+                terminal=run.record,
+                now=now,
+            )
         return report
 
     async def _tombstone_missing_backing_if_unchanged(
@@ -1326,38 +1425,57 @@ class SessionReconciler:
         session: DurableSessionRecord,
         now: datetime,
         report: ReconcileReport,
+        *,
+        fence: SessionOperationFence | None = None,
     ) -> ReconcileReport:
         if session.status in {"tombstoned", "deleting", "deleted"}:
             return report
-        if session.active_operation_id is None:
-            return report
-        try:
-            operation = await self._store.get_operation(
-                session.owner_partition,
-                session.session_id,
-                session.active_operation_id,
+        if fence is None:
+            if session.active_operation_id is None:
+                return report
+            try:
+                operation = await self._store.get_operation(
+                    session.owner_partition,
+                    session.session_id,
+                    session.active_operation_id,
+                )
+            except OperationRowNotFoundError:
+                return report
+            if operation.record.kind not in {"provision_submit", "submit_run"}:
+                return report
+            fence = await self._store.takeover_expired_operation(
+                owner_partition=session.owner_partition,
+                session_id=session.session_id,
+                token=uuid4().hex,
+                updated_at=now,
             )
-        except OperationRowNotFoundError:
+            if fence is None:
+                return report
+        if fence.kind not in {"provision_submit", "submit_run"}:
             return report
-        if operation.record.kind not in {"provision_submit", "submit_run"}:
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if not fence.matches(current.record, operation.record):
             return report
         if (
-            operation.record.lease_expires_at is not None
-            and operation.record.lease_expires_at > now
-        ):
-            return report
-        if (
-            operation.record.kind == "provision_submit"
-            and (session.sandbox_id is None or operation.record.target.sandbox_id is None)
+            fence.kind == "provision_submit"
+            and (
+                current.record.sandbox_id is None
+                or fence.target.sandbox_id is None
+            )
         ):
             tombstoned = _tombstoned_operation_session(
-                session,
+                current.record,
                 tombstone_reason="provision_run_missing",
                 updated_at=now,
             )
             try:
                 await self._store.abort_operation(
-                    fence=SessionOperationFence.create(operation.record),
+                    fence=fence,
                     updated_session=tombstoned,
                     error_code="provision_run_missing",
                     updated_at=now,
@@ -1368,18 +1486,11 @@ class SessionReconciler:
                 report,
                 tombstoned_sessions=report.tombstoned_sessions + 1,
             )
-        released = _released_operation_session(session, updated_at=now)
-        try:
-            await self._store.abort_operation(
-                fence=SessionOperationFence.create(operation.record),
-                updated_session=released,
-                error_code="submit_run_missing",
-                updated_at=now,
-            )
-        except StaleOperationTokenError:
-            return report
-        if self._lifecycle_repair is not None:
-            await self._lifecycle_repair(released)
+        await self._finish_reusable_operation(
+            fence=fence,
+            abort_error_code="submit_run_missing",
+            now=now,
+        )
         return report
 
     async def _reconcile_labeled_orphans(
@@ -1873,9 +1984,8 @@ def _with_status(read: SessionRead, status: SessionStatus, updated_at: datetime)
         tombstone_reason=record.tombstone_reason,
         created_at=record.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=record.reclaim_fence_token,
         active_operation_id=record.active_operation_id,
-        next_operation_sequence=record.next_operation_sequence,
+        operation_sequence=record.operation_sequence,
     )
 
 
@@ -1907,15 +2017,51 @@ def _session_with_operation(
         tombstone_reason=record.tombstone_reason,
         created_at=record.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=operation.operation_id,
-        next_operation_sequence=operation.sequence + 1,
+        operation_sequence=operation.sequence,
     )
 
 
-def _released_operation_session(
+def _matches_reusable_operation(
+    fence: SessionOperationFence,
+    session: DurableSessionRecord,
+    operation: DurableSessionOperation,
+) -> bool:
+    target = fence.target
+    return (
+        fence.matches(session, operation)
+        and session.status not in {"tombstoned", "deleting", "deleted"}
+        and target.sandbox_id is not None
+        and session.sandbox_id == target.sandbox_id
+        and session.generation == target.generation
+        and session.digest_kind == target.digest_kind
+        and session.digest == target.digest
+        and (
+            operation.kind != "reclaim_backing"
+            or _can_rearm_reclaim_operation(operation)
+        )
+    )
+
+
+def _can_rearm_reclaim_operation(operation: DurableSessionOperation) -> bool:
+    return (
+        operation.kind == "reclaim_backing"
+        and operation.phase in {"reclaim_fenced", "reclaim_rearm"}
+    )
+
+
+def _idle_rearm_phase(fence: SessionOperationFence) -> DurableOperationPhase:
+    if fence.kind == "provision_submit":
+        return "provision_rearm"
+    if fence.kind == "submit_run":
+        return "submit_rearm"
+    return "reclaim_rearm"
+
+
+def _armed_operation_session(
     record: DurableSessionRecord,
     *,
+    reclaim_idle_seconds: int,
     updated_at: datetime,
 ) -> DurableSessionRecord:
     return DurableSessionRecord.create(
@@ -1928,8 +2074,8 @@ def _released_operation_session(
         protocol=record.protocol,
         status="quarantined" if record.status == "quarantined" else "ready",
         last_activity_at=updated_at,
-        expires_at=record.expires_at,
-        idle_policy_armed=False,
+        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
+        idle_policy_armed=True,
         active_run_id=None,
         snapshot_ids=record.snapshot_ids,
         region=record.region,
@@ -1938,9 +2084,8 @@ def _released_operation_session(
         tombstone_reason=record.tombstone_reason,
         created_at=record.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=None,
-        next_operation_sequence=record.next_operation_sequence,
+        operation_sequence=record.operation_sequence,
     )
 
 
@@ -1970,9 +2115,8 @@ def _tombstoned_operation_session(
         tombstone_reason=tombstone_reason,
         created_at=record.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=None,
-        next_operation_sequence=record.next_operation_sequence,
+        operation_sequence=record.operation_sequence,
     )
 
 

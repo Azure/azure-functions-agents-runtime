@@ -115,9 +115,8 @@ def _journal_corrupt_session(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 

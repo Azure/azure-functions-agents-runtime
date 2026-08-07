@@ -26,6 +26,7 @@ from azure_functions_agents.controller.readiness import (
     disarm_submit_lifecycle,
     finalize_submit_operation,
     provision_new_session_submit,
+    rearm_idle_lifecycle,
     revalidate_before_submit,
     session_with_admitted_run,
     touch_session_activity,
@@ -41,6 +42,7 @@ from azure_functions_agents.session_state import (
     FunctionAppOwnerContext,
     SessionNotAdmissibleError,
     SessionOperationTarget,
+    SessionStateContractError,
     StateStoreUnavailableError,
     owner_partition,
 )
@@ -97,6 +99,8 @@ def _session(
         tombstone_reason=None,
         created_at=now,
         updated_at=now,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -319,7 +323,6 @@ async def test_session_locks_do_not_serialize_distinct_owners(
             ("tombstoned", False),
             ("deleting", False),
             ("deleted", False),
-            ("reclaiming", False),
         ],
 )
 async def test_management_touch_only_renews_live_session_retention(
@@ -329,13 +332,9 @@ async def test_management_touch_only_renews_live_session_retention(
 ) -> None:
         script_root = _script_root(tmp_path)
         base = _session(script_root)
-        if status in {"running", "canceling", "reclaiming"}:
+        if status in {"running", "canceling"}:
             record = session_with_admitted_run(base, "run-1", updated_at=base.updated_at)
-            record = replace(
-                record,
-                status=status,
-                reclaim_fence_token="fence-token" if status == "reclaiming" else None,
-            )
+            record = replace(record, status=status)
         else:
             record = replace(base, status=status)
         store = _FakeStore(record)
@@ -351,6 +350,30 @@ async def test_management_touch_only_renews_live_session_retention(
         else:
             assert store.session == previous
             assert store.operations == []
+
+
+@pytest.mark.asyncio
+async def test_rearm_rejects_an_orphan_disarmed_idle_marker(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = replace(_session(script_root), idle_policy_armed=False)
+    store = _FakeStore(session)
+    handle = _FakeHandle()
+    runtime = _runtime(script_root, _FakeProvider(handle), store)
+    activated = ActivatedSession.create(
+        handle=handle,
+        session=session,
+        etag=store.etag,
+        partition=session.owner_partition,
+        store=store,
+    )
+
+    with pytest.raises(
+        SessionStateContractError,
+        match="disarmed idle lifecycle requires an active durable operation",
+    ):
+        await rearm_idle_lifecycle(runtime, activated)
+
+    assert store.session == session
 
 
 @pytest.mark.asyncio

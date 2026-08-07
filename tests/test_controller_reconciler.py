@@ -8,6 +8,7 @@ import pytest
 from azure_functions_agents.controller.readiness import session_with_admitted_run
 from azure_functions_agents.controller.reconciler import (
     ReconcilerConfig,
+    ReconcileReport,
     SessionReconciler,
     reconciler_ncrontab,
     resolve_reconciler_cadence,
@@ -302,6 +303,8 @@ def _session(
         tombstone_reason=None,
         created_at=now,
         updated_at=now,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -377,6 +380,39 @@ def _provision_operation(
         attempt_count=1,
         error_code=None,
         lease_expires_at=now - timedelta(seconds=1),
+        next_attempt_at=None,
+        created_at=now - timedelta(minutes=1),
+        updated_at=now - timedelta(minutes=1),
+        finished_at=None,
+    )
+
+
+def _reclaim_operation(
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    now: datetime,
+    *,
+    lease_expires_at: datetime | None = None,
+) -> DurableSessionOperation:
+    return DurableSessionOperation.create(
+        owner_partition=session.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="reclaim_backing",
+        phase="reclaim_fenced",
+        state="active",
+        correlation_label=operation_correlation_label(session.session_id, 1),
+        token="d" * 32,
+        attempt_count=1,
+        error_code=None,
+        lease_expires_at=lease_expires_at,
         next_attempt_at=None,
         created_at=now - timedelta(minutes=1),
         updated_at=now - timedelta(minutes=1),
@@ -533,6 +569,8 @@ def _tombstoned_session(now: datetime, session_id: str) -> DurableSessionRecord:
         tombstone_reason="reclaimed_idle_session",
         created_at=session.created_at,
         updated_at=session.updated_at,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -1143,6 +1181,8 @@ async def test_reconciler_never_mutates_another_app_in_shared_storage_or_group()
         tombstone_reason=None,
         created_at=now - timedelta(hours=1),
         updated_at=now - timedelta(hours=1),
+        active_operation_id=None,
+        operation_sequence=0,
     )
     store = SharedStorageStore(local, foreign)
     provider = InventoryProvider(
@@ -1336,6 +1376,7 @@ async def test_reclaim_operation_blocks_successor_until_terminal_adoption_is_res
     provider = InventoryProvider(sandboxes=(_sandbox(now),))
     terminal_reads = 0
     successor_blocked = False
+    lifecycle_fences: list[SessionOperationFence] = []
 
     async def terminal_reader(
         _: DurableSessionRecord,
@@ -1388,6 +1429,15 @@ async def test_reclaim_operation_blocks_successor_until_terminal_adoption_is_res
     ) -> None:
         return None
 
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        assert store.session is not None
+        assert store.session.active_operation_id == fence.operation_id
+        assert store.session.active_run_id == run.run_id
+        assert not store.session.idle_policy_armed
+        assert store.durable_operations[fence.operation_id].phase == "reclaim_rearm"
+        lifecycle_fences.append(fence)
+        return True
+
     report = await SessionReconciler(
         store=store,
         provider=provider,  # type: ignore[arg-type]
@@ -1395,15 +1445,22 @@ async def test_reclaim_operation_blocks_successor_until_terminal_adoption_is_res
         terminal_reader=terminal_reader,
         heartbeat_reader=heartbeat_reader,
         death_verifier=lambda _session, _run: _none(),
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        reclaim_idle_seconds=120,
         now=lambda: now,
     ).run_once()
 
     assert successor_blocked
+    assert len(lifecycle_fences) == 1
     assert report.adopted_terminal_runs == 1
     assert provider.deleted_sandboxes == []
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.session.active_run_id is None
+    assert store.session.idle_policy_armed
+    assert store.session.last_activity_at == now
+    assert store.session.expires_at == now + timedelta(seconds=120)
+    assert store.operations[-2:] == ["advance_operation", "completed_operation"]
 
 
 async def _none() -> None:
@@ -1445,38 +1502,6 @@ async def test_targeted_reconciliation_resumes_a_persisted_reclaim_operation() -
     assert provider.deleted_sandboxes == ["sandbox-1"]
     assert store.session is not None
     assert store.session.status == "tombstoned"
-
-
-@pytest.mark.asyncio
-async def test_reconciler_migrates_a_legacy_reclaiming_row_before_releasing_it() -> None:
-    now = datetime(2026, 8, 5, tzinfo=UTC)
-    session, run = _expired_active_session(now)
-    legacy = replace(
-        session,
-        status="reclaiming",
-        reclaim_fence_token="legacy-fence-token",
-        idle_policy_armed=False,
-    )
-    store = FakeSessionStateStore(legacy)
-    store.runs[run.run_id] = replace(
-        run,
-        status="succeeded",
-        result_available=False,
-    )
-
-    report = await SessionReconciler(
-        store=store,
-        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
-        app_hash=_app_hash(),
-        now=lambda: now,
-    ).run_once()
-
-    assert report.adopted_terminal_runs == 1
-    assert store.session is not None
-    assert store.session.status == "ready"
-    assert store.session.reclaim_fence_token is None
-    assert store.session.active_operation_id is None
-    assert next(iter(store.durable_operations.values())).state == "completed"
 
 
 @pytest.mark.asyncio
@@ -1616,25 +1641,25 @@ async def test_reclaim_delete_then_crash_completes_when_target_is_missing_next_p
 
 
 @pytest.mark.asyncio
-async def test_reconciler_delegates_previously_unarmed_idle_lifecycle() -> None:
+async def test_reconciler_does_not_repair_an_operationless_idle_lifecycle() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     session = replace(_session(now), idle_policy_armed=False)
     store = FakeSessionStateStore(session)
-    repaired: list[str] = []
+    applied: list[str] = []
 
-    async def repair(record: DurableSessionRecord) -> bool:
-        repaired.append(record.session_id)
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        applied.append(fence.operation_id)
         return True
 
     await SessionReconciler(
         store=store,
         provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
         app_hash=_app_hash(),
-        lifecycle_repair=repair,
+        idle_lifecycle_applier=apply_idle_lifecycle,
         now=lambda: now,
     ).run_once()
 
-    assert repaired == ["session-1"]
+    assert applied == []
     assert store.session is not None
     assert store.session.idle_policy_armed is False
 
@@ -1743,7 +1768,7 @@ async def test_reconciler_preserves_provision_labeled_sandbox_before_pointer_pha
 
 
 @pytest.mark.asyncio
-async def test_reconciler_expires_a_no_retry_submit_operation_and_requests_rearm() -> None:
+async def test_reconciler_expires_a_no_retry_submit_operation_and_rearms_before_abort() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     base = _session(now, status="running", active_run_id="run-1")
     run = replace(
@@ -1759,27 +1784,34 @@ async def test_reconciler_expires_a_no_retry_submit_operation_and_requests_rearm
     store = FakeSessionStateStore(session)
     store.runs[run.run_id] = run
     store.durable_operations[operation.operation_id] = operation
-    repaired: list[str] = []
+    lifecycle_fences: list[SessionOperationFence] = []
 
-    async def repair(record: DurableSessionRecord) -> bool:
-        repaired.append(record.session_id)
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        assert store.session is not None
+        assert store.session.active_operation_id == fence.operation_id
+        assert store.session.active_run_id == run.run_id
+        assert store.durable_operations[fence.operation_id].phase == "submit_rearm"
+        lifecycle_fences.append(fence)
         return True
 
     report = await SessionReconciler(
         store=store,
         provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
         app_hash=_app_hash(),
-        lifecycle_repair=repair,
+        idle_lifecycle_applier=apply_idle_lifecycle,
         now=lambda: now,
     ).run_once()
 
     assert report.abandoned_runs == 1
     assert store.runs[run.run_id].status == "abandoned"
-    assert repaired == ["session-1"]
+    assert len(lifecycle_fences) == 1
+    assert store.session is not None
+    assert store.session.idle_policy_armed
+    assert store.operations[-2:] == ["advance_operation", "completed_operation"]
 
 
 @pytest.mark.asyncio
-async def test_reconciler_adopts_terminal_submit_before_lifecycle_repair() -> None:
+async def test_reconciler_rearms_terminal_submit_before_completion() -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     base = _session(now, status="running", active_run_id="run-1")
     run = _run(base, now, status="succeeded")
@@ -1792,22 +1824,29 @@ async def test_reconciler_adopts_terminal_submit_before_lifecycle_repair() -> No
     store = FakeSessionStateStore(session)
     store.runs[run.run_id] = run
     store.durable_operations[operation.operation_id] = operation
-    repaired: list[str] = []
+    lifecycle_fences: list[SessionOperationFence] = []
 
-    async def repair(record: DurableSessionRecord) -> bool:
-        repaired.append(record.session_id)
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        assert store.session is not None
+        assert store.session.active_operation_id == fence.operation_id
+        assert store.session.active_run_id == run.run_id
+        assert store.durable_operations[fence.operation_id].phase == "submit_rearm"
+        lifecycle_fences.append(fence)
         return True
 
     report = await SessionReconciler(
         store=store,
         provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
         app_hash=_app_hash(),
-        lifecycle_repair=repair,
+        idle_lifecycle_applier=apply_idle_lifecycle,
         now=lambda: now,
     ).run_once()
 
     assert report.adopted_terminal_runs == 0
-    assert repaired == ["session-1"]
+    assert len(lifecycle_fences) == 1
+    assert store.session is not None
+    assert store.session.idle_policy_armed
+    assert store.operations[-2:] == ["advance_operation", "completed_operation"]
 
 
 @pytest.mark.asyncio
@@ -1885,18 +1924,240 @@ async def test_targeted_reconcile_aborts_expired_missing_submit_run() -> None:
     )
     store = FakeSessionStateStore(session)
     store.durable_operations[operation.operation_id] = operation
+    lifecycle_fences: list[SessionOperationFence] = []
+
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        assert store.session is not None
+        assert store.session.active_operation_id == fence.operation_id
+        assert store.session.active_run_id == run.run_id
+        assert store.durable_operations[fence.operation_id].phase == "submit_rearm"
+        lifecycle_fences.append(fence)
+        return True
 
     await SessionReconciler(
         store=store,
         provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
         app_hash=_app_hash(),
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        reclaim_idle_seconds=120,
         now=lambda: now,
     ).reconcile_session(session.owner_partition, session.session_id)
 
+    assert len(lifecycle_fences) == 1
     assert store.session is not None
     assert store.session.active_operation_id is None
     assert store.session.active_run_id is None
+    assert store.session.idle_policy_armed
+    assert store.session.last_activity_at == now
+    assert store.session.expires_at == now + timedelta(seconds=120)
     assert store.durable_operations[operation.operation_id].state == "aborted"
+    assert store.operations[-2:] == ["advance_operation", "aborted_operation"]
+
+
+@pytest.mark.asyncio
+async def test_reclaim_terminal_lifecycle_failure_retries_with_the_active_fence() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now, status="running", active_run_id="run-1")
+    run = _run(base, now, status="succeeded")
+    operation = _reclaim_operation(
+        base,
+        run,
+        now,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    session = replace(
+        base,
+        idle_policy_armed=False,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    calls = 0
+    clock = [now]
+
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        nonlocal calls
+        calls += 1
+        assert store.durable_operations[fence.operation_id].phase == "reclaim_rearm"
+        if calls == 1:
+            raise SandboxProvisioningError("transient lifecycle failure")
+        return True
+
+    reconciler = SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        reclaim_idle_seconds=120,
+        now=lambda: clock[0],
+    )
+
+    first = await reconciler.reconcile_session(session.owner_partition, session.session_id)
+
+    assert first.adopted_terminal_runs == 0
+    assert store.session is not None
+    assert store.session.active_operation_id == operation.operation_id
+    assert store.session.active_run_id == run.run_id
+    assert not store.session.idle_policy_armed
+    assert store.durable_operations[operation.operation_id].phase == "reclaim_rearm"
+    assert (
+        store.durable_operations[operation.operation_id].error_code
+        == "lifecycle_policy_apply_failed"
+    )
+
+    clock[0] += timedelta(seconds=61)
+    second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
+
+    assert second.adopted_terminal_runs == 1
+    assert calls == 2
+    assert store.session.active_operation_id is None
+    assert store.session.idle_policy_armed
+    assert store.durable_operations[operation.operation_id].state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_stale_reclaim_fence_prevents_idle_lifecycle_application() -> None:
+    class StaleAtRearmStore(FakeSessionStateStore):
+        async def advance_operation(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            if kwargs["phase"] == "reclaim_rearm" and kwargs.get("error_code") is None:
+                fence = kwargs["fence"]
+                assert isinstance(fence, SessionOperationFence)
+                current = self.durable_operations[fence.operation_id]
+                self.durable_operations[fence.operation_id] = replace(
+                    current,
+                    token="e" * 32,
+                )
+            return await super().advance_operation(**kwargs)
+
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now, status="running", active_run_id="run-1")
+    run = _run(base, now, status="succeeded")
+    operation = _reclaim_operation(
+        base,
+        run,
+        now,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    session = replace(
+        base,
+        idle_policy_armed=False,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = StaleAtRearmStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    applied: list[str] = []
+
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        applied.append(fence.operation_id)
+        return True
+
+    report = await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.adopted_terminal_runs == 0
+    assert applied == []
+    assert store.session is not None
+    assert store.session.active_operation_id == operation.operation_id
+    assert not store.session.idle_policy_armed
+
+
+@pytest.mark.asyncio
+async def test_reclaim_deleting_does_not_rearm_a_terminal_run() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now, status="running", active_run_id="run-1")
+    run = _run(base, now, status="succeeded")
+    operation = replace(
+        _reclaim_operation(
+            base,
+            run,
+            now,
+            lease_expires_at=now - timedelta(seconds=1),
+        ),
+        phase="reclaim_deleting",
+    )
+    session = replace(
+        base,
+        idle_policy_armed=False,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    applied: list[str] = []
+
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        applied.append(fence.operation_id)
+        return True
+
+    report = await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.tombstoned_sessions == 1
+    assert applied == []
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert store.durable_operations[operation.operation_id].state == "completed"
+
+
+@pytest.mark.asyncio
+async def test_missing_submit_run_rearm_preserves_quarantine() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now)
+    run = _run(base, now, status="accepted")
+    operation = _submit_operation(
+        base,
+        run,
+        now,
+        lease_expires_at=now - timedelta(seconds=1),
+    )
+    session = replace(
+        base,
+        status="quarantined",
+        idle_policy_armed=False,
+        active_run_id=None,
+        quarantine_reason="sandbox_manifest_mismatch",
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.durable_operations[operation.operation_id] = operation
+
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        assert store.durable_operations[fence.operation_id].phase == "submit_rearm"
+        return True
+
+    reconciler = SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=(_sandbox(now),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        reclaim_idle_seconds=120,
+        now=lambda: now,
+    )
+
+    await reconciler._recover_missing_submit_run(session, now, reconciler_report := ReconcileReport())
+
+    assert reconciler_report == ReconcileReport()
+    assert store.session is not None
+    assert store.session.status == "quarantined"
+    assert store.session.quarantine_reason == "sandbox_manifest_mismatch"
+    assert store.session.idle_policy_armed
+    assert store.session.active_operation_id is None
 
 
 @pytest.mark.asyncio

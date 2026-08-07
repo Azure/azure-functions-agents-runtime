@@ -208,6 +208,8 @@ def _session(
         tombstone_reason=tombstone_reason,
         created_at=_NOW,
         updated_at=_NOW,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 

@@ -41,6 +41,7 @@ from ..session_state import (
     SessionOperationFence,
     SessionOperationTarget,
     SessionRead,
+    SessionStateContractError,
     SessionStateStore,
     StaleOperationTokenError,
     operation_correlation_label,
@@ -567,9 +568,8 @@ def session_with_admitted_run(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -606,49 +606,11 @@ def lifecycle_policy_for_idle(runtime: SessionRuntimeBinding) -> SandboxLifecycl
     )
 
 
-async def disarm_idle_lifecycle(
-    runtime: SessionRuntimeBinding,
-    activated: ActivatedSession,
-) -> ActivatedSession:
-    """Durably coordinate an idle-policy disable before a run can be admitted."""
-    if activated.session.active_operation_id is not None:
-        raise SessionNotAdmissibleError("session has an active durable controller operation")
-    now = datetime.now(UTC)
-    disarmed_session = _session_with_idle_policy_disarmed(activated.session, updated_at=now)
-    etag = await activated.store.update_session(
-        previous=activated.session,
-        updated=disarmed_session,
-        etag=activated.etag,
-    )
-    prepared = ActivatedSession.create(
-        handle=activated.handle,
-        session=disarmed_session,
-        etag=etag,
-        partition=activated.partition,
-        store=activated.store,
-    )
-    try:
-        current = await prepared.handle.get_lifecycle_policy()
-        disabled = SandboxLifecyclePolicy.create(
-            auto_suspend_seconds=None,
-            auto_suspend_mode=current.auto_suspend_mode,
-            auto_delete_seconds=current.auto_delete_seconds,
-        )
-        await prepared.handle.set_lifecycle_policy(disabled)
-    except BaseException:
-        try:
-            await restore_idle_lifecycle_if_unowned(runtime, prepared)
-        except Exception:
-            logger.exception("Could not restore sandbox idle policy after a pre-admission failure")
-        raise
-    return prepared
-
-
 async def rearm_idle_lifecycle(
     runtime: SessionRuntimeBinding,
     activated: ActivatedSession,
 ) -> bool:
-    """Finalize an active submit operation or repair a legacy false lifecycle marker."""
+    """Finalize an active submit operation before re-arming its idle policy."""
     current = await activated.store.get_session(
         activated.partition,
         activated.session.session_id,
@@ -660,8 +622,10 @@ async def rearm_idle_lifecycle(
                 activated.session.session_id,
                 current.record.active_operation_id,
             )
-        except OperationRowNotFoundError:
-            return False
+        except OperationRowNotFoundError as exc:
+            raise SessionStateContractError(
+                "disarmed idle lifecycle requires its active durable operation"
+            ) from exc
         if (
             operation.record.kind not in {"provision_submit", "submit_run"}
             or operation.record.target.run_id is None
@@ -678,15 +642,11 @@ async def rearm_idle_lifecycle(
         "tombstoned",
     }:
         return False
-    return await _repair_legacy_idle_lifecycle(runtime, activated, current.record, current.etag)
-
-
-async def restore_idle_lifecycle_if_unowned(
-    runtime: SessionRuntimeBinding,
-    activated: ActivatedSession,
-) -> bool:
-    """Restore idle policy only when no run or different operation owns the session."""
-    return await rearm_idle_lifecycle(runtime, activated)
+    if current.record.idle_policy_armed:
+        return False
+    raise SessionStateContractError(
+        "disarmed idle lifecycle requires an active durable operation"
+    )
 
 
 async def touch_session_activity(
@@ -745,23 +705,8 @@ def _session_with_touched_activity(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
-    )
-
-
-def session_with_idle_policy_armed(
-    session: DurableSessionRecord,
-    *,
-    reclaim_idle_seconds: int,
-    updated_at: datetime,
-) -> DurableSessionRecord:
-    """Return an idle session whose lifecycle deadline starts at terminal activity."""
-    return _session_with_idle_policy_armed(
-        session,
-        reclaim_idle_seconds=reclaim_idle_seconds,
-        updated_at=updated_at,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -1016,26 +961,6 @@ async def abort_submit_operation(
     )
 
 
-async def _repair_legacy_idle_lifecycle(
-    runtime: SessionRuntimeBinding,
-    activated: ActivatedSession,
-    current: DurableSessionRecord,
-    etag: str,
-) -> bool:
-    await activated.handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
-    updated = _session_with_idle_policy_armed(
-        current,
-        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
-        updated_at=datetime.now(UTC),
-    )
-    await activated.store.update_session(
-        previous=current,
-        updated=updated,
-        etag=etag,
-    )
-    return True
-
-
 def _session_with_active_operation(
     session: DurableSessionRecord,
     *,
@@ -1063,7 +988,6 @@ def _session_with_active_operation(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=operation.operation_id,
         operation_sequence=operation.sequence,
     )
@@ -1094,7 +1018,6 @@ def _session_before_submit_rearm(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=session.active_operation_id,
         operation_sequence=session.operation_sequence,
     )
@@ -1126,9 +1049,8 @@ def _session_after_submit_rearm(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=None,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -1158,73 +1080,8 @@ def _session_after_missing_submit_run(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=None,
         active_operation_id=None,
         operation_sequence=session.operation_sequence,
-    )
-
-
-def _session_with_idle_policy_disarmed(
-    session: DurableSessionRecord,
-    *,
-    updated_at: datetime,
-) -> DurableSessionRecord:
-    return DurableSessionRecord.create(
-        owner_partition=session.owner_partition,
-        session_id=session.session_id,
-        sandbox_id=session.sandbox_id,
-        generation=session.generation,
-        digest_kind=session.digest_kind,
-        digest=session.digest,
-        protocol=session.protocol,
-        status=session.status,
-        last_activity_at=session.last_activity_at,
-        expires_at=session.expires_at,
-        idle_policy_armed=False,
-        active_run_id=session.active_run_id,
-        snapshot_ids=session.snapshot_ids,
-        region=session.region,
-        state_store_fingerprint=session.state_store_fingerprint,
-        quarantine_reason=session.quarantine_reason,
-        tombstone_reason=session.tombstone_reason,
-        created_at=session.created_at,
-        updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
-        active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
-    )
-
-
-def _session_with_idle_policy_armed(
-    session: DurableSessionRecord,
-    *,
-    reclaim_idle_seconds: int,
-    updated_at: datetime,
-) -> DurableSessionRecord:
-    """Set idle policy state while preserving quarantined status when applicable."""
-    return DurableSessionRecord.create(
-        owner_partition=session.owner_partition,
-        session_id=session.session_id,
-        sandbox_id=session.sandbox_id,
-        generation=session.generation,
-        digest_kind=session.digest_kind,
-        digest=session.digest,
-        protocol=session.protocol,
-        status=session.status,
-        last_activity_at=updated_at,
-        expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
-        idle_policy_armed=True,
-        active_run_id=session.active_run_id,
-        snapshot_ids=session.snapshot_ids,
-        region=session.region,
-        state_store_fingerprint=session.state_store_fingerprint,
-        quarantine_reason=session.quarantine_reason,
-        tombstone_reason=session.tombstone_reason,
-        created_at=session.created_at,
-        updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
-        active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
     )
 
 
@@ -1746,6 +1603,8 @@ async def _create_and_activate_session(
         tombstone_reason=None,
         created_at=now,
         updated_at=now,
+        active_operation_id=None,
+        operation_sequence=0,
     )
     etag = await _within_setup_budget(
         state_binding.store.create_session(initial_session),
@@ -2039,9 +1898,8 @@ def _session_with_sandbox(
         tombstone_reason=None,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -2066,9 +1924,8 @@ def _ready_session(session: DurableSessionRecord, *, updated_at: datetime) -> Du
         tombstone_reason=None,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -2099,9 +1956,8 @@ def _quarantined_session(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 

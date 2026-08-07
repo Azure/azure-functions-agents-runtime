@@ -28,10 +28,9 @@ from .controller.package import build_expected_manifest_binding
 from .controller.readiness import (
     DEFAULT_AUTO_SUSPEND_SECONDS,
     DEFAULT_RECLAIM_IDLE_SECONDS,
-    ActivatedSession,
     SessionRuntimeBinding,
     StateStoreBinding,
-    rearm_idle_lifecycle,
+    lifecycle_policy_for_idle,
 )
 from .controller.reconciler import (
     ReconcilerConfig,
@@ -58,6 +57,7 @@ from .session_state import (
     DurableRunRecord,
     DurableSessionRecord,
     OwnerPartition,
+    SessionOperationFence,
     build_store_from_service_client,
     compute_app_hash,
     get_table_service_client,
@@ -209,24 +209,42 @@ def _build_session_reconciler(
 
         return await with_handle(session, verify)
 
-    async def lifecycle_repair(session: DurableSessionRecord) -> bool:
-        async def rearm(handle: SandboxSessionHandle) -> bool:
-            current = await state_binding.store.get_session(
-                session.owner_partition,
-                session.session_id,
-            )
-            return await rearm_idle_lifecycle(
-                runtime,
-                ActivatedSession.create(
-                    handle=handle,
-                    session=current.record,
-                    etag=current.etag,
-                    partition=session.owner_partition,
-                    store=state_binding.store,
-                ),
-            )
+    async def current_fenced_session(
+        fence: SessionOperationFence,
+    ) -> DurableSessionRecord | None:
+        current = await state_binding.store.get_session(
+            fence.owner_partition,
+            fence.session_id,
+        )
+        operation = await state_binding.store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        target = fence.target
+        if (
+            not fence.matches(current.record, operation.record)
+            or target.sandbox_id is None
+            or current.record.sandbox_id != target.sandbox_id
+            or current.record.generation != target.generation
+            or current.record.digest_kind != target.digest_kind
+            or current.record.digest != target.digest
+        ):
+            return None
+        return current.record
 
-        return await with_handle(session, rearm) is True
+    async def apply_idle_lifecycle(fence: SessionOperationFence) -> bool:
+        session = await current_fenced_session(fence)
+        if session is None:
+            return False
+
+        async def apply(handle: SandboxSessionHandle) -> bool:
+            if await current_fenced_session(fence) is None:
+                return False
+            await handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime))
+            return True
+
+        return await with_handle(session, apply) is True
 
     return SessionReconciler(
         store=state_binding.store,
@@ -239,7 +257,8 @@ def _build_session_reconciler(
         terminal_reader=terminal_reader,
         heartbeat_reader=heartbeat_reader,
         death_verifier=death_verifier,
-        lifecycle_repair=lifecycle_repair,
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        reclaim_idle_seconds=runtime.reclaim_idle_seconds,
         terminal_bindings=terminal_bindings,
     )
 

@@ -175,6 +175,8 @@ def _session(
         tombstone_reason=None,
         created_at=_NOW,
         updated_at=_NOW,
+        active_operation_id=None,
+        operation_sequence=0,
     )
 
 
@@ -222,9 +224,8 @@ def _admitted_session(session: DurableSessionRecord, run_id: str) -> DurableSess
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=session.updated_at,
-        reclaim_fence_token=session.reclaim_fence_token,
         active_operation_id=session.active_operation_id,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -235,6 +236,7 @@ def _operation(
     active_run_id: str | None,
     token: str,
 ) -> DurableSessionOperation:
+    sequence = session.operation_sequence + 1
     return DurableSessionOperation.create(
         owner_partition=session.owner_partition,
         target=SessionOperationTarget.create(
@@ -245,7 +247,7 @@ def _operation(
             digest=session.digest,
             run_id=active_run_id,
         ),
-        sequence=session.next_operation_sequence,
+        sequence=sequence,
         kind=kind,  # type: ignore[arg-type]
         phase=(
             "reclaim_fenced" if kind == "reclaim_backing" else "submit_admission"
@@ -253,7 +255,7 @@ def _operation(
         state="active",
         correlation_label=operation_correlation_label(
             session.session_id,
-            session.next_operation_sequence,
+            sequence,
         ),
         token=token,
         attempt_count=0,
@@ -290,9 +292,8 @@ def _session_with_operation(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=_NOW,
-        reclaim_fence_token=None,
         active_operation_id=operation.operation_id,
-        next_operation_sequence=operation.sequence + 1,
+        operation_sequence=operation.sequence,
     )
 
 
@@ -321,9 +322,8 @@ def _session_after_operation(
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=_NOW,
-        reclaim_fence_token=None,
         active_operation_id=None,
-        next_operation_sequence=session.next_operation_sequence,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -348,7 +348,6 @@ def _session_before_submit_rearm(session: DurableSessionRecord) -> DurableSessio
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=_NOW,
-        reclaim_fence_token=None,
         active_operation_id=session.active_operation_id,
         operation_sequence=session.operation_sequence,
     )
@@ -375,6 +374,8 @@ def _quarantined_session(session: DurableSessionRecord) -> DurableSessionRecord:
         tombstone_reason=session.tombstone_reason,
         created_at=session.created_at,
         updated_at=_NOW,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
     )
 
 
@@ -567,9 +568,16 @@ async def test_durable_operation_lifecycle_and_cursor_use_real_egt_guards() -> N
             )
         resumed = await store.advance_operation(
             fence=resumed,
-            phase="reclaim_deleting",
+            phase="reclaim_rearm",
             updated_at=_NOW,
         )
+        assert (
+            await store.get_operation(
+                partition,
+                session.session_id,
+                operation.operation_id,
+            )
+        ).record.phase == "reclaim_rearm"
         terminal = replace(run, status="succeeded", result_available=False)
         completed = await store.complete_operation(
             fence=resumed,
@@ -1330,6 +1338,8 @@ async def test_stale_etag_rejected_then_converges_after_reread() -> None:
             tombstone_reason=None,
             created_at=session.created_at,
             updated_at=_NOW,
+            active_operation_id=session.active_operation_id,
+            operation_sequence=session.operation_sequence,
         )
         fresh_etag = await store.update_session(previous=session, updated=bumped, etag=etag)
 
@@ -1360,6 +1370,8 @@ async def test_stale_etag_rejected_then_converges_after_reread() -> None:
             tombstone_reason=None,
             created_at=session.created_at,
             updated_at=_NOW,
+            active_operation_id=session.active_operation_id,
+            operation_sequence=session.operation_sequence,
         )
         newest_etag = await store.update_session(
             previous=reread.record, updated=again, etag=reread.etag
@@ -1394,6 +1406,8 @@ async def test_lower_generation_rejected_equal_generation_legal() -> None:
             tombstone_reason=None,
             created_at=session.created_at,
             updated_at=_NOW,
+            active_operation_id=session.active_operation_id,
+            operation_sequence=session.operation_sequence,
         )
         with pytest.raises(GenerationConflictError):
             await store.update_session(previous=session, updated=lower, etag=etag)
@@ -1418,6 +1432,8 @@ async def test_lower_generation_rejected_equal_generation_legal() -> None:
             tombstone_reason=None,
             created_at=session.created_at,
             updated_at=_NOW,
+            active_operation_id=session.active_operation_id,
+            operation_sequence=session.operation_sequence,
         )
         new_etag = await store.update_session(previous=session, updated=equal, etag=etag)
         assert new_etag != etag

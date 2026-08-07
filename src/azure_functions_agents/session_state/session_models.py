@@ -31,7 +31,6 @@ type SessionStatus = Literal[
     "suspending",
     "suspended",
     "resuming",
-    "reclaiming",
     "failed",
     "quarantined",
     "tombstoned",
@@ -64,6 +63,7 @@ type DurableOperationPhase = Literal[
     "reclaim_fenced",
     "reclaim_deleting",
     "reclaim_snapshots",
+    "reclaim_rearm",
     "completed",
     "aborted",
 ]
@@ -81,7 +81,6 @@ _SESSION_STATUSES: frozenset[str] = frozenset(
         "suspending",
         "suspended",
         "resuming",
-        "reclaiming",
         "failed",
         "quarantined",
         "tombstoned",
@@ -121,6 +120,7 @@ _OPERATION_PHASES: frozenset[str] = frozenset(
         "reclaim_fenced",
         "reclaim_deleting",
         "reclaim_snapshots",
+        "reclaim_rearm",
         "completed",
         "aborted",
     }
@@ -155,6 +155,7 @@ _OPERATION_PHASES_BY_KIND: Mapping[str, frozenset[str]] = {
             "reclaim_fenced",
             "reclaim_deleting",
             "reclaim_snapshots",
+            "reclaim_rearm",
             "completed",
             "aborted",
         }
@@ -162,25 +163,28 @@ _OPERATION_PHASES_BY_KIND: Mapping[str, frozenset[str]] = {
 }
 _OPERATION_PHASE_TRANSITIONS: Mapping[str, Mapping[str, frozenset[str]]] = {
     "provision_submit": {
-        "provision_create": frozenset({"provision_lifecycle"}),
-        "provision_lifecycle": frozenset({"provision_content"}),
-        "provision_content": frozenset({"provision_manifest"}),
-        "provision_manifest": frozenset({"provision_journal"}),
+        "provision_create": frozenset({"provision_lifecycle", "provision_rearm"}),
+        "provision_lifecycle": frozenset({"provision_content", "provision_rearm"}),
+        "provision_content": frozenset({"provision_manifest", "provision_rearm"}),
+        "provision_manifest": frozenset({"provision_journal", "provision_rearm"}),
         "provision_journal": frozenset({"provision_launching", "provision_rearm"}),
         "provision_launching": frozenset({"provision_rearm"}),
         "provision_rearm": frozenset(),
     },
     "submit_run": {
-        "submit_disarm": frozenset({"submit_admission"}),
-        "submit_admission": frozenset({"submit_journal"}),
+        "submit_disarm": frozenset({"submit_admission", "submit_rearm"}),
+        "submit_admission": frozenset({"submit_journal", "submit_rearm"}),
         "submit_journal": frozenset({"submit_launching", "submit_rearm"}),
         "submit_launching": frozenset({"submit_rearm"}),
         "submit_rearm": frozenset(),
     },
     "reclaim_backing": {
-        "reclaim_fenced": frozenset({"reclaim_deleting", "reclaim_snapshots"}),
+        "reclaim_fenced": frozenset(
+            {"reclaim_deleting", "reclaim_snapshots", "reclaim_rearm"}
+        ),
         "reclaim_deleting": frozenset({"reclaim_snapshots"}),
         "reclaim_snapshots": frozenset(),
+        "reclaim_rearm": frozenset(),
     },
 }
 # Label-safe (base32) app/owner hash: e.g. "a1-<52 lower-case base32 chars>". ACA
@@ -196,7 +200,7 @@ _REGION_PATTERN = re.compile(r"^[a-z0-9][a-z0-9-]{0,62}[a-z0-9]$|^[a-z0-9]$")
 _OPERATION_ID_PATTERN = re.compile(r"^op-([1-9][0-9]*)$")
 _OPERATION_LABEL_PATTERN = re.compile(r"^op-[a-z0-9-]{1,60}$")
 _STATUSES_REQUIRING_ACTIVE_RUN: frozenset[str] = frozenset(
-    {"running", "canceling", "reclaiming"}
+    {"running", "canceling"}
 )
 _STATUSES_FORBIDDING_ACTIVE_RUN: frozenset[str] = frozenset(
     {
@@ -838,9 +842,8 @@ class DurableSessionRecord:
     tombstone_reason: str | None
     created_at: datetime
     updated_at: datetime
-    reclaim_fence_token: str | None = None
-    active_operation_id: str | None = None
-    operation_sequence: int = 0
+    active_operation_id: str | None
+    operation_sequence: int
 
     @classmethod
     def create(
@@ -865,10 +868,8 @@ class DurableSessionRecord:
         tombstone_reason: str | None,
         created_at: datetime,
         updated_at: datetime,
-        reclaim_fence_token: str | None = None,
-        active_operation_id: str | None = None,
-        operation_sequence: int | None = None,
-        next_operation_sequence: int | None = None,
+        active_operation_id: str | None,
+        operation_sequence: int,
     ) -> DurableSessionRecord:
         if status not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
@@ -885,46 +886,22 @@ class DurableSessionRecord:
             raise SessionStateContractError(
                 f"{status} sessions require active_run_id to be unset"
             )
-        normalized_fence_token = _optional_bounded_text(
-            reclaim_fence_token,
-            "reclaim_fence_token",
-            max_bytes=64,
-        )
-        if status == "reclaiming" and normalized_fence_token is None:
-            raise SessionStateContractError("reclaiming sessions require reclaim_fence_token")
-        if status != "reclaiming" and normalized_fence_token is not None:
-            raise SessionStateContractError(
-                "only reclaiming sessions may retain reclaim_fence_token"
-            )
         normalized_operation_id = (
             None
             if active_operation_id is None
             else operation_id_for_sequence(parse_operation_id(active_operation_id))
         )
-        if operation_sequence is None:
-            if next_operation_sequence is None:
-                normalized_operation_sequence = 0
-            else:
-                normalized_operation_sequence = validate_operation_sequence(
-                    next_operation_sequence
-                ) - 1
-        elif next_operation_sequence is not None:
+        if (
+            isinstance(operation_sequence, bool)
+            or not isinstance(operation_sequence, int)
+            or operation_sequence < 0
+        ):
             raise SessionStateContractError(
-                "operation_sequence and next_operation_sequence are mutually exclusive"
+                "operation_sequence must be a non-negative integer"
             )
-        else:
-            if (
-                isinstance(operation_sequence, bool)
-                or not isinstance(operation_sequence, int)
-                or operation_sequence < 0
-            ):
-                raise SessionStateContractError(
-                    "operation_sequence must be a non-negative integer"
-                )
-            normalized_operation_sequence = operation_sequence
         if (
             normalized_operation_id is not None
-            and parse_operation_id(normalized_operation_id) > normalized_operation_sequence
+            and parse_operation_id(normalized_operation_id) > operation_sequence
         ):
             raise SessionStateContractError(
                 "operation_sequence must cover active_operation_id"
@@ -964,19 +941,13 @@ class DurableSessionRecord:
             tombstone_reason=tombstone_reason,
             created_at=created_at_n,
             updated_at=updated_at_n,
-            reclaim_fence_token=normalized_fence_token,
             active_operation_id=normalized_operation_id,
-            operation_sequence=normalized_operation_sequence,
+            operation_sequence=operation_sequence,
         )
 
     @property
     def row_key(self) -> SessionRowKey:
         return SessionRowKey.create(self.session_id)
-
-    @property
-    def next_operation_sequence(self) -> int:
-        """Return the next monotonic sequence while preserving stage-one callers."""
-        return self.operation_sequence + 1
 
     def to_table_entity(self) -> TableEntity:
         entity = _base_entity(self.owner_partition, self.row_key)
@@ -997,7 +968,6 @@ class DurableSessionRecord:
                 "state_store_fingerprint": self.state_store_fingerprint,
                 "quarantine_reason": self.quarantine_reason or "",
                 "tombstone_reason": self.tombstone_reason or "",
-                "reclaim_fence_token": self.reclaim_fence_token or "",
                 "active_operation_id": self.active_operation_id or "",
                 "operation_sequence": self.operation_sequence,
                 "created_at": self.created_at,
@@ -1039,15 +1009,8 @@ class DurableSessionRecord:
             tombstone_reason=_optional_entity_str(entity, "tombstone_reason"),
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
-            reclaim_fence_token=_optional_entity_str_or_none(
-                entity,
-                "reclaim_fence_token",
-            ),
-            active_operation_id=_optional_entity_str_or_none(
-                entity,
-                "active_operation_id",
-            ),
-            operation_sequence=_read_operation_sequence(entity),
+            active_operation_id=_optional_entity_str(entity, "active_operation_id"),
+            operation_sequence=_require_int(entity, "operation_sequence"),
         )
 
 
@@ -1281,7 +1244,7 @@ class DurableSessionOperation:
                 entity,
                 "next_attempt_at",
             ),
-            agent_slug=_optional_entity_str_or_none(entity, "agent_slug") or "",
+            agent_slug=_optional_entity_str(entity, "agent_slug") or "",
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
             finished_at=_optional_entity_datetime_or_none(entity, "finished_at"),
@@ -1389,7 +1352,7 @@ class DurableRunRecord:
             expires_at=_require_datetime(entity, "expires_at"),
             created_at=_require_datetime(entity, "created_at"),
             updated_at=_require_datetime(entity, "updated_at"),
-            agent_slug=_optional_entity_str_or_none(entity, "agent_slug") or "",
+            agent_slug=_optional_entity_str(entity, "agent_slug") or "",
         )
 
 
@@ -1715,39 +1678,6 @@ def _require_str(entity: Mapping[str, object], field_name: str) -> str:
 def _optional_entity_str(entity: Mapping[str, object], field_name: str) -> str | None:
     value = _require_str(entity, field_name)
     return value or None
-
-
-def _optional_entity_str_or_none(
-    entity: Mapping[str, object],
-    field_name: str,
-) -> str | None:
-    if field_name not in entity:
-        return None
-    return _optional_entity_str(entity, field_name)
-
-
-def _optional_entity_int_or_default(
-    entity: Mapping[str, object],
-    field_name: str,
-    *,
-    default: int,
-) -> int:
-    if field_name not in entity:
-        return default
-    return _require_int(entity, field_name)
-
-
-def _read_operation_sequence(entity: Mapping[str, object]) -> int:
-    if "operation_sequence" in entity:
-        value = _require_int(entity, "operation_sequence")
-        if value < 0:
-            raise SessionStateContractError("operation_sequence must be non-negative")
-        return value
-    if "next_operation_sequence" in entity:
-        return validate_operation_sequence(
-            _require_int(entity, "next_operation_sequence")
-        ) - 1
-    return 0
 
 
 def _require_int(entity: Mapping[str, object], field_name: str) -> int:
