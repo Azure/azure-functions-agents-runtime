@@ -121,10 +121,17 @@ class MAFClientManager(ClientManager):
         return runtime_model or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
-        client, _ = self.build_chat_client_with_target(model)
+        client, _ = self._build_maf_chat_client_with_target(model)
         return client
 
     def build_chat_client_with_target(
+        self, model: str | None
+    ) -> tuple[Any, InferenceTarget]:
+        if type(self).build_chat_client is not MAFClientManager.build_chat_client:
+            return self.build_chat_client(model), InferenceTarget()
+        return self._build_maf_chat_client_with_target(model)
+
+    def _build_maf_chat_client_with_target(
         self, model: str | None
     ) -> tuple[Any, InferenceTarget]:
         provider = self._provider()

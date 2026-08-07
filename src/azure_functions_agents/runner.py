@@ -141,6 +141,10 @@ _USAGE_FIELD_NAMES: dict[str, str] = {
     "cache_creation_input_token_count": "cache_creation_input_tokens",
     "cache_read_input_token_count": "cache_read_input_tokens",
     "reasoning_output_token_count": "reasoning_output_tokens",
+    "openai.cached_input_tokens": "cache_read_input_tokens",
+    "prompt/cached_tokens": "cache_read_input_tokens",
+    "openai.reasoning_tokens": "reasoning_output_tokens",
+    "completion/reasoning_tokens": "reasoning_output_tokens",
 }
 _USAGE_COMPLETE_FIELDS = frozenset({"input_tokens", "output_tokens", "total_tokens"})
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
@@ -154,7 +158,12 @@ def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
     normalized: dict[str, int] = {}
     for source_name, record_name in _USAGE_FIELD_NAMES.items():
         value = usage_details.get(source_name)
-        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+        if (
+            record_name not in normalized
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
             normalized[record_name] = value
     return normalized
 
@@ -1387,16 +1396,19 @@ async def run_agent_stream(
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
                             yield f"data: {json.dumps(event)}\n\n"
-                    usage_recorder.emit(
-                        "success",
-                        await _stream_usage_details(
-                            stream,
-                            remaining_timeout=max(0.0, deadline - loop.time()),
-                        ),
-                    )
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
+                    try:
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    finally:
+                        usage_details = None
+                        try:
+                            usage_details = await _stream_usage_details(
+                                stream,
+                                remaining_timeout=max(0.0, deadline - loop.time()),
+                            )
+                        finally:
+                            usage_recorder.emit("success", usage_details)
                 except TimeoutError as exc:
                     if usage_recorder is not None:
                         usage_recorder.emit("timeout")

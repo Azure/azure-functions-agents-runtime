@@ -69,6 +69,10 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
             "cache_creation_input_token_count": 3,
             "cache_read_input_token_count": 4,
             "reasoning_output_token_count": 5,
+            "openai.cached_input_tokens": 40,
+            "prompt/cached_tokens": 41,
+            "openai.reasoning_tokens": 50,
+            "completion/reasoning_tokens": 51,
             "ignored_provider_field": 99,
         }
     ) == {
@@ -90,6 +94,48 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
     assert runner._normalize_usage_details(None) == {}
 
 
+@pytest.mark.parametrize(
+    ("provider_usage", "cached_tokens", "reasoning_tokens"),
+    [
+        (
+            {
+                "openai.cached_input_tokens": 4,
+                "openai.reasoning_tokens": 5,
+            },
+            4,
+            5,
+        ),
+        (
+            {
+                "prompt/cached_tokens": 6,
+                "completion/reasoning_tokens": 7,
+            },
+            6,
+            7,
+        ),
+    ],
+)
+def test_normalize_usage_details_maps_maf_13_openai_converted_usage_details(
+    provider_usage: dict[str, int],
+    cached_tokens: int,
+    reasoning_tokens: int,
+) -> None:
+    usage_details = UsageDetails(
+        input_token_count=10,
+        output_token_count=8,
+        total_token_count=18,
+        **provider_usage,
+    )
+
+    assert runner._normalize_usage_details(usage_details) == {
+        "input_tokens": 10,
+        "output_tokens": 8,
+        "total_tokens": 18,
+        "cache_read_input_tokens": cached_tokens,
+        "reasoning_output_tokens": reasoning_tokens,
+    }
+
+
 def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
         agent_name="billing",
@@ -105,6 +151,8 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
                 "input_token_count": 10,
                 "output_token_count": 20,
                 "total_token_count": 30,
+                "openai.cached_input_tokens": 4,
+                "openai.reasoning_tokens": 5,
             },
         )
         recorder.emit("error")
@@ -115,6 +163,7 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
     payload = _usage_payload(records[0])
     assert payload == {
         "agent_name": "billing",
+        "cache_read_input_tokens": 4,
         "event_name": "agent_token_usage",
         "execution_role": "workflow_subagent",
         "input_tokens": 10,
@@ -122,6 +171,7 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
         "outcome": "success",
         "output_tokens": 20,
         "provider": None,
+        "reasoning_output_tokens": 5,
         "total_tokens": 30,
         "usage_available": True,
         "usage_complete": True,
@@ -219,27 +269,23 @@ async def test_run_agent_logs_usage_from_real_maf_final_response(
 
 
 @pytest.mark.asyncio
-async def test_run_agent_success_without_usage_logs_unavailable(
+async def test_run_agent_success_with_maf_optional_usage_absent_logs_unavailable(
     monkeypatch: Any, caplog: Any
 ) -> None:
-    class Agent:
-        async def run(self, *args: Any, **kwargs: Any) -> Any:
-            return SimpleNamespace(text="done", messages=[], usage_details=None)
+    response = AgentResponse(messages=[])
 
-    target = InferenceTarget(
-        provider="foundry",
-        model="claude-deployment",
-    )
-    _install_primary_agent(monkeypatch, Agent(), inference_target=target)
+    class Agent:
+        async def run(self, *args: Any, **kwargs: Any) -> AgentResponse[Any]:
+            return response
+
+    _install_primary_agent(monkeypatch, Agent())
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         result = await runner.run_agent("prompt")
 
-    assert result.content == "done"
+    assert response.usage_details is None
+    assert result.content == ""
     assert _usage_payloads(caplog)[0]["outcome"] == "success"
     assert _usage_payloads(caplog)[0]["usage_available"] is False
-    assert _usage_payloads(caplog)[0]["provider"] == "foundry"
-    assert "inference_host" not in _usage_payloads(caplog)[0]
-    assert _usage_payloads(caplog)[0]["model"] == "claude-deployment"
 
 
 @pytest.mark.parametrize(
@@ -557,6 +603,56 @@ async def test_run_agent_stream_bounds_hanging_final_response(
 
     assert json.loads(events[-1].removeprefix("data: "))["type"] == "done"
     assert _usage_payloads(caplog)[0]["usage_available"] is False
+
+
+@pytest.mark.asyncio
+async def test_run_agent_stream_yields_done_before_collecting_usage_on_close(
+    monkeypatch: Any, caplog: Any
+) -> None:
+    usage_collection_started = asyncio.Event()
+    release_usage = asyncio.Event()
+    response = AgentResponse(
+        messages=[],
+        usage_details=UsageDetails(
+            input_token_count=3,
+            output_token_count=2,
+            total_token_count=5,
+        ),
+    )
+
+    class Stream:
+        def __aiter__(self) -> Stream:
+            return self
+
+        async def __anext__(self) -> Any:
+            raise StopAsyncIteration
+
+        async def get_final_response(self) -> AgentResponse[Any]:
+            usage_collection_started.set()
+            await release_usage.wait()
+            return response
+
+    class Agent:
+        def run(self, *args: Any, **kwargs: Any) -> Stream:
+            return Stream()
+
+    _install_primary_agent(monkeypatch, Agent())
+    stream = runner.run_agent_stream("prompt")
+
+    with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
+        session = await stream.__anext__()
+        done = await asyncio.wait_for(stream.__anext__(), timeout=0.5)
+
+        assert json.loads(session.removeprefix("data: "))["type"] == "session"
+        assert json.loads(done.removeprefix("data: "))["type"] == "done"
+        assert not usage_collection_started.is_set()
+
+        close = asyncio.create_task(stream.aclose())
+        await usage_collection_started.wait()
+        release_usage.set()
+        await close
+
+    assert _usage_payloads(caplog)[0]["total_tokens"] == 5
 
 
 @pytest.mark.asyncio

@@ -178,6 +178,30 @@ def test_custom_manager_target_fallback_builds_client_once() -> None:
     assert target == InferenceTarget()
 
 
+def test_maf_subclass_build_chat_client_override_keeps_virtual_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    provider_client = object()
+
+    class WrappingMAFClientManager(MAFClientManager):
+        calls = 0
+
+        def build_chat_client(self, model: str | None) -> Any:
+            self.calls += 1
+            return ("wrapped", super().build_chat_client(model))
+
+    manager = WrappingMAFClientManager()
+
+    with patch.object(MAFClientManager, "_build_openai", return_value=provider_client) as build:
+        client, target = manager.build_chat_client_with_target("model-one")
+
+    assert client == ("wrapped", provider_client)
+    assert manager.calls == 1
+    build.assert_called_once_with("model-one")
+    assert target == InferenceTarget()
+
+
 def test_anthropic_api_key_does_not_select_direct_transport(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

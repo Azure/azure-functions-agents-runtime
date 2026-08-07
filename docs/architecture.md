@@ -349,7 +349,7 @@ This extension point is deliberately below the registration layer: no trigger or
 
 The runner calls `build_chat_client_with_target()` and receives the client plus a frozen `InferenceTarget` containing nullable `provider` and `model` fields. Its concrete base implementation calls the existing abstract `build_chat_client()` once and returns an empty descriptor, so existing custom managers remain compatible. A custom manager can override the new method when it can authoritatively describe the target used to construct its client.
 
-`MAFClientManager` resolves provider and effective model once, then uses those same values for both client construction and the descriptor. Endpoint-derived metadata and model publisher are not collected. Internal usage logging requires no customer configuration, does not infer publisher from a deployment name, and does not call the Foundry control plane during an invocation.
+The unmodified `MAFClientManager` resolves provider and effective model once, then uses those same values for both client construction and the descriptor. A subclass that overrides the legacy `build_chat_client()` method retains that virtual dispatch and receives an empty descriptor because the base class cannot know whether the wrapper changed the effective target; subclasses can override `build_chat_client_with_target()` when they can provide authoritative metadata. Endpoint-derived metadata and model publisher are not collected. Internal usage logging requires no customer configuration, does not infer publisher from a deployment name, and does not call the Foundry control plane during an invocation.
 
 ### Custom tools
 

@@ -4,9 +4,9 @@ title: Internal per-agent token usage logging
 status: Finalized        # Draft -> In review -> Finalized  (-> Implemented after merge)
 author: victoriahall
 created: 2026-08-05
-updated: 2026-08-06
-issues: []
-pull_requests: []
+updated: 2026-08-07
+issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/149]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/147]
 branch: hallvictoria/token-usage
 ---
 
@@ -18,10 +18,9 @@ The runtime will attempt one structured internal token-usage record through its 
 `azure.functions.AgentRuntime` logger for every Microsoft Agent Framework (MAF) `Agent.run()`
 invocation attempt, including top-level agents, chat-time delegated specialists, and Dynamic
 Workflow Sub Agents. The runtime will consume MAF's public `AgentResponse.usage_details` contract,
-preserve calls whose provider does not report usage by marking them unavailable, and keep each
-agent's usage local rather than silently rolling specialist tokens into a coordinator total. Each
-record will also identify the transport provider and effective model/deployment used to construct
-the client.
+mark attempts without valid final usage as unavailable, and keep each agent's usage local rather
+than silently rolling specialist tokens into a coordinator total. Each record will also identify
+the transport provider and effective model/deployment used to construct the client.
 
 ## 2. Motivation / problem
 
@@ -35,7 +34,7 @@ consumers need to identify:
 - which coordinator or specialist incurred the usage; and
 - which configured transport handled the call;
 - which effective model/deployment generated the usage; and
-- whether an attempted call completed without provider usage metadata.
+- whether an attempted call has valid final MAF usage metadata.
 
 The record belongs on the existing shared logger. This preserves the runtime's current category,
 routing, filtering, and visibility behavior. Internal ingestion can consume the structured message;
@@ -62,7 +61,7 @@ customers continue to use MAF's richer App Insights spans for detailed usage ana
 - Adding token usage to REST, MCP, SSE, or `AgentResult` response contracts.
 - Versioning the log payload or adding a unique per-invocation identifier.
 - Emitting one record per inner model call; MAF's existing `gen_ai.*` spans remain that surface.
-- Estimating tokens when a provider does not report them.
+- Estimating tokens when final MAF usage is unavailable.
 - Calculating price, currency, quotas, budgets, or chargeback.
 - Inferring model publisher from model/deployment names such as `gpt-*` or `claude-*`.
 - Logging model API hosts or other endpoint-derived resource identifiers.
@@ -97,6 +96,11 @@ The runtime uses only MAF's public response contracts:
 - successful streaming: `await ResponseStream.get_final_response()` after normal iteration, then
   its `AgentResponse.usage_details`.
 
+MAF 1.3 defines `AgentResponse.usage_details` as optional, although the runtime's built-in OpenAI,
+Azure OpenAI, and Foundry clients are expected to populate it for normally completed calls. The
+unavailable state remains necessary for interrupted or failed attempts and for contract-compatible
+custom or future MAF clients that return a final response without usage.
+
 Interrupted streams do not have a final `AgentResponse`, and provider/MAF versions do not expose a
 single documented cross-provider contract stating whether each intermediate `UsageContent` is an
 increment or a cumulative snapshot. The runtime therefore does not emit token counts from
@@ -112,12 +116,13 @@ The normalized token fields are:
 | `output_token_count` | `output_tokens` |
 | `total_token_count` | `total_tokens` |
 | `cache_creation_input_token_count` | `cache_creation_input_tokens` |
-| `cache_read_input_token_count` | `cache_read_input_tokens` |
-| `reasoning_output_token_count` | `reasoning_output_tokens` |
+| `cache_read_input_token_count`, `openai.cached_input_tokens`, or `prompt/cached_tokens` | `cache_read_input_tokens` |
+| `reasoning_output_token_count`, `openai.reasoning_tokens`, or `completion/reasoning_tokens` | `reasoning_output_tokens` |
 
 Reported integer zeroes are valid. Missing or malformed values are omitted. The runtime does not
 derive `total_tokens` from input/output when MAF omits it because the provider may report additional
-token categories. A record has `usage_available=true` when at least one canonical count is valid.
+token categories. When canonical and provider-specific aliases are both present, the canonical key
+takes precedence. A record has `usage_available=true` when at least one canonical count is valid.
 `usage_complete=true` requires a successful call with valid `input_tokens`, `output_tokens`, and
 `total_tokens`; cache and reasoning counts remain optional provider-specific details. A successful
 call with only a subset of the three base counts is available but incomplete.
@@ -143,9 +148,10 @@ class InferenceTarget:
   model: str | None = None
 ```
 
-Fields are optional because a custom manager may not have an authoritative value. The built-in MAF
-manager always supplies `provider` and effective `model`. The value remains valid for the lifetime
-of the client returned beside it.
+Fields are optional because a custom manager may not have an authoritative value. The unmodified
+built-in MAF manager supplies `provider` and effective `model`; an `MAFClientManager` subclass that
+only overrides the legacy `build_chat_client()` method receives an empty descriptor. The value
+remains valid for the lifetime of the client returned beside it.
 
 `build_chat_client()` remains an abstract, supported API with its existing signature. The new method
 is concrete on the ABC: its default calls `self.build_chat_client(model)` exactly once and returns
@@ -155,21 +161,22 @@ existing custom manager that implements only `resolve_model()` and `build_chat_c
 source-compatible and always receives the empty fallback descriptor. Custom managers may override
 the new method to return authoritative metadata.
 
-`MAFClientManager` overrides both paths around private helpers: it selects the provider once,
-resolves the effective model against that provider once, dispatches the matching client-builder
-branch, and creates the descriptor from those same local values. Its legacy `build_chat_client()`
-delegates to the MAF override and returns only the client. It must not independently call
-`_provider()` or `resolve_model()` after client construction. Tests assert the descriptor provider
-matches the client-builder branch that actually executed. Concretely,
-`MAFClientManager.build_chat_client_with_target()` caches `_provider()` and model resolution results
-as local variables in one method scope before invoking the matching `_build_openai()`,
-`_build_azure_openai()`, or `_build_foundry()` branch and constructing `InferenceTarget` from those
-same cached values. The legacy method performs no independent provider or model resolution.
+`MAFClientManager` places built-in construction behind a private non-virtual helper: it selects the
+provider once, resolves the effective model against that provider once, dispatches the matching
+client-builder branch, and creates the descriptor from those same local values. Its legacy
+`build_chat_client()` calls that helper and returns only the client. The target-aware method also
+uses the helper when the legacy method is unchanged. When a subclass overrides
+`build_chat_client()`, however, the target-aware method invokes that override exactly once and
+returns `InferenceTarget()` rather than bypassing established wrappers or guessing what target they
+constructed. This remains safe when the override calls `super().build_chat_client()` because that
+base method calls the non-virtual helper directly. A subclass can override
+`build_chat_client_with_target()` too when it can authoritatively describe its wrapped client.
 
 The frozen descriptor is a construction-time snapshot. Later environment, endpoint, credential, or
 manager-state changes do not mutate it. All fields remain optional in the shared type for custom
-manager compatibility. For `MAFClientManager`, `provider` and `model` are always populated;
-consumers still treat both fields as nullable and do not infer availability from provider type.
+manager compatibility. For an unmodified `MAFClientManager`, `provider` and `model` are populated;
+legacy-method subclasses receive unavailable fields unless they implement the target-aware method.
+Consumers treat both fields as nullable and do not infer availability from provider type.
 Endpoint-derived host metadata and model publisher are not collected or included in the descriptor.
 
 For built-in providers:
@@ -213,7 +220,7 @@ The record contains:
 `execution_role` is `primary`, `delegate`, or `workflow_subagent`. `usage_source` is
 `final_response` or `unavailable`. Normal completion with valid final response metadata sets
 `usage_available=true`; it sets `usage_complete=true` only when all three base counts are present.
-Interrupted calls and completed calls without valid provider metadata emit `usage_available=false`
+Interrupted calls and completed calls without valid final usage metadata emit `usage_available=false`
 and `usage_complete=false`. The record outcome is `success`, `error`, `timeout`, or `cancelled`.
 
 Each coordinator and specialist emits an independent local record. Chat-time delegation records
@@ -253,14 +260,17 @@ ids. `agents_workflow_run_sub_agent()` passes `workflow_subagent` plus `task["wo
 
 ### 4.5 Failure and streaming behavior
 
-For a successful stream, `run_agent_stream()` calls `get_final_response()` after update iteration
-and before emitting the existing `done` event. Usage content remains ignored and does not expand
-the SSE vocabulary. For timeout, cancellation, exception, or client disconnect, existing
-`_finalize_maf_stream()` behavior remains in place; the usage recorder emits at most once with
-usage unavailable. Tests assert ordering across normal completion, timeout, cancellation, and
+For a successful stream, `run_agent_stream()` emits the existing `done` event after update
+iteration, then calls `get_final_response()` to collect auxiliary usage with a bounded wait. This
+keeps final-usage latency out of the client-visible terminal frame. The collection runs from the
+terminal yield's `finally`, so normal iterator completion and an immediate `aclose()` after `done`
+both attempt the usage record. Usage content remains ignored and does not expand the SSE
+vocabulary. For timeout, cancellation, exception, or client disconnect before normal completion,
+existing `_finalize_maf_stream()` behavior remains in place; the usage recorder emits at most once
+with usage unavailable. Tests assert ordering across normal completion, timeout, cancellation, and
 `GeneratorExit`, including that `get_final_response()` does not duplicate cleanup/finalization.
 
-Extraction and emission catch their own errors. Malformed provider metadata, logger failures,
+Extraction and emission catch their own errors. Malformed usage metadata, logger failures,
 or a test/custom stream without `get_final_response()` never fail or alter the application call.
 
 ### Authoring / API surface
@@ -276,8 +286,8 @@ contract; no new customer observability surface is introduced.
 - Existing MAF `gen_ai.*` usage spans continue unchanged and can be used for model-call detail.
 - The log remains under `azure.functions.AgentRuntime`; no logger, category, exporter, span, or
   metric configuration changes.
-- Providers that omit usage still produce a record with `usage_available=false`; they are not
-  treated as zero-token calls.
+- Attempts without valid final MAF usage still produce a record with `usage_available=false`; they
+  are not treated as zero-token calls.
 - Existing custom `ClientManager` implementations remain source-compatible; target fields they do
   not authoritatively provide are omitted.
 - Internal usage attribution requires no customer-only configuration.
@@ -317,21 +327,26 @@ contract; no new customer observability surface is introduced.
 | 27 | Log schema marker | retain `schema_version` / remove it | Remove `schema_version`; this internal log does not need an explicit schema field. | Human | 2026-08-06 |
 | 28 | Review remediation: completeness | any canonical count / all three base counts | Set `usage_complete=true` only for successful responses containing valid input, output, and total counts; optional cache/reasoning fields do not affect completeness. | Agent (PR review remediation) | 2026-08-06 |
 | 29 | Review remediation: delivery guarantee | claim one emitted record / explicit best effort | Promise one in-process emission attempt, not durable delivery; keep failures non-fatal and require hosted validation of the internal sink. | Agent (PR review remediation) | 2026-08-06 |
+| 30 | Preserve `MAFClientManager` subclass dispatch | direct private construction / invoke legacy override with empty target | When a subclass overrides `build_chat_client()`, invoke it exactly once and return an empty `InferenceTarget`; use a non-virtual helper for the built-in path so wrappers can safely call `super()`. | Agent (PR review remediation) | 2026-08-07 |
+| 31 | Describe unavailable usage | provider omission / optional final MAF usage contract | **Supersedes the provider-omission framing of #3:** successful built-in clients are expected to report usage; unavailable covers interrupted or failed attempts and contract-compatible final responses whose optional `usage_details` is absent or invalid. | Agent (PR review remediation) | 2026-08-07 |
+| 32 | Streaming terminal-frame latency | await final usage before `done` / emit `done` then collect usage | Emit `done` as soon as stream updates complete, then perform bounded final-usage collection from the terminal yield's `finally`; this removes auxiliary usage latency from the client-visible stream while preserving collection on normal continuation or immediate `aclose()`. | Agent (PR review remediation) | 2026-08-07 |
 
 ## 6. Test plan
 
-- [x] Unit: usage normalization preserves valid zeroes and canonical optional fields while omitting
-  missing, boolean, negative, and malformed counts.
+- [x] Unit: usage normalization preserves valid zeroes and canonical optional fields, maps the MAF
+  1.3 OpenAI Responses and Chat Completions cache/reasoning aliases, and omits missing, boolean,
+  negative, and malformed counts.
 - [x] Unit: stable JSON message shape/prefix through the existing shared logger, metadata-only
   privacy, INFO level, and emitter idempotence.
-- [x] Unit: non-streaming success with/without usage and timeout/exception/cancellation emit exactly
-  once per attempt; pre-invocation build failure emits none.
+- [x] Unit: non-streaming success with usage, a real MAF `AgentResponse` whose optional usage is
+  absent, and timeout/exception/cancellation emit exactly once per attempt; pre-invocation build
+  failure emits none.
 - [x] MAF contract: one non-streaming `Agent.run()` with multiple model/tool turns reports the
   aggregate expected usage; a fully iterated stream followed by `get_final_response()` reports the
   same totals.
 - [x] Unit: streaming final-response usage, ignored usage SSE content, unavailable usage on
-  interruption, no-usage completion, custom-stream compatibility, and exactly-once teardown
-  behavior.
+  interruption, no-usage completion, custom-stream compatibility, `done`-before-usage ordering,
+  immediate close after `done`, and exactly-once teardown behavior.
 - [x] Unit: delegated and workflow specialists emit independent records with the correct role and
   workflow correlation; coordinator usage remains local.
 - [x] Testing review: independently inspect duplicate-emission paths, cancellation/`GeneratorExit`,
@@ -343,6 +358,8 @@ contract; no new customer observability surface is introduced.
   collecting endpoint-derived host or publisher metadata.
 - [x] Unit: custom `ClientManager` implementations remain compatible and omit target fields they do
   not provide.
+- [x] Unit: `MAFClientManager` subclasses retain legacy `build_chat_client()` virtual dispatch,
+  including wrappers that call `super()`, and receive an empty target descriptor.
 - [x] Unit: primary, streaming, delegated, and workflow usage records carry the target associated
   with their own built client; target metadata remains present when usage itself is unavailable.
 - [x] Testing review: independently verify client/metadata cannot drift, endpoint-derived metadata
@@ -353,11 +370,13 @@ contract; no new customer observability surface is introduced.
 - [x] Review remediation: delegated/workflow leaf error, timeout, cancellation, and pre-invocation
   construction failure logging behavior is asserted directly.
 - [x] Full gate after review remediation: ruff, mypy, and CI-equivalent pytest/coverage.
-- [ ] Hosted validation: confirm `azure.functions.AgentRuntime` INFO records reach the intended
-  internal sink and document its filtering, sampling, retry, and duplicate-delivery behavior.
+- [ ] Hosted validation ([#149](https://github.com/Azure/azure-functions-agents-runtime/issues/149)):
+  confirm `azure.functions.AgentRuntime` INFO records reach the intended internal sink; document
+  filtering, sampling, retry, and duplicate-delivery behavior; and attach durable redacted evidence.
 
 The hosted validation remains an external merge gate because repository unit tests can verify the
-logging call but cannot observe the platform's internal sink.
+logging call but cannot observe the platform's internal sink. Keep this item open until issue #149
+contains the evidence and all acceptance criteria are complete.
 
 No config scenario fixture is required because authoring/config interpretation does not change.
 
@@ -398,4 +417,6 @@ No config scenario fixture is required because authoring/config interpretation d
   best-effort emission attempt, treated partial usage as complete, and left stale publisher
   documentation. Decisions #28-#29 define the local remediation requested by the Human; original
   Decisions #23 and #27 remain authoritative, and hosted sink validation remains an external merge
-  gate.
+  gate tracked by [#149](https://github.com/Azure/azure-functions-agents-runtime/issues/149).
+- **Completion status:** Architecture is finalized, but feature completion remains blocked on the
+  hosted-delivery evidence and acceptance criteria in #149.
