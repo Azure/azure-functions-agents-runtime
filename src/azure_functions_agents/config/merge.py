@@ -9,6 +9,7 @@ from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     DynamicSessionsCodeInterpreterConfig,
     GlobalConfig,
+    HarnessAgentConfig,
     McpFilter,
     ResolvedAgent,
     SkillsFilter,
@@ -131,6 +132,33 @@ def apply_tools_filter(
     return ToolsFilter(exclude=sorted(merged_excludes)), False
 
 
+def _resolve_harness(
+    spec: AgentSpec, global_config: GlobalConfig
+) -> HarnessAgentConfig | None:
+    """Resolve the harness-mode setting with per-agent override taking precedence.
+
+    Returns a :class:`HarnessAgentConfig` when harness mode is active for this
+    agent, or ``None`` when the plain ``Agent`` path should be used (default).
+    """
+    # Per-agent explicit opt-out wins over global.
+    if spec.harness is False:
+        return None
+    # Per-agent opt-in (bool True or an object).
+    if spec.harness is True:
+        return HarnessAgentConfig()
+    if isinstance(spec.harness, HarnessAgentConfig):
+        return spec.harness
+    # Fall back to global config.
+    if global_config.harness is False:
+        return None
+    if global_config.harness is True:
+        return HarnessAgentConfig()
+    if isinstance(global_config.harness, HarnessAgentConfig):
+        return global_config.harness
+    # Default: plain Agent.
+    return None
+
+
 def _resolve_slug(spec: AgentSpec) -> str:
     """Compute the agent's stable identity slug from its source file stem.
 
@@ -211,6 +239,7 @@ def compose(
         substitute_variables=spec.substitute_variables,
         metadata=metadata,
         source_file=spec.source_file,
+        harness_config=_resolve_harness(spec, global_config),
     )
 
     return resolved

@@ -259,6 +259,7 @@ GLOBAL_CONFIG_DESCRIPTIONS = {
     "model": "Default LLM model identifier for all agents",
     "timeout": "Default execution timeout in seconds",
     "tools": "Global tool filtering configuration. [Details](#global-tools)",
+    "harness": "App-wide harness mode and context-compaction settings. [Details](./front-matter-spec.md#harness)",
     "http_auth": "App-wide default inbound HTTP authentication policy inherited by every agent's built-in HTTP endpoints; a per-agent `builtin_endpoints.http_auth` overrides it. Applies only to HTTP endpoints and does not affect MCP. Modes: `function` (default), `admin`, `anonymous`, `entra`.",
 }
 
@@ -267,6 +268,7 @@ GLOBAL_CONFIG_DEFAULTS = {
     "model": "Resolved from env/provider",
     "timeout": "`900`",
     "tools": "`{}`",
+    "harness": "`null`",
     "http_auth": "`function` (per-agent default)",
 }
 
@@ -308,6 +310,7 @@ AGENT_SPEC_OPTIONAL_DESCRIPTIONS = {
     "mcp": "MCP server filtering. [Details](#agent-mcp)",
     "skills": "Skill filtering. [Details](#agent-skills)",
     "tools": "Custom tool filtering. [Details](#agent-tools)",
+    "harness": "Per-agent harness override. [Details](./front-matter-spec.md#harness)",
     "workflows": "Dynamic Workflow enablement, tool filtering, and Sub Agent grants. [Details](#agent-workflows)",
     "subagents": "Specialist agents this agent can delegate to as `delegate_<slug>` tools. [Details](./front-matter-spec.md#subagents)",
     "input_schema": "JSON Schema for HTTP request validation",

@@ -225,6 +225,30 @@ class SystemToolsAgentOverride(BaseModel):
     web_request: bool | None = None
 
 
+class HarnessAgentConfig(BaseModel):
+    """Configuration for harness-mode agents (``create_harness_agent``).
+
+    When an agent opts into harness mode (``harness: true`` in frontmatter or
+    ``agents.config.yaml``), the runtime uses MAF's ``create_harness_agent``
+    instead of the plain ``Agent`` constructor. The harness can compact
+    accumulated conversation history before model calls, reducing input-token
+    growth after the configured threshold is reached. Agent instructions are
+    still supplied on every model call.
+
+    All fields are optional; an empty object (``harness: true`` short-hand)
+    uses the harness defaults with no compaction configured.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_context_window_tokens: int | None = None
+    max_output_tokens: int | None = None
+    disable_file_memory: bool = True
+    harness_instructions: str | None = ""
+    disable_todo: bool = True
+    disable_mode: bool = True
+
+
 class GlobalConfig(BaseModel):
     """Top-level agents.config.yaml schema."""
 
@@ -234,6 +258,13 @@ class GlobalConfig(BaseModel):
     model: str | None = None
     timeout: float | None = None
     tools: ToolsFilter | None = None
+    harness: bool | HarnessAgentConfig | None = Field(
+        default=None,
+        description=(
+            "App-wide harness-agent enablement and context-compaction settings. "
+            "Agents inherit this value when their front matter omits harness."
+        ),
+    )
     http_auth: EndpointAuthConfig | None = Field(
         default=None,
         description=(
@@ -271,6 +302,13 @@ class AgentSpec(BaseModel):
     instructions: str = ""
     source_file: str | None = None
     is_main: bool = False
+    harness: bool | HarnessAgentConfig | None = Field(
+        default=None,
+        description=(
+            "Per-agent harness override. Omit to inherit global settings, set false to opt out, "
+            "set true to enable harness defaults, or provide an object with compaction settings."
+        ),
+    )
 
 
 class ResolvedAgent(BaseModel):
@@ -310,6 +348,7 @@ class ResolvedAgent(BaseModel):
     substitute_variables: bool = True
     metadata: dict[str, Any] = Field(default_factory=dict)
     source_file: str | None = None
+    harness_config: HarnessAgentConfig | None = None
 
 
 GlobalConfig.model_rebuild()
