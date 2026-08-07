@@ -70,7 +70,7 @@ _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
 )
 
 type ChatHandler = Callable[[Request, Any | None], Awaitable[Response]]
-type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[StreamingResponse | Response]]
+type ChatStreamHandler = Callable[[Request, Any | None], Awaitable[Response]]
 type McpAgentChatHandler = Callable[[str, Any | None], Awaitable[str]]
 
 
@@ -193,8 +193,8 @@ def _chat_handler_without_client(handle_chat: ChatHandler) -> Callable[[Request]
 
 def _chat_stream_handler_with_client(
     handle_chat_stream: ChatStreamHandler,
-) -> Callable[[Request, str], Awaitable[StreamingResponse | Response]]:
-    async def chat_stream(req: Request, client: str) -> StreamingResponse | Response:
+) -> Callable[[Request, str], Awaitable[Response]]:
+    async def chat_stream(req: Request, client: str) -> Response:
         return await handle_chat_stream(req, client)
 
     return chat_stream
@@ -202,8 +202,8 @@ def _chat_stream_handler_with_client(
 
 def _chat_stream_handler_without_client(
     handle_chat_stream: ChatStreamHandler,
-) -> Callable[[Request], Awaitable[StreamingResponse | Response]]:
-    async def chat_stream(req: Request) -> StreamingResponse | Response:
+) -> Callable[[Request], Awaitable[Response]]:
+    async def chat_stream(req: Request) -> Response:
         return await handle_chat_stream(req, None)
 
     return chat_stream
@@ -538,7 +538,7 @@ async def _start_aca_stream(
     owner: OwnerPrincipal | None,
     respond_async: bool,
     after_sequence: int,
-) -> StreamingResponse | Response:
+) -> Response:
     """Accept a built-in stream through the shared LRO path, then render journal SSE."""
     budget = RequestBudget.start(authored_timeout=resolved.timeout)
     backend = create_execution_backend(
@@ -595,7 +595,7 @@ def _register_http_chat_stream(
     async def handle_chat_stream(
         req: Request,
         durable_client: Any | None,
-    ) -> StreamingResponse | Response:
+    ) -> Response:
         try:
             owner, auth_error = _resolve_session_owner(
                 req.headers.get,
@@ -987,7 +987,7 @@ def register_sandbox_management_endpoints(
         )
         return _controller_response_to_fastapi(response)
 
-    async def events_handler(req: Request) -> StreamingResponse | Response:
+    async def events_handler(req: Request) -> Response:
         resolved = await authorized_context(req)
         if isinstance(resolved, Response):
             return resolved

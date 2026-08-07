@@ -11,6 +11,7 @@ from typing import Any, get_type_hints
 
 import azure.functions as func
 import pytest
+from azurefunctions.extensions.http.fastapi import Response
 
 from azure_functions_agents._session_id import SESSION_ID_PATTERN
 from azure_functions_agents.config.schema import (
@@ -146,6 +147,8 @@ def test_sandbox_management_routes_share_one_submission_auth_policy(tmp_path: Pa
         ("agents/test-agent/sessions/{session_id}/runs/{run_id}/cancel", ("POST",)),
     }
     assert {route["auth_level"] for route in app.routes} == {func.AuthLevel.FUNCTION}
+    events_route = next(route for route in app.routes if route["route"].endswith("/events"))
+    assert get_type_hints(events_route["handler"])["return"] is Response
 
 
 @pytest.mark.asyncio
@@ -998,6 +1001,7 @@ def test_register_builtin_endpoints_without_workflows_has_no_client_parameter(
     stream_handler = stream_route["handler"]
     stream_params = inspect.signature(stream_handler).parameters
     assert "client" not in stream_params, "Stream handler should not have 'client' parameter when workflows disabled"
+    assert get_type_hints(stream_handler)["return"] is Response
     assert "__signature__" not in stream_handler.__dict__, "Stream handler should expose its natural signature"
     assert "durable_client_input" not in stream_route, "Stream handler should not have durable_client_input decorator"
 
@@ -1037,6 +1041,7 @@ def test_register_builtin_endpoints_with_workflows_has_client_parameter(
     assert "client" in stream_params, "Stream handler should have 'client' parameter when workflows enabled"
     assert stream_params["client"].default is inspect.Parameter.empty
     assert get_type_hints(stream_handler)["client"] is str
+    assert get_type_hints(stream_handler)["return"] is Response
     assert "durable_client_input" in stream_route, "Stream handler should have durable_client_input decorator"
     assert stream_route["durable_client_input"] == "client", "Durable client input should be named 'client'"
 
