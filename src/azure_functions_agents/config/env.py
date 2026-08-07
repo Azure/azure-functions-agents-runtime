@@ -16,6 +16,7 @@ _INLINE_PERCENT_PATTERN = re.compile(rf"%({_VAR_NAME_FRAGMENT})%")
 _LITERAL_DOLLAR_SENTINEL = "\x00AF_LITERAL_DOLLAR:"
 _LITERAL_PERCENT_SENTINEL = "\x00AF_LITERAL_PERCENT:"
 _LITERAL_SENTINEL_SUFFIX = "\x00"
+_SANDBOX_ENV_PREFIX = "SandboxEnv__"
 
 
 def _escaped_dollar_replacer(match: re.Match[str]) -> str:
@@ -27,11 +28,13 @@ def _escaped_percent_replacer(match: re.Match[str]) -> str:
 
 
 def _dollar_replacer(match: re.Match[str]) -> str:
-    return os.environ.get(match.group(1), match.group(0))
+    value = os.environ.get(match.group(1))
+    return match.group(0) if value is None else value
 
 
 def _percent_replacer(match: re.Match[str]) -> str:
-    return os.environ.get(match.group(1), match.group(0))
+    value = os.environ.get(match.group(1))
+    return match.group(0) if value is None else value
 
 
 def _restore_escaped_literals(value: str) -> str:
@@ -87,6 +90,15 @@ def resolve_env_vars_in_data(value: Any) -> Any:
 def runtime_env_value(name: str) -> str:
     """Return a stripped runtime env var value, or an empty string if unset."""
     return (os.environ.get(name) or "").strip()
+
+
+def runtime_backend_env_value(name: str) -> str:
+    """Return a backend setting, falling back to its explicit sandbox-prefixed value."""
+
+    value = os.environ.get(name)
+    if value is not None:
+        return value.strip()
+    return (os.environ.get(f"{_SANDBOX_ENV_PREFIX}{name}") or "").strip()
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

@@ -1,0 +1,1 @@
+{"name":"tool-failure","capabilities":[],"events":[{"type":"tool_start","data":{"tool_name":"plain_tool"}},{"type":"tool_end","data":{"tool_name":"plain_tool","success":false}},{"type":"error","data":{"code":"tool_failure"}}],"terminal_state":"failed"}

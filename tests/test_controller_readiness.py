@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -33,6 +34,7 @@ from azure_functions_agents.controller.readiness import (
 )
 from azure_functions_agents.controller.reconciler import SessionReconciler
 from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from azure_functions_agents.session_state import (
     AdmissionRecords,
     AppIdentity,
@@ -165,6 +167,37 @@ class _CountingHandle(_FakeHandle):
 
 
 @pytest.mark.asyncio
+async def test_profile_readiness_requires_exact_protocol_capabilities(tmp_path: Path) -> None:
+    session = _session(_script_root(tmp_path))
+    handle = _FakeHandle()
+    handle.seed_file(
+        HARNESS_PROTOCOL_PATH,
+        (
+            '{"protocol_version":"1","capabilities":'
+            + json.dumps(dict(REQUIRED_HARNESS_CAPABILITIES), sort_keys=True)
+            + "}\n"
+        ).encode("utf-8"),
+    )
+
+    await readiness_module._verify_optional_harness_artifacts(
+        handle,
+        session,
+        require_protocol=True,
+    )
+
+    handle.seed_file(
+        HARNESS_PROTOCOL_PATH,
+        b'{"protocol_version":"1","capabilities":{"bootstrap":"bootstrap-v1"}}',
+    )
+    with pytest.raises(readiness_module.SessionReadinessArtifactError, match="capability_mismatch"):
+        await readiness_module._verify_optional_harness_artifacts(
+            handle,
+            session,
+            require_protocol=True,
+        )
+
+
+@pytest.mark.asyncio
 async def test_reserved_provision_keeps_successful_created_handle_open(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     handle = _CountingHandle()
@@ -212,7 +245,7 @@ async def test_reserved_provision_closes_created_handle_after_post_create_failur
         raise readiness_module.LiveManifestNotReadyError("manifest failed")
 
     if failure_phase == "content":
-        monkeypatch.setattr(readiness_module, "deliver_content_package", fail_content)
+        monkeypatch.setattr(readiness_module, "deliver_content_and_bootstrap", fail_content)
     if failure_phase == "manifest":
         monkeypatch.setattr(readiness_module, "_wait_for_created_manifest", fail_manifest)
 
@@ -451,7 +484,7 @@ async def test_management_touch_propagates_non_concurrency_store_errors(
 
 
 @pytest.mark.asyncio
-async def test_attach_uses_the_provider_handshake_without_a_second_manifest_read(
+async def test_attach_requires_the_provider_handshake_and_protocol_capabilities(
     tmp_path: Path,
 ) -> None:
     script_root = _script_root(tmp_path)
@@ -470,12 +503,15 @@ async def test_attach_uses_the_provider_handshake_without_a_second_manifest_read
 
     assert provider.attach_calls == 1
     assert provider.resume_calls == 0
-    assert [call.operation for call in handle.calls] == []
+    assert [call.path for call in handle.calls] == [
+        HARNESS_PROTOCOL_PATH,
+        ATOMIC_CHECKPOINT_POINTER_PATH,
+    ]
     await activated.handle.close()
 
 
 @pytest.mark.asyncio
-async def test_resume_uses_the_provider_handshake_without_a_second_manifest_read(
+async def test_resume_requires_the_provider_handshake_and_protocol_capabilities(
     tmp_path: Path,
 ) -> None:
     script_root = _script_root(tmp_path)
@@ -494,7 +530,10 @@ async def test_resume_uses_the_provider_handshake_without_a_second_manifest_read
 
     assert provider.attach_calls == 0
     assert provider.resume_calls == 1
-    assert [call.operation for call in handle.calls] == []
+    assert [call.path for call in handle.calls] == [
+        HARNESS_PROTOCOL_PATH,
+        ATOMIC_CHECKPOINT_POINTER_PATH,
+    ]
     await activated.handle.close()
 
 

@@ -23,13 +23,12 @@ ABC surface
 
 from __future__ import annotations
 
-import os
 from abc import ABC, abstractmethod
 from typing import Any
 
 from ._credential import build_async_credential
 from ._logger import logger
-from .config.env import runtime_env_value
+from .config.env import runtime_backend_env_value
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -91,13 +90,11 @@ class MAFClientManager(ClientManager):
         if requested:
             return requested
         provider = self._provider()
-        runtime_model = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
+        runtime_model = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
         if provider == "azure_openai":
-            return (
-                os.environ.get("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
-            )
+            return self._env("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
         if provider == "foundry":
-            return os.environ.get("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
+            return self._env("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
         return runtime_model or _DEFAULT_OPENAI_MODEL
 
     def build_chat_client(self, model: str | None) -> Any:
@@ -127,7 +124,7 @@ class MAFClientManager(ClientManager):
         ``azd env set X ""`` workflows. We treat them as if the variable were
         unset so auto-detection does not pick them up.
         """
-        return (os.environ.get(name) or "").strip()
+        return runtime_backend_env_value(name)
 
     @classmethod
     def _provider(cls) -> str:

@@ -7,6 +7,10 @@ import pytest
 
 from azure_functions_agents.journal_paths import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
+    BOOT_READY_PATH,
+    BOOTSTRAP_DIGEST_PATH,
+    BOOTSTRAP_ERROR_PATH,
+    BOOTSTRAP_PATH,
     CHECKPOINT_NAME_PREFIX,
     CONTENT_ARCHIVE_PATH,
     CONTENT_DIGEST_SIDECAR_PATH,
@@ -49,6 +53,10 @@ def test_journal_paths_share_one_canonical_root() -> None:
     assert f"{CONTENT_PATH}/app.sha256" == CONTENT_DIGEST_SIDECAR_PATH
     assert f"{CONTENT_PATH}/manifest.seed.json" == CONTENT_MANIFEST_SEED_PATH
     assert f"{SESSION_PATH}/manifest.json" == SESSION_MANIFEST_PATH
+    assert f"{SESSION_PATH}/bootstrap.py" == BOOTSTRAP_PATH
+    assert f"{SESSION_PATH}/bootstrap.sha256" == BOOTSTRAP_DIGEST_PATH
+    assert f"{SESSION_PATH}/.boot-ready" == BOOT_READY_PATH
+    assert f"{SESSION_PATH}/bootstrap.error.json" == BOOTSTRAP_ERROR_PATH
     assert run_path("run-1") == f"{RUNS_PATH}/run-1"
     assert inbox_path("run-1") == f"{INBOX_PATH}/run-1.json"
     assert status_path("run-1") == f"{RUNS_PATH}/run-1/status.json"

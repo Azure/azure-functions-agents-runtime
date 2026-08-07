@@ -30,7 +30,7 @@ jobs:
           versionSpec: $(PYTHON_VERSION)
       - bash: |
           python -m pip install --upgrade pip
-          python -m pip install -U -e .[dev]
+          python -m pip install -U -e '.[dev,aca_sandbox]'
         displayName: 'Install dependencies'
       - bash: |
           python -m ruff check src tests

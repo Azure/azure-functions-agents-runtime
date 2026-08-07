@@ -444,11 +444,12 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 
 ### Experimental ACA session-runtime contract
 
-The ACA Sandbox session runtime is opt-in and currently remains capability-gated
-closed while its production bootstrap image and create source are deferred. The
-following HTTP contract is implemented and exercised with an injected
-provider-neutral test source; enabling `session_runtime.aca_sandbox` in an app
-still fails startup until the later capability gate opens.
+The ACA Sandbox session runtime is opt-in and remains capability-gated closed
+until live end-to-end and load acceptance. The controller now builds its public
+Python disk create profile, delivers the bootstrap through the durable provision
+operation, and launches the per-run harness journal behind that gate. Enabling
+`session_runtime.aca_sandbox` in an app still fails startup until the later
+capability gate opens.
 
 When enabled, ordinary chat calls remain synchronous. Send
 `Prefer: respond-async` on either built-in chat surface or a custom
@@ -483,6 +484,18 @@ sandbox is created, and once before retrying a capacity failure. Set
 from `60` through `3600`; the default and maximum is `3600`. If both a custom
 HTTP trigger and built-in chat are enabled for an ACA agent, their complete
 resolved auth policies must match before any route is registered.
+
+Inbound MCP retains the Function App owner partition, while `/chat` can use an
+Entra owner partition. A Sandbox Group managed identity is directly usable by
+guest code; use a dedicated least-privileged group identity and remember that
+egress limits token-use destinations rather than token acquisition.
+
+Unprefixed model keys are injected only as static per-sandbox proxy header
+transforms and do not enter guest processes. `SandboxEnv__` settings are
+explicit customer exposure: a prefixed credential is readable by sandbox code
+and its child processes. Optional MCP `secretRef` headers reference
+customer-provisioned group secrets; rotate a secret by draining or replacing
+the session because active streams do not update in place.
 
 ### MCP Server
 

@@ -16,6 +16,7 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._logger import logger
 from .._observability import current_span
 from ..config import DEFAULT_TIMEOUT
+from ..harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from ..journal_paths import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
@@ -68,6 +69,7 @@ from ..transport.transport_models import (
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
 )
+from .bootstrap_delivery import deliver_content_and_bootstrap
 from .idempotency import IdempotencyAttempt
 from .package import (
     CapturedContentPackage,
@@ -75,10 +77,10 @@ from .package import (
     ContentPackagingError,
     LiveManifestNotReadyError,
     build_expected_manifest_binding,
-    deliver_content_package,
     get_content_package,
     read_live_manifest_binding,
 )
+from .sandbox_config import SandboxCreateProfile
 
 DEFAULT_AUTO_SUSPEND_SECONDS = 300
 DEFAULT_RECLAIM_IDLE_SECONDS = 86_400
@@ -160,7 +162,7 @@ class _HarnessProtocolArtifact(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
 
     protocol_version: str
-    capabilities: dict[str, str] | None = None
+    capabilities: dict[str, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -264,6 +266,7 @@ class SessionRuntimeBinding:
     sandbox_group_resource_id: str
     script_root: Path
     creation_source: SandboxCreateSource | None
+    create_profile: SandboxCreateProfile | None
     auto_suspend_seconds: int
     reclaim_idle_seconds: int
     protocol_version: str
@@ -296,6 +299,7 @@ class SessionRuntimeBinding:
         provider_factory: Callable[[], Awaitable[SandboxSessionProvider]],
         state_store_factory: Callable[[], Awaitable[StateStoreBinding]],
         creation_source: SandboxCreateSource | None = None,
+        create_profile: SandboxCreateProfile | None = None,
         auto_suspend_seconds: int = DEFAULT_AUTO_SUSPEND_SECONDS,
         reclaim_idle_seconds: int = DEFAULT_RECLAIM_IDLE_SECONDS,
         protocol_version: str = DEFAULT_PROTOCOL_VERSION,
@@ -317,6 +321,7 @@ class SessionRuntimeBinding:
             sandbox_group_resource_id=group_resource_id,
             script_root=script_root,
             creation_source=creation_source,
+            create_profile=create_profile,
             auto_suspend_seconds=auto_suspend_seconds,
             reclaim_idle_seconds=reclaim_idle_seconds,
             protocol_version=protocol_version,
@@ -465,6 +470,7 @@ async def activate_session(
         SandboxGroupBinding.create(runtime.sandbox_group_resource_id, session.region),
     )
     provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
+    handle: SandboxSessionHandle | None = None
     try:
         if session.status == "suspended":
             handle = await _within_setup_budget(
@@ -484,6 +490,14 @@ async def activate_session(
                 ),
                 setup_deadline,
             )
+        await _within_setup_budget(
+            _verify_optional_harness_artifacts(
+                handle,
+                session,
+                require_protocol=True,
+            ),
+            setup_deadline,
+        )
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -495,6 +509,21 @@ async def activate_session(
         raise SessionActivationNotFoundError(
             "Session sandbox binding cannot be trusted."
         ) from None
+    except SessionReadinessArtifactError as exc:
+        if handle is not None:
+            with suppress(Exception):
+                await handle.close()
+        await _quarantine_detected_binding(
+            store,
+            session,
+            session_read.etag,
+            reason=exc.reason,
+        )
+        _record_security_event(exc.reason, frozenset({"harness_artifact"}))
+        raise SessionActivationNotFoundError(
+            "Session sandbox readiness artifacts cannot be trusted."
+        ) from None
+    assert handle is not None
     return ActivatedSession.create(
         handle=handle,
         session=session,
@@ -1096,7 +1125,7 @@ async def provision_new_session_submit(
     setup_deadline: SetupDeadline,
 ) -> ProvisionedSubmission:
     """Reserve the first run before any sandbox create, then provision its operation."""
-    if runtime.creation_source is None:
+    if runtime.creation_source is None and runtime.create_profile is None:
         raise SessionCreationUnavailableError(
             "No runtime bootstrap source is available for new sandbox sessions."
         )
@@ -1267,7 +1296,7 @@ async def _provision_reserved_session(
     setup_deadline: SetupDeadline,
 ) -> ActivatedSession:
     source = runtime.creation_source
-    if source is None:
+    if source is None and runtime.create_profile is None:
         raise SessionCreationUnavailableError(
             "No runtime bootstrap source is available for new sandbox sessions."
         )
@@ -1294,19 +1323,19 @@ async def _provision_reserved_session(
         "provision_rearm",
     }:
         raise SessionActivationError("Provision operation is no longer resumable.")
-    create_request = SandboxCreateRequest.create(
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version=session.owner_partition.owner_hash_version,
+        owner_kind=session.owner_partition.owner_kind,
+        owner_hash=session.owner_partition.owner_hash,
+        app_hash=session.owner_partition.app_hash,
+        session_id=session.session_id,
+        operation_label=fence.correlation_label,
+    )
+    create_request = _build_create_request(
+        runtime,
         source=source,
-        labels=SandboxProvisioningLabels.create(
-            owner_hash_version=session.owner_partition.owner_hash_version,
-            owner_kind=session.owner_partition.owner_kind,
-            owner_hash=session.owner_partition.owner_hash,
-            app_hash=session.owner_partition.app_hash,
-            session_id=session.session_id,
-            operation_label=fence.correlation_label,
-        ),
-        remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
-        auto_suspend_seconds=runtime.auto_suspend_seconds,
-        auto_suspend_mode="Disk",
+        labels=labels,
+        setup_deadline=setup_deadline,
     )
     current = await _within_setup_budget(
         state_binding.store.get_session(session.owner_partition, session.session_id),
@@ -1444,7 +1473,7 @@ async def _finish_created_provision(
     )
     if phase == "provision_content":
         await _within_setup_budget(
-            deliver_content_package(handle, package, expected, handle.identity),
+            deliver_content_and_bootstrap(handle, package, expected, handle.identity),
             setup_deadline,
         )
         fence = await _within_setup_budget(
@@ -1463,7 +1492,11 @@ async def _finish_created_provision(
             setup_deadline=setup_deadline,
         )
         await _within_setup_budget(
-            _verify_optional_harness_artifacts(handle, bound_session),
+            _verify_optional_harness_artifacts(
+                handle,
+                bound_session,
+                require_protocol=True,
+            ),
             setup_deadline,
         )
         current_policy = await _within_setup_budget(
@@ -1575,7 +1608,7 @@ async def _create_and_activate_session(
     state_binding: StateStoreBinding,
     setup_deadline: SetupDeadline,
 ) -> ActivatedSession:
-    if runtime.creation_source is None:
+    if runtime.creation_source is None and runtime.create_profile is None:
         raise SessionCreationUnavailableError(
             "No runtime bootstrap source is available for new sandbox sessions."
         )
@@ -1614,18 +1647,18 @@ async def _create_and_activate_session(
         runtime.sandbox_group_resource_id,
         provider.group.region,
     )
-    create_request = SandboxCreateRequest.create(
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version=partition.owner_hash_version,
+        owner_kind=partition.owner_kind,
+        owner_hash=partition.owner_hash,
+        app_hash=partition.app_hash,
+        session_id=session_id,
+    )
+    create_request = _build_create_request(
+        runtime,
         source=runtime.creation_source,
-        labels=SandboxProvisioningLabels.create(
-            owner_hash_version=partition.owner_hash_version,
-            owner_kind=partition.owner_kind,
-            owner_hash=partition.owner_hash,
-            app_hash=partition.app_hash,
-            session_id=session_id,
-        ),
-        remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
-        auto_suspend_seconds=runtime.auto_suspend_seconds,
-        auto_suspend_mode="Disk",
+        labels=labels,
+        setup_deadline=setup_deadline,
     )
     handle: SandboxSessionHandle | None = None
     persisted_session = initial_session
@@ -1665,7 +1698,7 @@ async def _create_and_activate_session(
             state_store_fingerprint=state_binding.state_store_fingerprint,
         )
         await _within_setup_budget(
-            deliver_content_package(handle, package, expected, handle.identity),
+            deliver_content_and_bootstrap(handle, package, expected, handle.identity),
             setup_deadline,
         )
         await _wait_for_created_manifest(
@@ -1674,7 +1707,11 @@ async def _create_and_activate_session(
             setup_deadline=setup_deadline,
         )
         await _within_setup_budget(
-            _verify_optional_harness_artifacts(handle, persisted_session),
+            _verify_optional_harness_artifacts(
+                handle,
+                persisted_session,
+                require_protocol=True,
+            ),
             setup_deadline,
         )
         ready_session = _ready_session(persisted_session, updated_at=datetime.now(UTC))
@@ -1778,13 +1815,45 @@ async def _capture_current_package(
         raise SessionActivationError("Sandbox content package could not be captured.") from None
 
 
+def _build_create_request(
+    runtime: SessionRuntimeBinding,
+    *,
+    source: SandboxCreateSource | None,
+    labels: SandboxProvisioningLabels,
+    setup_deadline: SetupDeadline,
+) -> SandboxCreateRequest:
+    if runtime.create_profile is not None:
+        return runtime.create_profile.build_request(
+            labels=labels,
+            remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
+            auto_suspend_seconds=runtime.auto_suspend_seconds,
+        )
+    if source is None:
+        raise SessionCreationUnavailableError(
+            "No runtime bootstrap source is available for new sandbox sessions."
+        )
+    return SandboxCreateRequest.create(
+        source=source,
+        labels=labels,
+        remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
+        auto_suspend_seconds=runtime.auto_suspend_seconds,
+        auto_suspend_mode="Disk",
+    )
+
+
 async def _verify_optional_harness_artifacts(
     handle: SandboxSessionHandle,
     session: DurableSessionRecord,
+    *,
+    require_protocol: bool,
 ) -> None:
-    """Validate optional harness artifacts without accepting malformed data."""
-    protocol_payload = await _read_optional_file(handle, HARNESS_PROTOCOL_PATH)
-    if protocol_payload is not None:
+    """Validate mandatory protocol capabilities and an optional checkpoint pointer."""
+    try:
+        protocol_payload = await handle.read_file(HARNESS_PROTOCOL_PATH)
+    except SandboxFileNotFoundError:
+        if require_protocol:
+            raise SessionReadinessArtifactError("protocol_version_mismatch") from None
+    else:
         try:
             protocol = _HarnessProtocolArtifact.model_validate(
                 decode_json_object(protocol_payload),
@@ -1800,6 +1869,8 @@ async def _verify_optional_harness_artifacts(
             raise SessionReadinessArtifactError("protocol_version_mismatch") from exc
         if protocol.protocol_version != session.protocol:
             raise SessionReadinessArtifactError("protocol_version_mismatch")
+        if protocol.capabilities != dict(REQUIRED_HARNESS_CAPABILITIES):
+            raise SessionReadinessArtifactError("capability_mismatch")
 
     pointer_payload = await _read_optional_file(handle, ATOMIC_CHECKPOINT_POINTER_PATH)
     if pointer_payload is not None:

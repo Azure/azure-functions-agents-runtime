@@ -1,0 +1,1 @@
+{"name":"delegation","capabilities":["delegation-v1"],"events":[{"type":"tool_start","data":{"tool_name":"delegate_specialist"}},{"type":"tool_end","data":{"tool_name":"delegate_specialist","success":true}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}

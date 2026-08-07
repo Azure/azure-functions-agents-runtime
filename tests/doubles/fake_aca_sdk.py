@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 from azure.core.credentials import AccessToken
@@ -39,17 +40,70 @@ class FakeSdkEgressPolicy:
 
     default_action: str
     traffic_inspection: str
+    host_rules: list[FakeSdkEgressHostRule] = field(default_factory=list)
+    rules: list[FakeSdkEgressRule] = field(default_factory=list)
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressHostRule:
+    pattern: str
+    action: str
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressRuleMatch:
+    host: str
+    path: str | None = None
+    methods: list[str] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressSecretRef:
+    secret_id: str
+    secret_key: str
+    format: str
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressHeaderValueRef:
+    secret_ref: FakeSdkEgressSecretRef
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressHeader:
+    operation: str
+    name: str
+    value: str | None = None
+    value_ref: FakeSdkEgressHeaderValueRef | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressRuleAction:
+    type: str
+    host: str | None = None
+    path: str | None = None
+    scheme: str | None = None
+    headers: list[FakeSdkEgressHeader] | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class FakeSdkEgressRule:
+    name: str
+    match: FakeSdkEgressRuleMatch
+    action: FakeSdkEgressRuleAction
 
 
 @dataclass(frozen=True, slots=True)
 class FakeSdkAutoSuspendPolicy:
-    auto_suspend_seconds: int
-    mode: str
+    enabled: bool = False
+    interval: int | None = None
+    mode: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
 class FakeSdkAutoDeletePolicy:
-    delete_interval_seconds: int
+    enabled: bool = False
+    delete_interval_seconds: int | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +158,7 @@ class FakeSdkSandboxSummary:
 class FakeSdkSnapshot:
     id: str
     sandbox_id: str | None = None
-    created_at: str | None = None
+    created_at_utc: str | None = None
 
 
 class FakeCredential:
@@ -152,8 +206,8 @@ class FakeSdkSandboxClient:
         self.stop_kwargs: dict[str, Any] | None = None
         self.delete_kwargs: dict[str, Any] | None = None
         self.lifecycle_policy = FakeSdkLifecyclePolicy(
-            auto_suspend=FakeSdkAutoSuspendPolicy(auto_suspend_seconds=300, mode="Disk"),
-            auto_delete=FakeSdkAutoDeletePolicy(delete_interval_seconds=90_300),
+            auto_suspend=FakeSdkAutoSuspendPolicy(enabled=True, interval=300, mode="Disk"),
+            auto_delete=FakeSdkAutoDeletePolicy(enabled=True, delete_interval_seconds=90_300),
         )
 
     async def list_files(self, path: str) -> FakeSdkDirListing:
@@ -205,8 +259,8 @@ class FakeSdkSandboxClient:
             stderr=result.stderr,
         )
 
-    async def get(self) -> None:
-        raise AssertionError("readiness must not trust advisory sandbox state")
+    async def get(self) -> SimpleNamespace:
+        return SimpleNamespace(lifecycle=self.lifecycle_policy)
 
     async def begin_stop(self, **kwargs: Any) -> FakePoller:
         self.stop_kwargs = kwargs
@@ -342,6 +396,13 @@ class FakeSdkEnvironment:
             sandbox_group_client=self.make_group_client,
             sandbox_client=self.make_sandbox_client,
             egress_policy=FakeSdkEgressPolicy,
+            egress_host_rule=FakeSdkEgressHostRule,
+            egress_rule=FakeSdkEgressRule,
+            egress_rule_match=FakeSdkEgressRuleMatch,
+            egress_rule_action=FakeSdkEgressRuleAction,
+            egress_header=FakeSdkEgressHeader,
+            egress_header_value_ref=FakeSdkEgressHeaderValueRef,
+            egress_secret_ref=FakeSdkEgressSecretRef,
             lifecycle_policy=FakeSdkLifecyclePolicy,
             auto_suspend_policy=FakeSdkAutoSuspendPolicy,
             auto_delete_policy=FakeSdkAutoDeletePolicy,

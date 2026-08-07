@@ -1035,11 +1035,9 @@ async def test_backend_retains_admitted_slot_when_acceptance_times_out(
     with pytest.raises(RunSubmissionIndeterminateError):
         await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
 
-    assert [call.operation for call in handle.calls[:3]] == [
-        "read_file",
-        "write_file",
-        "exec",
-    ]
+    operations = [call.operation for call in handle.calls]
+    assert operations.count("read_file") >= 3
+    assert operations.index("write_file") < operations.index("exec")
     assert store.adopted == []
     assert store.session is not None
     assert store.session.status == "running"
@@ -1066,7 +1064,9 @@ async def test_backend_releases_admitted_slot_when_request_write_fails(tmp_path:
     with pytest.raises(RunSubmissionDefinitiveFailureError):
         await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
 
-    assert [call.operation for call in handle.calls] == ["read_file", "write_file"]
+    operations = [call.operation for call in handle.calls]
+    assert operations[-1] == "write_file"
+    assert operations.count("read_file") >= 3
     assert len(store.adopted) == 1
     assert store.adopted[0].status == "failed"
     assert store.adopted[0].status_reason == "submission_failed"

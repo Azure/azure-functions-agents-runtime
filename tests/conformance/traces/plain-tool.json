@@ -1,0 +1,1 @@
+{"name":"plain-tool","capabilities":[],"events":[{"type":"tool_start","data":{"tool_name":"plain_tool"}},{"type":"tool_end","data":{"tool_name":"plain_tool","success":true}},{"type":"done","data":{"state":"succeeded"}}],"terminal_state":"succeeded"}
