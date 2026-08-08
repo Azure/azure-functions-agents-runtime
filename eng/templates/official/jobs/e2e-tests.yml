@@ -5,6 +5,9 @@ parameters:
   - name: PoolName
     type: string
     default: '1es-pool-azfunc'
+  - name: acaServiceConnection
+    type: string
+    default: 'saf-foundry-connection'
 
 jobs:
   - job: "E2ETests"
@@ -78,3 +81,105 @@ jobs:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
+
+  - job: "ACAHarnessEntrypointSmoke"
+    displayName: 'Run ACA harness entrypoint smoke test'
+    condition: in(variables['Build.Reason'], 'Schedule', 'Manual')
+    continueOnError: true
+
+    pool:
+      name: ${{ parameters.PoolName }}
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - bash: |
+          python --version
+        displayName: 'Check python version'
+      - bash: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -e ".[dev,aca_sandbox]"
+        displayName: 'Install ACA smoke dependencies'
+
+      - task: AzureCLI@2
+        displayName: 'Verify ACA sandbox group is reachable'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            : "${AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID:?ACA sandbox group resource ID is required}"
+            az rest --method get \
+              --url "https://management.azure.com${AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID}?api-version=2026-02-01-preview" \
+              --query '{id:id, location:location}' \
+              --output json
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
+          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION: $(ACA_SANDBOX_REGION)
+
+      - task: AzureCLI@2
+        displayName: 'Run ACA harness entrypoint smoke test'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            python -m pytest -m live_aca tests/live/test_aca_harness_entrypoint_smoke.py -v \
+              -o log_cli=true -o log_cli_level=INFO
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE: '1'
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
+          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION: $(ACA_SANDBOX_REGION)
+
+      - task: AzureCLI@2
+        displayName: 'Reap ACA smoke sandboxes'
+        condition: always()
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            owner_hash="o1-$(printf 'c%.0s' {1..52})"
+            app_hash="a1-$(printf 'd%.0s' {1..52})"
+            export owner_hash app_hash
+            python - <<'PY'
+            import asyncio
+            import os
+
+            from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
+
+
+            async def main() -> None:
+                adapter = await AcaSandboxAdapter.open(
+                    os.environ["AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"]
+                )
+                try:
+                    labels = {
+                        "owner_kind": "aca_smoke_ci",
+                        "owner_hash": os.environ["owner_hash"],
+                        "app_hash": os.environ["app_hash"],
+                    }
+                    sandboxes = await adapter.list_sandboxes(labels=labels)
+                    for sandbox in sandboxes:
+                        await adapter.delete_sandbox(sandbox.sandbox_id)
+                    print(f"Reaped {len(sandboxes)} ACA smoke sandbox(es).")
+                finally:
+                    await adapter.close()
+
+
+            asyncio.run(main())
+            PY
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
