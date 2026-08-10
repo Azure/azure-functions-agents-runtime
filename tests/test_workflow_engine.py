@@ -75,7 +75,7 @@ def _registered_function(name: str, *, catalog=None) -> Callable[..., Any]:
 async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, str, float]] = []
+    calls: list[tuple[str, str, float, str]] = []
 
     async def run_leaf(
         resolved: ResolvedAgent,
@@ -83,8 +83,9 @@ async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
         task: str,
         *,
         timeout: float,
+        execution_role: str,
     ) -> str:
-        calls.append((resolved.slug, task, timeout))
+        calls.append((resolved.slug, task, timeout, execution_role))
         return "PR is ready to merge."
 
     monkeypatch.setattr(engine, "run_leaf_agent_task", run_leaf)
@@ -109,7 +110,14 @@ async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
             "text": "PR is ready to merge.",
         },
     }
-    assert calls == [("pr_status_analyst", "Analyze PR 117.", 12.0)]
+    assert calls == [
+        (
+            "pr_status_analyst",
+            "Analyze PR 117.",
+            12.0,
+            "workflow_subagent",
+        )
+    ]
 
 
 @pytest.mark.asyncio
