@@ -13,9 +13,7 @@ from pathlib import Path
 
 from ..execution.backend import RunError, RunResult
 from ..journal_paths import (
-    HARNESS_CANCEL_DIAGNOSTIC_PREFIX,
     JOURNAL_ROOT_PATH,
-    LAUNCH_DIAGNOSTIC_PREFIX,
     SANDBOX_APPLICATION_PATH,
 )
 from ..runner import run_agent_events
@@ -35,21 +33,22 @@ from .watchdog import Watchdog, WatchdogTimeoutError
 _MAX_WORKING_FILE_BYTES = 4 * 1024 * 1024
 _MAX_WORKING_TREE_BYTES = 16 * 1024 * 1024
 _MAX_CONVERSATION_BYTES = 4 * 1024 * 1024
+# Greppable tag on the stderr the controller captures when a failure happens
+# before the first journal write. Purely a human-facing marker; nothing parses it.
+_LAUNCH_DIAGNOSTIC_PREFIX = "azfn-agents-harness-launch-error: "
 
 
-def _emit_launch_diagnostic(prefix: str, message: str) -> None:
-    """Emit a short, greppable prefixed marker to stderr for a pre-return trace.
+def _emit_launch_diagnostic(message: str) -> None:
+    """Emit a short, greppable marker to stderr before returning without a journal.
 
     Failures before the first journal write leave no journal trace, so the
-    controller captures this process's stderr into a per-run sidecar. Only a
-    repo-authored, secret-free message is written here: never a traceback,
-    environment values, or envelope contents. The prefix selects whether the
-    controller may treat the trace as determinate launch-failure evidence
-    (LAUNCH_DIAGNOSTIC_PREFIX) or as a non-promoting note
-    (HARNESS_CANCEL_DIAGNOSTIC_PREFIX).
+    controller captures this process's stderr into a per-run sidecar and logs it
+    for operators. Only a repo-authored, secret-free message is written here:
+    never a traceback, environment values, or envelope contents. The controller
+    does not parse this text; it exists so a human can see why a launch died.
     """
     try:
-        sys.stderr.write(f"{prefix}{message}\n")
+        sys.stderr.write(f"{_LAUNCH_DIAGNOSTIC_PREFIX}{message}\n")
         sys.stderr.flush()
     except Exception:
         return
@@ -75,13 +74,13 @@ def main(argv: list[str] | None = None) -> int:
         return asyncio.run(_run(arguments.run_id, arguments.journal_root, arguments.app_root))
     except asyncio.CancelledError:
         # Cancellation can arrive after the harness has journaled acceptance (the
-        # cancellation handler is installed post-acceptance), so this is not
-        # launch-failure evidence. Emit a distinct, non-promoting marker so a
-        # canceled healthy run is never promoted to a determinate launch failure.
-        _emit_launch_diagnostic(HARNESS_CANCEL_DIAGNOSTIC_PREFIX, "harness canceled.")
+        # Cancellation here is controller-driven and arrives post-acceptance, so
+        # it is not launch-failure evidence; it is recorded only so the reason is
+        # visible to a human reading the captured stderr.
+        _emit_launch_diagnostic("harness canceled.")
         return 1
     except HarnessJournalError as exc:
-        _emit_launch_diagnostic(LAUNCH_DIAGNOSTIC_PREFIX, str(exc))
+        _emit_launch_diagnostic(str(exc))
         return 1
 
 

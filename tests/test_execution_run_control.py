@@ -22,8 +22,6 @@ from azure_functions_agents.execution.run_control import (
     _launch_command,
 )
 from azure_functions_agents.journal_paths import (
-    HARNESS_CANCEL_DIAGNOSTIC_PREFIX,
-    LAUNCH_DIAGNOSTIC_PREFIX,
     LAUNCH_STDERR_FILENAME,
     inbox_path,
     launch_stderr_path,
@@ -186,57 +184,40 @@ async def test_launch_stderr_sidecar_is_excluded_from_event_enumeration() -> Non
 
 
 @pytest.mark.asyncio
-async def test_submit_promotes_to_definitive_when_launch_stderr_has_the_harness_marker() -> None:
+async def test_submit_stays_indeterminate_even_when_launch_stderr_reports_a_failure() -> None:
     transport = FakeSandboxTransport()
     control = SandboxRunControl(event_poll_interval_seconds=0.001)
 
     async def emit_launch_error(_command: str) -> None:
         transport.seed_file(
             launch_stderr_path("run-1"),
-            f"{LAUNCH_DIAGNOSTIC_PREFIX}Sandbox run inbox is missing.\n".encode(),
+            b"azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n",
         )
 
     transport.exec_hook = emit_launch_error
 
-    with pytest.raises(RunSubmissionDefinitiveFailureError):
+    # Captured stderr is a diagnostic for operators, never a classification
+    # signal. A detached harness may still be alive when it writes to stderr, so
+    # retiring the run here could orphan a live process; the reconciler settles
+    # the true outcome instead.
+    with pytest.raises(RunSubmissionIndeterminateError):
         await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
 
 
 @pytest.mark.asyncio
-async def test_submit_keeps_indeterminate_when_launch_stderr_lacks_the_harness_marker() -> None:
+async def test_submit_keeps_indeterminate_when_launch_stderr_has_unrelated_output() -> None:
     transport = FakeSandboxTransport()
     control = SandboxRunControl(event_poll_interval_seconds=0.001)
 
     async def emit_unmarked_stderr(_command: str) -> None:
         # A healthy but slow harness can spill benign startup warnings onto the
-        # same stderr sidecar before it journals acceptance. Without the harness
-        # marker this is not proof of a failed launch, so it must stay
-        # indeterminate rather than retire a possibly-live detached run.
+        # same stderr sidecar before it journals acceptance.
         transport.seed_file(
             launch_stderr_path("run-1"),
             b"DeprecationWarning: legacy import path is deprecated\n",
         )
 
     transport.exec_hook = emit_unmarked_stderr
-
-    with pytest.raises(RunSubmissionIndeterminateError):
-        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
-
-
-@pytest.mark.asyncio
-async def test_submit_keeps_indeterminate_when_launch_stderr_has_only_the_cancel_marker() -> None:
-    transport = FakeSandboxTransport()
-    control = SandboxRunControl(event_poll_interval_seconds=0.001)
-
-    async def emit_cancel_marker(_command: str) -> None:
-        # Cancellation can arrive after the harness journals acceptance, so its
-        # marker must never promote a possibly-live run to a terminal failure.
-        transport.seed_file(
-            launch_stderr_path("run-1"),
-            f"{HARNESS_CANCEL_DIAGNOSTIC_PREFIX}harness canceled.\n".encode(),
-        )
-
-    transport.exec_hook = emit_cancel_marker
 
     with pytest.raises(RunSubmissionIndeterminateError):
         await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
@@ -266,14 +247,14 @@ async def test_submit_does_not_leak_launch_stderr_in_the_exception_message() -> 
         transport.seed_file(
             launch_stderr_path("run-1"),
             (
-                f"{LAUNCH_DIAGNOSTIC_PREFIX}Sandbox run inbox is missing.\n"
+                "azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n"
                 f"Traceback (most recent call last):\nRuntimeError: {sandbox_secret}"
             ).encode(),
         )
 
     transport.exec_hook = emit_secret_bearing_stderr
 
-    with pytest.raises(RunSubmissionDefinitiveFailureError) as exc_info:
+    with pytest.raises(RunSubmissionIndeterminateError) as exc_info:
         await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
 
     message = str(exc_info.value)

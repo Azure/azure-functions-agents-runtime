@@ -513,8 +513,7 @@ def test_main_emits_controlled_stderr_diagnostic_on_pre_accept_failure(
 
     assert exit_code == 1
     captured = capsys.readouterr()
-    assert harness_main.LAUNCH_DIAGNOSTIC_PREFIX in captured.err
-    assert harness_main.HARNESS_CANCEL_DIAGNOSTIC_PREFIX not in captured.err
+    assert harness_main._LAUNCH_DIAGNOSTIC_PREFIX in captured.err
     assert "identifier" in captured.err
     assert "Traceback" not in captured.err
 
@@ -537,8 +536,8 @@ def test_main_emits_non_promoting_marker_on_cancellation(
 
     assert exit_code == 1
     captured = capsys.readouterr()
-    # Cancellation must not carry the promotion marker, or a canceled healthy run
-    # would be misclassified as a failed launch.
-    assert harness_main.HARNESS_CANCEL_DIAGNOSTIC_PREFIX in captured.err
-    assert harness_main.LAUNCH_DIAGNOSTIC_PREFIX not in captured.err
+    # Cancellation is recorded so a human can see why the run stopped; nothing
+    # parses this text, so it carries the same tag as other launch diagnostics.
+    assert harness_main._LAUNCH_DIAGNOSTIC_PREFIX in captured.err
+    assert "canceled" in captured.err
     assert "Traceback" not in captured.err

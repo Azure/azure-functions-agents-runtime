@@ -29,7 +29,6 @@ from ..journal_paths import (
     JOURNAL_ROOT_PATH as _JOURNAL_ROOT_PATH,
 )
 from ..journal_paths import (
-    LAUNCH_DIAGNOSTIC_PREFIX,
     LAUNCH_STDERR_FILENAME,
     inbox_path,
     launch_stderr_path,
@@ -299,8 +298,7 @@ class SandboxRunControl:
         # reports exit code 0 regardless of whether the backgrounded harness
         # actually started. This guard therefore cannot fire for the current
         # command form; it is retained as defense-in-depth in case that form ever
-        # changes. Determinate launch failure is instead proven by the harness's
-        # own pre-acceptance failure marker in the captured launch stderr below.
+        # changes.
         if launch_result.exit_code != 0:
             raise RunSubmissionDefinitiveFailureError(
                 "Run launch failed before harness acceptance."
@@ -316,26 +314,18 @@ class SandboxRunControl:
                 # Launch stderr originates in the untrusted sandbox and may embed
                 # environment values, so it is recorded for operators but never
                 # placed in the caller-visible exception message.
+                #
+                # The outcome stays indeterminate even when stderr is present. The
+                # detached harness has no configured log handler, so a healthy but
+                # slow run can spill benign import or startup warnings here, and
+                # retiring such a run as a terminal failure would orphan a live
+                # process. The reconciler settles the true outcome later; this
+                # capture exists to make the reason visible, not to classify it.
                 logger.error(
                     "Sandbox harness emitted launch stderr before acceptance for run %s: %s",
                     normalized_run_id,
                     launch_stderr,
                 )
-            if LAUNCH_DIAGNOSTIC_PREFIX in launch_stderr:
-                # The harness writes this marker only from its pre-acceptance
-                # journal-failure handler, before it could journal acceptance, so
-                # its presence is determinate proof the launch failed. Controller-
-                # driven cancellation uses a separate, non-promoting marker because
-                # it can arrive after acceptance, so a canceled healthy run is never
-                # promoted here. Bare non-empty stderr is likewise not promoted: the
-                # detached harness has no configured log handler, so a healthy but
-                # slow run can spill benign import or startup warnings onto stderr
-                # before acceptance, and retiring such a run as a terminal failure
-                # would orphan a live detached process. Unmarked output stays
-                # indeterminate so the reconciler can settle it later.
-                raise RunSubmissionDefinitiveFailureError(
-                    "Run launch failed before harness acceptance."
-                ) from exc
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but journal acceptance was not confirmed."
             ) from exc
