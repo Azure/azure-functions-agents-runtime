@@ -60,6 +60,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import os
 import sys
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -82,7 +83,7 @@ from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
 from .client_manager import get_client_manager
 from .config import ResolvedAgent, SubagentRef
-from .config.env import runtime_env_value
+from .config.env import runtime_backend_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .discovery.mcp import discover_mcp_servers
 from .discovery.tools import discover_user_tools
@@ -109,7 +110,7 @@ if TYPE_CHECKING:
 
 
 def _runtime_timeout_default() -> float:
-    env_timeout = runtime_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
+    env_timeout = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_TIMEOUT_SECONDS")
     if env_timeout:
         try:
             return float(env_timeout)
@@ -122,7 +123,7 @@ def _runtime_timeout_default() -> float:
 
 
 DEFAULT_TIMEOUT = _runtime_timeout_default()
-DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
+DEFAULT_MODEL: str | None = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or None
 
 # Validated session-id pattern. The id is used as a filename component, so
 # refuse anything that could escape the session directory. Shared with the
@@ -190,7 +191,12 @@ def _resolve_sessions_dir() -> Path:
     the *directory* path — :class:`FileHistoryProvider` itself appends
     ``{session_id}.jsonl`` per session.
     """
-    base = Path(resolve_config_dir()).resolve() / "agent-sessions"
+    sandbox_session_directory = os.environ.get("AZURE_FUNCTIONS_AGENTS_SESSION_DIR")
+    base = (
+        Path(sandbox_session_directory).resolve()
+        if sandbox_session_directory
+        else Path(resolve_config_dir()).resolve() / "agent-sessions"
+    )
     base.mkdir(parents=True, exist_ok=True)
     return base
 
@@ -215,10 +221,10 @@ def _build_history_provider() -> Any:
 def _build_chat_options_from_environment() -> dict[str, Any] | None:
     """Build provider chat options from supported runtime environment variables."""
     reasoning: dict[str, str] = {}
-    effort = runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT")
+    effort = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT")
     if effort:
         reasoning["effort"] = effort
-    summary = runtime_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY")
+    summary = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY")
     if summary:
         reasoning["summary"] = summary
     if not reasoning:
@@ -924,11 +930,11 @@ async def run_agent(
 
 
 # ---------------------------------------------------------------------------
-# Public API: run_agent_stream (SSE)
+# Internal structured event stream
 # ---------------------------------------------------------------------------
 
 
-async def run_agent_stream(
+async def _run_agent_event_stream(
     prompt: str,
     *,
     instructions: str | None = None,
@@ -947,8 +953,8 @@ async def run_agent_stream(
     web_request_tools: list[Any] | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
-) -> AsyncIterator[str]:
-    """SSE-formatted async generator yielding ``data: {...}\\n\\n`` lines.
+) -> AsyncIterator[dict[str, object]]:
+    """Yield the stable runner event vocabulary as structured documents.
 
     Tool-selection semantics match :func:`run_agent`:
 
@@ -966,10 +972,9 @@ async def run_agent_stream(
       directories. ``None`` or ``[]`` disables skills.
     * ``subagents``/``catalog`` add ``delegate_<slug>`` tools (FRD 0007), one
       per reference — see :func:`run_agent`. Delegate calls surface through
-      the same ``tool_start``/``tool_end`` events as any other tool call; the
-      per-run delegate-error count is not surfaced in the SSE vocabulary
-      itself (only in :class:`AgentResult` for the non-streaming path), but
-      it IS applied to this run's own ``agent.run {name}`` span as
+      the same ``tool_start``/``tool_end`` events as any other tool call. The
+      terminal ``done`` event carries the per-run delegate-error count for
+      journal consumers, and it is applied to this run's own ``agent.run {name}`` span as
       ``af.agent.tool_error_count`` once the stream completes, mirroring
       what the non-streaming path does for :class:`AgentResult`.
     * To fully disable all tools from a direct API call, pass
@@ -1015,10 +1020,10 @@ async def run_agent_stream(
         )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
-        yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+        yield {"type": "error", "content": str(exc)}
         return
 
-    yield f"data: {json.dumps({'type': 'session', 'session_id': resolved_id})}\n\n"
+    yield {"type": "session", "session_id": resolved_id}
 
     # `run_agent_stream` opens its *own* run-level span rather than relying on
     # a caller-provided one (B3): unlike the non-streaming path — where
@@ -1081,22 +1086,24 @@ async def run_agent_stream(
 
                 async def emit_tool_start_if_ready(
                     call_id: str, event: dict[str, Any]
-                ) -> AsyncIterator[str]:
+                ) -> AsyncIterator[dict[str, object]]:
                     if call_id in emitted_tool_calls:
                         return
                     if not _is_complete_json_argument(event.get("arguments")):
                         return
                     emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield event
 
-                async def emit_tool_start_before_result(call_id: str | None) -> AsyncIterator[str]:
+                async def emit_tool_start_before_result(
+                    call_id: str | None,
+                ) -> AsyncIterator[dict[str, object]]:
                     if call_id is None or call_id in emitted_tool_calls:
                         return
                     event = pending_tool_calls.get(call_id)
                     if event is None:
                         return
                     emitted_tool_calls.add(call_id)
-                    yield f"data: {json.dumps(event)}\n\n"
+                    yield event
 
                 # B2b: `stream`/`stream_settled` are declared here, outside
                 # the `try:` below, so the `finally:` clause added at the
@@ -1164,17 +1171,15 @@ async def run_agent_stream(
                             if ctype == "text":
                                 text = _content_text(item)
                                 if text:
-                                    yield f"data: {json.dumps({'type': 'delta', 'content': text})}\n\n"
+                                    yield {"type": "delta", "content": text}
                             elif ctype == "text_reasoning":
                                 text = _content_text(item)
                                 if text:
-                                    yield (
-                                        f"data: {json.dumps({'type': 'intermediate', 'content': text})}\n\n"
-                                    )
+                                    yield {"type": "intermediate", "content": text}
                             elif ctype == "function_call":
                                 call_id, event = buffer_function_call(item)
                                 if call_id is None:
-                                    yield f"data: {json.dumps(event)}\n\n"
+                                    yield event
                                 else:
                                     async for output in emit_tool_start_if_ready(call_id, event):
                                         yield output
@@ -1187,14 +1192,19 @@ async def run_agent_stream(
                                 result_event = _function_result_event(item)
                                 if _looks_like_tool_error(result_event.get("result")):
                                     ordinary_tool_error_count += 1
-                                yield f"data: {json.dumps(result_event, default=str)}\n\n"
+                                yield result_event
                             # Unknown content types are intentionally ignored — the
                             # SSE vocabulary is fixed and the UI doesn't render them.
                     for call_id, event in pending_tool_calls.items():
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
-                            yield f"data: {json.dumps(event)}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                            yield event
+                    yield {
+                        "type": "done",
+                        "delegate_error_count": (
+                            delegate_error_tracker.count if delegate_error_tracker else 0
+                        ),
+                    }
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
                 except TimeoutError as exc:
@@ -1210,7 +1220,7 @@ async def run_agent_stream(
                     span.record_exception(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
-                    yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                    yield {"type": "error", "content": f"Timeout after {timeout}s"}
                 except Exception as exc:
                     if not stream_settled:
                         # Same reasoning as the `TimeoutError` branch above:
@@ -1224,7 +1234,7 @@ async def run_agent_stream(
                     logger.error("Agent stream failed: %s", exc, exc_info=True)
                     span.set_attribute("af.agent.outcome", "error")
                     span.record_exception(exc, fault_domain=FaultDomain.UNKNOWN)
-                    yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
+                    yield {"type": "error", "content": str(exc)}
                 finally:
                     if not stream_settled:
                         # B2b: reached only when this async generator itself
@@ -1260,20 +1270,70 @@ async def run_agent_stream(
             span.record_exception(
                 TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
             )
-            yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+            yield {"type": "error", "content": f"Timeout after {timeout}s"}
         finally:
             # Retained through generator completion regardless of outcome
             # (success/timeout/error) so the streaming surface's delegate
             # errors are always accounted for, matching what
             # `AgentResult.delegate_error_count` does for the non-streaming
-            # path (B3). Ordinary (non-delegate) tool-call failures detected
-            # in the `function_result` handling above are folded in too
-            # (M3): the delegate tracker only counts specialist-delegation
-            # failures, so a failed sandbox/web_request tool call with no
-            # delegate failure at all would otherwise report zero even
-            # though a tool genuinely failed.
+            # path (B3). Ordinary tool failures remain telemetry-only, while
+            # the terminal wire field stays limited to delegation failures.
             span.set_attribute(
                 "af.agent.tool_error_count",
                 (delegate_error_tracker.count if delegate_error_tracker else 0)
                 + ordinary_tool_error_count,
             )
+
+
+async def run_agent_events(
+    prompt: str,
+    **kwargs: Any,
+) -> AsyncIterator[dict[str, object]]:
+    """Yield one shared structured runner stream for sandbox and HTTP adapters."""
+
+    async for event in _run_agent_event_stream(prompt, **kwargs):
+        yield event
+
+
+async def run_agent_stream(
+    prompt: str,
+    *,
+    instructions: str | None = None,
+    timeout: float | None = None,
+    tools: list[Any] | None = None,
+    mcp_tools: list[Any] | None = None,
+    skill_paths: list[Path] | None = None,
+    model: str | None = None,
+    session_id: str | None = None,
+    sandbox_tools: list[Any] | None = None,
+    system_addendum: str | None = None,
+    workflow_enabled: bool = False,
+    workflow_durable_client: Any | None = None,
+    agent_name: str | None = None,
+    display_name: str | None = None,
+    web_request_tools: list[Any] | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+) -> AsyncIterator[str]:
+    """Render the shared structured runner stream as the existing SSE vocabulary."""
+
+    async for event in run_agent_events(
+        prompt,
+        instructions=instructions,
+        timeout=timeout,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        model=model,
+        session_id=session_id,
+        sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        agent_name=agent_name,
+        display_name=display_name,
+        web_request_tools=web_request_tools,
+        subagents=subagents,
+        catalog=catalog,
+    ):
+        yield f"data: {json.dumps(event, default=str)}\n\n"

@@ -22,6 +22,7 @@ class AtomicCommitCorruptError(AtomicCommitError):
 
 type FaultHook = Callable[[str], None]
 type FsyncHook = Callable[[int], None]
+WORKING_DIRECTORY_NAME = "working"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,8 +63,9 @@ class AtomicCommitStore:
         checkpoint = self._checkpoints_root / name
         staging.mkdir()
         self._write_durable(staging / "conversation.json", conversation)
+        working_root = staging / WORKING_DIRECTORY_NAME
         for relative_path, content in working_files.items():
-            self._write_working_file(staging, relative_path, content)
+            self._write_working_file(working_root, relative_path, content)
         self._sync_directory(staging)
         self._fault("after_staging_fsync")
 
@@ -113,10 +115,10 @@ class AtomicCommitStore:
         self._staging_root.mkdir(exist_ok=True)
         self._checkpoints_root.mkdir(exist_ok=True)
 
-    def _write_working_file(self, staging: Path, relative_path: str, content: bytes) -> None:
+    def _write_working_file(self, working_root: Path, relative_path: str, content: bytes) -> None:
         if not isinstance(content, bytes):
             raise TypeError("working file content must be bytes")
-        target = _safe_child(staging, relative_path)
+        target = _safe_child(working_root, relative_path)
         target.parent.mkdir(parents=True, exist_ok=True)
         self._write_durable(target, content)
 

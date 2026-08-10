@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, get_args
 
 _MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
 
@@ -283,8 +283,11 @@ class PresetSource:
 
 
 type SandboxCreateSource = DiskSource | DiskIdSource | PresetSource
-type SandboxEgressInspection = Literal["Full", "Partial"]
+type SandboxEgressInspection = Literal["Full"]
 type SandboxAutoSuspendMode = Literal["Memory", "Disk"]
+type SandboxEgressHostAction = Literal["Allow", "Deny"]
+type SandboxEgressRuleActionType = Literal["Allow", "Deny", "Transform", "Rewrite"]
+type SandboxEgressHeaderOperation = Literal["Set", "Insert", "Remove"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -345,28 +348,206 @@ class SandboxProvisioningLabels:
 
 
 @dataclass(frozen=True, slots=True)
-class SandboxEgressPolicy:
-    """A safe egress-policy request accepted by the sandbox adapter.
+class SandboxEgressHostRule:
+    """One host-only Allow or Deny egress rule."""
 
-    Construct with :meth:`create` so values are validated once.
-    """
+    host: str
+    action: SandboxEgressHostAction
+
+    @classmethod
+    def create(cls, *, host: str, action: SandboxEgressHostAction) -> SandboxEgressHostRule:
+        if action not in {"Allow", "Deny"}:
+            raise SandboxProvisioningError("Sandbox egress host rules support only Allow or Deny.")
+        return cls(host=_normalize_egress_host(host), action=action)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEgressSecretRef:
+    """A customer-provisioned secret reference for an egress header."""
+
+    secret_id: str = field(repr=False)
+    secret_key: str = field(repr=False)
+    format: str = field(repr=False)
+
+    @classmethod
+    def create(
+        cls, *, secret_id: str, secret_key: str, format: str = "{value}"
+    ) -> SandboxEgressSecretRef:
+        _require_nonempty_string(secret_id, "egress secret_id")
+        _require_nonempty_string(secret_key, "egress secret_key")
+        if not isinstance(format, str) or not format or "{value}" not in format:
+            raise SandboxProvisioningError(
+                "Sandbox egress secret format must be non-empty and contain {value}."
+            )
+        return cls(secret_id=secret_id, secret_key=secret_key, format=format)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEgressHeader:
+    """One static or secret-backed header transformation."""
+
+    operation: SandboxEgressHeaderOperation
+    name: str
+    value: str | None = field(default=None, repr=False)
+    secret_ref: SandboxEgressSecretRef | None = field(default=None, repr=False)
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        operation: SandboxEgressHeaderOperation,
+        name: str,
+        value: str | None = None,
+        secret_ref: SandboxEgressSecretRef | None = None,
+    ) -> SandboxEgressHeader:
+        if operation not in get_args(SandboxEgressHeaderOperation.__value__):
+            raise SandboxProvisioningError("Sandbox egress header operation is invalid.")
+        _require_nonempty_string(name, "egress header name")
+        if operation == "Remove":
+            if value is not None or secret_ref is not None:
+                raise SandboxProvisioningError(
+                    "Sandbox Remove header operations must not include a value."
+                )
+            return cls(operation=operation, name=name)
+        if (value is None) == (secret_ref is None):
+            raise SandboxProvisioningError(
+                "Sandbox egress header operations require exactly one value source."
+            )
+        if value is not None and not isinstance(value, str):
+            raise SandboxProvisioningError("Sandbox egress header values must be strings.")
+        return cls(operation=operation, name=name, value=value, secret_ref=secret_ref)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEgressRuleMatch:
+    """The provider-neutral HTTP request shape matched by an ordered rule."""
+
+    host: str
+    path: str | None = None
+    methods: tuple[str, ...] = ()
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        host: str,
+        path: str | None = None,
+        methods: Iterable[str] = (),
+    ) -> SandboxEgressRuleMatch:
+        return cls(
+            host=_normalize_egress_host(host),
+            path=_normalize_egress_path(path),
+            methods=_normalize_egress_methods(methods),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEgressRuleAction:
+    """The operation applied after an ordered rule matches."""
+
+    type: SandboxEgressRuleActionType
+    host: str | None = None
+    path: str | None = None
+    scheme: str | None = None
+    headers: tuple[SandboxEgressHeader, ...] = ()
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        type: SandboxEgressRuleActionType,
+        host: str | None = None,
+        path: str | None = None,
+        scheme: str | None = None,
+        headers: Iterable[SandboxEgressHeader] = (),
+    ) -> SandboxEgressRuleAction:
+        if type not in get_args(SandboxEgressRuleActionType.__value__):
+            raise SandboxProvisioningError("Sandbox egress rule action is invalid.")
+        normalized_headers = tuple(headers)
+        if not all(isinstance(header, SandboxEgressHeader) for header in normalized_headers):
+            raise SandboxProvisioningError("Sandbox egress rule headers must be typed values.")
+        normalized_host = _normalize_egress_host(host) if host is not None else None
+        normalized_path = _normalize_egress_path(path)
+        normalized_scheme = _normalize_egress_scheme(scheme)
+        changes_request = any(
+            value is not None
+            for value in (normalized_host, normalized_path, normalized_scheme)
+        ) or bool(normalized_headers)
+        if type in {"Allow", "Deny"} and changes_request:
+            raise SandboxProvisioningError(
+                "Sandbox Allow and Deny rules must not include transforms."
+            )
+        if type in {"Transform", "Rewrite"} and not changes_request:
+            raise SandboxProvisioningError(
+                "Sandbox Transform and Rewrite rules must change a request."
+            )
+        return cls(
+            type=type,
+            host=normalized_host,
+            path=normalized_path,
+            scheme=normalized_scheme,
+            headers=normalized_headers,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEgressRule:
+    """One ordered full-inspection egress rule."""
+
+    name: str
+    match: SandboxEgressRuleMatch
+    action: SandboxEgressRuleAction
+
+    @classmethod
+    def create(
+        cls,
+        *,
+        name: str,
+        match: SandboxEgressRuleMatch,
+        action: SandboxEgressRuleAction,
+    ) -> SandboxEgressRule:
+        _require_nonempty_string(name, "egress rule name")
+        if not isinstance(match, SandboxEgressRuleMatch):
+            raise SandboxProvisioningError("Sandbox egress rule match must be typed.")
+        if not isinstance(action, SandboxEgressRuleAction):
+            raise SandboxProvisioningError("Sandbox egress rule action must be typed.")
+        return cls(name=name, match=match, action=action)
+
+
+@dataclass(frozen=True, slots=True)
+class SandboxEgressPolicy:
+    """A safe egress-policy request accepted by the sandbox adapter."""
 
     default_action: Literal["Deny"] = "Deny"
     traffic_inspection: SandboxEgressInspection = "Full"
+    host_rules: tuple[SandboxEgressHostRule, ...] = ()
+    rules: tuple[SandboxEgressRule, ...] = ()
 
     @classmethod
     def create(
         cls,
         default_action: Literal["Deny"] = "Deny",
         traffic_inspection: SandboxEgressInspection = "Full",
+        host_rules: Iterable[SandboxEgressHostRule] = (),
+        rules: Iterable[SandboxEgressRule] = (),
     ) -> SandboxEgressPolicy:
         if default_action != "Deny":
             raise SandboxProvisioningError("Sandbox egress default_action must be Deny.")
-        if traffic_inspection not in {"Full", "Partial"}:
-            raise SandboxProvisioningError(
-                "Sandbox egress traffic_inspection must be Full or Partial."
-            )
-        return cls(default_action=default_action, traffic_inspection=traffic_inspection)
+        if traffic_inspection != "Full":
+            raise SandboxProvisioningError("Sandbox egress traffic_inspection must be Full.")
+        normalized_host_rules = tuple(host_rules)
+        normalized_rules = tuple(rules)
+        if not all(isinstance(rule, SandboxEgressHostRule) for rule in normalized_host_rules):
+            raise SandboxProvisioningError("Sandbox egress host rules must be typed values.")
+        if not all(isinstance(rule, SandboxEgressRule) for rule in normalized_rules):
+            raise SandboxProvisioningError("Sandbox egress rules must be typed values.")
+        _validate_host_rule_order(normalized_host_rules)
+        return cls(
+            default_action=default_action,
+            traffic_inspection=traffic_inspection,
+            host_rules=normalized_host_rules,
+            rules=normalized_rules,
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -543,29 +724,74 @@ def _require_provider_label_value(value: object, field_name: str) -> str:
     return label_value
 
 
-def _is_controller_credential_key(key: str) -> bool:
-    normalized = key.upper()
-    return (
-        normalized.startswith(("AZURE_", "AZUREWEBJOBS", "IDENTITY_", "MSI_"))
-        or "CONNECTION_STRING" in normalized
-        or normalized.endswith(("_ACCOUNT_KEY", "_SAS_TOKEN"))
-    )
-
-
 def _validate_create_environment(environment: Mapping[str, str]) -> Mapping[str, str]:
-    """Reject non-string values and Azure/state credential-shaped keys, then freeze."""
+    """Validate string environment values and return an immutable copy."""
 
     validated: dict[str, str] = {}
     for key, value in environment.items():
         _require_nonempty_string(key, "environment key")
         if not isinstance(value, str):
             raise SandboxProvisioningError("Sandbox environment values must be strings.")
-        if _is_controller_credential_key(key):
-            raise SandboxProvisioningError(
-                "Sandbox environment must not contain Azure or state credentials."
-            )
         validated[key] = value
     return MappingProxyType(validated)
+
+
+def _normalize_egress_host(value: object) -> str:
+    host = _require_nonempty_string(value, "egress host").strip().casefold()
+    if (
+        host.startswith(".")
+        or "/" in host
+        or "://" in host
+        or any(character.isspace() for character in host)
+    ):
+        raise SandboxProvisioningError("Sandbox egress host has an invalid shape.")
+    return host
+
+
+def _normalize_egress_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.startswith("/") or "\x00" in value:
+        raise SandboxProvisioningError("Sandbox egress path must start with /.")
+    return value
+
+
+def _normalize_egress_methods(values: Iterable[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise SandboxProvisioningError("Sandbox egress methods must be non-empty strings.")
+        method = value.strip().upper()
+        if method not in normalized:
+            normalized.append(method)
+    return tuple(normalized)
+
+
+def _normalize_egress_scheme(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str) or value.casefold() not in {"http", "https"}:
+        raise SandboxProvisioningError("Sandbox egress scheme must be http or https.")
+    return value.casefold()
+
+
+def _validate_host_rule_order(rules: tuple[SandboxEgressHostRule, ...]) -> None:
+    for index, earlier in enumerate(rules):
+        if earlier.action != "Allow":
+            continue
+        for later in rules[index + 1 :]:
+            if later.action == "Deny" and _host_rule_covers(earlier.host, later.host):
+                raise SandboxProvisioningError(
+                    "A broad sandbox egress Allow host rule must not shadow a Deny rule."
+                )
+
+
+def _host_rule_covers(broader: str, narrower: str) -> bool:
+    return (
+        broader == "*"
+        or broader == narrower
+        or (broader.startswith("*.") and narrower.endswith(broader[1:]))
+    )
 
 
 def _validate_labels(labels: Mapping[str, str]) -> dict[str, str]:

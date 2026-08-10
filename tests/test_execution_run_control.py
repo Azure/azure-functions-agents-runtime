@@ -20,6 +20,7 @@ from azure_functions_agents.execution.run_control import (
     RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
+from azure_functions_agents.journal_paths import inbox_path
 from azure_functions_agents.transport.transport_models import SandboxExecResult
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
@@ -87,7 +88,7 @@ async def test_submit_waits_for_the_harness_to_journal_acceptance() -> None:
         "exec",
         "read_file",
     ]
-    inbox = json.loads(await transport.read_file("/var/lib/azure-functions-agents/inbox/run-1.json"))
+    inbox = json.loads(await transport.read_file(inbox_path("run-1")))
     assert inbox == {
         "agent_name": "main",
         "prompt": "hello",

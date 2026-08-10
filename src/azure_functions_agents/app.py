@@ -38,12 +38,15 @@ from .controller.reconciler import (
     reconciler_ncrontab,
     resolve_reconciler_cadence,
 )
+from .controller.sandbox_config import SandboxCreateProfile, build_sandbox_create_profile
 from .discovery.mcp import discover_mcp_servers
 from .discovery.skills import discover_skills
 from .discovery.tools import discover_project_tools
+from .egress import build_header_transform_rule, compile_mcp_headers
 from .execution.backend import RunContext, RunStatus
 from .execution.binding import AgentBinding
 from .execution.run_control import RunControlError, SandboxRunControl
+from .harness.delegation import validate_delegation_graph
 from .journal_paths import heartbeat_path
 from .registration._handlers import build_output_validator
 from .registration.capabilities import build_capabilities, validate_subagent_tool_names
@@ -66,6 +69,7 @@ from .session_state import (
 from .transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from .transport.transport_models import (
     PersistedSandboxBinding,
+    SandboxEgressHeader,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupBinding,
@@ -268,6 +272,7 @@ def _build_session_runtime_binding(
     script_root: Path,
     *,
     terminal_bindings: Mapping[str, AgentBinding] | None = None,
+    create_profile: SandboxCreateProfile | None = None,
 ) -> SessionRuntimeBinding | None:
     session_runtime = global_config.session_runtime
     if session_runtime is None or session_runtime.aca_sandbox is None:
@@ -334,8 +339,91 @@ def _build_session_runtime_binding(
         targeted_reconciler=targeted_reconcile,
         post_create_reconciler=bounded_reconcile,
         capacity_reaper=bounded_reconcile,
+        create_profile=create_profile,
     )
     return runtime
+
+
+def _build_sandbox_create_profile(
+    global_config: GlobalConfig,
+    resolved_agents: list[ResolvedAgent],
+    mcp_result: Any,
+) -> SandboxCreateProfile | None:
+    session_runtime = global_config.session_runtime
+    if session_runtime is None or session_runtime.aca_sandbox is None:
+        return None
+    web_request_configs = [
+        resolved.web_request_config
+        for resolved in resolved_agents
+        if resolved.web_request_config is not None
+    ]
+    if not web_request_configs:
+        allowed_hosts: tuple[str, ...] | None = ()
+    elif any(config.allowed_hosts is None for config in web_request_configs):
+        allowed_hosts = None
+    else:
+        allowed_hosts = tuple(
+            sorted(
+                {
+                    host
+                    for config in web_request_configs
+                    for host in config.allowed_hosts or []
+                }
+            )
+        )
+    reachable_mcp_names = {
+        name
+        for resolved in resolved_agents
+        for name in resolved.enabled_mcp_names
+    }
+    reachable_mcp_definitions = tuple(
+        definition
+        for name, definition in mcp_result.definitions.items()
+        if name in reachable_mcp_names
+    )
+    egress_rules = tuple(
+        build_header_transform_rule(
+            name=f"mcp-{definition.name}-headers",
+            url=definition.url,
+            headers=headers,
+        )
+        for definition in reachable_mcp_definitions
+        if (
+            headers := _compile_sandbox_mcp_headers(
+                definition.name,
+                definition.headers,
+                definition.auth,
+            )
+        )
+    )
+    return build_sandbox_create_profile(
+        web_request_allowed_hosts=allowed_hosts,
+        mcp_urls=tuple(
+            definition.url for definition in reachable_mcp_definitions
+        ),
+        model_endpoint=None,
+        telemetry_endpoint=None,
+        egress_rules=egress_rules,
+    )
+
+
+def _compile_sandbox_mcp_headers(
+    name: str,
+    headers: Mapping[str, object],
+    auth: Mapping[str, object],
+) -> tuple[SandboxEgressHeader, ...]:
+    compiled = compile_mcp_headers(headers)
+    scope = auth.get("scope")
+    if not isinstance(scope, str) or not scope.strip():
+        return compiled
+    filtered = tuple(header for header in compiled if header.name.casefold() != "authorization")
+    if len(filtered) != len(compiled):
+        logger.warning(
+            "MCP server '%s' declares native auth; omitting its static Authorization "
+            "egress transform so the native managed-identity token wins.",
+            name,
+        )
+    return filtered
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
@@ -432,6 +520,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     for resolved in resolved_agents:
         validate_subagent_references(resolved, known_slugs=known_slugs)
         referenced_slugs.update(ref.agent for ref in resolved.subagents)
+    if (
+        global_config.session_runtime is not None
+        and global_config.session_runtime.aca_sandbox is not None
+    ):
+        validate_delegation_graph(resolved_agents)
 
     workflows_requested = any(
         resolved.is_main and _workflows_requested(resolved.workflows)
@@ -489,10 +582,16 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         )
         for resolved in resolved_agents
     }
+    create_profile = _build_sandbox_create_profile(
+        global_config,
+        resolved_agents,
+        mcp_result,
+    )
     session_runtime = _build_session_runtime_binding(
         global_config,
         resolved_root,
         terminal_bindings=terminal_bindings,
+        create_profile=create_profile,
     )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------

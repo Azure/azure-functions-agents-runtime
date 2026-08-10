@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import json
 import time
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, cast
 
 from agent_framework import MCPStreamableHTTPTool
@@ -17,7 +19,7 @@ from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
 type MCPTool = MCPStreamableHTTPTool
 
-_DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
+_DISCOVERED_MCP_SERVERS_CACHE: dict[Path, MCPDiscoveryResult] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
 
 
@@ -27,11 +29,42 @@ class MCPDiscoveryResult:
 
     servers: dict[str, MCPTool]  # {server_name: MCPTool}
     failed_loads: list[tuple[str, str]]  # [(server_name, error_message), ...]
+    definitions: dict[str, MCPServerDefinition] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class MCPServerDefinition:
+    """Resolved MCP metadata shared by tool discovery and egress compilation."""
+
+    name: str
+    url: str
+    headers: Mapping[str, object]
+    auth: Mapping[str, object]
+
+    @classmethod
+    def create(cls, name: str, server: Mapping[str, object]) -> MCPServerDefinition:
+        url = str(server.get("url", "")).strip()
+        headers = server.get("headers")
+        auth = server.get("auth")
+        return cls(
+            name=name,
+            url=url,
+            headers=MappingProxyType(dict(headers)) if isinstance(headers, Mapping) else MappingProxyType({}),
+            auth=MappingProxyType(dict(auth)) if isinstance(auth, Mapping) else MappingProxyType({}),
+        )
 
 
 def clear_mcp_cache() -> None:
     """Clear cached MCP server discovery results."""
     _DISCOVERED_MCP_SERVERS_CACHE.clear()
+
+
+def _copy_discovery_result(result: MCPDiscoveryResult) -> MCPDiscoveryResult:
+    return MCPDiscoveryResult(
+        servers=dict(result.servers),
+        failed_loads=list(result.failed_loads),
+        definitions=dict(result.definitions),
+    )
 
 
 def _build_header_provider(server: dict[str, Any]) -> Any:
@@ -168,19 +201,21 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
     resolved_root = Path(app_root).resolve()
     cached_servers = _DISCOVERED_MCP_SERVERS_CACHE.get(resolved_root)
     if cached_servers is not None:
-        return MCPDiscoveryResult(servers=dict(cached_servers), failed_loads=[])
+        return _copy_discovery_result(cached_servers)
 
     path = resolved_root / "mcp.json"
     if not path.exists():
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        result = MCPDiscoveryResult(servers={}, failed_loads=[], definitions={})
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = result
+        return _copy_discovery_result(result)
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Failed to read MCP config from %s: %s", path, exc)
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        result = MCPDiscoveryResult(servers={}, failed_loads=[], definitions={})
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = result
+        return _copy_discovery_result(result)
 
     if not isinstance(data, dict):
         logger.warning(
@@ -188,18 +223,21 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
             path,
             type(data).__name__,
         )
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        result = MCPDiscoveryResult(servers={}, failed_loads=[], definitions={})
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = result
+        return _copy_discovery_result(result)
 
     data = cast(dict[str, Any], resolve_env_vars_in_data(data))
     servers = data.get("servers", {})
     if not isinstance(servers, dict):
         logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        result = MCPDiscoveryResult(servers={}, failed_loads=[], definitions={})
+        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = result
+        return _copy_discovery_result(result)
 
     tools: dict[str, MCPTool] = {}
     failed_loads: list[tuple[str, str]] = []
+    definitions: dict[str, MCPServerDefinition] = {}
     for name in sorted(servers.keys()):
         config = servers[name]
         if not isinstance(name, str) or not isinstance(config, dict):
@@ -207,6 +245,7 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
         built, error = _build_mcp_tool(name, config)
         if built is not None:
             tools[name] = built
+            definitions[name] = MCPServerDefinition.create(name, config)
         elif error is not None:
             failed_loads.append((name, error))
 
@@ -216,5 +255,10 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
         logger.info("No valid MCP servers found in %s", path)
     if failed_loads:
         logger.warning("Failed to load %d MCP server(s)", len(failed_loads))
-    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
-    return MCPDiscoveryResult(servers=dict(tools), failed_loads=failed_loads)
+    result = MCPDiscoveryResult(
+        servers=tools,
+        failed_loads=failed_loads,
+        definitions=definitions,
+    )
+    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = result
+    return _copy_discovery_result(result)

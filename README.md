@@ -444,11 +444,13 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 
 ### Experimental ACA session-runtime contract
 
-The ACA Sandbox session runtime is opt-in and currently remains capability-gated
-closed while its production bootstrap image and create source are deferred. The
-following HTTP contract is implemented and exercised with an injected
-provider-neutral test source; enabling `session_runtime.aca_sandbox` in an app
-still fails startup until the later capability gate opens.
+The ACA Sandbox session runtime is opt-in and remains capability-gated closed
+until live end-to-end and load acceptance. Enabling
+`session_runtime.aca_sandbox` still fails startup until that gate opens. See
+[the ACA operator guide](docs/aca-sandbox-session-runtime.md) for configuration,
+identity, egress, lifecycle, and troubleshooting guidance; see
+[architecture.md](docs/architecture.md) and
+[FRD 0008](docs/frds/0008-aca-sandbox-session-runtime.md) for internal design.
 
 When enabled, ordinary chat calls remain synchronous. Send
 `Prefer: respond-async` on either built-in chat surface or a custom
@@ -483,6 +485,19 @@ sandbox is created, and once before retrying a capacity failure. Set
 from `60` through `3600`; the default and maximum is `3600`. If both a custom
 HTTP trigger and built-in chat are enabled for an ACA agent, their complete
 resolved auth policies must match before any route is registered.
+
+Inbound MCP retains the Function App owner partition, while `/chat` can use an
+Entra owner partition. A Sandbox Group managed identity is directly usable by
+guest code; use a dedicated least-privileged group identity and remember that
+egress limits token-use destinations rather than token acquisition.
+
+Unprefixed model keys are injected only as static per-sandbox proxy header
+transforms and do not enter guest processes.
+`AZURE_FUNCTIONS_AGENTS_SANDBOXENV_` settings are explicit customer exposure:
+a prefixed credential is readable by sandbox code and its child processes.
+Optional MCP `secretRef` headers reference
+customer-provisioned group secrets; rotate a secret by draining or replacing
+the session because active streams do not update in place.
 
 ### MCP Server
 
@@ -611,6 +626,7 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
+| `AZURE_FUNCTIONS_AGENTS_SANDBOXENV_<NAME>` | Forward an explicit customer setting as `<NAME>` to an ACA sandbox |
 
 ## Development
 

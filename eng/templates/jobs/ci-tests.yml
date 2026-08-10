@@ -30,14 +30,21 @@ jobs:
           versionSpec: $(PYTHON_VERSION)
       - bash: |
           python -m pip install --upgrade pip
-          python -m pip install -U -e .[dev]
-        displayName: 'Install dependencies'
+          python -m pip install -U -e '.[dev]'
+        displayName: 'Install dev dependencies'
       - bash: |
           python -m ruff check src tests
         displayName: 'Lint with ruff'
       - bash: |
           python -m mypy src
         displayName: 'Type check with mypy'
+      - bash: |
+          python -m pip install -U -e '.[aca_sandbox]'
+        displayName: 'Install ACA Sandbox test dependency'
+      - bash: |
+          python -c "from importlib.metadata import version; assert version('azure-containerapps-sandbox') == '0.1.0b4'"
+          python -m pytest -q tests/test_transport_aca_sdk.py::test_real_b4_models_accept_rule_bearing_policy_projection
+        displayName: 'Verify ACA Sandbox SDK projection'
       - bash: |
           python eng/scripts/generate_config_reference.py --check
         displayName: 'Verify config reference docs are up to date'

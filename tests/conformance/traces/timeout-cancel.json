@@ -1,0 +1,1 @@
+{"name":"timeout-cancel","capabilities":[],"events":[{"type":"session","data":{"status":"running"}},{"type":"error","data":{"code":"timed_out"}}],"terminal_state":"timed_out"}

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 
 _VAR_NAME_FRAGMENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -16,6 +17,7 @@ _INLINE_PERCENT_PATTERN = re.compile(rf"%({_VAR_NAME_FRAGMENT})%")
 _LITERAL_DOLLAR_SENTINEL = "\x00AF_LITERAL_DOLLAR:"
 _LITERAL_PERCENT_SENTINEL = "\x00AF_LITERAL_PERCENT:"
 _LITERAL_SENTINEL_SUFFIX = "\x00"
+SANDBOX_ENV_PREFIX = "AZURE_FUNCTIONS_AGENTS_SANDBOXENV_"
 
 
 def _escaped_dollar_replacer(match: re.Match[str]) -> str:
@@ -27,11 +29,13 @@ def _escaped_percent_replacer(match: re.Match[str]) -> str:
 
 
 def _dollar_replacer(match: re.Match[str]) -> str:
-    return os.environ.get(match.group(1), match.group(0))
+    value = os.environ.get(match.group(1))
+    return match.group(0) if value is None else value
 
 
 def _percent_replacer(match: re.Match[str]) -> str:
-    return os.environ.get(match.group(1), match.group(0))
+    value = os.environ.get(match.group(1))
+    return match.group(0) if value is None else value
 
 
 def _restore_escaped_literals(value: str) -> str:
@@ -87,6 +91,21 @@ def resolve_env_vars_in_data(value: Any) -> Any:
 def runtime_env_value(name: str) -> str:
     """Return a stripped runtime env var value, or an empty string if unset."""
     return (os.environ.get(name) or "").strip()
+
+
+def runtime_backend_env_value(name: str) -> str:
+    """Return a backend setting, falling back to its explicit sandbox-prefixed value."""
+
+    return runtime_backend_env_value_from(os.environ, name)
+
+
+def runtime_backend_env_value_from(environment: Mapping[str, str], name: str) -> str:
+    """Return one mapping-backed backend setting with sandbox fallback precedence."""
+
+    value = environment.get(name)
+    if value is not None:
+        return value.strip()
+    return (environment.get(f"{SANDBOX_ENV_PREFIX}{name}") or "").strip()
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

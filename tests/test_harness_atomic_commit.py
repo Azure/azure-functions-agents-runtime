@@ -21,7 +21,7 @@ def test_atomic_commit_recovers_only_the_pointer_selected_checkpoint(tmp_path) -
     assert recovered == second
     assert not first.path.exists()
     assert (recovered.path / "conversation.json").read_bytes() == b'{"turn":2}'
-    assert (recovered.path / "notes.txt").read_bytes() == b"second"
+    assert (recovered.path / "working" / "notes.txt").read_bytes() == b"second"
 
 
 def test_recovery_discards_unpointed_checkpoint_after_fault(tmp_path) -> None:
@@ -51,6 +51,26 @@ def test_commit_rejects_working_file_traversal(tmp_path) -> None:
 
     with pytest.raises(AtomicCommitError):
         store.commit(conversation=b"state", working_files={"../escape": b"bad"})
+
+
+def test_checkpoint_recovery_preserves_unrelated_shared_session_children(tmp_path) -> None:
+    (tmp_path / "content").mkdir()
+    sentinel = tmp_path / "content" / "archive.bin"
+    sentinel.write_bytes(b"content")
+    store = AtomicCommitStore(tmp_path)
+    store.commit(conversation=b"state", working_files={})
+
+    store.recover()
+
+    assert sentinel.read_bytes() == b"content"
+
+
+def test_checkpoint_and_pointer_share_the_atomic_store_filesystem(tmp_path) -> None:
+    store = AtomicCommitStore(tmp_path)
+    checkpoint = store.commit(conversation=b"state", working_files={})
+
+    assert checkpoint.path.stat().st_dev == tmp_path.stat().st_dev
+    assert (tmp_path / "current").stat().st_dev == tmp_path.stat().st_dev
 
 
 @pytest.mark.skipif(os.name != "posix", reason="directory fsync is a POSIX durability primitive")

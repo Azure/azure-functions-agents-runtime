@@ -5,6 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import asdict
+from importlib import import_module
+from importlib.metadata import PackageNotFoundError, version
+from inspect import signature
 from typing import Any
 
 import aiohttp
@@ -24,7 +27,13 @@ from azure_functions_agents.transport.transport_models import (
     PersistedSandboxBinding,
     PresetSource,
     SandboxCreateRequest,
+    SandboxEgressHeader,
+    SandboxEgressHostRule,
     SandboxEgressPolicy,
+    SandboxEgressRule,
+    SandboxEgressRuleAction,
+    SandboxEgressRuleMatch,
+    SandboxEgressSecretRef,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupBinding,
@@ -35,9 +44,12 @@ from azure_functions_agents.transport.transport_models import (
 )
 from tests.doubles.fake_aca_sdk import (
     FakeCredential,
+    FakeSdkAutoDeletePolicy,
+    FakeSdkAutoSuspendPolicy,
     FakeSdkEgressPolicy,
     FakeSdkEnvironment,
     FakeSdkFileInfo,
+    FakeSdkLifecyclePolicy,
     FakeSdkSnapshot,
 )
 
@@ -86,11 +98,115 @@ def _request(**overrides: Any) -> SandboxCreateRequest:
         "cmd": ("-m", "harness"),
         "egress_policy": SandboxEgressPolicy.create(
             default_action="Deny",
-            traffic_inspection="Partial",
+            traffic_inspection="Full",
         ),
     }
     values.update(overrides)
     return SandboxCreateRequest.create(**values)
+
+
+def test_real_b4_models_accept_rule_bearing_policy_projection() -> None:
+    module_name = ".".join(("azure", "containerapps", "sandbox"))
+    try:
+        sdk = import_module(module_name)
+        installed_version = version("azure-containerapps-sandbox")
+    except (ImportError, PackageNotFoundError):
+        pytest.skip("The optional ACA Sandbox SDK is not installed.")
+    if installed_version != "0.1.0b4":
+        pytest.skip("This regression runs only against the pinned ACA Sandbox SDK.")
+    assert {
+        name: tuple(signature(getattr(sdk, name)).parameters)
+        for name in (
+            "EgressPolicy",
+            "EgressHostRule",
+            "EgressRule",
+            "EgressRuleMatch",
+            "EgressRuleAction",
+            "EgressHeader",
+            "EgressHeaderValueRef",
+            "EgressSecretRef",
+        )
+    } == {
+        "EgressPolicy": ("default_action", "host_rules", "rules", "traffic_inspection"),
+        "EgressHostRule": ("pattern", "action"),
+        "EgressRule": ("name", "match", "action"),
+        "EgressRuleMatch": ("host", "path", "methods"),
+        "EgressRuleAction": ("type", "host", "path", "scheme", "headers"),
+        "EgressHeader": ("operation", "name", "value", "value_ref"),
+        "EgressHeaderValueRef": ("secret_ref", "managed_identity_ref"),
+        "EgressSecretRef": ("secret_id", "secret_key", "format"),
+    }
+    secret_ref = SandboxEgressSecretRef.create(
+        secret_id="mcp-token",
+        secret_key="TOKEN",
+        format="Bearer " + "{" + "value}",
+    )
+    policy = SandboxEgressPolicy.create(
+        host_rules=(SandboxEgressHostRule.create(host="mcp.example.com", action="Allow"),),
+        rules=(
+            SandboxEgressRule.create(
+                name="mcp-auth",
+                match=SandboxEgressRuleMatch.create(
+                    host="mcp.example.com",
+                    path="/v1",
+                    methods=("POST",),
+                ),
+                action=SandboxEgressRuleAction.create(
+                    type="Transform",
+                    headers=(
+                        SandboxEgressHeader.create(
+                            operation="Set",
+                            name="Authorization",
+                            secret_ref=secret_ref,
+                        ),
+                        SandboxEgressHeader.create(
+                            operation="Set",
+                            name="X-Static",
+                            value="static-value",
+                        ),
+                    ),
+                ),
+            ),
+            SandboxEgressRule.create(
+                name="rewrite-route",
+                match=SandboxEgressRuleMatch.create(host="old.example.com", path="/old"),
+                action=SandboxEgressRuleAction.create(
+                    type="Rewrite",
+                    host="new.example.com",
+                    path="/new",
+                    scheme="https",
+                ),
+            ),
+        ),
+    )
+
+    projected = aca_sdk._compile_egress_policy(aca_sdk._load_sdk_factories(), policy)
+
+    assert projected.default_action == "Deny"
+    assert projected.traffic_inspection == "Full"
+    assert projected.host_rules[0].pattern == "mcp.example.com"
+    assert projected.rules[0].match.methods == ["POST"]
+    assert projected.rules[0].action.headers[0].value_ref.secret_ref.secret_id == "mcp-token"
+    assert projected.rules[0].action.headers[1].value == "static-value"
+    assert projected.rules[1].action.scheme == "https"
+
+
+def test_real_b4_disabled_auto_delete_policy_is_rejected() -> None:
+    module_name = ".".join(("azure", "containerapps", "sandbox"))
+    try:
+        sdk = import_module(module_name)
+        installed_version = version("azure-containerapps-sandbox")
+    except (ImportError, PackageNotFoundError):
+        pytest.skip("The optional ACA Sandbox SDK is not installed.")
+    if installed_version != "0.1.0b4":
+        pytest.skip("This regression runs only against the pinned ACA Sandbox SDK.")
+    policy = sdk.LifecyclePolicy(
+        auto_suspend=sdk.AutoSuspendPolicy(enabled=False),
+        auto_delete=sdk.AutoDeletePolicy(enabled=False, delete_interval_seconds=90_300),
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="lifecycle policy is incomplete"):
+        aca_sdk._project_lifecycle_policy(policy)
 
 
 def _install_fake_adapter_boundary(
@@ -240,7 +356,7 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
     assert call["cmd"] == ["-m", "harness"]
     assert call["egress_policy"] == FakeSdkEgressPolicy(
         default_action="Deny",
-        traffic_inspection="Partial",
+        traffic_inspection="Full",
     )
     assert environment.group_client.add_port_calls == 0
 
@@ -552,6 +668,35 @@ async def test_adapter_projects_complete_lifecycle_policy_without_group_readback
     await handle.set_lifecycle_policy(policy)
 
     assert await handle.get_lifecycle_policy() == policy
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "delete_interval_seconds"),
+    ((False, 90_300), (True, None)),
+)
+async def test_adapter_rejects_disabled_or_incomplete_auto_delete_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    delete_interval_seconds: int | None,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+    environment.sandboxes[handle.identity.sandbox_id].lifecycle_policy = FakeSdkLifecyclePolicy(
+        auto_suspend=FakeSdkAutoSuspendPolicy(enabled=False),
+        auto_delete=FakeSdkAutoDeletePolicy(
+            enabled=enabled,
+            delete_interval_seconds=delete_interval_seconds,
+        ),
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="lifecycle policy is incomplete"):
+        await handle.get_lifecycle_policy()
+
     await handle.close()
     await adapter.close()
 
@@ -915,7 +1060,7 @@ async def test_missing_optional_sdk_fails_before_constructing_or_using_credentia
     assert not credential_constructed
 
 
-def test_create_request_rejects_ports_unsafe_egress_and_controller_credentials() -> None:
+def test_create_request_rejects_ports_and_unsafe_egress_without_name_filtering() -> None:
     with pytest.raises(SandboxProvisioningError, match="inbound ports"):
         _request(ports=("tcp/80",))
 
@@ -924,8 +1069,8 @@ def test_create_request_rejects_ports_unsafe_egress_and_controller_credentials()
             egress_policy=SandboxEgressPolicy.create(default_action="Allow")  # type: ignore[arg-type]
         )
 
-    with pytest.raises(SandboxProvisioningError, match="credentials"):
-        _request(environment={"AZURE_CLIENT_SECRET": "not-allowed"})
+    request = _request(environment={"AZURE_CLIENT_SECRET": "explicit-value"})
+    assert request.environment == {"AZURE_CLIENT_SECRET": "explicit-value"}
 
     with pytest.raises(SandboxProvisioningError, match="egress proxy"):
         _request(skip_egress_proxy=True)

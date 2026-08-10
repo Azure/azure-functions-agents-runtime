@@ -748,10 +748,12 @@ def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
 
     events = _events_from_sse(asyncio.run(collect()))
-    assert any(event["type"] == "done" for event in events)
+    assert [event for event in events if event["type"] == "done"] == [
+        {"type": "done", "delegate_error_count": 0}
+    ]
 
     [span] = spans
-    assert span.attributes["af.agent.tool_error_count"] >= 1
+    assert span.attributes["af.agent.tool_error_count"] == 1
 
 
 def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: Any) -> None:
@@ -779,11 +781,14 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
     async def collect() -> list[str]:
         return [chunk async for chunk in runner.run_agent_stream("prompt")]
 
-    asyncio.run(collect())
+    events = _events_from_sse(asyncio.run(collect()))
 
     [span] = spans
     # 1 delegate failure + 1 ordinary tool-call failure from `_ToolErrorAgent`.
     assert span.attributes["af.agent.tool_error_count"] == 2
+    assert [event for event in events if event["type"] == "done"] == [
+        {"type": "done", "delegate_error_count": 1}
+    ]
 
 
 def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None:
