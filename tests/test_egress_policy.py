@@ -2,13 +2,10 @@ from __future__ import annotations
 
 import pytest
 
-from azure_functions_agents.discovery.mcp import MCPDiscoveryResult, MCPServerDefinition
 from azure_functions_agents.egress.credentials import (
-    McpIdentityConfigurationError,
     compile_mcp_headers,
     compile_model_key_headers,
     compile_static_header,
-    validate_mcp_identity_requirements,
 )
 from azure_functions_agents.egress.policy import (
     CONTROL_PLANE_DENY_HOSTS,
@@ -247,55 +244,6 @@ def test_model_headers_require_an_endpoint_and_become_a_transform_rule() -> None
     )
     assert policy.rules[0].name == "model-auth"
     assert policy.rules[0].action.headers[0].value == "azure-key"
-
-
-def test_authenticated_mcp_requires_a_known_group_identity() -> None:
-    servers = {"remote": {"auth": {"scope": "https://service/.default"}}}
-
-    with pytest.raises(McpIdentityConfigurationError, match="requires"):
-        validate_mcp_identity_requirements(servers, ())
-
-    with pytest.raises(McpIdentityConfigurationError, match="select"):
-        validate_mcp_identity_requirements(servers, ("first", "second"))
-
-    validate_mcp_identity_requirements(servers, ("only",))
-
-
-def test_authenticated_mcp_client_id_must_belong_to_the_group() -> None:
-    servers = {
-        "remote": {
-            "auth": {
-                "scope": "https://service/.default",
-                "client_id": "second",
-            }
-        }
-    }
-
-    with pytest.raises(McpIdentityConfigurationError, match="not available"):
-        validate_mcp_identity_requirements(servers, ("first",))
-
-    validate_mcp_identity_requirements(servers, ("first", "SECOND"))
-
-
-def test_authenticated_discovery_definitions_are_not_silently_skipped() -> None:
-    discovery = MCPDiscoveryResult(
-        servers={},
-        failed_loads=[],
-        definitions={
-            "remote": MCPServerDefinition.create(
-                "remote",
-                {
-                    "url": "https://mcp.example.com",
-                    "auth": {"scope": "https://service/.default"},
-                },
-            )
-        },
-    )
-
-    with pytest.raises(McpIdentityConfigurationError, match="requires"):
-        validate_mcp_identity_requirements(discovery.definitions, ())
-
-    validate_mcp_identity_requirements(discovery.definitions, ("group-identity",))
 
 
 @pytest.mark.parametrize("inspection", ["Partial", "None", "Legacy"])

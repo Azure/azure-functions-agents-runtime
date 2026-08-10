@@ -122,10 +122,14 @@ code genuinely needs them. Foundry and Azure OpenAI can use
 An MCP server declared with `auth: { scope, client_id }` keeps its native
 in-process `DefaultAzureCredential` behavior. On the default backend this
 selects the Function App identity; in a sandbox it selects the Sandbox Group
-identity. A reachable authenticated MCP endpoint requires an appropriate group
-identity, and an explicit client ID must select an identity available to that
-group. Long-lived streams reconnect when their token expires; neither native
-auth nor proxy headers rotate a credential in an already-open stream.
+identity. The runtime does not inventory or pre-validate Sandbox Group
+identities at startup: missing or misconfigured identity selection fails when
+native credential acquisition or the authenticated outbound MCP request runs,
+matching normal Azure credential behavior. When `auth.scope` is configured,
+native authorization also takes precedence over an authored static
+`Authorization` header on both backends. Long-lived streams reconnect when
+their token expires; neither native auth nor proxy headers rotate a credential
+in an already-open stream.
 
 ## Egress and header credentials
 

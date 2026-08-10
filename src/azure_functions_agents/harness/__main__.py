@@ -15,7 +15,7 @@ from ..journal_paths import JOURNAL_ROOT_PATH, SANDBOX_APPLICATION_PATH
 from ..runner import run_agent_events
 from ..session_state import validate_run_id
 from . import _ensure_sandbox
-from .atomic_commit import AtomicCommitError, AtomicCommitStore
+from .atomic_commit import WORKING_DIRECTORY_NAME, AtomicCommitError, AtomicCommitStore
 from .delegation import rebuild_agent_catalog
 from .journal_writer import (
     HarnessJournalError,
@@ -306,10 +306,15 @@ def _restore_checkpoint(
         history_path = _history_path(work_directory, session_id)
         history_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(conversation, history_path)
-    for path in checkpoint.path.rglob("*"):
-        if path.is_dir() or path == conversation:
+    working_root = checkpoint.path / WORKING_DIRECTORY_NAME
+    if not working_root.exists():
+        return
+    if not working_root.is_dir() or working_root.is_symlink():
+        raise AtomicCommitError("Sandbox checkpoint working files are invalid.")
+    for path in working_root.rglob("*"):
+        if path.is_dir():
             continue
-        relative = path.relative_to(checkpoint.path)
+        relative = path.relative_to(working_root)
         destination = work_directory / relative
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(path, destination)

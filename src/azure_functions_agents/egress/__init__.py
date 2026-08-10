@@ -3,7 +3,6 @@
 from .credentials import (
     compile_mcp_headers,
     compile_model_key_headers,
-    validate_mcp_identity_requirements,
 )
 from .policy import (
     CONTROL_PLANE_DENY_HOSTS,
@@ -23,5 +22,4 @@ __all__ = [
     "compile_model_key_headers",
     "derive_destination_hosts",
     "validate_egress_rule_order",
-    "validate_mcp_identity_requirements",
 ]

@@ -69,6 +69,7 @@ from .session_state import (
 from .transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from .transport.transport_models import (
     PersistedSandboxBinding,
+    SandboxEgressHeader,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupBinding,
@@ -387,7 +388,13 @@ def _build_sandbox_create_profile(
             headers=headers,
         )
         for definition in reachable_mcp_definitions
-        if (headers := compile_mcp_headers(definition.headers))
+        if (
+            headers := _compile_sandbox_mcp_headers(
+                definition.name,
+                definition.headers,
+                definition.auth,
+            )
+        )
     )
     return build_sandbox_create_profile(
         web_request_allowed_hosts=allowed_hosts,
@@ -398,6 +405,25 @@ def _build_sandbox_create_profile(
         telemetry_endpoint=None,
         egress_rules=egress_rules,
     )
+
+
+def _compile_sandbox_mcp_headers(
+    name: str,
+    headers: Mapping[str, object],
+    auth: Mapping[str, object],
+) -> tuple[SandboxEgressHeader, ...]:
+    compiled = compile_mcp_headers(headers)
+    scope = auth.get("scope")
+    if not isinstance(scope, str) or not scope.strip():
+        return compiled
+    filtered = tuple(header for header in compiled if header.name.casefold() != "authorization")
+    if len(filtered) != len(compiled):
+        logger.warning(
+            "MCP server '%s' declares native auth; omitting its static Authorization "
+            "egress transform so the native managed-identity token wins.",
+            name,
+        )
+    return filtered
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:

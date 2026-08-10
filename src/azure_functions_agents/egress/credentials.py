@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Iterable, Mapping
-from typing import Annotated, Protocol
+from collections.abc import Mapping
+from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
@@ -19,7 +19,6 @@ type _NonEmptyText = Annotated[str, StringConstraints(min_length=1)]
 
 AZURE_OPENAI_API_KEY_ENV = "AZURE_OPENAI_API_KEY"
 OPENAI_API_KEY_ENV = "OPENAI_API_KEY"
-_MISSING = object()
 
 
 class _SecretReferencePayload(BaseModel):
@@ -30,16 +29,6 @@ class _SecretReferencePayload(BaseModel):
     secret: _NonEmptyText
     key: _NonEmptyText
     format: str = "{value}"
-
-
-class McpIdentityConfigurationError(SandboxProvisioningError):
-    """An authenticated MCP server cannot select a Sandbox Group identity."""
-
-
-class McpIdentityDefinition(Protocol):
-    """The discovery metadata shape needed for native MCP identity validation."""
-
-    auth: Mapping[str, object]
 
 
 def compile_mcp_headers(headers: Mapping[str, object] | None) -> tuple[SandboxEgressHeader, ...]:
@@ -112,57 +101,3 @@ def _app_setting(environment: Mapping[str, str], name: str) -> str:
     if not isinstance(value, str):
         raise SandboxProvisioningError("Model API key settings must be strings.")
     return value
-
-
-def validate_mcp_identity_requirements(
-    servers: Mapping[str, Mapping[str, object] | McpIdentityDefinition],
-    group_client_ids: Iterable[str],
-) -> None:
-    """Validate native MCP token selection against known group identities."""
-
-    normalized_group_ids = {
-        client_id.casefold()
-        for client_id in group_client_ids
-        if isinstance(client_id, str) and client_id.strip()
-    }
-    for name, server in servers.items():
-        if not isinstance(name, str):
-            raise McpIdentityConfigurationError("MCP server names must be strings.")
-        auth = _mcp_auth(server)
-        if auth is None:
-            continue
-        scope = auth.get("scope")
-        if not isinstance(scope, str) or not scope.strip():
-            continue
-        if not normalized_group_ids:
-            raise McpIdentityConfigurationError(
-                "An authenticated MCP server requires a Sandbox Group identity."
-            )
-        client_id = auth.get("client_id")
-        if client_id is not None and (not isinstance(client_id, str) or not client_id.strip()):
-            raise McpIdentityConfigurationError(
-                "An authenticated MCP client_id must be a non-empty string."
-            )
-        if isinstance(client_id, str) and client_id.strip():
-            if client_id.casefold() not in normalized_group_ids:
-                raise McpIdentityConfigurationError(
-                    "An authenticated MCP client_id is not available to the Sandbox Group."
-                )
-        elif len(normalized_group_ids) > 1:
-            raise McpIdentityConfigurationError(
-                "An authenticated MCP server must select one Sandbox Group identity."
-            )
-
-
-def _mcp_auth(server: object) -> Mapping[str, object] | None:
-    if isinstance(server, Mapping):
-        candidate = server.get("auth")
-    else:
-        candidate = getattr(server, "auth", _MISSING)
-        if candidate is _MISSING:
-            raise McpIdentityConfigurationError("MCP discovery metadata is invalid.")
-    if candidate is None:
-        return None
-    if not isinstance(candidate, Mapping):
-        raise McpIdentityConfigurationError("MCP server auth must be an object.")
-    return candidate

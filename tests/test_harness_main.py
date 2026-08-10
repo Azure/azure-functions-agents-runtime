@@ -405,6 +405,32 @@ def test_checkpoint_restores_session_history_and_relative_working_files(tmp_path
     }
 
 
+def test_checkpoint_separates_customer_conversation_file_from_history(tmp_path: Path) -> None:
+    store = AtomicCommitStore(tmp_path / "session")
+    checkpoint = store.commit(
+        conversation=b'{"role":"assistant","content":"history"}\n',
+        working_files={"conversation.json": b"customer working file"},
+    )
+    work_directory = tmp_path / "runs" / "run-1" / "work"
+
+    assert (checkpoint.path / "conversation.json").read_bytes() == (
+        b'{"role":"assistant","content":"history"}\n'
+    )
+    assert (checkpoint.path / "working" / "conversation.json").read_bytes() == (
+        b"customer working file"
+    )
+
+    harness_main._restore_checkpoint(store, work_directory, "session-1")
+
+    assert (work_directory / ".history" / "session-1.jsonl").read_bytes() == (
+        b'{"role":"assistant","content":"history"}\n'
+    )
+    assert (work_directory / "conversation.json").read_bytes() == b"customer working file"
+    assert harness_main._collect_working_files(work_directory, "session-1") == {
+        "conversation.json": b"customer working file"
+    }
+
+
 def test_conversation_history_is_bounded_before_checkpoint_commit(tmp_path: Path) -> None:
     work_directory = tmp_path / "work"
     history = work_directory / ".history"

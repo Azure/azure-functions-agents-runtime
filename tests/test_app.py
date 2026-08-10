@@ -124,6 +124,53 @@ def test_sandbox_profile_egress_includes_only_reachable_mcp_servers() -> None:
     assert "excluded.example.com" not in allowed_hosts
 
 
+def test_sandbox_profile_preserves_native_mcp_authorization_precedence(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    config = GlobalConfig(
+        session_runtime=SessionRuntimeConfig(
+            aca_sandbox=AcaSandboxConfig(
+                sandbox_group_resource_id=(
+                    "/subscriptions/sub/resourceGroups/rg/providers/"
+                    "Microsoft.App/sandboxGroups/group"
+                )
+            )
+        )
+    )
+    mcp_result = MCPDiscoveryResult(
+        servers={},
+        failed_loads=[],
+        definitions={
+            "authenticated": MCPServerDefinition.create(
+                "authenticated",
+                {
+                    "url": "https://mcp.example.com",
+                    "headers": {
+                        "Authorization": "Bearer static-token",
+                        "X-Static": "preserved",
+                    },
+                    "auth": {"scope": "https://mcp.example.com/.default"},
+                },
+            )
+        },
+    )
+    resolved_agents = [
+        SimpleNamespace(web_request_config=None, enabled_mcp_names=["authenticated"])
+    ]
+
+    profile = app_module._build_sandbox_create_profile(  # type: ignore[arg-type]
+        config,
+        resolved_agents,
+        mcp_result,
+    )
+
+    assert profile is not None
+    [rule] = profile.egress_policy.rules
+    assert rule.name == "mcp-authenticated-headers"
+    assert [header.name for header in rule.action.headers] == ["X-Static"]
+    assert "native auth" in caplog.text
+
+
 def test_create_function_app_fails_fast_on_duplicate_function_names(
     caplog: pytest.LogCaptureFixture,
     tmp_path: Path,

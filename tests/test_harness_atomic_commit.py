@@ -21,7 +21,7 @@ def test_atomic_commit_recovers_only_the_pointer_selected_checkpoint(tmp_path) -
     assert recovered == second
     assert not first.path.exists()
     assert (recovered.path / "conversation.json").read_bytes() == b'{"turn":2}'
-    assert (recovered.path / "notes.txt").read_bytes() == b"second"
+    assert (recovered.path / "working" / "notes.txt").read_bytes() == b"second"
 
 
 def test_recovery_discards_unpointed_checkpoint_after_fault(tmp_path) -> None:
