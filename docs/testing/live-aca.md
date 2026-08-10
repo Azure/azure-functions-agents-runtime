@@ -1,24 +1,46 @@
 # Live ACA harness smoke coverage
 
-`tests/live/test_aca_harness_entrypoint_smoke.py` is an opt-in, paid-service
-smoke test for the ACA sandbox harness entrypoint. It intentionally exercises a
-real `AcaSandboxAdapter.create()` call, a real `SandboxSessionHandle`, a direct
-file upload, and synchronous process execution. It does not use an ACA fake.
+Two opt-in, paid-service smoke tests exercise the ACA sandbox against the real
+service, with no ACA fake:
+
+- `tests/live/test_aca_harness_entrypoint_smoke.py` — proves the production
+  harness entrypoint resolves and runs. It exercises a real
+  `AcaSandboxAdapter.create()` call, a real `SandboxSessionHandle`, a direct
+  file upload, and synchronous process execution.
+- `tests/live/test_aca_run_journal_acceptance.py` — proves the full
+  controller-to-harness round trip: a real `SandboxRunControl.submit()` writes
+  an inbox envelope, launches the harness, and observes the journal status the
+  harness wrote back.
+
+Shared provisioning, dependency-closure delivery, and cleanup live in
+`tests/live/aca_smoke_support.py`.
 
 ## Run locally
+
+The dependency closure is built for the host platform, so these tests must run
+on **Linux (or WSL) x86_64 with CPython 3.13 or 3.14** to match the sandbox ABI.
+On Windows or macOS the fixture fails fast with an `ACA-SMOKE-ENV` error rather
+than shipping incompatible native wheels into the sandbox.
 
 Install the ACA transport extra, authenticate with the Azure CLI, and set the
 following values for a CI-only Sandbox Group:
 
-```powershell
+```bash
 python -m pip install -U -e ".[dev,aca_sandbox]"
 az login
-$env:AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE = "1"
-$env:AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID = "/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.App/sandboxGroups/<group>"
-$env:AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK = "<sandbox-disk-name>"
-$env:AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION = "<sandbox-group-region>"
-python -m pytest -m live_aca tests/live/test_aca_harness_entrypoint_smoke.py -v -o log_cli=true -o log_cli_level=INFO
+export AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.App/sandboxGroups/<group>"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK="<sandbox-disk-name>"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION="<sandbox-group-region>"
+python -m pytest -m live_aca \
+  tests/live/test_aca_harness_entrypoint_smoke.py \
+  tests/live/test_aca_run_journal_acceptance.py \
+  -v -o log_cli=true -o log_cli_level=INFO
 ```
+
+Run these two files by name rather than the whole `tests/live` directory: the
+pre-existing `test_aca_sdk_smoke.py` reports configuration problems as test
+failures instead of environment errors, which defeats the triage rule below.
 
 The test skips before collecting a live fixture unless
 `AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE` is exactly `1`. Do not set that variable

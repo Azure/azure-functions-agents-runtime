@@ -133,7 +133,9 @@ jobs:
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
-            python -m pytest -m live_aca tests/live/test_aca_harness_entrypoint_smoke.py -v \
+            python -m pytest -m live_aca \
+              tests/live/test_aca_harness_entrypoint_smoke.py \
+              tests/live/test_aca_run_journal_acceptance.py -v \
               -o log_cli=true -o log_cli_level=INFO
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
