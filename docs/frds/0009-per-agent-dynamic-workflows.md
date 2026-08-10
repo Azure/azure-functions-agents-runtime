@@ -9,7 +9,8 @@ issues:
   - "Azure/azure-functions-agents-runtime#109"
   - "Azure/azure-functions-bucees-planning#1274"
   - "Azure/azure-functions-bucees-planning#1275"
-pull_requests: []
+pull_requests:
+  - "Azure/azure-functions-agents-runtime#151"
 branch: tsuyoshiushio-per-agent-dynamic-workflows
 ---
 
