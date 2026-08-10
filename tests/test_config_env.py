@@ -14,6 +14,10 @@ from azure_functions_agents.config.env import (
 from azure_functions_agents.config.schema import BuiltinEndpointsConfig
 
 
+def test_sandbox_environment_prefix_uses_the_runtime_namespace() -> None:
+    assert SANDBOX_ENV_PREFIX == "AZURE_FUNCTIONS_AGENTS_SANDBOXENV_"
+
+
 def test_substitute_env_vars_in_value_dollar(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("FOO", "value")
     assert substitute_env_vars_in_value("$FOO") == "value"

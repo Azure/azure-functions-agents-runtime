@@ -46,6 +46,19 @@ def test_build_sandbox_environment_forwards_only_documented_sources() -> None:
         forwarded["OTHER"] = "value"  # type: ignore[index]
 
 
+def test_sandbox_environment_prefix_is_stripped_once() -> None:
+    forwarded = build_sandbox_environment(
+        {"AZURE_FUNCTIONS_AGENTS_SANDBOXENV_MY_API_HOST": "https://sandbox.example"}
+    )
+
+    assert forwarded["MY_API_HOST"] == "https://sandbox.example"
+
+
+def test_sandbox_environment_prefix_requires_a_nonempty_suffix() -> None:
+    with pytest.raises(SandboxProvisioningError, match="must name an environment variable"):
+        build_sandbox_environment({SANDBOX_ENV_PREFIX: "value"})
+
+
 def test_host_process_values_are_not_forwarded_without_explicit_prefix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -1,79 +1,48 @@
 # ACA Sandbox session runtime
 
-The ACA Sandbox session runtime is an experimental execution backend for
-HTTP-triggered MAF agents. It keeps the Functions app as the authenticated
-controller and runs one session harness in a customer-owned ACA Sandbox. The
-normal in-language-worker backend remains the default.
+> **Experimental.** The ACA Sandbox backend is opt-in and remains
+> capability-gated until live end-to-end and load acceptance complete. The
+> in-language-worker backend remains the default.
 
-The startup capability gate remains closed until live end-to-end acceptance.
-This document describes the controller and harness contracts already wired
-behind that gate.
+This guide is for application authors and operators. For the internal module
+map and runtime pipeline, see [architecture.md](architecture.md). For the
+normative design rationale and durable contracts, see
+[FRD 0008](frds/0008-aca-sandbox-session-runtime.md).
 
-## Integration boundary
+## Availability and scope
 
-The activation layer builds one immutable create profile, preserves the durable
-operation labels, delivers content and bootstrap artifacts in one fenced
-operation, and validates the harness protocol/capability map before accepting
-the journal. The startup gate intentionally keeps ACA execution unavailable
-until live end-to-end and load acceptance completes.
+Configure `session_runtime.aca_sandbox` only for HTTP-triggered MAF agents.
+While the capability gate is closed, enabling it fails startup rather than
+silently falling back to another backend. When the gate opens, ordinary chat
+remains synchronous and `Prefer: respond-async` opts into the durable
+run-management URLs.
 
-## Disk boot and content delivery
+The sandbox has no public inbound port. The Functions app remains the
+authenticated entry point and controller.
 
-By default, a session sandbox uses the public disk named for the Functions
-worker's Python minor version, such as `python-3.13`. This requires no customer
-image or registry setup. Public names are mutable aliases; set exactly one of
-these Function App settings to use a customer-pinned disk instead:
+## Disk selection and content
+
+By default, the runtime selects the public disk named for the Functions
+worker's Python minor version, such as `python-3.13`. Select exactly one of
+these Function App settings to pin a customer-managed base disk:
 
 - `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK`
 - `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID`
 
-The runtime uses `Disk` auto-suspend mode. On resume, ACA starts a fresh
-process and re-executes the disk entrypoint. The one-shot entrypoint waits for
-`.boot-ready`, runs the delivered bootstrap with canonical child paths under
-the single sandbox root, writes output to `bootstrap.log`, publishes readiness, and exits. Each
-run is then a separately supervised
-`python -m azure_functions_agents.harness --run-id ...` process.
+The supported public-disk pairings are CPython 3.13 on Debian 12 with glibc
+2.36 and CPython 3.14 on Ubuntu 24.04 with glibc 2.39. Version-specific
+extensions must match the running interpreter; compatible `abi3` extensions
+and wheel tags are accepted on later CPython versions. Musl and an unmet
+manylinux glibc floor fail closed.
 
-The create profile supplies `/app` and its captured site-packages directory in
-`PYTHONPATH` for harness children. The supervisor starts bootstrap with `-E
--S`, so an unverified `/app`, delivered `.pth` file, or `sitecustomize.py`
-cannot run before digest and ABI verification. Bootstrap writes a persistent
-`sitecustomize.py` only after staging verified content, so fresh harness
-interpreters process delivered `.pth` files rather than relying on the
-bootstrap process's in-memory `sys.path`.
-
-The verified public-disk ABI pairing is CPython 3.13 on Debian 12 with glibc
-2.36 and CPython 3.14 on Ubuntu 24.04 with glibc 2.39. This is a current
-platform fact, not an immutable public-image contract. The bootstrap reads the
-actual interpreter and glibc version on every boot. Version-specific CPython
-extensions must match that interpreter; `abi3` extensions and wheel tags are
-accepted on compatible later CPython releases.
-
-The controller delivers the captured application archive, digest sidecar,
-manifest seed, bootstrap source, bootstrap digest, and finally `.boot-ready`.
-ACA file writes are not atomic, so the sentinel is intentionally last and only
-after read-back verifies every preceding artifact. The bootstrap independently
-parses the seed, checks both archive digests, validates CPython and manylinux
-ABI compatibility, safely stages `/app`, and atomically publishes the live
-manifest. A matching on-disk digest skips extraction after resume.
-
-The stock disk's public name can roll to a different base image. The bootstrap
-therefore fails closed for an incompatible CPython ABI, unsupported glibc floor,
-musl, malformed archive, digest mismatch, or protocol mismatch. It writes a
-typed `bootstrap.error.json` and never publishes readiness in those cases.
-
-Selecting `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK` or
-`AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID` chooses the base disk only; it is not
-a trust signal for application content. The current protocol always delivers
-the application archive, including `.python_packages`, so its digest and ABI
-checks remain mandatory for custom disks as well. There is no fixed-image
-application-content mode or implicit opt-out based on a disk name or ID. Such a
-mode would require a separately authenticated content-source contract.
+A disk name or ID selects the base disk only. The runtime still delivers the
+application archive, including `.python_packages`, and verifies its digest and
+ABI. There is no fixed-image application-content mode or implicit integrity
+opt-out based on a disk override.
 
 ## Sandbox environment
 
-The runtime never copies the entire Functions worker environment. It forwards
-only this built-in non-secret profile:
+The runtime forwards only this built-in non-secret profile:
 
 ```text
 AZURE_FUNCTIONS_AGENTS_PROVIDER
@@ -88,130 +57,71 @@ FOUNDRY_PROJECT_ENDPOINT
 FOUNDRY_MODEL
 ```
 
-For customer-specific configuration, set `SandboxEnv__NAME=value` in the
-Function App. The sandbox receives `NAME=value`. The prefix is explicit
-customer intent: it has no denylist, including for credential-shaped names.
-Sandbox code and child processes can read and exfiltrate every forwarded
-setting, so use this route only for values the workload is allowed to hold.
+Forward customer configuration with the runtime-owned prefix:
 
-The default backend looks up an unprefixed setting first and falls back to
-`SandboxEnv__NAME`. If both exist, the default backend uses the unprefixed
-value while the sandbox receives the stripped prefixed value. Unresolved
-placeholders retain normal backend behavior instead of causing an ACA-only
-startup failure.
-
-For example, `SandboxEnv__AZURE_OPENAI_API_KEY` is allowed by design, but it
-deliberately bypasses proxy-managed key isolation: the actual key becomes
-readable by guest code and child processes. Use the ordinary unprefixed model
-key setting when the static proxy-header route is desired instead.
-
-## Identity and model authentication
-
-A managed identity attached to the customer-owned Sandbox Group is directly
-available to guest code through the platform identity endpoint. Egress policy
-controls destinations where a token can be used; it does not prevent token
-acquisition. The runtime does not attach, remove, or strip this identity; the
-controller identity remains separate and is the sole state writer.
-
-Use a dedicated, least-privileged group user-assigned identity. Do not reuse
-the controller identity and do not grant the group identity state-store,
-Sandbox Group Data Owner, Storage, or Service Bus permissions unless workload
-code genuinely needs them. Foundry and Azure OpenAI can use
-`DefaultAzureCredential` inside the sandbox with that group identity.
-
-An MCP server declared with `auth: { scope, client_id }` keeps its native
-in-process `DefaultAzureCredential` behavior. On the default backend this
-selects the Function App identity; in a sandbox it selects the Sandbox Group
-identity. The runtime does not inventory or pre-validate Sandbox Group
-identities at startup: missing or misconfigured identity selection fails when
-native credential acquisition or the authenticated outbound MCP request runs,
-matching normal Azure credential behavior. When `auth.scope` is configured,
-native authorization also takes precedence over an authored static
-`Authorization` header on both backends. Long-lived streams reconnect when
-their token expires; neither native auth nor proxy headers rotate a credential
-in an already-open stream.
-
-## Egress and header credentials
-
-Every sandbox has an explicit per-sandbox policy with `default_action="Deny"`
-and `traffic_inspection="Full"`. The policy derives destinations from
-`web_request` hosts, MCP URLs, the model endpoint, telemetry, and reachable
-delegates. Full rules are ordered from most specific to broadest; a broad Allow
-that would hide a narrower Deny is rejected. ARM and the ACA data plane are
-explicitly denied before broad allows.
-
-When `web_request.allowed_hosts` is omitted, the existing tool contract allows
-any public host subject to its SSRF floor. The sandbox compiler preserves that
-behavior with a wildcard Allow after the explicit control-plane Denies. Set
-`allowed_hosts` to use an exact destination boundary instead.
-
-The platform re-evaluates HTTP redirects and already blocks IMDS and the
-wireserver. It does not inspect UDP DNS to Azure DNS; DNS-based exfiltration is
-a known platform limitation. `get_egress_decisions()` is a rolling sample, not
-a complete audit log. Egress is create-time-only in this version: policy or
-credential changes do **not** reach live sessions. Drain the session and start
-a new one to apply them.
-
-The runtime supports at most 500 combined host and full rules per sandbox
-policy. This is the default service limit; it intentionally does not depend on
-optional service-level quota overrides.
-
-MCP header strings are structurally headers, not values inferred from their
-names. By default, a referenced Function App setting is resolved by the
-controller into a static `Set` transformation. The actual key never reaches
-the sandbox process or filesystem, but static policy values are visible to
-sandbox data-plane read/list callers. Treat those permissions as
-secret-bearing.
-
-Model-key transforms use the same provider resolution as the MAF client:
-Azure OpenAI receives only `api-key`, OpenAI receives only `Authorization:
-Bearer`, and Foundry uses its native managed-identity path without a static
-model-key transform.
-
-Customers who need stronger policy metadata separation can provision a group
-secret and use an ACA-specific `secretRef` at a header value:
-
-```json
-{
-  "headers": {
-    "Authorization": {
-      "secretRef": {
-        "secret": "mcp-github",
-        "key": "TOKEN",
-        "format": "Bearer {value}"
-      }
-    }
-  }
-}
+```text
+AZURE_FUNCTIONS_AGENTS_SANDBOXENV_MY_API_HOST=https://api.example
 ```
 
-`format` must be non-empty and contain the literal `{value}` placeholder. The
-runtime only references the secret; it never reads, writes, rotates, or deletes
-it. A missing secret or key fails sandbox creation. Rotation requires draining
-and replacing the session; deletion is not credential revocation and there is
-no mid-stream update. Group-secret provisioning is a data-plane operation
-performed with an SDK, deployment script, or `az rest`, not a runtime-created
-resource.
+The sandbox receives `MY_API_HOST=https://api.example`. The default backend
+uses `MY_API_HOST` first and then
+`AZURE_FUNCTIONS_AGENTS_SANDBOXENV_MY_API_HOST`; the sandbox receives the
+prefixed value when present. The previous short-form prefix is unsupported.
 
-## Delegation and conformance
+The prefix is explicit guest exposure. For example,
+`AZURE_FUNCTIONS_AGENTS_SANDBOXENV_AZURE_OPENAI_API_KEY` makes that key
+readable by sandbox code and child processes, bypassing proxy-managed key
+isolation. Use an ordinary unprefixed model key when the proxy-injected route
+is intended.
 
-The sandbox rebuilds the existing immutable `AgentCatalog` from captured
-application content. It reuses the normal `delegate_<slug>` tools and
-single-level delegated role: specialists are fresh per call, receive their own
-static capabilities, and never create another sandbox, session, or top-level
-run.
+## Identity and RBAC
 
-Harness capabilities are described by one exact map: `atomic_commit_v1`,
-`watchdog_v1`, `bootstrap_v1`, and `delegation_v1`. Unknown features fail
-closed, and every advertised capability requires a runtime-produced semantic
-trace. Those traces compare event order, stable fields, and terminal state
-while excluding reasoning text, wording, timing, and provider metadata.
+Attach a dedicated, least-privileged managed identity to the customer-owned
+Sandbox Group. Guest code can acquire tokens through the platform identity
+endpoint; egress policy limits where a token is used, not whether it can be
+acquired.
 
-## Lifecycle notes
+Do not reuse the controller identity or grant the group identity state-store,
+Sandbox Group management, Storage, or Service Bus permissions unless workload
+code genuinely needs them. Native `DefaultAzureCredential` handles Foundry,
+Azure OpenAI, and authenticated MCP calls. Missing or incorrectly selected
+identities fail when the outbound credential or request is used.
 
-Auto-suspend starts enabled at creation because of the current SDK behavior.
-The controller disables it before an active run and re-arms it after terminal
-adoption. CPU work and egress alone do not count as ACA activity, so detached
-async work needs this lifecycle protection. The durable content commit happens
-at turn boundaries: on node drain, the disk snapshot precedes the process
-termination signal, so last-gasp shutdown writes cannot be relied on.
+## Egress and credentials
+
+Every sandbox is created with `default_action="Deny"` and
+`traffic_inspection="Full"`. The policy allows only the configured model,
+telemetry, MCP, web-request, and reachable-delegate destinations. Broad rules
+that hide a narrower deny are rejected.
+
+MCP headers are static egress transformations or customer-provisioned
+`secretRef` values. When an MCP server has native `auth.scope`, its managed
+identity `Authorization` value wins over an authored static `Authorization`
+header on both backends.
+
+Model-key transforms follow the resolved provider: Azure OpenAI uses only
+`api-key`, OpenAI uses only `Authorization: Bearer`, and Foundry uses native
+managed identity. Unrelated configured keys are not sent to the selected
+provider.
+
+Policy and credential changes are create-time-only. Drain or replace a session
+to apply them. Rotate a group secret the same way; active streams do not
+update in place.
+
+## Lifecycle, recovery, and troubleshooting
+
+The runtime applies per-sandbox lifecycle policy: it disables auto-suspend
+during an active run and restores the idle policy after terminal adoption.
+The reconciler is the deletion authority after idle reclaim; group auto-delete
+is only a backstop.
+
+Useful failure signals include:
+
+- `bootstrap.error.json` for digest, ABI, protocol, or archive failures;
+- a durable failed or abandoned run status after sandbox loss or reaping;
+- `410 Gone` for an unavailable or evicted result.
+
+In v1, sandbox or snapshot loss tombstones the session; create a new session.
+Content, egress, credential, and disk changes likewise require a replacement
+session. For detailed operational diagnostics and the exact internal
+state-machine behavior, use the architecture and FRD references above.

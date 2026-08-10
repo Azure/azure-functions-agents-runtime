@@ -124,7 +124,7 @@ def test_resolve_model_uses_default_when_no_override_exists(
         ),
         (
             {
-                "SandboxEnv__AZURE_OPENAI_ENDPOINT": "https://azure.example",
+                "AZURE_FUNCTIONS_AGENTS_SANDBOXENV_AZURE_OPENAI_ENDPOINT": "https://azure.example",
                 "OPENAI_API_KEY": "openai-key",
             },
             "azure_openai",
@@ -140,7 +140,7 @@ def test_resolve_maf_provider_matches_manager_precedence(
     names = (
         "AZURE_FUNCTIONS_AGENTS_PROVIDER",
         "AZURE_OPENAI_ENDPOINT",
-        "SandboxEnv__AZURE_OPENAI_ENDPOINT",
+        "AZURE_FUNCTIONS_AGENTS_SANDBOXENV_AZURE_OPENAI_ENDPOINT",
         "FOUNDRY_PROJECT_ENDPOINT",
         "OPENAI_API_KEY",
     )

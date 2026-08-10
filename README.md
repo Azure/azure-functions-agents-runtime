@@ -445,11 +445,12 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 ### Experimental ACA session-runtime contract
 
 The ACA Sandbox session runtime is opt-in and remains capability-gated closed
-until live end-to-end and load acceptance. The controller now builds its public
-Python disk create profile, delivers the bootstrap through the durable provision
-operation, and launches the per-run harness journal behind that gate. Enabling
-`session_runtime.aca_sandbox` in an app still fails startup until the later
-capability gate opens.
+until live end-to-end and load acceptance. Enabling
+`session_runtime.aca_sandbox` still fails startup until that gate opens. See
+[the ACA operator guide](docs/aca-sandbox-session-runtime.md) for configuration,
+identity, egress, lifecycle, and troubleshooting guidance; see
+[architecture.md](docs/architecture.md) and
+[FRD 0008](docs/frds/0008-aca-sandbox-session-runtime.md) for internal design.
 
 When enabled, ordinary chat calls remain synchronous. Send
 `Prefer: respond-async` on either built-in chat surface or a custom
@@ -491,9 +492,10 @@ guest code; use a dedicated least-privileged group identity and remember that
 egress limits token-use destinations rather than token acquisition.
 
 Unprefixed model keys are injected only as static per-sandbox proxy header
-transforms and do not enter guest processes. `SandboxEnv__` settings are
-explicit customer exposure: a prefixed credential is readable by sandbox code
-and its child processes. Optional MCP `secretRef` headers reference
+transforms and do not enter guest processes.
+`AZURE_FUNCTIONS_AGENTS_SANDBOXENV_` settings are explicit customer exposure:
+a prefixed credential is readable by sandbox code and its child processes.
+Optional MCP `secretRef` headers reference
 customer-provisioned group secrets; rotate a secret by draining or replacing
 the session because active streams do not update in place.
 
@@ -624,6 +626,7 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
+| `AZURE_FUNCTIONS_AGENTS_SANDBOXENV_<NAME>` | Forward an explicit customer setting as `<NAME>` to an ACA sandbox |
 
 ## Development
 
