@@ -168,10 +168,13 @@ Define event-triggered agents with `.agent.md` files. Each file corresponds to a
 Agent files can be placed at the app root or in an `agents/` folder:
 ```
 my-app/
-├── main.agent.md           # Top-level (is_main=true)
+├── agent.md                 # Bare single-agent alias → slug "main" (is_main=true)
+│                            # Alternatives: main.agent.md → slug "main", CLAUDE.md → slug "main"
+│                            # (agent.md, CLAUDE.md, and main.agent.md are all aliases;
+│                            #  only one may be present in the same app)
 ├── agents/                  # Optional folder for organization
 │   ├── chat.agent.md
-│   └── report.agent.md
+│   └── report.claude.md     # *.claude.md is equivalent to *.agent.md — prefix becomes slug
 ├── tools/
 └── skills/
 ```
@@ -271,6 +274,11 @@ Agent instructions in markdown...
 
 - **`*.agent.md` with `trigger`** — creates an event-triggered Azure Function. Exactly one trigger per file.
 - **`*.agent.md` with `builtin_endpoints`** — also serves `/agents/{slug}/`, `/agents/{slug}/chat`, and `/agents/{slug}/chatstream` when chat endpoints are enabled, and can expose an MCP tool when `builtin_endpoints: true` or `builtin_endpoints.mcp: true`. The sanitized filename stem becomes the base Azure Function name, endpoint slug, and the agent's global identity (its slug — also used for `delegate_<slug>` tool names, see [Multi-agent delegation](#multi-agent-delegation-subagents) above). The frontmatter `name:` field is display-only. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution) and [`docs/front-matter-spec.md#builtin_endpoints`](docs/front-matter-spec.md#builtin_endpoints).
+
+> **Flexible filename conventions:** Beyond `*.agent.md`, the runtime also supports:
+> - **`agent.md`** (any casing: `Agent.md`, `AGENT.MD`) and **`CLAUDE.md`** (any casing: `Claude.md`, `claude.md`) — bare aliases for `main.agent.md` that produce slug `main` and `is_main=True`. `agent.md`, `CLAUDE.md`, and `main.agent.md` all produce the same slug so at most one may be present in the same app.
+> - **`*.claude.md`** — e.g. `summarizer.claude.md` is equivalent to `summarizer.agent.md`; the prefix becomes the slug.
+> - **Case-insensitive suffix matching** — `.agent.md` and `.claude.md` suffixes are matched case-insensitively (`Report.AGENT.md` is valid but collides with `report.agent.md`).
 
 > **⚠️ Breaking change**: Earlier releases silently auto-suffixed (`_2`, `_3`, ...) when two agent files
 > sanitized to the same name. **Slugs are now required to be globally unique across the whole app.** A
@@ -431,6 +439,12 @@ Built-in endpoints are explicit per agent. The filename stem determines `{slug}`
 A built-in single-page chat interface served at `/agents/{slug}/` when `builtin_endpoints.debug_chat_ui: true` (or `builtin_endpoints: true`). No frontend code needed — just open `http://localhost:7071/agents/main/` locally for `main.agent.md`, or `https://<your-app>.azurewebsites.net/agents/{slug}/` when deployed. See [`docs/front-matter-spec.md#function-name-resolution`](docs/front-matter-spec.md#function-name-resolution).
 
 On first load, you'll be prompted for the base URL and a function key (for deployed apps). These are stored in browser local storage and can be changed via the gear icon.
+
+The chat UI manages the session id for you. The active id is shown beneath the status line with a **Copy** button, and you can resume an existing conversation by pasting its id into the **Session ID (optional)** field in the settings dialog. Pasted ids are validated client-side against the same rule the server enforces (`^[A-Za-z0-9._-]{1,128}$`) and persist in browser local storage per base URL and agent (each `/agents/{slug}/`), so a resumed conversation survives page reloads and new tabs. Use **New session** to clear the id and start fresh.
+
+The settings dialog also keeps a **Recent sessions** list (most-recent first, up to 8 per base URL and agent). Each turn adds or updates an entry, auto-titling it with your first message (renameable via **Rename**); pick one to fill the Session ID field and **Save** to resume it, or use **Remove** / **Clear recent** to prune the list. This list is a per-browser convenience stored in local storage — it is **not** synced across devices or browsers, and it does not include sessions created through the raw HTTP API from other clients.
+
+When you resume a session — whether by pasting an id or picking one from **Recent sessions** — the chat window reloads that conversation's earlier messages from the server (via a `GET /agents/{slug}/history` endpoint) so its history is visible right away, not just carried invisibly into your next turn. The replay is capped at the 200 most recent user and assistant messages; the UI shows a notice when older messages were omitted. Intermediate tool activity is not replayed. This requires the app's blob-backed [session storage](#session-storage) to be configured; without it — or on an older runtime that predates the history endpoint — the window simply starts empty and the resumed session still continues on your next message.
 
 ### HTTP Chat API
 
@@ -594,6 +608,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`multi-agent-delegation`](samples/multi-agent-delegation) — HTTP coordinator that delegates to two specialists via `subagents:`, one of them endpoint-less
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
+- [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
 
 ## Deployment Notes
 

@@ -21,19 +21,22 @@ a per-agent workflow-safe tool registry (M3).
 
 from __future__ import annotations
 
+import asyncio
 import json
-from typing import Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import azure.durable_functions as df
 import azure.functions as func
 
 from azure_functions_agents._logger import logger
+from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
 from .workflow_schema import (
     ECHO_TOOL_NAME,
     MAX_PARALLELISM,
     MAX_WAIT_DURATION,
+    SUB_AGENT_TASK_TYPE,
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
     TemplateResolutionError,
@@ -42,9 +45,34 @@ from .workflow_schema import (
     resolve_template_value,
 )
 
+if TYPE_CHECKING:
+    from azure_functions_agents.config.schema import ResolvedAgent
+    from azure_functions_agents.registration.capabilities import AgentCapabilities
+
+
+async def run_leaf_agent_task(
+    resolved: ResolvedAgent,
+    capabilities: AgentCapabilities,
+    task: str,
+    *,
+    timeout: float,
+    execution_role: Literal["workflow_subagent"],
+) -> str:
+    """Load the runner only when a Workflow Sub Agent activity executes."""
+    from azure_functions_agents.runner import run_leaf_agent_task as execute_leaf_task
+
+    return await execute_leaf_task(
+        resolved,
+        capabilities,
+        task,
+        timeout=timeout,
+        execution_role=execution_role,
+    )
+
 ORCHESTRATOR_NAME = "agents_workflow_orchestrator"
 CANCEL_EVENT_NAME = "cancel"
 _ACTIVITY_NAME = "agents_workflow_run_tool"
+SUB_AGENT_ACTIVITY_NAME = "agents_workflow_run_sub_agent"
 
 WORKFLOW_SAFE_ECHO_TOOL = ECHO_TOOL_NAME
 
@@ -95,7 +123,11 @@ def _wait_deadline(context: df.DurableOrchestrationContext, task: dict[str, Any]
     return deadline
 
 
-def register_workflows(app: func.FunctionApp) -> None:
+def register_workflows(
+    app: func.FunctionApp,
+    *,
+    catalog: AgentCatalog | None = None,
+) -> None:
     """Register the workflow orchestrator + activities on ``app``.
 
     Expected to be invoked exactly once during app construction.
@@ -131,6 +163,71 @@ def register_workflows(app: func.FunctionApp) -> None:
         # with a clearer message instead of deeper in the runtime).
         json.dumps(result)
         return {"id": task_id, "result": result}
+
+    @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
+    async def agents_workflow_run_sub_agent(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+        task_id = str(task["id"])
+        agent_slug = str(task["agent"])
+        workflow_id = str(task.get("workflow_id") or "")
+        if catalog is None or agent_slug not in catalog:
+            logger.error(
+                "workflow sub-agent catalog miss: workflow_id=%s node_id=%s agent=%s",
+                workflow_id,
+                task_id,
+                agent_slug,
+            )
+            raise RuntimeError(
+                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not available"
+            )
+
+        entry = catalog[agent_slug]
+        logger.info(
+            "workflow sub-agent activity running: workflow_id=%s node_id=%s agent=%s",
+            workflow_id,
+            task_id,
+            agent_slug,
+        )
+        try:
+            text = await run_leaf_agent_task(
+                entry.resolved,
+                entry.capabilities,
+                str(task["task"]),
+                timeout=entry.resolved.timeout,
+                execution_role="workflow_subagent",
+            )
+        except asyncio.CancelledError:
+            raise
+        except TimeoutError:
+            logger.exception(
+                "workflow sub-agent activity timed out: workflow_id=%s node_id=%s agent=%s",
+                workflow_id,
+                task_id,
+                agent_slug,
+            )
+            raise RuntimeError(
+                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} timed out"
+            ) from None
+        except Exception:
+            logger.exception(
+                "workflow sub-agent activity failed: workflow_id=%s node_id=%s agent=%s",
+                workflow_id,
+                task_id,
+                agent_slug,
+            )
+            raise RuntimeError(
+                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} failed "
+                "(error_code=workflow_subagent_execution_failed)"
+            ) from None
+
+        result = {
+            "id": task_id,
+            "result": {
+                "agent": agent_slug,
+                "text": text,
+            },
+        }
+        json.dumps(result)
+        return result
 
     @bp.orchestration_trigger(context_name="context")  # type: ignore[untyped-decorator]
     def agents_workflow_orchestrator(context: df.DurableOrchestrationContext) -> Any:
@@ -213,6 +310,29 @@ def register_workflows(app: func.FunctionApp) -> None:
                         )
                     )
                     wave_specs.append({"id": tid, "type": TOOL_TASK_TYPE})
+                elif ttype == SUB_AGENT_TASK_TYPE:
+                    try:
+                        resolved_task = resolve_template_value(task["task"], results)
+                    except TemplateResolutionError as exc:
+                        raise RuntimeError(
+                            f"task {tid!r}: template resolution failed: {exc}"
+                        ) from exc
+                    if not isinstance(resolved_task, str):
+                        raise RuntimeError(
+                            f"task {tid!r}: resolved Sub Agent task must be a string"
+                        )
+                    wave_tasks.append(
+                        context.call_activity(
+                            SUB_AGENT_ACTIVITY_NAME,
+                            {
+                                "id": tid,
+                                "agent": task["agent"],
+                                "task": resolved_task,
+                                "workflow_id": context.instance_id,
+                            },
+                        )
+                    )
+                    wave_specs.append({"id": tid, "type": SUB_AGENT_TASK_TYPE})
                 elif ttype == WAIT_TASK_TYPE:
                     deadline = _wait_deadline(context, task)
                     wave_tasks.append(context.create_timer(deadline))
@@ -229,6 +349,9 @@ def register_workflows(app: func.FunctionApp) -> None:
                         f"task {tid!r}: unsupported task type {ttype!r}"
                     )
 
+            context.set_custom_status(
+                f"{len(results)}/{total} tasks done, running={','.join(wave)}"
+            )
             wave_task = context.task_all(wave_tasks)
             winner = yield context.task_any([cancel_task, wave_task])
             if winner is cancel_task:
@@ -259,7 +382,7 @@ def register_workflows(app: func.FunctionApp) -> None:
             wave_results = wave_task.result
             for spec, raw in zip(wave_specs, wave_results, strict=True):
                 tid = spec["id"]
-                if spec["type"] == TOOL_TASK_TYPE:
+                if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
                     results[tid] = raw["result"]
                 else:
                     # Timer tasks resolve to None; we synthesize a result so
@@ -289,6 +412,7 @@ def register_workflows(app: func.FunctionApp) -> None:
 __all__ = [
     "CANCEL_EVENT_NAME",
     "ORCHESTRATOR_NAME",
+    "SUB_AGENT_ACTIVITY_NAME",
     "WORKFLOW_SAFE_ECHO_TOOL",
     "register_workflows",
 ]

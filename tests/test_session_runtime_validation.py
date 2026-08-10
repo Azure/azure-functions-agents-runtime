@@ -144,6 +144,7 @@ def test_row5_explicit_null_aca_sandbox_fails_startup() -> None:
 
 
 def test_row2_workflows_enabled_fails_startup() -> None:
+    """Typed Workflow Sub Agent grants remain covered by the ACA workflow gate."""
     with pytest.raises(ValueError, match=r"[Ww]orkflows") as exc_info:
         create_function_app(FIXTURES_ROOT / "19_aca_sandbox_row2_workflows_enabled")
     message = str(exc_info.value)

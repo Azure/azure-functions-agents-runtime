@@ -16,6 +16,7 @@ import pytest
 
 import azure_functions_agents.execution.in_lang_worker as language_worker_execution
 from azure_functions_agents import runner
+from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.execution import (
     DEFAULT_EXECUTION_PROVIDER,
     AgentBinding,
@@ -233,8 +234,8 @@ def test_language_worker_backend_stream_round_trips_real_runner_sse_bytes(
 ) -> None:
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_StreamingAgent, object, str, None]:
-        return _StreamingAgent(), object(), "session-1", None
+    ) -> tuple[_StreamingAgent, object, str, None, InferenceTarget]:
+        return _StreamingAgent(), object(), "session-1", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
     binding = _binding()
@@ -367,8 +368,8 @@ def test_language_worker_backend_maps_runner_timeout_to_timed_out(monkeypatch: p
     async def fake_build_agent_session_history(
         *args: Any,
         **kwargs: Any,
-    ) -> tuple[Any, Any, str, None]:
-        return object(), object(), "session-1", None
+    ) -> tuple[Any, Any, str, None, InferenceTarget]:
+        return object(), object(), "session-1", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 

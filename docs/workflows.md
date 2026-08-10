@@ -7,9 +7,11 @@
 > [workflow-incident-triage sample](../samples/workflow-incident-triage/README.md)
 > for the interactive experience, or the
 > [queue-trigger sample](../samples/workflow-queue-p0-report/README.md) for a
-> non-interactive starter. Larger features such as sub-orchestrations,
-> sub-agent tasks, configurable retry policies, and MCP Tasks integration
-> are tracked as v2 follow-up work.
+> non-interactive starter. The
+> [parallel PR report sample](../samples/workflow-subagents-preview/README.md)
+> demonstrates workflow Sub Agents. Larger features such as sub-orchestrations,
+> configurable retry policies, and MCP Tasks integration are tracked as v2
+> follow-up work.
 
 Dynamic workflows let a markdown agent author and run **distributed,
 observable, durable** plans without writing orchestration code. Flip
@@ -39,9 +41,9 @@ They are **not** the right tool for:
   immediately with an ID; the *result* is fetched on a later turn);
 - hand-authored orchestration DSLs — plans are LLM-authored only, by
   design, so there is no YAML/markdown workflow template format;
-- cross-app or multi-agent coordination. Those are v2 scenarios; v1
-  workflows live inside one Functions app and are enabled only by its
-  `main.agent.md`.
+- cross-app coordination. v1 workflows live inside one Functions app and are
+  enabled only by its `main.agent.md`; authorized leaf specialists in that app
+  can run as workflow Sub Agents.
 
 ## Why workflows (token, latency, context)
 
@@ -141,9 +143,12 @@ workflows:
   # Defaults to every public @workflow_tool discovered from tools/.
   exclude:
     - expensive_diagnostics
-  # Future v2 knobs (not honored by v1):
+  # Optional, independent, deny-by-default specialist grant:
+  subagents:
+    - agent: log_analyst
+      when: Analyze one bounded set of logs
+  # Future v2 knob (not honored by v1):
   # max_nodes: 100
-  # allowed_sub_agents: []
   #
   # Note: the Durable execution backend (Azure Storage vs Durable Task
   # Scheduler) and the task hub name are configured in host.json's
@@ -233,6 +238,8 @@ A workflow plan is a list of tasks with `depends_on` edges. Task types:
 - **`tool`** — call a discovered `@workflow_tool` by name with args.
 - **`wait`** — durable timer. Accepts `duration` (ISO-8601, e.g. `PT30S`)
   or `until` (absolute ISO-8601 timestamp).
+- **`sub_agent`** — invoke one leaf specialist authorized by
+  `workflows.subagents`, using `agent` and a self-contained `task`.
 
 v1 does not support per-task timeout or retry fields yet. Those are v2
 hardening controls.
@@ -250,6 +257,58 @@ hardening controls.
   ]
 }
 ```
+
+### Workflow Sub Agents
+
+The author grants access in `main.agent.md` with `workflows.subagents`. Each
+frontmatter grant contains `agent` and optional `when`; it is not a DAG node.
+The model then generates a `sub_agent` DAG node with exactly `id`, `type`,
+`agent`, `task`, and optional `depends_on`. A node does not accept `when`,
+`tool`, `args`, `duration`, or `until`.
+The runtime validates every specialist slug against the workflow owner's
+immutable grant before any node is scheduled and fails closed if the specialist
+is unavailable.
+
+```json
+{
+  "tasks": [
+    {
+      "id": "analyze_pr_42",
+      "type": "sub_agent",
+      "agent": "pr_status_analyst",
+      "task": "Review https://github.com/Azure/example/pull/42."
+    },
+    {
+      "id": "analyze_pr_43",
+      "type": "sub_agent",
+      "agent": "pr_status_analyst",
+      "task": "Review https://github.com/Azure/example/pull/43."
+    },
+    {
+      "id": "write_report",
+      "type": "sub_agent",
+      "agent": "actionable_report_writer",
+      "task": "Create an HTML report from PR 42: ${analyze_pr_42.result.text}; PR 43: ${analyze_pr_43.result.text}.",
+      "depends_on": ["analyze_pr_42", "analyze_pr_43"]
+    }
+  ]
+}
+```
+
+Each invocation is stateless and receives only its resolved `task`. The
+specialist uses its own model, instructions, normal tools, MCP servers, skills,
+`web_request` configuration, and timeout. It does not receive the parent's
+history, sandbox, workflow-management tools, or chat-time delegation tools.
+Success returns `{"agent": "<slug>", "text": "<answer>"}`. A specialist error or
+timeout fails the parent workflow. Timeout and missing-specialist failures have
+distinct messages. Other failures expose only the stable, non-sensitive
+`workflow_subagent_execution_failed` error code; provider and tool details stay
+in runtime logs. Operators can correlate those logs using the Workflow ID, node
+ID, and specialist slug.
+
+Sub Agent execution can be delivered more than once after a worker failure.
+Specialist tools should therefore tolerate re-execution, and terminal publishers
+should overwrite a stable destination or otherwise be idempotent.
 
 ### Templating
 
@@ -444,6 +503,7 @@ v1 includes:
 
 - five built-in workflow tools;
 - DAG execution of `@workflow_tool` calls and wait tasks;
+- deny-by-default `workflows.subagents` grants and stateless `sub_agent` tasks;
 - fan-out/fan-in via `depends_on`;
 - result templating with `${node_id.result}` and dotted paths;
 - cooperative cancel and hard terminate;
@@ -456,7 +516,7 @@ v1 includes:
   workflows per session, and status-list result count.
 
 v2 follow-up work includes enabling workflows for non-`main.agent.md`
-agents, sub-orchestrations/sub-agent tasks, per-agent registry isolation,
+agents, sub-orchestrations and bounded nested agents, per-agent registry isolation,
 configurable caps, retry and timeout policies, HMAC-backed workflow
 ownership, blob-offloaded large outputs, an MCP Tasks bridge, richer error
 taxonomy, and storage hygiene.

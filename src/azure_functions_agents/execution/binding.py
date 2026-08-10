@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from ..config.schema import SubagentRef
     from ..registration.catalog import AgentCatalog
+    from ..workflows.workflow_schema import WorkflowPlanPolicy
     from .backend import RunError, RunResult
 
 type OutputValidator = Callable[["RunResult"], "RunError | None"]
@@ -28,6 +29,7 @@ class AgentBinding:
     system_addendum: str | None = None
     workflow_enabled: bool = False
     workflow_durable_client: Any | None = None
+    workflow_policy: WorkflowPlanPolicy | None = None
     agent_name: str | None = None
     display_name: str | None = None
     web_request_tools: list[Any] | None = None
@@ -47,6 +49,7 @@ class AgentBinding:
             "system_addendum": self.system_addendum,
             "workflow_enabled": self.workflow_enabled,
             "workflow_durable_client": self.workflow_durable_client,
+            "workflow_policy": self.workflow_policy,
             "agent_name": self.agent_name,
             "web_request_tools": self.web_request_tools,
             "subagents": self.subagents,

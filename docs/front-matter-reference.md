@@ -101,7 +101,7 @@ YAML front matter at the top of each agent markdown file.
 | `mcp` | boolean \| object | No | `true` (inherit all) | MCP server filtering. [Details](#agent-mcp) |
 | `skills` | boolean \| object | No | Inherit all | Skill filtering. [Details](#agent-skills) |
 | `tools` | boolean \| object | No | Inherit all | Custom tool filtering. [Details](#agent-tools) |
-| `workflows` | object | No | `null` | Dynamic Workflow enablement and filtering. [Details](./front-matter-spec.md#workflows) |
+| `workflows` | object | No | `null` | Dynamic Workflow enablement, tool filtering, and Sub Agent grants. [Details](#agent-workflows) |
 | `subagents` | list[SubagentRef] | No | `null` | Specialist agents this agent can delegate to as `delegate_<slug>` tools. [Details](./front-matter-spec.md#subagents) |
 | `input_schema` | object | No | `null` | JSON Schema for HTTP request validation |
 | `response_schema` | object | No | `null` | JSON Schema for response validation |
@@ -205,6 +205,27 @@ Filter custom tools auto-discovered from `tools/` directory.
 | `exclude` | string[] | No | `[]` | Tool names to exclude (in addition to global excludes) |
 
 **See:** [Front Matter Spec - tools](./front-matter-spec.md#tools)
+
+### Agent: `workflows`
+
+Enable Dynamic Workflows, filter workflow tools, and grant leaf specialists.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `enabled` | boolean | No | `false` | Enable Dynamic Workflows for this agent. In v1, only `main.agent.md` is honored. |
+| `exclude` | string[] | No | `[]` | Discovered `@workflow_tool` names to withhold from workflow plans. |
+| `subagents` | object[] | No | `[]` | Independent, deny-by-default leaf-specialist grants. [Details](#agent-workflows-subagents) |
+
+#### Agent: `workflows.subagents`
+
+Each entry is an object. Bare-string shorthand and unknown fields are rejected.
+
+| Property | Type | Required | Default | Description |
+|----------|------|----------|---------|-------------|
+| `agent` | string | **Yes** | N/A | Required specialist identity slug. |
+| `when` | string | No | `null` | Optional model-facing routing hint; defaults to the specialist description. |
+
+**See:** [Front Matter Spec - workflows](./front-matter-spec.md#workflows)
 
 ---
 

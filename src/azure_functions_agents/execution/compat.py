@@ -52,6 +52,7 @@ def split_runner_call(
         system_addendum=cast(str | None, values.pop("system_addendum", None)),
         workflow_enabled=cast(bool, values.pop("workflow_enabled", False)),
         workflow_durable_client=values.pop("workflow_durable_client", None),
+        workflow_policy=values.pop("workflow_policy", None),
         agent_name=cast(str | None, values.pop("agent_name", None)),
         display_name=cast(str | None, values.pop("display_name", None)) if stream else None,
         web_request_tools=cast(list[Any] | None, values.pop("web_request_tools", None)),

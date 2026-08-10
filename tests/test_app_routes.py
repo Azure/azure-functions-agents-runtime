@@ -88,6 +88,16 @@ def test_workflow_app_uses_durable_function_app(tmp_path: Path):
     assert isinstance(function_app, df.DFApp)
 
 
+def test_bare_agent_md_with_workflows_creates_durable_app(tmp_path: Path):
+    _write_agent(tmp_path, "agent.md", name="Main", workflows=True)
+
+    # bare agent.md is an alias for main.agent.md; enabling workflows on it
+    # should produce a DFApp just like main.agent.md would.
+    function_app = app_module.create_function_app(app_root=tmp_path)
+
+    assert isinstance(function_app, df.DFApp)
+
+
 def test_non_main_workflows_enabled_warns_and_does_not_enable_durable(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ):

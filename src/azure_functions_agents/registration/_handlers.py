@@ -7,7 +7,7 @@ import re
 import uuid
 from collections.abc import Callable
 from importlib import import_module
-from typing import Any, TypedDict, cast
+from typing import TYPE_CHECKING, Any, TypedDict, cast
 
 import azure.functions as func
 import jsonschema
@@ -35,6 +35,9 @@ from ._auth import AuthError, authorize_entra_request, resolve_owner_principal
 from ._trigger_serialization import serialize_trigger_data
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
+
+if TYPE_CHECKING:
+    from ..workflows.workflow_schema import WorkflowPlanPolicy
 
 AUTH_LEVEL_MAP = {
     "anonymous": func.AuthLevel.ANONYMOUS,
@@ -376,6 +379,7 @@ def make_agent_handler(
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler function for a non-HTTP triggered agent."""
 
@@ -428,6 +432,7 @@ def make_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
+                    workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
                 )
 
@@ -479,6 +484,7 @@ def make_http_agent_handler(
     session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Callable[..., Any]:
     """Create an async handler for an HTTP-triggered agent.
 
@@ -585,7 +591,11 @@ def make_http_agent_handler(
                 }
                 runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
                 if runtime_kwargs is None:
-                    result = await _run_agent(prompt, **runner_kwargs)
+                    result = await _run_agent(
+                        prompt,
+                        **runner_kwargs,
+                        workflow_policy=workflow_policy,
+                    )
                 else:
                     budget = RequestBudget.start(authored_timeout=resolved.timeout)
                     request, binding = split_runner_call(

@@ -4,7 +4,14 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictBool,
+    field_validator,
+    model_validator,
+)
 
 type EndpointAuthMode = Literal["function", "admin", "anonymous", "entra"]
 
@@ -117,8 +124,8 @@ class TriggerSpec(BaseModel):
         return trimmed
 
 
-class SubagentRef(BaseModel):
-    """A coordinator's reference to one specialist agent it may delegate to.
+class _SubagentRefBase(BaseModel):
+    """Shared fields and normalization for Sub Agent capability grants.
 
     Object form only (no string shorthand).
     ``agent`` is the specialist's identity slug (its file stem, sanitized;
@@ -128,7 +135,7 @@ class SubagentRef(BaseModel):
     used instead (resolved once the specialist is known, not here).
     """
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", frozen=True)
 
     agent: str
     when: str | None = None
@@ -140,6 +147,38 @@ class SubagentRef(BaseModel):
         if not trimmed:
             raise ValueError("agent must be non-empty")
         return trimmed
+
+    @field_validator("when")
+    @classmethod
+    def validate_when(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return value.strip() or None
+
+
+class SubagentRef(_SubagentRefBase):
+    """A coordinator's reference to one specialist agent it may delegate to."""
+
+class WorkflowSubagentRef(_SubagentRefBase):
+    """A workflow owner's authorization grant for one leaf specialist."""
+
+
+class WorkflowConfig(BaseModel):
+    """Dynamic Workflow enablement and owner-specific capability grants."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    enabled: StrictBool = False
+    exclude: tuple[str, ...] = ()
+    subagents: tuple[WorkflowSubagentRef, ...] = ()
+
+    @field_validator("exclude")
+    @classmethod
+    def validate_exclude(cls, value: tuple[str, ...]) -> tuple[str, ...]:
+        normalized = tuple(item.strip() for item in value)
+        if any(not item for item in normalized):
+            raise ValueError("exclude entries must be non-empty")
+        return normalized
 
 
 class DynamicSessionsCodeInterpreterConfig(BaseModel):
@@ -315,7 +354,7 @@ class AgentSpec(BaseModel):
     mcp: bool | McpFilter | None = None
     skills: bool | SkillsFilter | None = None
     tools: bool | ToolsFilter | None = None
-    workflows: dict[str, Any] | None = None
+    workflows: WorkflowConfig | None = None
     subagents: list[SubagentRef] | None = None
     input_schema: dict[str, Any] | None = None
     response_schema: dict[str, Any] | None = None
@@ -350,7 +389,7 @@ class ResolvedAgent(BaseModel):
     skills_exclude_names: list[str] = Field(default_factory=list)
     tool_exclude_names: list[str] = Field(default_factory=list)
     tool_filter: ToolsFilter
-    workflows: dict[str, Any] | None = None
+    workflows: WorkflowConfig | None = None
     subagents: list[SubagentRef] = Field(default_factory=list)
     tools_disabled: bool = False
     skills_disabled: bool = False

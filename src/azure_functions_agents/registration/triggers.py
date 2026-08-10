@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
 
@@ -22,6 +22,9 @@ from ._naming import allocate_unique_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
 
+if TYPE_CHECKING:
+    from ..workflows.workflow_schema import WorkflowPlanPolicy
+
 __all__ = [
     "allocate_unique_function_name",
     "register_agent",
@@ -40,6 +43,7 @@ def _register_builtin_agent(
     *,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     trigger_params = dict(trigger_params)
     decorator_fn = getattr(app, trigger_type, None)
@@ -65,6 +69,7 @@ def _register_builtin_agent(
         catalog,
         workflows_enabled=workflows_enabled,
         workflow_system_addendum=workflow_system_addendum,
+        workflow_policy=workflow_policy,
     )
     trigger_params["arg_name"] = "trigger_data"
 
@@ -117,6 +122,7 @@ def _register_http_agent(
     session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     route = trigger_params.get("route")
     if not route:
@@ -136,6 +142,7 @@ def _register_http_agent(
             auth=auth,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            workflow_policy=workflow_policy,
         )
     else:
         handler = make_http_agent_handler(
@@ -146,6 +153,7 @@ def _register_http_agent(
             session_runtime=session_runtime,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            workflow_policy=workflow_policy,
         )
 
     if workflows_enabled:
@@ -169,6 +177,7 @@ def register_agent(
     session_runtime: SessionRuntimeBinding | None = None,
     workflows_enabled: bool = False,
     workflow_system_addendum: str | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     """Register an agent trigger on the FunctionApp."""
     if resolved.trigger is None:
@@ -201,6 +210,7 @@ def register_agent(
             session_runtime=session_runtime,
             workflows_enabled=workflows_enabled,
             workflow_system_addendum=workflow_system_addendum,
+            workflow_policy=workflow_policy,
         )
         logger.info(
             "Registered trigger: source_file=%s function=%s trigger_type=http_trigger route=%s methods=%s",
@@ -223,6 +233,7 @@ def register_agent(
         catalog,
         workflows_enabled=workflows_enabled,
         workflow_system_addendum=workflow_system_addendum,
+        workflow_policy=workflow_policy,
     )
     logger.info(
         "Registered trigger: source_file=%s function=%s trigger_type=%s",

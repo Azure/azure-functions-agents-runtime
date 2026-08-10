@@ -504,6 +504,7 @@ def test_register_agent_accepts_nested_auth_object_with_entra_allowlists(
         auth: Any,
         workflows_enabled: bool = False,
         workflow_system_addendum: str | None = None,
+        workflow_policy: Any = None,
     ) -> Any:
         captured["auth"] = auth
         return _stub_handler

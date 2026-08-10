@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -8,6 +9,8 @@ from azure_functions_agents._credential import build_async_credential
 from azure_functions_agents.client_manager import (
     _DEFAULT_FOUNDRY_MODEL,
     _DEFAULT_OPENAI_MODEL,
+    ClientManager,
+    InferenceTarget,
     MAFClientManager,
     MAFProvider,
     resolve_maf_provider,
@@ -178,6 +181,149 @@ def test_resolve_maf_provider_rejects_unknown_explicit_value() -> None:
         ),
     ):
         resolve_maf_provider({"AZURE_FUNCTIONS_AGENTS_PROVIDER": "other"})
+
+
+@pytest.mark.parametrize(
+    ("provider", "builder", "endpoint_name", "endpoint"),
+    [
+        ("openai", "_build_openai", None, None),
+        (
+            "azure_openai",
+            "_build_azure_openai",
+            "AZURE_OPENAI_ENDPOINT",
+            "https://account.openai.azure.com/openai/deployments/private?api-version=secret",
+        ),
+        (
+            "foundry",
+            "_build_foundry",
+            "FOUNDRY_PROJECT_ENDPOINT",
+            "https://user:password@project.services.ai.azure.com:443/api/projects/private",
+        ),
+    ],
+)
+def test_build_chat_client_with_target_matches_client_branch(
+    monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    builder: str,
+    endpoint_name: str | None,
+    endpoint: str | None,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
+    if endpoint_name and endpoint:
+        monkeypatch.setenv(endpoint_name, endpoint)
+    client = object()
+
+    with patch.object(MAFClientManager, builder, return_value=client) as build:
+        built_client, target = MAFClientManager().build_chat_client_with_target("model-one")
+
+    assert built_client is client
+    build.assert_called_once_with("model-one")
+    assert target == InferenceTarget(provider, "model-one")
+    assert not hasattr(target, "inference_host")
+
+
+def test_maf_target_uses_one_provider_and_model_resolution_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    client = object()
+
+    with (
+        patch.object(
+            MAFClientManager, "_provider", return_value=MAFProvider.FOUNDRY
+        ) as provider,
+        patch.object(
+            MAFClientManager, "_resolve_model", return_value="resolved-model"
+        ) as resolve,
+        patch.object(MAFClientManager, "_build_foundry", return_value=client),
+    ):
+        built_client, target = MAFClientManager().build_chat_client_with_target("requested-model")
+
+    assert built_client is client
+    assert target.provider == "foundry"
+    assert target.model == "resolved-model"
+    provider.assert_called_once_with()
+    resolve.assert_called_once_with("requested-model", MAFProvider.FOUNDRY)
+
+
+def test_maf_target_preserves_custom_model_resolution(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    provider_client = object()
+
+    class CustomModelManager(MAFClientManager):
+        def resolve_model(self, requested: str | None) -> str:
+            assert requested is None
+            return "custom-deployment"
+
+    with patch.object(
+        MAFClientManager,
+        "_build_openai",
+        return_value=provider_client,
+    ) as build:
+        client, target = CustomModelManager().build_chat_client_with_target(None)
+
+    assert client is provider_client
+    build.assert_called_once_with("custom-deployment")
+    assert target == InferenceTarget("openai", "custom-deployment")
+
+
+def test_custom_manager_target_fallback_builds_client_once() -> None:
+    class CustomManager(ClientManager):
+        calls = 0
+
+        def resolve_model(self, requested: str | None) -> str:
+            return requested or "custom-model"
+
+        def build_chat_client(self, model: str | None) -> Any:
+            self.calls += 1
+            return object()
+
+    manager = CustomManager()
+
+    client, target = manager.build_chat_client_with_target("custom-model")
+
+    assert client is not None
+    assert manager.calls == 1
+    assert target == InferenceTarget()
+
+
+def test_maf_subclass_build_chat_client_override_keeps_virtual_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    provider_client = object()
+
+    class WrappingMAFClientManager(MAFClientManager):
+        calls = 0
+
+        def build_chat_client(self, model: str | None) -> Any:
+            self.calls += 1
+            return ("wrapped", super().build_chat_client(model))
+
+    manager = WrappingMAFClientManager()
+
+    with patch.object(MAFClientManager, "_build_openai", return_value=provider_client) as build:
+        client, target = manager.build_chat_client_with_target("model-one")
+
+    assert client == ("wrapped", provider_client)
+    assert manager.calls == 1
+    build.assert_called_once_with("model-one")
+    assert target == InferenceTarget()
+
+
+def test_anthropic_api_key_does_not_select_direct_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", raising=False)
+    monkeypatch.delenv("AZURE_OPENAI_ENDPOINT", raising=False)
+    monkeypatch.delenv("FOUNDRY_PROJECT_ENDPOINT", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "not-used")
+
+    with pytest.raises(RuntimeError, match="No MAF provider configured"):
+        MAFClientManager().build_chat_client_with_target(None)
 
 
 def test_build_managed_identity_credential_passes_client_id(

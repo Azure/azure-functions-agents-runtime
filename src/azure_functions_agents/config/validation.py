@@ -15,7 +15,13 @@ from azure_functions_agents.sandbox_runtime_limits import (
 )
 
 from .http_auth import resolve_aca_submission_auth, resolve_http_trigger_auth
-from .schema import GlobalConfig, ResolvedAgent
+from .schema import (
+    GlobalConfig,
+    ResolvedAgent,
+    SubagentRef,
+    WorkflowConfig,
+    WorkflowSubagentRef,
+)
 
 _SPEC_LINK_DEFAULT = "docs/front-matter-spec.md"
 
@@ -142,35 +148,74 @@ def validate_subagent_references(
     root) — these are fail-fast configuration errors, never silently
     dropped.
     """
+    _validate_references(
+        resolved,
+        refs=resolved.subagents,
+        known_slugs=known_slugs,
+        field="subagents",
+        self_message="An agent cannot delegate to itself",
+        duplicate_message="Duplicate reference to agent",
+        spec_anchor="#subagents",
+    )
+
+
+def validate_workflow_subagent_references(
+    resolved: ResolvedAgent,
+    *,
+    known_slugs: set[str],
+) -> None:
+    """Reject invalid owner-specific ``workflows.subagents`` grants."""
+    refs = resolved.workflows.subagents if resolved.workflows is not None else ()
+    _validate_references(
+        resolved,
+        refs=refs,
+        known_slugs=known_slugs,
+        field="workflows.subagents",
+        self_message="An agent cannot invoke itself as a Workflow Sub Agent",
+        duplicate_message="Duplicate reference to agent",
+        spec_anchor="#workflows",
+    )
+
+
+def _validate_references(
+    resolved: ResolvedAgent,
+    *,
+    refs: list[SubagentRef] | tuple[WorkflowSubagentRef, ...],
+    known_slugs: set[str],
+    field: str,
+    self_message: str,
+    duplicate_message: str,
+    spec_anchor: str,
+) -> None:
     source_file = resolved.source_file or "<unknown>"
     seen: set[str] = set()
-    for ref in resolved.subagents:
+    for ref in refs:
         if ref.agent == resolved.slug:
             raise ValueError(
                 _format_error(
                     source_file,
-                    "subagents",
-                    f"An agent cannot delegate to itself (`agent: {ref.agent}`).",
-                    "#subagents",
+                    field,
+                    f"{self_message} (`agent: {ref.agent}`).",
+                    spec_anchor,
                 )
             )
         if ref.agent not in known_slugs:
             raise ValueError(
                 _format_error(
                     source_file,
-                    "subagents",
+                    field,
                     f"Unknown agent reference `{ref.agent}`. No agent with that "
                     "identity slug (file stem) was discovered in this app.",
-                    "#subagents",
+                    spec_anchor,
                 )
             )
         if ref.agent in seen:
             raise ValueError(
                 _format_error(
                     source_file,
-                    "subagents",
-                    f"Duplicate reference to agent `{ref.agent}` in `subagents`.",
-                    "#subagents",
+                    field,
+                    f"{duplicate_message} `{ref.agent}` in `{field}`.",
+                    spec_anchor,
                 )
             )
         seen.add(ref.agent)
@@ -197,9 +242,9 @@ def _session_runtime_error(
     return ValueError(f"{location}field `{field}`: {normalized} See {_FRD_0008_LINK}.")
 
 
-def _workflows_requested(workflows: dict[str, Any] | None) -> bool:
+def _workflows_requested(workflows: WorkflowConfig | None) -> bool:
     """Return whether workflows are enabled."""
-    return isinstance(workflows, dict) and workflows.get("enabled") is True
+    return workflows is not None and workflows.enabled
 
 
 def auto_delete_backstop_violated(

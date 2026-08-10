@@ -4,9 +4,9 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-07-23
+updated: 2026-07-24
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117]
 ---
 
 # FRD 0004 — Dynamic workflows
@@ -80,8 +80,8 @@ explicitly opt a function into the Durable Activity execution path.
   LLM-authored through `start_workflow`.
 - Per-task retry/timeout/concurrency settings in v1, beyond reserving
   `@workflow_tool(...)` as the future metadata surface.
-- Sub-orchestrations, sub-agent tasks, MCP Tasks integration, or cross-app
-  workflow coordination.
+- Sub-orchestrations, nested/stateful Sub Agent tasks, MCP Tasks integration,
+  or cross-app workflow coordination. Stateless leaf Sub Agent tasks are in v1.
 - Changing normal MAF tool execution semantics.
 - Automatically promoting every compatible plain function into a workflow tool.
 
@@ -90,9 +90,9 @@ explicitly opt a function into the Durable Activity execution path.
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `_function_tool.py` | Load `tools/*.py` once, preserving normal `FunctionTool` discovery while also discovering explicit workflow tool declarations. Add a public `workflow_tool` decorator that records workflow metadata without making the function a normal MAF tool by itself. |
-| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled` plus optional `exclude`) and compute the concrete per-agent workflow tool set for the main agent. Unknown workflow excludes warn, mirroring `tools.exclude`. |
-| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | When the main agent enables workflows, consume the already-filtered workflow tool set, register compatible handlers into the workflow registry, register the Durable blueprint, store the effective workflow tool names, and add Durable client bindings to built-in endpoints and Markdown-declared triggers. |
-| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Durable Activity invokes registered workflow handlers with `dict` args and JSON-serializable results. Trigger handlers pass the bound Durable client and trigger-specific workflow guidance to the runner. UI polls workflow status and injects terminal notifications. |
+| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled`, optional `exclude`, and independent `subagents`) and compute concrete capabilities without hard-coding the v1 owner. Unknown workflow excludes warn, mirroring `tools.exclude`. |
+| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | The app composition root selects `main.agent.md` as the v1 owner. Integration consumes its filtered workflow tools and Sub Agent grants, builds one immutable owner policy, registers the Durable blueprint and catalog-backed Sub Agent Activity, and threads the policy plus Durable client through endpoints and declared triggers. |
+| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Runtime validation uses the same policy that generated prompt guidance. Durable Activities invoke registered workflow tools or fresh stateless leaf specialists. Trigger handlers pass the bound Durable client and trigger-specific workflow guidance to the runner. UI polls workflow status and injects terminal notifications. |
 
 ### Authoring / API surface
 
@@ -270,6 +270,145 @@ execution.
   arguments fail fast at startup so authors do not think unsupported policy knobs
   are active.
 
+### Workflow Sub Agents
+
+> [!IMPORTANT]
+> This extension is approved for the Dynamic Workflows v1 surface. Its first
+> implementation is limited to the workflow-enabled `main.agent.md`; issue #109
+> will apply the same contract to non-main workflow owners. The
+> `samples/workflow-subagents-preview/` directory becomes a runnable sample as
+> part of this implementation.
+
+The extension lets the workflow-enabled main agent authorize existing Markdown
+agents as DAG nodes:
+
+```yaml
+---
+name: Support Coordinator
+workflows:
+  enabled: true
+  subagents:
+    - agent: pr_status_analyst
+      when: Review one pull request and summarize its current status
+    - agent: actionable_report_writer
+      when: Combine pull-request summaries into an actionable portfolio report
+---
+```
+
+`workflows.subagents` and the top-level chat-time `subagents:` list are
+independent capability grants. Both are deny-by-default when omitted.
+`workflows.subagents` may reference a specialist used only by Workflows.
+Unknown, duplicate, and self references fail during app composition. As with a
+top-level `subagents:` reference, an authorized Workflow-only specialist does
+not need its own trigger or built-in endpoint. `when` is the routing hint shown
+to the coordinator's plan-authoring model; when omitted, the specialist's
+`description` is used. The `subagents` items are translated into typed
+configuration during app composition rather than re-parsed by registration or
+execution code.
+
+The static grant and every runtime plan are enforced independently. Before a
+plan starts, each `sub_agent.agent` must be present in the owning agent's
+`workflows.subagents` grant. An unauthorized or unknown slug rejects the plan;
+the Activity also fails closed if its catalog lookup cannot resolve the
+already-authorized slug. The immutable owner-specific policy used for prompt
+guidance is the same policy used for plan validation. v1 constructs that policy
+only for `main.agent.md`; issue #109 can construct the same value per owner
+without changing the node or Activity contract.
+
+The Workflow plan uses a `sub_agent` task:
+
+```json
+{
+  "id": "analyze_pr_42",
+  "type": "sub_agent",
+  "agent": "pr_status_analyst",
+  "task": "Review pull request https://github.com/owner/repo/pull/42 and summarize its current status."
+}
+```
+
+The reduce node uses the same task type and depends on every map result:
+
+```json
+{
+  "id": "write_report",
+  "type": "sub_agent",
+  "agent": "actionable_report_writer",
+  "task": "Create an actionable report from PR 42: ${analyze_pr_42.result.text}; PR 43: ${analyze_pr_43.result.text}.",
+  "depends_on": ["analyze_pr_42", "analyze_pr_43"]
+}
+```
+
+`task` must be a self-contained string and may template upstream results. A
+successful v1 node returns
+`{"agent": "pr_status_analyst", "text": "..."}`;
+downstream tasks can reference `${analyze_pr_42.result.text}`. Independent Sub
+Agent tasks can fan out without dependencies, and another authorized Sub Agent
+can depend on all of them to reduce their summaries. Status and lineage remain
+owned by the parent Workflow and identify the execution by parent Workflow id,
+node id, and specialist slug. Leaf-only means that the specialist cannot start
+another Workflow or delegate again. A Sub Agent Activity is not an independently
+queryable workflow instance: built-in status surfaces report it only as a parent
+node, including the currently scheduled node ids while a wave is running.
+
+The specialist runs as itself with a fresh context and its own instructions,
+model, timeout, normal tools, MCP servers, skills, and `web_request` setting. It
+does not inherit the parent's tools or conversation history. In v1 it also
+receives no request-scoped sandbox, Workflow management tools, or `delegate_*`
+tools.
+
+The specialist's configured timeout is enforced inside the async Agent Activity
+around `Agent.run(task)`. The Functions host's activity/function timeout remains
+an outer limit, so the observable upper bound is the shorter of the specialist
+timeout and the host limit. A timeout raises from the Activity and fails the
+parent Workflow; it is never returned as a success-shaped result.
+
+| Concern | Proposed v1 | Deferred to v2 |
+| --- | --- | --- |
+| Execution | One stateless Agent Activity per leaf node; no child orchestration | Stateful or bounded multi-level execution |
+| Result | Fixed `{agent, text}` envelope | `response_schema`-validated output |
+| Failure | Activity failure or timeout fails the parent Workflow | Retry and continue-on-error policy |
+| Retry | No automatic retry; use the specialist's timeout | Idempotent retry with attempts/backoff |
+| Cancellation | Parent stops scheduling; an already-dispatched model call is best-effort | Stronger activity interruption where supported |
+| Context | Self-contained `task` only | Explicit context-sharing policy, if justified |
+
+The v1 runtime does not configure automatic Durable retries. The task and result
+authoring contract should remain unchanged if a runtime-managed Durable retry
+policy is added later. Before enabling it, the implementation must define
+idempotency, retryable failure kinds, maximum attempts/backoff, and how repeated
+model or tool side effects are surfaced.
+
+Even without configured retry options, Durable Activity delivery is
+at-least-once. A worker failure can therefore repeat a model call or specialist
+tool side effect. v1 does not claim exactly-once Agent execution: specialist
+tools used from a Workflow should tolerate re-execution, and terminal publishers
+should use stable destination identities or equivalent idempotent writes. The
+PR-status sample overwrites the request's specified Blob path so repeated
+publication converges on the same report instead of creating duplicate outputs.
+
+#### Reviewer note: positive capability allowlists
+
+Today specialist `tools`, `skills`, and `mcp` capabilities inherit the
+project-wide inventory and can only be narrowed with `exclude` (or disabled
+entirely). The proposal preserves that existing behavior, but durable background
+execution makes the lack of a positive allowlist a least-privilege concern:
+adding a new project capability can make it available to existing specialists
+without editing their definitions.
+
+A future capability proposal could add an explicit form such as:
+
+```yaml
+tools:
+  allow: [lookup_invoice]
+skills:
+  allow: [billing-policy]
+mcp:
+  allow: [billing-api]
+```
+
+This syntax is illustrative only and is not accepted as part of the Workflow Sub
+Agent contract in this draft. Review should decide whether positive allowlists
+are a prerequisite, a parallel feature, or a later hardening step.
+
 ## 5. Decisions log
 
 | # | Decision | Options considered | Choice | Decided by | Date |
@@ -288,6 +427,15 @@ execution.
 | 12 | Record trigger support | Create a second Dynamic Workflows FRD / evolve this FRD | Update FRD 0004 because Markdown-declared trigger support extends the existing feature without redesigning it | Human | 2026-07-23 |
 | 13 | Declared-trigger scope | Add named trigger types individually / use generic trigger registration | Add the Durable client binding generically to every supported Markdown-declared trigger for the workflow-enabled main agent | Human + Agent | 2026-07-17 |
 | 14 | Trigger lifetime | Wait for terminal status / start asynchronously | End the initial trigger Function after the agent starts the workflow; Durable execution continues independently | Human + Agent | 2026-07-17 |
+| 15 | Workflow Sub Agent authorization | Reuse the top-level list / add a mode flag / use a Workflow-owned grant | Add independent, deny-by-default `workflows.subagents` | Human | 2026-07-23 |
+| 16 | First execution boundary | Recursive delegation / bounded nesting / leaf-only | v1 is leaf-only; bounded multi-level execution is v2 | Human | 2026-07-23 |
+| 17 | Specialist context | Copy parent state / share history / self-contained task | Run with the specialist's own static capabilities and a self-contained task only | Human | 2026-07-23 |
+| 18 | Failure and retry | Recoverable result / automatic retry / fail parent without retry | Sub Agent failure fails the parent Workflow; v1 has no automatic retry | Human | 2026-07-23 |
+| 19 | Successful result | Plain text / schema-dependent result / fixed envelope | Return `{agent, text}`; defer `response_schema` to v2 | Human | 2026-07-24 |
+| 20 | Sub Agent runtime boundary | Direct Activity / one child orchestrator per node / shared child orchestrator | Invoke each stateless Sub Agent directly as an Activity; retain status and lineage on the parent node | Human + Chris Gillum | 2026-07-24 |
+| 21 | Dependency on per-agent Workflows (#109) | Wait for #109 / ship main-only then extend | Ship the existing `main.agent.md` owner scope now, while keeping engine and policy boundaries reusable by #109 | Human | 2026-07-24 |
+| 22 | Documentation audiences | Explain internals in every document / separate maintainer and customer surfaces | Keep decisions and Durable internals in the FRD/architecture; make samples and authoring docs independently understandable to customers | Human + Chris Gillum | 2026-07-24 |
+| 23 | Sub Agent failure diagnostics | Expose provider errors / one generic message / bounded error code plus correlated logs | Keep provider details out of Durable history, expose a stable non-sensitive error code, and correlate detailed logs by Workflow ID, node ID, and specialist slug | Human + Laveesh Rohra | 2026-08-03 |
 
 ## 6. Test plan
 
@@ -331,6 +479,18 @@ execution.
 - [x] Evolution #112: timer and queue samples index their trigger, Durable
   client, orchestrator, and Activity bindings and complete model-backed local
   runs.
+- [x] Evolution #117: Workflow Sub Agents
+  - validate the independent, deny-by-default `workflows.subagents` grant;
+  - reject a runtime `sub_agent` node whose slug is not authorized by that
+    grant, and fail closed on an impossible catalog miss;
+  - validate `sub_agent` node shape, authorization, DAG templates, and results;
+  - execute map nodes as parallel Agent Activities and reduce their `{agent,
+    text}` results;
+  - verify specialist capability isolation, timeout, failure, and cancellation;
+  - make `samples/workflow-subagents-preview/` runnable and execute it end to
+    end through Queue, Durable execution, fake PR tools, HTML reduction, and
+    Blob publication, including convergence on the same Blob after repeated
+    publication.
 
 ## 7. Docs impact
 
@@ -347,6 +507,10 @@ execution.
 - [ ] `docs/frds/README.md` — add FRD 0004 to the index.
 - [x] Evolution #112: update `docs/triggers.md`, `docs/workflows.md`, and
   `docs/architecture.md` for trigger-started workflows.
+- [x] Evolution #117: document `workflows.subagents` and the `sub_agent` task in
+  `docs/front-matter-spec.md`, `docs/workflows.md`, and `docs/architecture.md`;
+  keep the sample customer-facing and free of FRD/Durable implementation
+  details.
 
 ## 8. Status & sign-off
 
@@ -358,3 +522,13 @@ execution.
 - **Human sign-off:** TsuyoshiUshio, 2026-07-06 → `status: Finalized`.
 - **Evolution review:** Markdown-declared trigger support reviewed by
   TsuyoshiUshio and Chris Gillum in PR #112, 2026-07-23.
+- **Workflow Sub Agent architecture review:** External contract reviewed in PR
+  #117. Chris Gillum recommended direct Activity execution because current
+  Serverless Agent invocations are stateless; the plan was revised to remove
+  child orchestration and child ids. A dedicated pre-implementation review on
+  2026-07-24 additionally required an executable E2E sample, runtime
+  authorization enforcement, explicit at-least-once semantics, and an
+  Activity-owned timeout boundary; those findings are incorporated above.
+- **Workflow Sub Agent human sign-off:** TsuyoshiUshio, 2026-07-24. Approved
+  Activity-only execution, `{agent, text}` results, main-only v1 ownership, and
+  implementation using TDD followed by sample E2E validation.

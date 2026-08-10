@@ -17,6 +17,8 @@ ABC surface
   use given an optional per-call request.
 * :meth:`ClientManager.build_chat_client` — return a fresh ``ChatClient``
   bound to a specific model.
+* :meth:`ClientManager.build_chat_client_with_target` — return a fresh client
+    with authoritative inference-target metadata when available.
 * :meth:`ClientManager.close` — release any resources held by the manager
   (called from the application's shutdown hook).
 """
@@ -26,6 +28,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from dataclasses import dataclass
 from enum import StrEnum
 from typing import Any
 
@@ -36,6 +39,14 @@ from .config.env import runtime_backend_env_value, runtime_backend_env_value_fro
 # ---------------------------------------------------------------------------
 # ABC
 # ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class InferenceTarget:
+    """Construction-time metadata for the model endpoint used by a chat client."""
+
+    provider: str | None = None
+    model: str | None = None
 
 
 class ClientManager(ABC):
@@ -60,6 +71,12 @@ class ClientManager(ABC):
         :meth:`resolve_model` itself. The return type is intentionally
         ``Any`` so different framework SDKs can be plugged in.
         """
+
+    def build_chat_client_with_target(
+        self, model: str | None
+    ) -> tuple[Any, InferenceTarget]:
+        """Construct a client and return any authoritative target metadata."""
+        return self.build_chat_client(model), InferenceTarget()
 
     async def close(self) -> None:
         """Release any resources held by the manager. Default: no-op."""
@@ -136,29 +153,62 @@ class MAFClientManager(ClientManager):
 
     def resolve_model(self, requested: str | None) -> str:
         """Resolve model as requested > provider-specific env > runtime env > default."""
+        return self._resolve_model(requested, self._provider())
+
+    @classmethod
+    def _resolve_model(cls, requested: str | None, provider: MAFProvider) -> str:
         if requested:
             return requested
-        provider = self._provider()
         runtime_model = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
         if provider is MAFProvider.AZURE_OPENAI:
-            return self._env("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
+            return cls._env("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
         if provider is MAFProvider.FOUNDRY:
-            return self._env("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
+            return cls._env("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
         if provider is MAFProvider.OPENAI:
             return runtime_model or _DEFAULT_OPENAI_MODEL
         raise AssertionError("Resolved MAF provider is unsupported.")
 
     def build_chat_client(self, model: str | None) -> Any:
+        client, _ = self._build_maf_chat_client_with_target(model)
+        return client
+
+    def build_chat_client_with_target(
+        self, model: str | None
+    ) -> tuple[Any, InferenceTarget]:
+        if self._has_custom_chat_client_builder():
+            return self.build_chat_client(model), InferenceTarget()
+        return self._build_maf_chat_client_with_target(model)
+
+    def _has_custom_chat_client_builder(self) -> bool:
+        """Return whether a subclass overrides the existing public builder hook."""
+        return type(self).build_chat_client is not MAFClientManager.build_chat_client
+
+    def _has_custom_model_resolver(self) -> bool:
+        """Return whether a subclass overrides the public model-resolution hook."""
+        return type(self).resolve_model is not MAFClientManager.resolve_model
+
+    def _build_maf_chat_client_with_target(
+        self, model: str | None
+    ) -> tuple[Any, InferenceTarget]:
         provider = self._provider()
-        resolved = self.resolve_model(model)
+        resolved = (
+            self.resolve_model(model)
+            if self._has_custom_model_resolver()
+            else self._resolve_model(model, provider)
+        )
         logger.info("MAF provider=%s model=%s", provider, resolved)
         if provider is MAFProvider.OPENAI:
-            return self._build_openai(resolved)
-        if provider is MAFProvider.AZURE_OPENAI:
-            return self._build_azure_openai(resolved)
-        if provider is MAFProvider.FOUNDRY:
-            return self._build_foundry(resolved)
-        raise AssertionError("Resolved MAF provider is unsupported.")
+            client = self._build_openai(resolved)
+        elif provider is MAFProvider.AZURE_OPENAI:
+            client = self._build_azure_openai(resolved)
+        elif provider is MAFProvider.FOUNDRY:
+            client = self._build_foundry(resolved)
+        else:
+            raise AssertionError("Resolved MAF provider is unsupported.")
+        return client, InferenceTarget(
+            provider=provider.value,
+            model=resolved,
+        )
 
     # ------------------------------------------------------------------
     # Internals

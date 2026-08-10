@@ -8,7 +8,7 @@ import re
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
@@ -66,6 +66,9 @@ from ._handlers import (
 from ._naming import _function_name_from_source, _safe_function_name
 from .capabilities import AgentCapabilities
 from .catalog import AgentCatalog
+
+if TYPE_CHECKING:
+    from ..workflows.workflow_schema import WorkflowPlanPolicy
 
 _MCP_AGENT_TOOL_PROPERTIES = json.dumps(
     [
@@ -150,6 +153,7 @@ _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
 _PROVIDER_LABEL_VALUE_PATTERN = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
 )
+_MAX_HISTORY_REPLAY_MESSAGES = 200
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -256,6 +260,7 @@ async def _run_builtin_agent(
     catalog: AgentCatalog | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
     owner: OwnerPrincipal | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Any:
     resolved_session_id = (
         session_id
@@ -287,7 +292,11 @@ async def _run_builtin_agent(
     }
     runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
     if runtime_kwargs is None:
-        return await _run_agent(prompt, **runner_kwargs)
+        return await _run_agent(
+            prompt,
+            **runner_kwargs,
+            workflow_policy=workflow_policy,
+        )
     return await _run_agent(prompt, **runner_kwargs, **runtime_kwargs)
 
 
@@ -303,6 +312,7 @@ def _run_builtin_agent_stream(
     catalog: AgentCatalog | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
     owner: OwnerPrincipal | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> Any:
     resolved_session_id = (
         session_id
@@ -335,7 +345,11 @@ def _run_builtin_agent_stream(
     }
     runtime_kwargs = _session_runtime_kwargs(session_runtime, owner)
     if runtime_kwargs is None:
-        return _run_agent_stream(prompt, **runner_kwargs)
+        return _run_agent_stream(
+            prompt,
+            **runner_kwargs,
+            workflow_policy=workflow_policy,
+        )
     return _run_agent_stream(prompt, **runner_kwargs, **runtime_kwargs)
 
 
@@ -402,6 +416,7 @@ def _register_http_chat(
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat(req: Request, durable_client: Any | None) -> Response:
         owner: OwnerPrincipal | None = None
@@ -506,6 +521,7 @@ def _register_http_chat(
                     catalog=catalog,
                     session_runtime=session_runtime,
                     owner=owner,
+                    workflow_policy=workflow_policy,
                 )
                 _set_run_result_attributes(span, result)
                 span.set_attribute("af.agent.outcome", "success")
@@ -616,6 +632,7 @@ def _register_http_chat_stream(
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_chat_stream(
         req: Request,
@@ -668,8 +685,9 @@ def _register_http_chat_stream(
                     catalog=catalog,
                     session_runtime=None,
                     owner=owner,
-                    ),
-                    media_type="text/event-stream",
+                    workflow_policy=workflow_policy,
+                ),
+                media_type="text/event-stream",
             )
         except ValueError as exc:
             return _sse_error_response(str(exc), status_code=400)
@@ -708,6 +726,7 @@ def _register_mcp_endpoint(
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     async def handle_mcp_agent_chat(context: str, durable_client: Any | None) -> str:
         # Same rationale as `handle_chat` above: this built-in MCP surface
@@ -748,6 +767,7 @@ def _register_mcp_endpoint(
                     catalog=catalog,
                     session_runtime=session_runtime,
                     owner=FunctionAppPrincipal() if session_runtime is not None else None,
+                    workflow_policy=workflow_policy,
                 )
                 # When the caller supplies no explicit session id (`session_id`
                 # is `None` above), the runner still resolves/generates one for
@@ -876,6 +896,88 @@ def _register_workflow_status_endpoints(
     )
 
 
+def _register_history_endpoint(
+    app: func.FunctionApp,
+    *,
+    slug: str,
+    base_function_name: str,
+    auth: EndpointAuthConfig,
+) -> None:
+    """Register a read-only endpoint that returns a session's persisted transcript.
+
+    The built-in chat UI calls this to repaint prior user/assistant messages when a
+    user resumes an older session. It reads the same blob history the runtime writes
+    each turn; when no storage is configured it degrades to an empty transcript so
+    older deployments (and local runs without storage) keep working.
+    """
+    auth_level = resolve_endpoint_auth_level(auth)
+
+    async def get_session_history(req: Request) -> Response:
+        auth_error = authorize_entra_request(req.headers.get, auth)
+        if auth_error is not None:
+            return _json_error(auth_error.message, status_code=auth_error.status_code)
+        session_id = req.headers.get("x-ms-session-id") or ""
+        if not session_id:
+            return Response(
+                json.dumps({"messages": [], "truncated": False}),
+                media_type="application/json",
+            )
+        # session_id becomes part of the blob path; reject anything unsafe.
+        if not _SAFE_SESSION_ID_PATTERN.match(session_id):
+            return Response(
+                json.dumps({"error": "invalid session id"}),
+                status_code=400,
+                media_type="application/json",
+            )
+
+        from .._blob_history import build_blob_provider_from_environment
+
+        provider = build_blob_provider_from_environment()
+        if provider is None:
+            return Response(
+                json.dumps({"messages": [], "truncated": False}),
+                media_type="application/json",
+            )
+        # Present a clean transcript: drop internal/excluded turns.
+        provider.skip_excluded = True
+        try:
+            messages = await provider.get_messages(session_id)
+        except Exception:
+            logger.exception("history endpoint failed")
+            return Response(
+                json.dumps({"error": "failed to load history"}),
+                status_code=500,
+                media_type="application/json",
+            )
+
+        rendered: list[dict[str, str]] = []
+        for message in messages:
+            role = str(getattr(message, "role", "") or "").strip().lower()
+            if role not in ("user", "assistant"):
+                continue
+            text = getattr(message, "text", "")
+            if not isinstance(text, str) or not text:
+                continue
+            rendered.append({"role": role, "text": text})
+
+        truncated = len(rendered) > _MAX_HISTORY_REPLAY_MESSAGES
+        if truncated:
+            rendered = rendered[-_MAX_HISTORY_REPLAY_MESSAGES:]
+        return Response(
+            json.dumps({"messages": rendered, "truncated": truncated}),
+            media_type="application/json",
+        )
+
+    # Order mirrors the chat/chatstream endpoints (route first, then
+    # function_name) so the applied name is idiomatic `@app.function_name`
+    # above `@app.route`. This is also what lets the route be looked up by
+    # its function name in tests.
+    decorated = app.route(
+        route=f"agents/{slug}/history", methods=["GET"], auth_level=auth_level
+    )(get_session_history)
+    app.function_name(name=f"{base_function_name}_history")(decorated)
+
+
 def register_builtin_endpoints(
     app: func.FunctionApp,
     resolved: ResolvedAgent,
@@ -886,6 +988,7 @@ def register_builtin_endpoints(
     workflow_system_addendum: str | None = None,
     catalog: AgentCatalog | None = None,
     session_runtime: SessionRuntimeBinding | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     """Register built-in debug chat UI, REST chat, and MCP endpoints for one agent."""
 
@@ -918,6 +1021,7 @@ def register_builtin_endpoints(
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
             session_runtime=session_runtime,
+            workflow_policy=workflow_policy,
         )
         _register_http_chat_stream(
             app,
@@ -930,6 +1034,13 @@ def register_builtin_endpoints(
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
             session_runtime=session_runtime,
+            workflow_policy=workflow_policy,
+        )
+        _register_history_endpoint(
+            app,
+            slug=slug,
+            base_function_name=base_function_name,
+            auth=auth,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(
@@ -950,6 +1061,7 @@ def register_builtin_endpoints(
             workflow_system_addendum=workflow_system_addendum,
             catalog=catalog,
             session_runtime=session_runtime,
+            workflow_policy=workflow_policy,
         )
 
 

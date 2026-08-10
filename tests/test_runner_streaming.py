@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from azure_functions_agents import runner
+from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 
 
@@ -227,8 +228,8 @@ def test_run_agent_stream_coalesces_tool_argument_chunks(monkeypatch: Any) -> No
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_Agent, object, str, None]:
-        return _Agent(), object(), "test-session", None
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -272,8 +273,8 @@ def test_run_agent_stream_bounds_stalled_generator_by_coordinator_deadline(
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_StallingAgent, object, str, None]:
-        return _StallingAgent(), object(), "test-session", None
+    ) -> tuple[_StallingAgent, object, str, None, InferenceTarget]:
+        return _StallingAgent(), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -332,8 +333,8 @@ def test_run_agent_stream_finalizes_when_deadline_exhausted_between_updates(
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_CleanupTrackingAgent, object, str, None]:
-        return _CleanupTrackingAgent(fake_stream), object(), "test-session", None
+    ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
+        return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -394,8 +395,8 @@ def test_run_agent_stream_finalizes_when_cancelled_while_suspended_at_a_yield(
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_CleanupTrackingAgent, object, str, None]:
-        return _CleanupTrackingAgent(fake_stream), object(), "test-session", None
+    ) -> tuple[_CleanupTrackingAgent, object, str, None, InferenceTarget]:
+        return _CleanupTrackingAgent(fake_stream), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -523,8 +524,8 @@ def test_run_agent_bounds_lock_wait_by_coordinator_deadline(monkeypatch: Any) ->
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_Agent, object, str, None]:
-        return _Agent(), object(), resolved_id, None
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), resolved_id, None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -562,8 +563,8 @@ def test_run_agent_stream_bounds_lock_wait_by_coordinator_deadline(monkeypatch: 
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_Agent, object, str, None]:
-        return _Agent(), object(), resolved_id, None
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), resolved_id, None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -675,8 +676,8 @@ def test_run_agent_stream_reports_delegate_error_count_on_span(monkeypatch: Any)
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_Agent, object, str, runner._DelegateErrorTracker]:
-        return _Agent(), object(), "test-session", tracker
+    ) -> tuple[_Agent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
+        return _Agent(), object(), "test-session", tracker, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -705,8 +706,8 @@ def test_run_agent_stream_reports_zero_tool_errors_without_delegation(monkeypatc
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_Agent, object, str, None]:
-        return _Agent(), object(), "test-session", None
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -739,8 +740,8 @@ def test_run_agent_stream_counts_ordinary_tool_errors_without_delegation(
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_ToolErrorAgent, object, str, None]:
-        return _ToolErrorAgent(), object(), "test-session", None
+    ) -> tuple[_ToolErrorAgent, object, str, None, InferenceTarget]:
+        return _ToolErrorAgent(), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -773,8 +774,8 @@ def test_run_agent_stream_sums_ordinary_and_delegate_tool_errors(monkeypatch: An
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_ToolErrorAgent, object, str, runner._DelegateErrorTracker]:
-        return _ToolErrorAgent(), object(), "test-session", tracker
+    ) -> tuple[_ToolErrorAgent, object, str, runner._DelegateErrorTracker, InferenceTarget]:
+        return _ToolErrorAgent(), object(), "test-session", tracker, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 
@@ -806,8 +807,8 @@ def test_run_agent_stream_reports_display_name_on_span(monkeypatch: Any) -> None
 
     async def fake_build_agent_session_history(
         **_kwargs: Any,
-    ) -> tuple[_Agent, object, str, None]:
-        return _Agent(), object(), "test-session", None
+    ) -> tuple[_Agent, object, str, None, InferenceTarget]:
+        return _Agent(), object(), "test-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_build_agent_session_history)
 

@@ -37,6 +37,7 @@ import azure_functions_agents._observability as obs
 import azure_functions_agents.runner as runner
 from azure_functions_agents.client_manager import (
     ClientManager,
+    InferenceTarget,
     get_client_manager,
     set_client_manager,
 )
@@ -48,6 +49,7 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
+from azure_functions_agents.workflows.workflow_schema import WorkflowPlanPolicy
 
 # ---------------------------------------------------------------------------
 # Shared scaffolding
@@ -79,6 +81,10 @@ def _make_resolved(**overrides: Any) -> ResolvedAgent:
     }
     defaults.update(overrides)
     return ResolvedAgent(**defaults)  # type: ignore[arg-type]
+
+
+def _targeted_agent(agent: Any) -> tuple[Any, InferenceTarget]:
+    return agent, InferenceTarget()
 
 
 class _FakeClientManager(ClientManager):
@@ -326,7 +332,9 @@ def test_build_role_agent_delegated_role_has_only_its_own_tools() -> None:
     assert agent.context_providers == []
 
 
-def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
+def test_build_role_agent_direct_role_has_full_tool_superset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     chat_client = SimpleNamespace(model="fake-model")
     user_tool = SimpleNamespace(name="own_user_tool")
     mcp_tool = SimpleNamespace(name="own_mcp_tool")
@@ -334,6 +342,24 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
     web_request_tool = SimpleNamespace(name="web_request")
     delegate_tool = SimpleNamespace(name="delegate_billing")
     history_provider = SimpleNamespace()
+    policy = WorkflowPlanPolicy(
+        allowed_tools=frozenset({"own_user_tool"}),
+        allowed_subagents=frozenset({"billing"}),
+    )
+    captured: dict[str, object] = {}
+
+    def _build_workflow_tools(**kwargs: object) -> list[object]:
+        captured.update(kwargs)
+        return [
+            SimpleNamespace(name="start_workflow"),
+            SimpleNamespace(name="get_workflow_status"),
+            SimpleNamespace(name="list_workflows"),
+        ]
+
+    monkeypatch.setattr(
+        "azure_functions_agents.workflows.workflow_tools.build_workflow_tools",
+        _build_workflow_tools,
+    )
 
     agent = runner._build_role_agent(
         chat_client,
@@ -350,6 +376,7 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
         resolved_id="session-1",
         history_provider=history_provider,
         delegate_tools=[delegate_tool],
+        workflow_policy=policy,
     )
 
     tool_names = _tool_names(agent)
@@ -364,6 +391,7 @@ def test_build_role_agent_direct_role_has_full_tool_superset() -> None:
         "list_workflows",
     } <= tool_names
     assert history_provider in agent.context_providers
+    assert captured["policy"] is policy
 
 
 # ---------------------------------------------------------------------------
@@ -380,7 +408,7 @@ def test_build_delegated_agent_never_wires_its_own_declared_subagents() -> None:
         instructions="handle billing",
     )
 
-    agent = runner._build_delegated_agent(resolved, AgentCapabilities())
+    agent, _ = runner._build_delegated_agent(resolved, AgentCapabilities())
 
     # Structural proof of single-level delegation: even though
     # `resolved.subagents` is non-empty, _build_delegated_agent's signature
@@ -462,7 +490,7 @@ def test_build_delegated_agent_uses_specialists_own_model_instructions_tools_and
         delegate_tools=None,
     )
 
-    billing_agent = runner._build_delegated_agent(billing_resolved, billing_capabilities)
+    billing_agent, _ = runner._build_delegated_agent(billing_resolved, billing_capabilities)
 
     # Model: the specialist's chat client resolves to *its own* model.
     # (MAF's `Agent` stores the client passed to its constructor as
@@ -514,9 +542,9 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     real_build_delegated_agent = runner._build_delegated_agent
 
     def _capturing_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
-        agent = real_build_delegated_agent(resolved, capabilities)
+        agent, inference_target = real_build_delegated_agent(resolved, capabilities)
         built_agents.append(agent)
-        return agent
+        return agent, inference_target
 
     monkeypatch.setattr(runner, "_build_delegated_agent", _capturing_build_delegated_agent)
 
@@ -541,6 +569,127 @@ async def test_single_level_delegation_end_to_end_with_mutual_subagents_refs_doe
     assert tracker.count == 0
     assert len(built_agents) == 1
     assert _tool_names(built_agents[0]) == set()
+
+
+# ---------------------------------------------------------------------------
+# Shared leaf execution used by chat delegation and Workflow Activities
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_builds_fresh_specialist_and_returns_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    built: list[_FakeSpecialistAgent] = []
+
+    def build(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+        async def respond(task: str) -> str:
+            return f"{resolved.slug}:{task}"
+
+        agent = _FakeSpecialistAgent(resolved.slug, respond)
+        built.append(agent)
+        return _targeted_agent(agent)
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", build)
+    resolved = _make_resolved(slug="analyst")
+    capabilities = AgentCapabilities()
+
+    first, second = await asyncio.gather(
+        runner.run_leaf_agent_task(
+            resolved,
+            capabilities,
+            "first",
+            timeout=1.0,
+            execution_role="delegate",
+        ),
+        runner.run_leaf_agent_task(
+            resolved,
+            capabilities,
+            "second",
+            timeout=1.0,
+            execution_role="delegate",
+        ),
+    )
+
+    assert {first, second} == {"analyst:first", "analyst:second"}
+    assert len(built) == 2
+    assert built[0] is not built[1]
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_propagates_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def respond(task: str) -> str:
+        await asyncio.sleep(10)
+        return task
+
+    monkeypatch.setattr(
+        runner,
+        "_build_delegated_agent",
+        lambda resolved, capabilities: _targeted_agent(
+            _FakeSpecialistAgent(resolved.slug, respond)
+        ),
+    )
+
+    with pytest.raises(TimeoutError):
+        await runner.run_leaf_agent_task(
+            _make_resolved(slug="analyst"),
+            AgentCapabilities(),
+            "slow",
+            timeout=0.01,
+            execution_role="delegate",
+        )
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_propagates_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    async def respond(task: str) -> str:
+        await asyncio.sleep(10)
+        return task
+
+    monkeypatch.setattr(
+        runner,
+        "_build_delegated_agent",
+        lambda resolved, capabilities: _targeted_agent(
+            _FakeSpecialistAgent(resolved.slug, respond)
+        ),
+    )
+    running = asyncio.create_task(
+        runner.run_leaf_agent_task(
+            _make_resolved(slug="analyst"),
+            AgentCapabilities(),
+            "cancel",
+            timeout=30.0,
+            execution_role="delegate",
+        )
+    )
+    await asyncio.sleep(0.01)
+    running.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await running
+
+
+@pytest.mark.asyncio
+async def test_run_leaf_agent_task_propagates_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
+        raise RuntimeError("model configuration failed")
+
+    monkeypatch.setattr(runner, "_build_delegated_agent", fail)
+
+    with pytest.raises(RuntimeError, match="model configuration failed"):
+        await runner.run_leaf_agent_task(
+            _make_resolved(slug="analyst"),
+            AgentCapabilities(),
+            "work",
+            timeout=1.0,
+            execution_role="delegate",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +748,9 @@ async def _build_single_delegate_tool(
 ) -> tuple[Any, Any]:
     """Build one real ``delegate_<slug>`` tool with a ``_FakeSpecialistAgent`` swapped in."""
     monkeypatch.setattr(
-        runner, "_build_delegated_agent", lambda resolved, caps: _FakeSpecialistAgent(slug, respond)
+        runner,
+        "_build_delegated_agent",
+        lambda resolved, caps: _targeted_agent(_FakeSpecialistAgent(slug, respond)),
     )
     catalog = _catalog_of((slug, _make_resolved(slug=slug, timeout=resolved_timeout)))
     loop = asyncio.get_event_loop()
@@ -869,7 +1020,7 @@ async def test_delegate_adapter_concurrent_calls_to_same_specialist_run_on_indep
 
         agent = _FakeSpecialistAgent(resolved.slug, respond)
         built_instances.append(agent)
-        return agent
+        return _targeted_agent(agent)
 
     monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
 
@@ -917,7 +1068,7 @@ async def test_delegate_adapter_runs_different_specialists_in_parallel(
 
     def _fake_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
         respond = respond_billing if resolved.slug == "billing" else respond_shipping
-        return _FakeSpecialistAgent(resolved.slug, respond)
+        return _targeted_agent(_FakeSpecialistAgent(resolved.slug, respond))
 
     monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
 
@@ -976,7 +1127,7 @@ async def test_delegate_spans_share_one_trace_id_under_concurrent_gather(
 
     def _fake_build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Any:
         respond = respond_a if resolved.slug == "a" else respond_b
-        return _FakeSpecialistAgent(resolved.slug, respond)
+        return _targeted_agent(_FakeSpecialistAgent(resolved.slug, respond))
 
     monkeypatch.setattr(runner, "_build_delegated_agent", _fake_build_delegated_agent)
 

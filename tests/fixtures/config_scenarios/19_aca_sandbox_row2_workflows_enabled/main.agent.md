@@ -5,5 +5,7 @@ builtin_endpoints:
   chat_api: true
 workflows:
   enabled: true
+  subagents:
+    - agent: workflow_leaf
 ---
 Assist the user.

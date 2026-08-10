@@ -1,6 +1,7 @@
 # Samples
 
-Each subdirectory is a standalone Azure Functions app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
+Each subdirectory in the runnable samples table is a standalone Azure Functions
+app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure-developer-cli/install-azd).
 
 | Sample | Trigger | Custom Tools | Connectors | MCP Servers | Skills | Sandbox | Chat UI |
 |---|---|---|---|---|---|---|---|
@@ -12,6 +13,12 @@ Each subdirectory is a standalone Azure Functions app deployable with [`azd up`]
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
+
+## Design previews
+
+- [workflow-subagents-preview](workflow-subagents-preview/) is a non-runnable,
+  reviewer-facing preview of the proposed Dynamic Workflow Sub Agent authoring
+  surface. It intentionally has no `host.json`.
 
 ## Run Locally (optional)
 

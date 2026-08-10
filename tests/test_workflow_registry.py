@@ -15,10 +15,14 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
+from azure_functions_agents.config.schema import WorkflowSubagentRef
+from azure_functions_agents.registration.capabilities import AgentCapabilities
+from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
 from azure_functions_agents.workflows import context, engine, integration, registry
 from azure_functions_agents.workflows import workflow_schema as schema
 from azure_functions_agents.workflows import workflow_tools as tools
@@ -249,6 +253,18 @@ def _workflow_tool(
     return WorkflowTool(name, description, handler, public=public)
 
 
+def _agent_catalog(**descriptions: str):
+    return build_catalog(
+        {
+            slug: CatalogEntry(
+                SimpleNamespace(slug=slug, description=description),  # type: ignore[arg-type]
+                AgentCapabilities(),
+            )
+            for slug, description in descriptions.items()
+        }
+    )
+
+
 def test_integration_default_workflow_tools_are_public_tools_only():
     result = integration.build_workflow_integration(
         _FakeApp(),
@@ -295,6 +311,9 @@ def test_integration_no_workflow_tools_yields_empty_effective_set():
     )
     assert result.workflow_tools  # management tools still come back
     assert "No tool tasks are currently allowed" in result.chat_system_addendum
+    assert "No Sub Agent tasks are allowed" in result.chat_system_addendum
+    assert result.plan_policy is not None
+    assert result.plan_policy.allowed_subagents == frozenset()
     assert registry.get_app_config() == frozenset()
 
 
@@ -326,6 +345,72 @@ def test_addendum_includes_per_tool_descriptions():
     assert "### Available workflow tools" in addendum
     assert "`demo_evidence_tool`" in addendum
     assert "Sample tool for the addendum-rendering test." in addendum
+
+
+def test_integration_builds_owner_specific_policy_and_sub_agent_guidance() -> None:
+    result = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_tools=[_workflow_tool("publish", "Publish the report.")],
+        workflow_subagents=[
+            WorkflowSubagentRef(
+                agent="pr_status_analyst",
+                when="Analyze one pull request.",
+            ),
+            WorkflowSubagentRef(agent="report_writer"),
+        ],
+        catalog=_agent_catalog(
+            pr_status_analyst="Default analyst description.",
+            report_writer="Create an actionable report.",
+        ),
+    )
+
+    assert result.plan_policy == schema.WorkflowPlanPolicy(
+        allowed_tools=frozenset({"publish"}),
+        allowed_subagents=frozenset({"pr_status_analyst", "report_writer"}),
+        subagent_guidance=(
+            ("pr_status_analyst", "Analyze one pull request."),
+            ("report_writer", "Create an actionable report."),
+        ),
+    )
+    assert "### Available workflow Sub Agents" in result.chat_system_addendum
+    assert "`pr_status_analyst`" in result.chat_system_addendum
+    assert "Analyze one pull request." in result.chat_system_addendum
+    assert "`${node_id.result.text}`" in result.chat_system_addendum
+
+
+def test_integration_fails_closed_when_authorized_sub_agent_is_missing() -> None:
+    with pytest.raises(RuntimeError, match="not available in the AgentCatalog"):
+        integration.build_workflow_integration(
+            _FakeApp(),
+            _enable_metadata(),
+            workflow_subagents=[WorkflowSubagentRef(agent="missing")],
+            catalog=_agent_catalog(known="Known specialist."),
+        )
+
+
+def test_integration_policies_for_different_owners_do_not_mix() -> None:
+    catalog = _agent_catalog(
+        analyst_a="Analyze A.",
+        analyst_b="Analyze B.",
+    )
+    first = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_subagents=[WorkflowSubagentRef(agent="analyst_a")],
+        catalog=catalog,
+    )
+    second = integration.build_workflow_integration(
+        _FakeApp(),
+        _enable_metadata(),
+        workflow_subagents=[WorkflowSubagentRef(agent="analyst_b")],
+        catalog=catalog,
+    )
+
+    assert first.plan_policy is not None
+    assert second.plan_policy is not None
+    assert first.plan_policy.allowed_subagents == frozenset({"analyst_a"})
+    assert second.plan_policy.allowed_subagents == frozenset({"analyst_b"})
 
 
 def test_addendum_enforces_fire_and_forget_no_poll_guidance():
@@ -572,6 +657,67 @@ async def test_start_workflow_rejects_new_workflow_when_session_active_cap_reach
         "limit": 10,
     }
     assert client.started is False
+
+
+@pytest.mark.asyncio
+async def test_start_workflow_uses_passed_policy_for_sub_agent_authorization() -> None:
+    class _UnexpectedClient:
+        async def get_status_all(self):
+            raise AssertionError("authorization must fail before Durable scheduling")
+
+    session = context.WorkflowSessionContext(
+        session_id="session-1",
+        agent_name="coordinator",
+        durable_client=_UnexpectedClient(),
+        token="",
+    )
+    params = tools.StartWorkflowParams(
+        tasks=[
+            {
+                "id": "analyze",
+                "type": "sub_agent",
+                "agent": "not_allowed",
+                "task": "Analyze one pull request.",
+            }
+        ]
+    )
+    policy = schema.WorkflowPlanPolicy(
+        allowed_tools=frozenset(),
+        allowed_subagents=frozenset({"pr_status_analyst"}),
+    )
+
+    result = await tools.start_workflow(params, session, policy=policy)
+
+    assert "not authorized" in json.loads(result)["error"]
+
+
+def test_start_workflow_params_survive_framework_default_materialization() -> None:
+    original = tools.StartWorkflowParams(
+        tasks=[
+            {
+                "id": "analyze",
+                "type": "sub_agent",
+                "agent": "pr_status_analyst",
+                "task": "Analyze one pull request.",
+            },
+            {
+                "id": "publish",
+                "tool": "publish_report",
+                "args": {"report": "${analyze.result.text}"},
+                "depends_on": ["analyze"],
+            },
+        ]
+    )
+
+    materialized = tools.StartWorkflowParams.model_validate(original.model_dump())
+
+    assert set(materialized.model_dump()["tasks"][0]) == {
+        "id",
+        "type",
+        "agent",
+        "task",
+        "depends_on",
+    }
 
 
 @pytest.mark.asyncio
