@@ -127,9 +127,13 @@ class MAFClientManager(ClientManager):
     def build_chat_client_with_target(
         self, model: str | None
     ) -> tuple[Any, InferenceTarget]:
-        if type(self).build_chat_client is not MAFClientManager.build_chat_client:
+        if self._has_custom_chat_client_builder():
             return self.build_chat_client(model), InferenceTarget()
         return self._build_maf_chat_client_with_target(model)
+
+    def _has_custom_chat_client_builder(self) -> bool:
+        """Return whether a subclass overrides the existing public builder hook."""
+        return type(self).build_chat_client is not MAFClientManager.build_chat_client
 
     def _build_maf_chat_client_with_target(
         self, model: str | None

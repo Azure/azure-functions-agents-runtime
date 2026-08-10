@@ -132,21 +132,11 @@ DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or
 _SESSION_ID_PATTERN = SESSION_ID_PATTERN
 
 type _AgentExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
-type _AgentUsageOutcome = Literal["success", "error", "timeout", "cancelled"]
 
 _USAGE_FIELD_NAMES: dict[str, str] = {
     "input_token_count": "input_tokens",
     "output_token_count": "output_tokens",
-    "total_token_count": "total_tokens",
-    "cache_creation_input_token_count": "cache_creation_input_tokens",
-    "cache_read_input_token_count": "cache_read_input_tokens",
-    "reasoning_output_token_count": "reasoning_output_tokens",
-    "openai.cached_input_tokens": "cache_read_input_tokens",
-    "prompt/cached_tokens": "cache_read_input_tokens",
-    "openai.reasoning_tokens": "reasoning_output_tokens",
-    "completion/reasoning_tokens": "reasoning_output_tokens",
 }
-_USAGE_COMPLETE_FIELDS = frozenset({"input_tokens", "output_tokens", "total_tokens"})
 _FINAL_USAGE_TIMEOUT_SECONDS = 1.0
 
 
@@ -175,6 +165,10 @@ def _response_usage_details(response: Any) -> Any:
         return None
 
 
+def _model_publisher(provider: str | None) -> str | None:
+    return "openai" if provider in {"openai", "azure_openai"} else None
+
+
 async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any:
     try:
         get_final_response = getattr(stream, "get_final_response", None)
@@ -196,11 +190,9 @@ class _AgentUsageRecorder:
     agent_name: str
     execution_role: _AgentExecutionRole
     inference_target: InferenceTarget = field(default_factory=InferenceTarget)
-    workflow_id: str | None = None
-    workflow_node_id: str | None = None
     _emission_attempted: bool = field(default=False, init=False)
 
-    def emit(self, outcome: _AgentUsageOutcome, usage_details: Any = None) -> None:
+    def emit(self, usage_details: Any = None) -> None:
         if self._emission_attempted:
             return
         self._emission_attempted = True
@@ -211,18 +203,11 @@ class _AgentUsageRecorder:
                 "agent_name": self.agent_name,
                 "event_name": "agent_token_usage",
                 "execution_role": self.execution_role,
+                "input_tokens": usage.get("input_tokens"),
                 "model": self.inference_target.model,
-                "outcome": outcome,
+                "model_publisher": _model_publisher(self.inference_target.provider),
+                "output_tokens": usage.get("output_tokens"),
                 "provider": self.inference_target.provider,
-                "usage_available": bool(usage),
-                "usage_complete": (
-                    outcome == "success" and _USAGE_COMPLETE_FIELDS.issubset(usage)
-                ),
-                "usage_scope": "agent_run_local",
-                "usage_source": "final_response" if usage else "unavailable",
-                "workflow_id": self.workflow_id,
-                "workflow_node_id": self.workflow_node_id,
-                **usage,
             }
             logger.info(
                 "Agent token usage: %s",
@@ -539,8 +524,6 @@ async def run_leaf_agent_task(
     *,
     timeout: float,
     execution_role: Literal["delegate", "workflow_subagent"],
-    workflow_id: str | None = None,
-    workflow_node_id: str | None = None,
 ) -> str:
     """Run one fresh stateless specialist and return its response text."""
     specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
@@ -548,21 +531,19 @@ async def run_leaf_agent_task(
         agent_name=resolved.slug,
         execution_role=execution_role,
         inference_target=inference_target,
-        workflow_id=workflow_id,
-        workflow_node_id=workflow_node_id,
     )
     try:
         response = await asyncio.wait_for(specialist_agent.run(task), timeout=timeout)
     except asyncio.CancelledError:
-        usage_recorder.emit("cancelled")
+        usage_recorder.emit()
         raise
     except TimeoutError:
-        usage_recorder.emit("timeout")
+        usage_recorder.emit()
         raise
     except Exception:
-        usage_recorder.emit("error")
+        usage_recorder.emit()
         raise
-    usage_recorder.emit("success", _response_usage_details(response))
+    usage_recorder.emit(_response_usage_details(response))
     return response.text
 
 
@@ -1059,15 +1040,15 @@ async def run_agent(
                     timeout=remaining_after_lock,
                 )
             except asyncio.CancelledError:
-                usage_recorder.emit("cancelled")
+                usage_recorder.emit()
                 raise
             except TimeoutError:
-                usage_recorder.emit("timeout")
+                usage_recorder.emit()
                 raise
             except Exception:
-                usage_recorder.emit("error")
+                usage_recorder.emit()
                 raise
-            usage_recorder.emit("success", _response_usage_details(response))
+            usage_recorder.emit(_response_usage_details(response))
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -1408,10 +1389,10 @@ async def run_agent_stream(
                                 remaining_timeout=max(0.0, deadline - loop.time()),
                             )
                         finally:
-                            usage_recorder.emit("success", usage_details)
+                            usage_recorder.emit(usage_details)
                 except TimeoutError as exc:
                     if usage_recorder is not None:
-                        usage_recorder.emit("timeout")
+                        usage_recorder.emit()
                     if not stream_settled:
                         # Reached when the deadline/cancellation surfaced
                         # from somewhere the inner handler above didn't cover
@@ -1427,11 +1408,11 @@ async def run_agent_stream(
                     yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
                 except asyncio.CancelledError:
                     if usage_recorder is not None:
-                        usage_recorder.emit("cancelled")
+                        usage_recorder.emit()
                     raise
                 except Exception as exc:
                     if usage_recorder is not None:
-                        usage_recorder.emit("error")
+                        usage_recorder.emit()
                     if not stream_settled:
                         # Same reasoning as the `TimeoutError` branch above:
                         # an ordinary exception that reached here without
@@ -1476,7 +1457,7 @@ async def run_agent_stream(
                         )
                         await _finalize_maf_stream(stream, exc_at_teardown)
                         if usage_recorder is not None:
-                            usage_recorder.emit("cancelled")
+                            usage_recorder.emit()
         except TimeoutError:
             span.set_attribute("af.agent.outcome", "error")
             span.record_exception(

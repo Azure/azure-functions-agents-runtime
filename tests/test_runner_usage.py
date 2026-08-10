@@ -42,6 +42,22 @@ def _usage_payloads(caplog: Any) -> list[dict[str, Any]]:
     ]
 
 
+_USAGE_FIELDS = {
+    "agent_name",
+    "event_name",
+    "execution_role",
+    "provider",
+    "model",
+    "model_publisher",
+    "input_tokens",
+    "output_tokens",
+}
+
+
+def _assert_exact_usage_fields(payload: dict[str, Any]) -> None:
+    assert payload.keys() == _USAGE_FIELDS
+
+
 def _install_primary_agent(
     monkeypatch: Any,
     agent: Any,
@@ -78,10 +94,6 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
     ) == {
         "input_tokens": 0,
         "output_tokens": 12,
-        "total_tokens": 12,
-        "cache_creation_input_tokens": 3,
-        "cache_read_input_tokens": 4,
-        "reasoning_output_tokens": 5,
     }
 
     assert runner._normalize_usage_details(
@@ -95,30 +107,20 @@ def test_normalize_usage_details_keeps_only_non_negative_integer_counts() -> Non
 
 
 @pytest.mark.parametrize(
-    ("provider_usage", "cached_tokens", "reasoning_tokens"),
+    "provider_usage",
     [
-        (
-            {
-                "openai.cached_input_tokens": 4,
-                "openai.reasoning_tokens": 5,
-            },
-            4,
-            5,
-        ),
-        (
-            {
-                "prompt/cached_tokens": 6,
-                "completion/reasoning_tokens": 7,
-            },
-            6,
-            7,
-        ),
+        {
+            "openai.cached_input_tokens": 4,
+            "openai.reasoning_tokens": 5,
+        },
+        {
+            "prompt/cached_tokens": 6,
+            "completion/reasoning_tokens": 7,
+        },
     ],
 )
-def test_normalize_usage_details_maps_maf_13_openai_converted_usage_details(
+def test_normalize_usage_details_ignores_additional_maf_13_usage_details(
     provider_usage: dict[str, int],
-    cached_tokens: int,
-    reasoning_tokens: int,
 ) -> None:
     usage_details = UsageDetails(
         input_token_count=10,
@@ -130,32 +132,43 @@ def test_normalize_usage_details_maps_maf_13_openai_converted_usage_details(
     assert runner._normalize_usage_details(usage_details) == {
         "input_tokens": 10,
         "output_tokens": 8,
-        "total_tokens": 18,
-        "cache_read_input_tokens": cached_tokens,
-        "reasoning_output_tokens": reasoning_tokens,
     }
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("openai", "openai"),
+        ("azure_openai", "openai"),
+        ("foundry", None),
+        (None, None),
+    ],
+)
+def test_model_publisher_is_derived_only_for_known_openai_transports(
+    provider: str | None,
+    expected: str | None,
+) -> None:
+    assert runner._model_publisher(provider) == expected
 
 
 def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
         agent_name="billing",
         execution_role="workflow_subagent",
-        workflow_id="workflow-1",
-        workflow_node_id="node-2",
+        inference_target=InferenceTarget("azure_openai", "gpt-4o"),
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         recorder.emit(
-            "success",
             {
                 "input_token_count": 10,
                 "output_token_count": 20,
                 "total_token_count": 30,
                 "openai.cached_input_tokens": 4,
                 "openai.reasoning_tokens": 5,
-            },
+            }
         )
-        recorder.emit("error")
+        recorder.emit()
 
     records = [record for record in caplog.records if record.message.startswith("Agent token usage")]
     assert len(records) == 1
@@ -163,44 +176,32 @@ def test_usage_recorder_emits_deterministic_json_once_through_shared_logger(capl
     payload = _usage_payload(records[0])
     assert payload == {
         "agent_name": "billing",
-        "cache_read_input_tokens": 4,
         "event_name": "agent_token_usage",
         "execution_role": "workflow_subagent",
         "input_tokens": 10,
-        "model": None,
-        "outcome": "success",
+        "model": "gpt-4o",
+        "model_publisher": "openai",
         "output_tokens": 20,
-        "provider": None,
-        "reasoning_output_tokens": 5,
-        "total_tokens": 30,
-        "usage_available": True,
-        "usage_complete": True,
-        "usage_scope": "agent_run_local",
-        "usage_source": "final_response",
-        "workflow_id": "workflow-1",
-        "workflow_node_id": "node-2",
+        "provider": "azure_openai",
     }
 
 
-def test_usage_recorder_marks_missing_usage_unavailable(caplog: Any) -> None:
+def test_usage_recorder_logs_null_counts_when_usage_is_unavailable(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
         agent_name="main",
         execution_role="primary",
     )
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
-        recorder.emit("timeout")
+        recorder.emit()
 
     payload = _usage_payload(caplog.records[-1])
-    assert payload["usage_available"] is False
-    assert payload["usage_complete"] is False
-    assert payload["usage_source"] == "unavailable"
-    assert "input_tokens" not in payload
-    assert "output_tokens" not in payload
-    assert "total_tokens" not in payload
+    _assert_exact_usage_fields(payload)
+    assert payload["input_tokens"] is None
+    assert payload["output_tokens"] is None
 
 
-def test_usage_recorder_marks_partial_base_counts_incomplete(caplog: Any) -> None:
+def test_usage_recorder_logs_available_token_counts_independently(caplog: Any) -> None:
     recorder = runner._AgentUsageRecorder(
         agent_name="main",
         execution_role="primary",
@@ -208,17 +209,15 @@ def test_usage_recorder_marks_partial_base_counts_incomplete(caplog: Any) -> Non
 
     with caplog.at_level(logging.INFO, logger="azure.functions.AgentRuntime"):
         recorder.emit(
-            "success",
             {
                 "input_token_count": 10,
-                "output_token_count": 4,
             },
         )
 
     payload = _usage_payload(caplog.records[-1])
-    assert payload["usage_available"] is True
-    assert payload["usage_complete"] is False
-    assert payload["usage_source"] == "final_response"
+    _assert_exact_usage_fields(payload)
+    assert payload["input_tokens"] == 10
+    assert payload["output_tokens"] is None
 
 
 def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypatch: Any) -> None:
@@ -232,8 +231,8 @@ def test_usage_recorder_never_changes_agent_behavior_when_logging_fails(monkeypa
     monkeypatch.setattr(runner.logger, "info", fail_logging)
     recorder = runner._AgentUsageRecorder(agent_name="main", execution_role="primary")
 
-    recorder.emit("success", {"total_token_count": 4})
-    recorder.emit("error")
+    recorder.emit({"input_token_count": 4})
+    recorder.emit()
 
     assert logging_attempts == 1
 
@@ -261,11 +260,11 @@ async def test_run_agent_logs_usage_from_real_maf_final_response(
 
     assert result.session_id == "session-1"
     payload = _usage_payload(caplog.records[-1])
+    _assert_exact_usage_fields(payload)
     assert payload["execution_role"] == "primary"
     assert "session_id" not in payload
     assert payload["input_tokens"] == 11
     assert payload["output_tokens"] == 7
-    assert payload["total_tokens"] == 18
 
 
 @pytest.mark.asyncio
@@ -284,13 +283,15 @@ async def test_run_agent_success_with_maf_optional_usage_absent_logs_unavailable
 
     assert response.usage_details is None
     assert result.content == ""
-    assert _usage_payloads(caplog)[0]["outcome"] == "success"
-    assert _usage_payloads(caplog)[0]["usage_available"] is False
+    payload = _usage_payloads(caplog)[0]
+    _assert_exact_usage_fields(payload)
+    assert payload["input_tokens"] is None
+    assert payload["output_tokens"] is None
 
 
 @pytest.mark.parametrize(
-    ("failure", "expected_exception", "expected_outcome"),
-    [("error", ValueError, "error"), ("timeout", RuntimeError, "timeout")],
+    ("failure", "expected_exception"),
+    [("error", ValueError), ("timeout", RuntimeError)],
 )
 @pytest.mark.asyncio
 async def test_run_agent_failure_logs_once(
@@ -298,7 +299,6 @@ async def test_run_agent_failure_logs_once(
     caplog: Any,
     failure: str,
     expected_exception: type[BaseException],
-    expected_outcome: str,
 ) -> None:
     class Agent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
@@ -315,8 +315,9 @@ async def test_run_agent_failure_logs_once(
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == expected_outcome
-    assert payloads[0]["usage_available"] is False
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -338,7 +339,9 @@ async def test_run_agent_cancellation_logs_once(monkeypatch: Any, caplog: Any) -
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == "cancelled"
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -393,9 +396,10 @@ async def test_run_agent_stream_logs_usage_from_real_maf_final_response(
     ]
     assert len(usage_records) == 1
     payload = _usage_payload(usage_records[0])
+    _assert_exact_usage_fields(payload)
     assert "session_id" not in payload
-    assert payload["usage_source"] == "final_response"
-    assert payload["total_tokens"] == 8
+    assert payload["input_tokens"] == 5
+    assert payload["output_tokens"] == 3
     assert payload["provider"] == "openai"
     assert "inference_host" not in payload
     assert payload["model"] == "gpt-4o-mini"
@@ -465,10 +469,10 @@ async def test_real_maf_final_response_aggregates_two_tool_call_turns() -> None:
     assert streaming_response.usage_details == expected_usage
 
 
-@pytest.mark.parametrize(("failure", "expected_outcome"), [("error", "error"), ("timeout", "timeout")])
+@pytest.mark.parametrize("failure", ["error", "timeout"])
 @pytest.mark.asyncio
 async def test_run_agent_stream_failure_logs_once(
-    monkeypatch: Any, caplog: Any, failure: str, expected_outcome: str
+    monkeypatch: Any, caplog: Any, failure: str
 ) -> None:
     class Stream:
         def __aiter__(self) -> Stream:
@@ -495,8 +499,9 @@ async def test_run_agent_stream_failure_logs_once(
     assert json.loads(events[-1].removeprefix("data: "))["type"] == "error"
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == expected_outcome
-    assert payloads[0]["usage_available"] is False
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -529,7 +534,9 @@ async def test_run_agent_stream_cancellation_logs_once(monkeypatch: Any, caplog:
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == "cancelled"
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -550,7 +557,9 @@ async def test_run_agent_stream_aclose_logs_cancelled_once(monkeypatch: Any, cap
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == "cancelled"
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -572,8 +581,9 @@ async def test_run_agent_stream_without_final_response_logs_success_unavailable(
     assert json.loads(events[-1].removeprefix("data: "))["type"] == "done"
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == "success"
-    assert payloads[0]["usage_available"] is False
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -602,7 +612,10 @@ async def test_run_agent_stream_bounds_hanging_final_response(
         )
 
     assert json.loads(events[-1].removeprefix("data: "))["type"] == "done"
-    assert _usage_payloads(caplog)[0]["usage_available"] is False
+    payload = _usage_payloads(caplog)[0]
+    _assert_exact_usage_fields(payload)
+    assert payload["input_tokens"] is None
+    assert payload["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -652,11 +665,14 @@ async def test_run_agent_stream_yields_done_before_collecting_usage_on_close(
         release_usage.set()
         await close
 
-    assert _usage_payloads(caplog)[0]["total_tokens"] == 5
+    payload = _usage_payloads(caplog)[0]
+    _assert_exact_usage_fields(payload)
+    assert payload["input_tokens"] == 3
+    assert payload["output_tokens"] == 2
 
 
 @pytest.mark.asyncio
-async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
+async def test_leaf_agent_logs_distinct_attempts_and_execution_roles(
     monkeypatch: Any, caplog: Any
 ) -> None:
     class Agent:
@@ -680,8 +696,6 @@ async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
                 "task",
                 timeout=1.0,
                 execution_role="workflow_subagent",
-                workflow_id="workflow-1",
-                workflow_node_id="node-1",
             )
         await runner.run_leaf_agent_task(
             resolved,
@@ -694,22 +708,23 @@ async def test_leaf_agent_logs_distinct_workflow_attempts_and_delegate_role(
     assert result == "done"
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 3
-    assert payloads[0]["workflow_id"] == payloads[1]["workflow_id"] == "workflow-1"
-    assert payloads[0]["workflow_node_id"] == payloads[1]["workflow_node_id"] == "node-1"
+    assert payloads[0]["execution_role"] == payloads[1]["execution_role"] == "workflow_subagent"
     assert payloads[2]["agent_name"] == "analyst"
     assert payloads[2]["execution_role"] == "delegate"
-    assert payloads[2]["workflow_id"] is None
     for payload in payloads:
+        _assert_exact_usage_fields(payload)
         assert payload["provider"] == "azure_openai"
-        assert "inference_host" not in payload
         assert payload["model"] == "gpt-deployment"
+        assert payload["model_publisher"] == "openai"
+        assert payload["input_tokens"] == 2
+        assert payload["output_tokens"] == 1
 
 
 @pytest.mark.parametrize(
-    ("failure", "execution_role", "expected_exception", "expected_outcome"),
+    ("failure", "execution_role", "expected_exception"),
     [
-        ("error", "delegate", ValueError, "error"),
-        ("timeout", "workflow_subagent", TimeoutError, "timeout"),
+        ("error", "delegate", ValueError),
+        ("timeout", "workflow_subagent", TimeoutError),
     ],
 )
 @pytest.mark.asyncio
@@ -719,7 +734,6 @@ async def test_leaf_agent_failure_logs_once(
     failure: str,
     execution_role: str,
     expected_exception: type[BaseException],
-    expected_outcome: str,
 ) -> None:
     class Agent:
         async def run(self, *args: Any, **kwargs: Any) -> Any:
@@ -742,15 +756,14 @@ async def test_leaf_agent_failure_logs_once(
             "task",
             timeout=0.01 if failure == "timeout" else 1.0,
             execution_role=execution_role,
-            workflow_id="workflow-1" if execution_role == "workflow_subagent" else None,
-            workflow_node_id="node-1" if execution_role == "workflow_subagent" else None,
         )
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
+    _assert_exact_usage_fields(payloads[0])
     assert payloads[0]["execution_role"] == execution_role
-    assert payloads[0]["outcome"] == expected_outcome
-    assert payloads[0]["usage_available"] is False
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
@@ -784,7 +797,9 @@ async def test_leaf_agent_cancellation_logs_once(monkeypatch: Any, caplog: Any) 
 
     payloads = _usage_payloads(caplog)
     assert len(payloads) == 1
-    assert payloads[0]["outcome"] == "cancelled"
+    _assert_exact_usage_fields(payloads[0])
+    assert payloads[0]["input_tokens"] is None
+    assert payloads[0]["output_tokens"] is None
 
 
 @pytest.mark.asyncio
