@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from .._logger import logger
+from ..client_manager import resolve_maf_provider
 from ..config.env import SANDBOX_ENV_PREFIX
 from ..egress.credentials import compile_model_key_headers
 from ..egress.policy import compile_egress_policy
@@ -187,6 +188,7 @@ def build_sandbox_create_profile(
     """Build the exact app-scoped source, environment, bootstrap, and egress profile."""
 
     resolved_environment = build_sandbox_environment(environment)
+    resolved_provider = resolve_maf_provider(resolved_environment, required=False)
     resolved_model_endpoint = _resolve_model_endpoint(resolved_environment, model_endpoint)
     resolved_telemetry_endpoint = _resolve_telemetry_endpoint(
         environment,
@@ -208,7 +210,7 @@ def build_sandbox_create_profile(
             model_endpoint=resolved_model_endpoint,
             telemetry_endpoint=resolved_telemetry_endpoint,
             rules=egress_rules,
-            model_headers=compile_model_key_headers(environment),
+            model_headers=compile_model_key_headers(resolved_provider, environment),
         ),
     )
 

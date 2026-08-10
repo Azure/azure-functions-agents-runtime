@@ -23,12 +23,14 @@ ABC surface
 
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
+from collections.abc import Mapping
 from typing import Any
 
 from ._credential import build_async_credential
 from ._logger import logger
-from .config.env import runtime_backend_env_value
+from .config.env import runtime_backend_env_value, runtime_backend_env_value_from
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -70,6 +72,37 @@ class ClientManager(ABC):
 
 _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_FOUNDRY_MODEL = "gpt-4o-mini"
+
+
+def resolve_maf_provider(
+    environment: Mapping[str, str],
+    *,
+    required: bool = True,
+) -> str | None:
+    """Resolve MAF provider precedence from an explicit environment mapping."""
+
+    explicit = runtime_backend_env_value_from(
+        environment,
+        "AZURE_FUNCTIONS_AGENTS_PROVIDER",
+    ).lower()
+    if explicit:
+        return explicit
+    if runtime_backend_env_value_from(environment, "AZURE_OPENAI_ENDPOINT"):
+        return "azure_openai"
+    if runtime_backend_env_value_from(environment, "FOUNDRY_PROJECT_ENDPOINT"):
+        return "foundry"
+    if runtime_backend_env_value_from(environment, "OPENAI_API_KEY"):
+        return "openai"
+    if not required:
+        return None
+    raise RuntimeError(
+        "No MAF provider configured. Set one of: "
+        "OPENAI_API_KEY (OpenAI), "
+        "AZURE_OPENAI_ENDPOINT (+ AZURE_OPENAI_API_KEY or managed identity) for Azure OpenAI, "
+        "or FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry. "
+        "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry "
+        "to override."
+    )
 
 
 class MAFClientManager(ClientManager):
@@ -128,23 +161,9 @@ class MAFClientManager(ClientManager):
 
     @classmethod
     def _provider(cls) -> str:
-        explicit = cls._env("AZURE_FUNCTIONS_AGENTS_PROVIDER").lower()
-        if explicit:
-            return explicit
-        if cls._env("AZURE_OPENAI_ENDPOINT"):
-            return "azure_openai"
-        if cls._env("FOUNDRY_PROJECT_ENDPOINT"):
-            return "foundry"
-        if cls._env("OPENAI_API_KEY"):
-            return "openai"
-        raise RuntimeError(
-            "No MAF provider configured. Set one of: "
-            "OPENAI_API_KEY (OpenAI), "
-            "AZURE_OPENAI_ENDPOINT (+ AZURE_OPENAI_API_KEY or managed identity) for Azure OpenAI, "
-            "or FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry. "
-            "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry "
-            "to override."
-        )
+        provider = resolve_maf_provider(os.environ)
+        assert provider is not None
+        return provider
 
     @classmethod
     def _build_openai(cls, model: str) -> Any:

@@ -217,22 +217,34 @@ def test_header_repr_redacts_static_values_and_secret_references() -> None:
     assert "credential-store" not in repr(referenced)
 
 
-def test_model_keys_compile_to_static_proxy_headers() -> None:
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("azure_openai", [("api-key", "azure-key")]),
+        ("openai", [("Authorization", "Bearer " + "openai-key")]),
+        ("foundry", []),
+    ],
+)
+def test_model_keys_compile_only_for_the_resolved_provider(
+    provider: str,
+    expected: list[tuple[str, str]],
+) -> None:
     headers = compile_model_key_headers(
-        {
+        provider=provider,
+        environment={
             "AZURE_OPENAI_API_KEY": "azure-key",
             "OPENAI_API_KEY": "openai-key",
-        }
+        },
     )
 
-    assert [(header.name, header.value) for header in headers] == [
-        ("api-key", "azure-key"),
-        ("Authorization", "Bearer " + "openai-key"),
-    ]
+    assert [(header.name, header.value) for header in headers] == expected
 
 
 def test_model_headers_require_an_endpoint_and_become_a_transform_rule() -> None:
-    headers = compile_model_key_headers({"AZURE_OPENAI_API_KEY": "azure-key"})
+    headers = compile_model_key_headers(
+        provider="azure_openai",
+        environment={"AZURE_OPENAI_API_KEY": "azure-key"},
+    )
 
     with pytest.raises(SandboxProvisioningError, match="model endpoint"):
         compile_egress_policy(web_request_allowed_hosts=[], model_headers=headers)

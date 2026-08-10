@@ -9,6 +9,7 @@ from azure_functions_agents.client_manager import (
     _DEFAULT_FOUNDRY_MODEL,
     _DEFAULT_OPENAI_MODEL,
     MAFClientManager,
+    resolve_maf_provider,
 )
 
 
@@ -92,6 +93,64 @@ def test_resolve_model_uses_default_when_no_override_exists(
     monkeypatch.delenv("FOUNDRY_MODEL", raising=False)
 
     assert MAFClientManager().resolve_model(None) == default_model
+
+
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        (
+            {
+                "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
+                "AZURE_OPENAI_ENDPOINT": "https://azure.example",
+                "FOUNDRY_PROJECT_ENDPOINT": "https://foundry.example",
+                "OPENAI_API_KEY": "openai-key",
+            },
+            "foundry",
+        ),
+        (
+            {
+                "AZURE_OPENAI_ENDPOINT": "https://azure.example",
+                "FOUNDRY_PROJECT_ENDPOINT": "https://foundry.example",
+                "OPENAI_API_KEY": "openai-key",
+            },
+            "azure_openai",
+        ),
+        (
+            {
+                "FOUNDRY_PROJECT_ENDPOINT": "https://foundry.example",
+                "OPENAI_API_KEY": "openai-key",
+            },
+            "foundry",
+        ),
+        (
+            {
+                "SandboxEnv__AZURE_OPENAI_ENDPOINT": "https://azure.example",
+                "OPENAI_API_KEY": "openai-key",
+            },
+            "azure_openai",
+        ),
+        ({"OPENAI_API_KEY": "openai-key"}, "openai"),
+    ],
+)
+def test_resolve_maf_provider_matches_manager_precedence(
+    monkeypatch: pytest.MonkeyPatch,
+    environment: dict[str, str],
+    expected: str,
+) -> None:
+    names = (
+        "AZURE_FUNCTIONS_AGENTS_PROVIDER",
+        "AZURE_OPENAI_ENDPOINT",
+        "SandboxEnv__AZURE_OPENAI_ENDPOINT",
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "OPENAI_API_KEY",
+    )
+    for name in names:
+        monkeypatch.delenv(name, raising=False)
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+
+    assert resolve_maf_provider(environment) == expected
+    assert MAFClientManager()._provider() == expected
 
 
 def test_build_managed_identity_credential_passes_client_id(

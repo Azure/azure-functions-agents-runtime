@@ -212,3 +212,35 @@ def test_create_profile_uses_explicit_prefixed_model_endpoint_for_egress() -> No
         rule.host == "sandbox.example" and rule.action == "Allow"
         for rule in profile.egress_policy.host_rules
     )
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("azure_openai", [("api-key", "azure-key")]),
+        ("openai", [("Authorization", "Bearer " + "openai-key")]),
+        ("foundry", []),
+    ],
+)
+def test_create_profile_uses_only_the_resolved_provider_key(
+    provider: str,
+    expected: list[tuple[str, str]],
+) -> None:
+    profile = build_sandbox_create_profile(
+        web_request_allowed_hosts=(),
+        mcp_urls=(),
+        model_endpoint="https://models.example.com",
+        telemetry_endpoint=None,
+        environment={
+            "AZURE_FUNCTIONS_AGENTS_PROVIDER": provider,
+            "AZURE_OPENAI_API_KEY": "azure-key",
+            "OPENAI_API_KEY": "openai-key",
+        },
+    )
+
+    model_rules = [rule for rule in profile.egress_policy.rules if rule.name == "model-auth"]
+    assert [
+        (header.name, header.value)
+        for rule in model_rules
+        for header in rule.action.headers
+    ] == expected

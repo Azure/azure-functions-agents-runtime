@@ -163,6 +163,11 @@ the sandbox process or filesystem, but static policy values are visible to
 sandbox data-plane read/list callers. Treat those permissions as
 secret-bearing.
 
+Model-key transforms use the same provider resolution as the MAF client:
+Azure OpenAI receives only `api-key`, OpenAI receives only `Authorization:
+Bearer`, and Foundry uses its native managed-identity path without a static
+model-key transform.
+
 Customers who need stronger policy metadata separation can provision a group
 secret and use an ACA-specific `secretRef` at a header value:
 

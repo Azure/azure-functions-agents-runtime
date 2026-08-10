@@ -17,7 +17,7 @@ from azure_functions_agents.harness.journal_writer import (
     HarnessJournalError,
     HarnessRunEnvelope,
     JournalWriter,
-    acquire_run_claim,
+    acquire_run_lock,
 )
 
 
@@ -142,30 +142,15 @@ def test_writer_rejects_oversized_event_before_sequence_or_segment_write(
     assert not tuple(overflow.run_directory.glob("events-*.jsonl"))
 
 
-def test_run_claim_recovers_a_dead_process_owner(tmp_path: Path) -> None:
-    run_directory = tmp_path / "runs" / ("a" * 32)
-    run_directory.mkdir(parents=True)
-    (run_directory / ".run_claim.json").write_text(
-        '{"pid":999999999,"process_group_id":999999999,"token":"stale"}',
-        encoding="utf-8",
-    )
-
-    claim = acquire_run_claim(run_directory)
-
-    assert claim is not None
-    assert claim.recovered is True
-    claim.release()
-
-
-def _claim_worker(
+def _lock_worker(
     run_directory: Path,
     checkpoint_root: Path,
     marker_path: Path,
     barrier,
 ) -> None:
     barrier.wait()
-    claim = acquire_run_claim(run_directory)
-    if claim is None:
+    lock = acquire_run_lock(run_directory)
+    if lock is None:
         return
     try:
         with marker_path.open("a", encoding="utf-8") as marker:
@@ -175,11 +160,19 @@ def _claim_worker(
         time.sleep(0.5)
         AtomicCommitStore(checkpoint_root).commit(conversation=b"state", working_files={})
     finally:
-        claim.release()
+        lock.release()
 
 
-@pytest.mark.skipif(os.name == "nt", reason="run claims use the Linux harness process contract")
-def test_concurrent_processes_execute_one_claim_and_preserve_checkpoint(tmp_path: Path) -> None:
+def _crash_lock_holder(run_directory: Path, marker_path: Path) -> None:
+    lock = acquire_run_lock(run_directory)
+    if lock is None:
+        os._exit(1)
+    marker_path.write_text("held", encoding="utf-8")
+    os._exit(0)
+
+
+@pytest.mark.skipif(os.name != "posix", reason="run locks use the Linux harness process contract")
+def test_concurrent_processes_hold_one_lock_and_later_retry_acquires(tmp_path: Path) -> None:
     run_directory = tmp_path / "runs" / ("b" * 32)
     checkpoint_root = tmp_path / "session"
     marker_path = tmp_path / "executions.txt"
@@ -187,7 +180,7 @@ def test_concurrent_processes_execute_one_claim_and_preserve_checkpoint(tmp_path
     barrier = context.Barrier(2)
     workers = [
         context.Process(
-            target=_claim_worker,
+            target=_lock_worker,
             args=(run_directory, checkpoint_root, marker_path, barrier),
         )
         for _ in range(2)
@@ -206,6 +199,21 @@ def test_concurrent_processes_execute_one_claim_and_preserve_checkpoint(tmp_path
     checkpoint = AtomicCommitStore(checkpoint_root).recover()
     assert checkpoint is not None
     assert (checkpoint.path / "conversation.json").read_bytes() == b"state"
+
+    crash_marker = tmp_path / "crash-lock-held.txt"
+    crashing_holder = context.Process(
+        target=_crash_lock_holder,
+        args=(run_directory, crash_marker),
+    )
+    crashing_holder.start()
+    crashing_holder.join(10)
+    assert crashing_holder.exitcode == 0
+    assert crash_marker.read_text(encoding="utf-8") == "held"
+
+    retry = acquire_run_lock(run_directory)
+    assert retry is not None
+    retry.release()
+    assert (run_directory / ".run.lock").exists()
 
 
 @pytest.mark.parametrize(

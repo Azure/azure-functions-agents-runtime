@@ -79,19 +79,27 @@ def compile_static_header(
 
 
 def compile_model_key_headers(
+    provider: str | None,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[SandboxEgressHeader, ...]:
-    """Compile existing Function App model keys into proxy-only header values."""
+    """Compile only the resolved provider's conventional model-key header."""
 
     source = os.environ if environment is None else environment
-    headers: list[SandboxEgressHeader] = []
-    azure_openai_key = _app_setting(source, AZURE_OPENAI_API_KEY_ENV)
-    if azure_openai_key:
-        headers.append(compile_static_header("api-key", azure_openai_key))
-    openai_key = _app_setting(source, OPENAI_API_KEY_ENV)
-    if openai_key:
-        headers.append(compile_static_header("Authorization", f"Bearer {openai_key}"))
-    return tuple(headers)
+    if provider == "azure_openai":
+        azure_openai_key = _app_setting(source, AZURE_OPENAI_API_KEY_ENV)
+        return (
+            ()
+            if not azure_openai_key
+            else (compile_static_header("api-key", azure_openai_key),)
+        )
+    if provider == "openai":
+        openai_key = _app_setting(source, OPENAI_API_KEY_ENV)
+        return (
+            ()
+            if not openai_key
+            else (compile_static_header("Authorization", f"Bearer {openai_key}"),)
+        )
+    return ()
 
 
 def _app_setting(environment: Mapping[str, str], name: str) -> str:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Mapping
 from typing import Any
 
 _VAR_NAME_FRAGMENT = r"[A-Za-z_][A-Za-z0-9_]*"
@@ -95,10 +96,16 @@ def runtime_env_value(name: str) -> str:
 def runtime_backend_env_value(name: str) -> str:
     """Return a backend setting, falling back to its explicit sandbox-prefixed value."""
 
-    value = os.environ.get(name)
+    return runtime_backend_env_value_from(os.environ, name)
+
+
+def runtime_backend_env_value_from(environment: Mapping[str, str], name: str) -> str:
+    """Return one mapping-backed backend setting with sandbox fallback precedence."""
+
+    value = environment.get(name)
     if value is not None:
         return value.strip()
-    return (os.environ.get(f"{SANDBOX_ENV_PREFIX}{name}") or "").strip()
+    return (environment.get(f"{SANDBOX_ENV_PREFIX}{name}") or "").strip()
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

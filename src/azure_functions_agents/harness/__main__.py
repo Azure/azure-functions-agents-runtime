@@ -21,7 +21,7 @@ from .journal_writer import (
     HarnessJournalError,
     HarnessRunEnvelope,
     JournalWriter,
-    acquire_run_claim,
+    acquire_run_lock,
 )
 from .sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from .watchdog import Watchdog, WatchdogTimeoutError
@@ -62,29 +62,26 @@ async def _run(run_id: str, journal_root: Path, app_root: Path) -> int:
     except ValueError:
         raise HarnessJournalError("Sandbox run identifier is invalid.") from None
     envelope = _read_envelope(journal_root, run_id)
-    claim = acquire_run_claim(journal_root / "runs" / run_id)
-    if claim is None:
+    lock = acquire_run_lock(journal_root / "runs" / run_id)
+    if lock is None:
         return 0
     try:
         return await _run_claimed(
             envelope,
             journal_root,
             app_root,
-            recovered_claim=claim.recovered,
         )
     finally:
-        claim.release()
+        lock.release()
 
 
 async def _run_claimed(
     envelope: HarnessRunEnvelope,
     journal_root: Path,
     app_root: Path,
-    *,
-    recovered_claim: bool,
 ) -> int:
     writer = JournalWriter(envelope, journal_root=journal_root)
-    if writer.terminal_exists() or (writer.status_exists() and not recovered_claim):
+    if writer.terminal_exists() or writer.status_exists():
         return 0
     writer.write_process_group(_process_group_id())
     writer.write_accepted()

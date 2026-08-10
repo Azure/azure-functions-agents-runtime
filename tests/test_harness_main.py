@@ -17,8 +17,20 @@ from azure_functions_agents.conformance.capability_map import validate_capabilit
 from azure_functions_agents.conformance.trace import parse_trace
 from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
 from azure_functions_agents.harness.atomic_commit import AtomicCommitError, AtomicCommitStore
-from azure_functions_agents.harness.journal_writer import HarnessJournalError, acquire_run_claim
+from azure_functions_agents.harness.journal_writer import HarnessJournalError, acquire_run_lock
 from azure_functions_agents.harness.sandbox_capabilities import HARNESS_CAPABILITIES
+
+
+class _TestRunLock:
+    def release(self) -> None:
+        return
+
+
+@pytest.fixture(autouse=True)
+def _mock_run_lock_outside_posix(monkeypatch: pytest.MonkeyPatch):
+    if os.name != "posix":
+        monkeypatch.setattr(harness_main, "acquire_run_lock", lambda _: _TestRunLock())
+    yield
 
 
 def test_python_module_entrypoint_exposes_the_harness_run_argument() -> None:
@@ -147,7 +159,8 @@ async def test_duplicate_terminal_launch_does_not_rewrite_journal(
 
 
 @pytest.mark.asyncio
-async def test_active_run_claim_prevents_a_second_harness_execution(
+@pytest.mark.skipif(os.name != "posix", reason="run locks use the Linux harness process contract")
+async def test_active_run_lock_prevents_a_second_harness_execution(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -168,15 +181,51 @@ async def test_active_run_claim_prevents_a_second_harness_execution(
         encoding="utf-8",
     )
     monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
-    claim = acquire_run_claim(journal_root / "runs" / run_id)
-    assert claim is not None
+    lock = acquire_run_lock(journal_root / "runs" / run_id)
+    assert lock is not None
 
     try:
         assert await harness_main._run(run_id, journal_root, tmp_path / "app") == 0
     finally:
-        claim.release()
+        lock.release()
 
     assert not (journal_root / "runs" / run_id / "status.json").exists()
+
+
+@pytest.mark.asyncio
+async def test_existing_nonterminal_status_keeps_the_durable_run_fence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "h" * 32
+    journal_root = tmp_path / "journal"
+    run_directory = journal_root / "runs" / run_id
+    run_directory.mkdir(parents=True)
+    (run_directory / "status.json").write_text('{"state":"accepted"}\n', encoding="utf-8")
+    inbox = journal_root / "inbox" / f"{run_id}.json"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "session_id": "session-1",
+                "agent_name": "agent",
+                "prompt": "hello",
+                "timeout": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+    before = (run_directory / "status.json").read_bytes()
+    monkeypatch.setattr(
+        harness_main,
+        "rebuild_agent_catalog",
+        lambda _: pytest.fail("durable run status must prevent re-execution"),
+    )
+
+    assert await harness_main._run(run_id, journal_root, tmp_path / "app") == 0
+    assert (run_directory / "status.json").read_bytes() == before
 
 
 @pytest.mark.asyncio
