@@ -5,7 +5,7 @@ import json
 import os
 import subprocess
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Coroutine
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -501,3 +501,44 @@ async def test_entrypoint_rejects_an_unsafe_run_id_before_reading_the_inbox(
 
     with pytest.raises(HarnessJournalError, match="identifier"):
         await harness_main._run("../outside", tmp_path, tmp_path / "app")
+
+
+def test_main_emits_controlled_stderr_diagnostic_on_pre_accept_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+
+    exit_code = harness_main.main(["--run-id", "../outside"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    assert harness_main.LAUNCH_DIAGNOSTIC_PREFIX in captured.err
+    assert harness_main.HARNESS_CANCEL_DIAGNOSTIC_PREFIX not in captured.err
+    assert "identifier" in captured.err
+    assert "Traceback" not in captured.err
+
+
+def test_main_emits_non_promoting_marker_on_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+
+    def _raise_cancelled(coro: Coroutine[object, object, int]) -> int:
+        # Close the unused coroutine to avoid a "never awaited" warning, then
+        # simulate a controller cancellation escaping asyncio.run.
+        coro.close()
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(harness_main.asyncio, "run", _raise_cancelled)
+
+    exit_code = harness_main.main(["--run-id", "run-1"])
+
+    assert exit_code == 1
+    captured = capsys.readouterr()
+    # Cancellation must not carry the promotion marker, or a canceled healthy run
+    # would be misclassified as a failed launch.
+    assert harness_main.HARNESS_CANCEL_DIAGNOSTIC_PREFIX in captured.err
+    assert harness_main.LAUNCH_DIAGNOSTIC_PREFIX not in captured.err
+    assert "Traceback" not in captured.err

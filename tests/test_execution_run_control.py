@@ -19,8 +19,15 @@ from azure_functions_agents.execution.run_control import (
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
     SandboxRunControl,
+    _launch_command,
 )
-from azure_functions_agents.journal_paths import inbox_path
+from azure_functions_agents.journal_paths import (
+    HARNESS_CANCEL_DIAGNOSTIC_PREFIX,
+    LAUNCH_DIAGNOSTIC_PREFIX,
+    LAUNCH_STDERR_FILENAME,
+    inbox_path,
+    launch_stderr_path,
+)
 from azure_functions_agents.transport.transport_models import SandboxExecResult
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
@@ -85,6 +92,7 @@ async def test_submit_waits_for_the_harness_to_journal_acceptance() -> None:
     assert [call.operation for call in transport.calls] == [
         "read_file",
         "write_file",
+        "write_file",
         "exec",
         "read_file",
     ]
@@ -126,8 +134,9 @@ async def test_submit_keeps_launch_indeterminate_when_acceptance_times_out() -> 
     with pytest.raises(RunSubmissionIndeterminateError):
         await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
 
-    assert [call.operation for call in transport.calls[:3]] == [
+    assert [call.operation for call in transport.calls[:4]] == [
         "read_file",
+        "write_file",
         "write_file",
         "exec",
     ]
@@ -144,8 +153,150 @@ async def test_submit_marks_nonzero_launch_exit_as_definitive_failure() -> None:
     assert [call.operation for call in transport.calls] == [
         "read_file",
         "write_file",
+        "write_file",
         "exec",
     ]
+
+
+def test_launch_command_redirects_stderr_to_the_per_run_sidecar() -> None:
+    command = _launch_command("run-1")
+
+    assert "setsid nohup" in command
+    assert command.rstrip().endswith("&")
+    assert ">/dev/null" in command
+    assert f"2>{launch_stderr_path('run-1')}" in command
+    assert "2>&1" not in command
+
+
+@pytest.mark.asyncio
+async def test_launch_stderr_sidecar_is_excluded_from_event_enumeration() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/{LAUNCH_STDERR_FILENAME}",
+        b"Traceback (most recent call last):\nRuntimeError: not a journal document",
+    )
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/events-000.jsonl",
+        f"{_event(1, 'delta')}\n".encode(),
+    )
+
+    events = await SandboxRunControl()._read_events(transport, _context(), {})
+
+    assert [event.sequence for event in events] == [1]
+
+
+@pytest.mark.asyncio
+async def test_submit_promotes_to_definitive_when_launch_stderr_has_the_harness_marker() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_launch_error(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            f"{LAUNCH_DIAGNOSTIC_PREFIX}Sandbox run inbox is missing.\n".encode(),
+        )
+
+    transport.exec_hook = emit_launch_error
+
+    with pytest.raises(RunSubmissionDefinitiveFailureError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_indeterminate_when_launch_stderr_lacks_the_harness_marker() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_unmarked_stderr(_command: str) -> None:
+        # A healthy but slow harness can spill benign startup warnings onto the
+        # same stderr sidecar before it journals acceptance. Without the harness
+        # marker this is not proof of a failed launch, so it must stay
+        # indeterminate rather than retire a possibly-live detached run.
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"DeprecationWarning: legacy import path is deprecated\n",
+        )
+
+    transport.exec_hook = emit_unmarked_stderr
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_indeterminate_when_launch_stderr_has_only_the_cancel_marker() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_cancel_marker(_command: str) -> None:
+        # Cancellation can arrive after the harness journals acceptance, so its
+        # marker must never promote a possibly-live run to a terminal failure.
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            f"{HARNESS_CANCEL_DIAGNOSTIC_PREFIX}harness canceled.\n".encode(),
+        )
+
+    transport.exec_hook = emit_cancel_marker
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_indeterminate_when_launch_stderr_is_whitespace_only() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_blank_stderr(_command: str) -> None:
+        transport.seed_file(launch_stderr_path("run-1"), b"   \n\t  \n")
+
+    transport.exec_hook = emit_blank_stderr
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_leak_launch_stderr_in_the_exception_message() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+    sandbox_secret = "AZURE_CLIENT_SECRET=super-secret-value-do-not-leak"
+
+    async def emit_secret_bearing_stderr(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            (
+                f"{LAUNCH_DIAGNOSTIC_PREFIX}Sandbox run inbox is missing.\n"
+                f"Traceback (most recent call last):\nRuntimeError: {sandbox_secret}"
+            ).encode(),
+        )
+
+    transport.exec_hook = emit_secret_bearing_stderr
+
+    with pytest.raises(RunSubmissionDefinitiveFailureError) as exc_info:
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    message = str(exc_info.value)
+    assert sandbox_secret not in message
+    assert "super-secret-value-do-not-leak" not in message
+    assert "Traceback" not in message
+
+
+@pytest.mark.asyncio
+async def test_submit_swallows_launch_stderr_read_failure_without_masking() -> None:
+    class _LaunchStderrReadFailsTransport(FakeSandboxTransport):
+        async def read_file(self, path: str) -> bytes:
+            if path.endswith(f"/{LAUNCH_STDERR_FILENAME}"):
+                raise RuntimeError("sidecar read boom must not surface")
+            return await super().read_file(path)
+
+    transport = _LaunchStderrReadFailsTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    with pytest.raises(RunSubmissionIndeterminateError) as exc_info:
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert "sidecar read boom must not surface" not in str(exc_info.value)
 
 
 @pytest.mark.asyncio

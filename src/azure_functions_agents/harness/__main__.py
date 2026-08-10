@@ -8,10 +8,16 @@ import errno
 import os
 import shutil
 import signal
+import sys
 from pathlib import Path
 
 from ..execution.backend import RunError, RunResult
-from ..journal_paths import JOURNAL_ROOT_PATH, SANDBOX_APPLICATION_PATH
+from ..journal_paths import (
+    HARNESS_CANCEL_DIAGNOSTIC_PREFIX,
+    JOURNAL_ROOT_PATH,
+    LAUNCH_DIAGNOSTIC_PREFIX,
+    SANDBOX_APPLICATION_PATH,
+)
 from ..runner import run_agent_events
 from ..session_state import validate_run_id
 from . import _ensure_sandbox
@@ -29,6 +35,24 @@ from .watchdog import Watchdog, WatchdogTimeoutError
 _MAX_WORKING_FILE_BYTES = 4 * 1024 * 1024
 _MAX_WORKING_TREE_BYTES = 16 * 1024 * 1024
 _MAX_CONVERSATION_BYTES = 4 * 1024 * 1024
+
+
+def _emit_launch_diagnostic(prefix: str, message: str) -> None:
+    """Emit a short, greppable prefixed marker to stderr for a pre-return trace.
+
+    Failures before the first journal write leave no journal trace, so the
+    controller captures this process's stderr into a per-run sidecar. Only a
+    repo-authored, secret-free message is written here: never a traceback,
+    environment values, or envelope contents. The prefix selects whether the
+    controller may treat the trace as determinate launch-failure evidence
+    (LAUNCH_DIAGNOSTIC_PREFIX) or as a non-promoting note
+    (HARNESS_CANCEL_DIAGNOSTIC_PREFIX).
+    """
+    try:
+        sys.stderr.write(f"{prefix}{message}\n")
+        sys.stderr.flush()
+    except Exception:
+        return
 
 
 class HarnessRunFailureError(Exception):
@@ -50,8 +74,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_run(arguments.run_id, arguments.journal_root, arguments.app_root))
     except asyncio.CancelledError:
+        # Cancellation can arrive after the harness has journaled acceptance (the
+        # cancellation handler is installed post-acceptance), so this is not
+        # launch-failure evidence. Emit a distinct, non-promoting marker so a
+        # canceled healthy run is never promoted to a determinate launch failure.
+        _emit_launch_diagnostic(HARNESS_CANCEL_DIAGNOSTIC_PREFIX, "harness canceled.")
         return 1
-    except HarnessJournalError:
+    except HarnessJournalError as exc:
+        _emit_launch_diagnostic(LAUNCH_DIAGNOSTIC_PREFIX, str(exc))
         return 1
 
 

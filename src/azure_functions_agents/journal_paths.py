@@ -26,6 +26,17 @@ ATOMIC_CHECKPOINT_POINTER_PATH = f"{SESSION_PATH}/current"
 CHECKPOINT_NAME_PREFIX = "checkpoint_"
 HEARTBEAT_FILENAME = "heartbeat.json"
 PROCESS_FILENAME = "process.json"
+LAUNCH_STDERR_FILENAME = "launch.stderr"
+# Marker the harness writes into LAUNCH_STDERR_FILENAME only from its
+# pre-acceptance journal-failure handler, before it journals acceptance. The
+# controller matches on it to promote an otherwise indeterminate launch to a
+# determinate failure. A healthy run never reaches that handler, so it never
+# emits this marker.
+LAUNCH_DIAGNOSTIC_PREFIX = "azfn-agents-harness-launch-error: "
+# Separate, non-promoting marker for controller-driven cancellation, which can
+# arrive after acceptance. Kept distinct from LAUNCH_DIAGNOSTIC_PREFIX so a
+# canceled but otherwise healthy run is never mistaken for a failed launch.
+HARNESS_CANCEL_DIAGNOSTIC_PREFIX = "azfn-agents-harness-canceled: "
 
 
 def inbox_path(run_id: str) -> str:
@@ -56,6 +67,11 @@ def process_path(run_id: str) -> str:
 def heartbeat_path(run_id: str) -> str:
     """Return one run heartbeat path."""
     return f"{run_path(run_id)}/{HEARTBEAT_FILENAME}"
+
+
+def launch_stderr_path(run_id: str) -> str:
+    """Return one run launch-stderr diagnostic sidecar path."""
+    return f"{run_path(run_id)}/{LAUNCH_STDERR_FILENAME}"
 
 
 def checkpoint_name(token: str) -> str:

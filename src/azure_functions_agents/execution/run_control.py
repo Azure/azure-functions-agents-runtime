@@ -21,6 +21,7 @@ from pydantic import (
     model_validator,
 )
 
+from .._logger import logger
 from ..journal_paths import (
     INBOX_PATH as _INBOX_PATH,
 )
@@ -28,14 +29,17 @@ from ..journal_paths import (
     JOURNAL_ROOT_PATH as _JOURNAL_ROOT_PATH,
 )
 from ..journal_paths import (
-    RUNS_PATH as _RUNS_PATH,
-)
-from ..journal_paths import (
+    LAUNCH_DIAGNOSTIC_PREFIX,
+    LAUNCH_STDERR_FILENAME,
     inbox_path,
+    launch_stderr_path,
     process_path,
     result_path,
     run_path,
     status_path,
+)
+from ..journal_paths import (
+    RUNS_PATH as _RUNS_PATH,
 )
 from ..session_state import TERMINAL_RUN_STATUSES, validate_run_id, validate_session_id
 from ..strict_json import DuplicateJsonKeyError, decode_json_object
@@ -60,11 +64,13 @@ MAX_RUN_ENVELOPE_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_STATUS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_RESULT_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_PROCESS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
+MAX_LAUNCH_STDERR_BYTES = 64 * 1024
 MAX_EVENT_SEGMENTS = 16
 MAX_EVENT_SEGMENT_BYTES = 1024 * 1024
 EVENT_POLL_INTERVAL_SECONDS = 1.0
 JOURNAL_VISIBILITY_TIMEOUT_SECONDS = 2.0
 CANCEL_CONFIRM_TIMEOUT_SECONDS = 5.0
+LAUNCH_STDERR_READ_TIMEOUT_SECONDS = 2.0
 
 _JOURNAL_ENTRYPOINT = "setsid nohup python -m azure_functions_agents.harness"
 
@@ -259,6 +265,18 @@ class SandboxRunControl:
                 ),
                 deadline,
             )
+            # Pre-create the run directory and an empty launch-stderr sidecar so
+            # the shell can bind `2>` to it before exec'ing the detached harness.
+            # The harness creates this directory lazily, so without this the
+            # redirect target's parent would be absent at launch time.
+            await self._with_deadline(
+                handle.write_file(
+                    _launch_stderr_path(normalized_run_id),
+                    b"",
+                    create_dirs=True,
+                ),
+                deadline,
+            )
             launch_timeout_seconds = _remaining_seconds(deadline)
         except Exception as exc:
             raise RunSubmissionDefinitiveFailureError(
@@ -277,6 +295,12 @@ class SandboxRunControl:
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but could not be confirmed."
             ) from exc
+        # A trailing `&` makes the launch a POSIX asynchronous list, so the shell
+        # reports exit code 0 regardless of whether the backgrounded harness
+        # actually started. This guard therefore cannot fire for the current
+        # command form; it is retained as defense-in-depth in case that form ever
+        # changes. Determinate launch failure is instead proven by the harness's
+        # own pre-acceptance failure marker in the captured launch stderr below.
         if launch_result.exit_code != 0:
             raise RunSubmissionDefinitiveFailureError(
                 "Run launch failed before harness acceptance."
@@ -287,6 +311,31 @@ class SandboxRunControl:
         except RunJournalProtocolError:
             raise
         except Exception as exc:
+            launch_stderr = await self._read_launch_stderr(handle, normalized_run_id)
+            if launch_stderr.strip():
+                # Launch stderr originates in the untrusted sandbox and may embed
+                # environment values, so it is recorded for operators but never
+                # placed in the caller-visible exception message.
+                logger.error(
+                    "Sandbox harness emitted launch stderr before acceptance for run %s: %s",
+                    normalized_run_id,
+                    launch_stderr,
+                )
+            if LAUNCH_DIAGNOSTIC_PREFIX in launch_stderr:
+                # The harness writes this marker only from its pre-acceptance
+                # journal-failure handler, before it could journal acceptance, so
+                # its presence is determinate proof the launch failed. Controller-
+                # driven cancellation uses a separate, non-promoting marker because
+                # it can arrive after acceptance, so a canceled healthy run is never
+                # promoted here. Bare non-empty stderr is likewise not promoted: the
+                # detached harness has no configured log handler, so a healthy but
+                # slow run can spill benign import or startup warnings onto stderr
+                # before acceptance, and retiring such a run as a terminal failure
+                # would orphan a live detached process. Unmarked output stays
+                # indeterminate so the reconciler can settle it later.
+                raise RunSubmissionDefinitiveFailureError(
+                    "Run launch failed before harness acceptance."
+                ) from exc
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but journal acceptance was not confirmed."
             ) from exc
@@ -461,6 +510,27 @@ class SandboxRunControl:
             raise RunJournalProtocolError("Run journal status does not match the requested context.")
         return status
 
+    async def _read_launch_stderr(
+        self,
+        handle: SandboxSessionHandle,
+        run_id: str,
+    ) -> str:
+        """Best-effort, size-capped read of the untrusted per-run launch stderr.
+
+        The sidecar is written by the sandbox through a shell stderr redirect,
+        so its contents are untrusted text: it is never JSON-decoded and never
+        reaches a strict journal model. Any failure is swallowed and logged so
+        it can never mask or replace the original submission error, and the read
+        is bounded in both time and size.
+        """
+        try:
+            async with asyncio.timeout(LAUNCH_STDERR_READ_TIMEOUT_SECONDS):
+                payload = await handle.read_file(_launch_stderr_path(run_id))
+        except Exception as exc:
+            logger.debug("Could not read launch stderr sidecar for run %s: %r", run_id, exc)
+            return ""
+        return payload[:MAX_LAUNCH_STDERR_BYTES].decode("utf-8", errors="replace")
+
     async def _read_result(
         self,
         handle: SandboxSessionHandle,
@@ -488,6 +558,7 @@ class SandboxRunControl:
             entry.path
             for entry in entries
             if not entry.is_directory
+            and entry.name != LAUNCH_STDERR_FILENAME
             and entry.name.startswith("events")
             and entry.name.endswith(".jsonl")
         )
@@ -569,8 +640,16 @@ def _process_path(run_id: str) -> str:
     return process_path(validate_run_id(run_id))
 
 
+def _launch_stderr_path(run_id: str) -> str:
+    return launch_stderr_path(validate_run_id(run_id))
+
+
 def _launch_command(run_id: str) -> str:
-    return f"{_JOURNAL_ENTRYPOINT} --run-id {validate_run_id(run_id)} >/dev/null 2>&1 &"
+    normalized_run_id = validate_run_id(run_id)
+    return (
+        f"{_JOURNAL_ENTRYPOINT} --run-id {normalized_run_id} "
+        f">/dev/null 2>{launch_stderr_path(normalized_run_id)} &"
+    )
 
 
 def _signal_process_group(process_group_id: int, *, force: bool) -> str:
