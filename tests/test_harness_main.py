@@ -12,6 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 import azure_functions_agents.harness.__main__ as harness_main
+import azure_functions_agents.harness.journal_writer as journal_writer
 from azure_functions_agents.conformance.capability_map import validate_capability_coverage
 from azure_functions_agents.conformance.trace import parse_trace
 from azure_functions_agents.harness import SANDBOX_MARKER_ENV_VAR
@@ -273,6 +274,113 @@ async def test_agent_error_is_preserved_as_a_typed_terminal_journal_error(
         (journal_root / "runs" / run_id / "status.json").read_text(encoding="utf-8")
     )
     assert status["error"]["code"] == "agent_run_failed"
+
+
+@pytest.mark.asyncio
+async def test_oversized_runner_event_records_a_readable_terminal_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "f" * 32
+    journal_root = tmp_path / "journal"
+    inbox = journal_root / "inbox" / f"{run_id}.json"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "session_id": "session-1",
+                "agent_name": "agent",
+                "prompt": "hello",
+                "timeout": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+    monkeypatch.setattr(journal_writer, "MAX_EVENT_SEGMENT_BYTES", 512)
+
+    async def oversized_events(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        yield {"type": "delta", "content": "x" * 1024}
+        yield {"type": "done", "delegate_error_count": 0}
+
+    entry = SimpleNamespace(
+        resolved=SimpleNamespace(instructions="instructions", model=None, subagents=[]),
+        capabilities=SimpleNamespace(
+            filtered_user_tools=[],
+            filtered_mcp_tools=[],
+            enabled_skill_paths=[],
+            web_request_tools=[],
+        ),
+    )
+    monkeypatch.setattr(harness_main, "run_agent_events", oversized_events)
+    monkeypatch.setattr(harness_main, "rebuild_agent_catalog", lambda _: {"agent": entry})
+
+    assert await harness_main._run(run_id, journal_root, tmp_path / "app") == 1
+
+    run_directory = journal_root / "runs" / run_id
+    status = json.loads((run_directory / "status.json").read_text(encoding="utf-8"))
+    event_paths = tuple(run_directory.glob("events-*.jsonl"))
+    assert status["state"] == "failed"
+    assert status["error"]["code"] == "sandbox_storage_failure"
+    assert event_paths
+    assert all(path.stat().st_size <= journal_writer.MAX_EVENT_SEGMENT_BYTES for path in event_paths)
+    assert [json.loads(line)["type"] for line in event_paths[0].read_text(encoding="utf-8").splitlines()] == [
+        "error"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_harness_result_keeps_ordinary_tool_errors_out_of_delegate_count(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_id = "g" * 32
+    journal_root = tmp_path / "journal"
+    inbox = journal_root / "inbox" / f"{run_id}.json"
+    inbox.parent.mkdir(parents=True)
+    inbox.write_text(
+        json.dumps(
+            {
+                "run_id": run_id,
+                "session_id": "session-1",
+                "agent_name": "agent",
+                "prompt": "hello",
+                "timeout": 30.0,
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
+
+    async def tool_error_events(*_: object, **__: object) -> AsyncIterator[dict[str, object]]:
+        yield {
+            "type": "tool_end",
+            "tool_call_id": "call-1",
+            "tool_name": "sandbox_exec",
+            "result": '{"error":"boom"}',
+        }
+        yield {"type": "done", "delegate_error_count": 0}
+
+    entry = SimpleNamespace(
+        resolved=SimpleNamespace(instructions="instructions", model=None, subagents=[]),
+        capabilities=SimpleNamespace(
+            filtered_user_tools=[],
+            filtered_mcp_tools=[],
+            enabled_skill_paths=[],
+            web_request_tools=[],
+        ),
+    )
+    monkeypatch.setattr(harness_main, "run_agent_events", tool_error_events)
+    monkeypatch.setattr(harness_main, "rebuild_agent_catalog", lambda _: {"agent": entry})
+
+    assert await harness_main._run(run_id, journal_root, tmp_path / "app") == 0
+
+    result = json.loads(
+        (journal_root / "runs" / run_id / "result.json").read_text(encoding="utf-8")
+    )
+    assert result["delegate_error_count"] == 0
+    assert result["tool_calls"][0]["result"] == '{"error":"boom"}'
 
 
 def test_checkpoint_restores_session_history_and_relative_working_files(tmp_path: Path) -> None:

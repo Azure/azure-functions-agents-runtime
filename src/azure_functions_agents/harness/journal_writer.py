@@ -300,9 +300,9 @@ class JournalWriter:
 
         if not event_type:
             raise HarnessJournalError("Sandbox journal event type is invalid.")
-        self._sequence += 1
+        sequence = self._sequence + 1
         payload = {
-            "sequence": self._sequence,
+            "sequence": sequence,
             "type": event_type,
             "data": data,
             "timestamp": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
@@ -311,6 +311,9 @@ class JournalWriter:
             json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
             + b"\n"
         )
+        if len(encoded) > MAX_EVENT_SEGMENT_BYTES:
+            raise HarnessJournalError("Sandbox journal event exceeds its size limit.")
+        self._sequence = sequence
         path = self._active_event_path(encoded)
         with path.open("ab") as output:
             output.write(encoded)

@@ -19,6 +19,7 @@ from azure_functions_agents.egress.policy import (
     validate_egress_rule_order,
 )
 from azure_functions_agents.transport.transport_models import (
+    SandboxEgressHeader,
     SandboxEgressHostRule,
     SandboxEgressPolicy,
     SandboxEgressRule,
@@ -187,6 +188,17 @@ def test_static_headers_are_not_classified_by_name() -> None:
 
     assert header.value == "already-resolved"
     assert header.operation == "Set"
+
+
+def test_egress_literal_validators_reject_unknown_operations() -> None:
+    with pytest.raises(SandboxProvisioningError, match="header operation"):
+        SandboxEgressHeader.create(  # type: ignore[arg-type]
+            operation="Replace",
+            name="X-Header",
+            value="value",
+        )
+    with pytest.raises(SandboxProvisioningError, match="rule action"):
+        SandboxEgressRuleAction.create(type="Proxy")  # type: ignore[arg-type]
 
 
 def test_header_repr_redacts_static_values_and_secret_references() -> None:

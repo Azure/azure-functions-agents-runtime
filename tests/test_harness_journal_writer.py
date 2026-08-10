@@ -4,12 +4,14 @@ import json
 import multiprocessing
 import os
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
 
 from azure_functions_agents.execution import run_control
 from azure_functions_agents.execution.backend import RunError, RunResult
+from azure_functions_agents.harness import journal_writer
 from azure_functions_agents.harness.atomic_commit import AtomicCommitStore
 from azure_functions_agents.harness.journal_writer import (
     HarnessJournalError,
@@ -95,6 +97,49 @@ def test_writer_rejects_noncontiguous_existing_event_history(tmp_path: Path) -> 
 
     with pytest.raises(HarnessJournalError, match="contiguous"):
         JournalWriter(envelope, journal_root=tmp_path)
+
+
+def test_writer_rejects_oversized_event_before_sequence_or_segment_write(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None) -> datetime:
+            return datetime(2026, 8, 10, 12, 0, tzinfo=UTC)
+
+    monkeypatch.setattr(journal_writer, "datetime", FixedDatetime)
+    data = {"content": "x" * 32}
+    encoded = (
+        json.dumps(
+            {
+                "sequence": 1,
+                "type": "delta",
+                "data": data,
+                "timestamp": "2026-08-10T12:00:00Z",
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        + b"\n"
+    )
+    envelope = HarnessRunEnvelope.parse(_envelope_payload())
+
+    monkeypatch.setattr(journal_writer, "MAX_EVENT_SEGMENT_BYTES", len(encoded))
+    boundary = JournalWriter(envelope, journal_root=tmp_path / "boundary")
+    boundary.append_event("delta", data)
+
+    assert (boundary.run_directory / "events-0000.jsonl").read_bytes() == encoded
+    assert boundary._sequence == 1
+
+    monkeypatch.setattr(journal_writer, "MAX_EVENT_SEGMENT_BYTES", len(encoded) - 1)
+    overflow = JournalWriter(envelope, journal_root=tmp_path / "overflow")
+    with pytest.raises(HarnessJournalError, match="event exceeds"):
+        overflow.append_event("delta", data)
+
+    assert overflow._sequence == 0
+    assert not tuple(overflow.run_directory.glob("events-*.jsonl"))
 
 
 def test_run_claim_recovers_a_dead_process_owner(tmp_path: Path) -> None:

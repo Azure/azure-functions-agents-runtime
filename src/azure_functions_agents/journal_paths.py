@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from uuid import UUID
 
+SANDBOX_APPLICATION_PATH = "/app"
+SANDBOX_SITE_PACKAGES_PATH = f"{SANDBOX_APPLICATION_PATH}/.python_packages/lib/site-packages"
+SANDBOX_PYTHONPATH = f"{SANDBOX_APPLICATION_PATH}:{SANDBOX_SITE_PACKAGES_PATH}"
 SANDBOX_ROOT_PATH = "/var/lib/azurefunctions-agents-runtime"
 JOURNAL_ROOT_PATH = SANDBOX_ROOT_PATH
 SESSION_PATH = f"{SANDBOX_ROOT_PATH}/session"

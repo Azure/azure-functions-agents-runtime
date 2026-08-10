@@ -11,7 +11,7 @@ import signal
 from pathlib import Path
 
 from ..execution.backend import RunError, RunResult
-from ..journal_paths import JOURNAL_ROOT_PATH
+from ..journal_paths import JOURNAL_ROOT_PATH, SANDBOX_APPLICATION_PATH
 from ..runner import run_agent_events
 from ..session_state import validate_run_id
 from . import _ensure_sandbox
@@ -45,7 +45,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--run-id", required=True)
     parser.add_argument("--journal-root", type=Path, default=Path(JOURNAL_ROOT_PATH))
-    parser.add_argument("--app-root", type=Path, default=Path("/app"))
+    parser.add_argument("--app-root", type=Path, default=Path(SANDBOX_APPLICATION_PATH))
     arguments = parser.parse_args(argv)
     try:
         return asyncio.run(_run(arguments.run_id, arguments.journal_root, arguments.app_root))

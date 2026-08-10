@@ -28,7 +28,6 @@ LIVE_MANIFEST_NAME = "manifest.json"
 ERROR_REPORT_NAME = "bootstrap.error.json"
 CONTENT_DIGEST_MARKER_NAME = ".content_digest"
 SITECUSTOMIZE_NAME = "sitecustomize.py"
-APPLICATION_DIRECTORY = Path("/app")
 EX_CONFIG = 78
 MAX_ARCHIVE_BYTES = 256 * 1024 * 1024
 MAX_ARCHIVE_MEMBERS = 65_535
@@ -49,10 +48,11 @@ MANIFEST_BINDING_FIELDS = (
 )
 _DIGEST_PATTERN = re.compile(r"^sha256:[0-9a-f]{64}$")
 _COMPILED_ABI_PATTERN = re.compile(
-    r"\.cpython-(?P<abi>\d{2,3})-(?P<platform>[^/]+)\.so$"
+    r"\.(?:(?:cpython-(?P<abi>\d{2,3})-(?P<platform>[^/]+))|(?P<abi3>abi3))\.so$"
 )
 _WHEEL_TAG_PATTERN = re.compile(r"^Tag:\s*(\S+)\s*$")
 _MANYLINUX_PATTERN = re.compile(r"manylinux_(\d+)_(\d+)_")
+_CPYTHON_TAG_PATTERN = re.compile(r"^cp(?P<major>\d)(?P<minor>\d+)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,7 +91,7 @@ def main(argv: list[str] | None = None) -> int:
         required=True,
     )
     parser.add_argument("--journal-root", type=Path)
-    parser.add_argument("--application-directory", type=Path, default=APPLICATION_DIRECTORY)
+    parser.add_argument("--application-directory", type=Path, required=True)
     arguments = parser.parse_args(argv)
     try:
         context = prepare_sandbox(
@@ -118,7 +118,7 @@ def prepare_sandbox(
     session_directory: Path,
     *,
     journal_directory: Path | None = None,
-    application_directory: Path = APPLICATION_DIRECTORY,
+    application_directory: Path,
     bootstrap_path: Path | None = None,
 ) -> BootstrapContext:
     """Verify, stage, and publish one content epoch for the sandbox harness."""
@@ -130,7 +130,7 @@ def prepare_sandbox(
     seed = _read_seed(session_directory)
     _verify_bootstrap_digest(session_directory, bootstrap_file)
     archive_bytes = _verify_content_digest(session_directory, seed)
-    _verify_archive_abi(archive_bytes)
+    _verify_delivered_archive_abi(archive_bytes)
     _stage_content(archive_bytes, str(seed["digest"]), application_directory)
     _install_persistent_import_paths(application_directory)
     _configure_import_paths(application_directory)
@@ -201,19 +201,25 @@ def _verify_content_digest(session_directory: Path, seed: Mapping[str, object]) 
     return archive
 
 
-def _verify_archive_abi(archive_bytes: bytes) -> None:
+def _verify_delivered_archive_abi(archive_bytes: bytes) -> None:
+    """Verify ABI metadata in the controller-delivered archive, not the base disk."""
+
     if len(archive_bytes) > MAX_ARCHIVE_BYTES:
         raise BootstrapFailure("archive_invalid", "Sandbox content archive is invalid.")
     try:
         with zipfile.ZipFile(_BytesReader(archive_bytes)) as archive:
             members = tuple(archive.infolist())
             _validate_archive_members(members)
-            required_versions, manylinux_floor = _required_archive_abi(archive, members)
+            required_versions, abi3_minimum_versions, manylinux_floor = _required_archive_abi(
+                archive, members
+            )
     except (OSError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile):
         raise BootstrapFailure("archive_invalid", "Sandbox content archive is invalid.") from None
 
-    python_abi = f"{sys.version_info.major}{sys.version_info.minor}"
-    if any(required != python_abi for required in required_versions):
+    python_version = _runtime_cpython_version()
+    if any(required != python_version for required in required_versions):
+        raise BootstrapFailure("python_abi_mismatch", "Sandbox Python ABI is incompatible.")
+    if any(python_version < required for required in abi3_minimum_versions):
         raise BootstrapFailure("python_abi_mismatch", "Sandbox Python ABI is incompatible.")
     platform_name = sysconfig.get_platform().replace("-", "_").casefold()
     if "x86_64" not in platform_name and "amd64" not in platform_name:
@@ -225,14 +231,19 @@ def _verify_archive_abi(archive_bytes: bytes) -> None:
 def _required_archive_abi(
     archive: zipfile.ZipFile,
     members: Iterable[zipfile.ZipInfo],
-) -> tuple[set[str], tuple[int, int] | None]:
-    required_versions: set[str] = set()
+) -> tuple[set[tuple[int, int]], set[tuple[int, int]], tuple[int, int] | None]:
+    required_versions: set[tuple[int, int]] = set()
+    abi3_minimum_versions: set[tuple[int, int]] = set()
     manylinux_floor: tuple[int, int] | None = None
     for member in members:
         compiled = _COMPILED_ABI_PATTERN.search(member.filename)
         if compiled is not None:
-            _validate_compiled_platform(compiled.group("platform"))
-            required_versions.add(compiled.group("abi"))
+            platform_tag = compiled.group("platform")
+            if platform_tag is not None:
+                _validate_compiled_platform(platform_tag)
+            compiled_abi = compiled.group("abi")
+            if compiled_abi is not None:
+                required_versions.add(_parse_cpython_tag(compiled_abi))
         if not member.filename.endswith(".dist-info/WHEEL"):
             continue
         try:
@@ -244,15 +255,33 @@ def _required_archive_abi(
             if match is None:
                 continue
             tag = match.group(1)
-            interpreter, _, platform_tag = tag.split("-", 2)
-            if interpreter.startswith("cp") and interpreter[2:].isdigit():
-                required_versions.add(interpreter[2:])
+            interpreter, abi, platform_tag = tag.split("-", 2)
+            cpython_versions = {
+                _parse_cpython_tag(component)
+                for component in interpreter.split(".")
+                if component.startswith("cp")
+            }
+            if abi == "abi3":
+                abi3_minimum_versions.update(cpython_versions)
+            else:
+                required_versions.update(cpython_versions)
             for platform_component in platform_tag.split("."):
                 _validate_wheel_platform(platform_component)
                 floor = _manylinux_floor(platform_component)
                 if floor is not None and (manylinux_floor is None or floor > manylinux_floor):
                     manylinux_floor = floor
-    return required_versions, manylinux_floor
+    return required_versions, abi3_minimum_versions, manylinux_floor
+
+
+def _runtime_cpython_version() -> tuple[int, int]:
+    return sys.version_info.major, sys.version_info.minor
+
+
+def _parse_cpython_tag(tag: str) -> tuple[int, int]:
+    match = _CPYTHON_TAG_PATTERN.fullmatch(f"cp{tag}" if tag.isdigit() else tag)
+    if match is None:
+        raise BootstrapFailure("archive_invalid", "Sandbox content archive is invalid.")
+    return int(match.group("major")), int(match.group("minor"))
 
 
 def _validate_compiled_platform(platform_tag: str) -> None:
@@ -643,3 +672,7 @@ class _BytesReader:
 
     def seekable(self) -> bool:
         return True
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

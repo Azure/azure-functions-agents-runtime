@@ -1203,8 +1203,7 @@ async def _run_agent_event_stream(
                         "type": "done",
                         "delegate_error_count": (
                             delegate_error_tracker.count if delegate_error_tracker else 0
-                        )
-                        + ordinary_tool_error_count,
+                        ),
                     }
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
@@ -1277,12 +1276,8 @@ async def _run_agent_event_stream(
             # (success/timeout/error) so the streaming surface's delegate
             # errors are always accounted for, matching what
             # `AgentResult.delegate_error_count` does for the non-streaming
-            # path (B3). Ordinary (non-delegate) tool-call failures detected
-            # in the `function_result` handling above are folded in too
-            # (M3): the delegate tracker only counts specialist-delegation
-            # failures, so a failed sandbox/web_request tool call with no
-            # delegate failure at all would otherwise report zero even
-            # though a tool genuinely failed.
+            # path (B3). Ordinary tool failures remain telemetry-only, while
+            # the terminal wire field stays limited to delegation failures.
             span.set_attribute(
                 "af.agent.tool_error_count",
                 (delegate_error_tracker.count if delegate_error_tracker else 0)

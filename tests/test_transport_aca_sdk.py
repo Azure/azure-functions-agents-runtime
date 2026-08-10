@@ -44,9 +44,12 @@ from azure_functions_agents.transport.transport_models import (
 )
 from tests.doubles.fake_aca_sdk import (
     FakeCredential,
+    FakeSdkAutoDeletePolicy,
+    FakeSdkAutoSuspendPolicy,
     FakeSdkEgressPolicy,
     FakeSdkEnvironment,
     FakeSdkFileInfo,
+    FakeSdkLifecyclePolicy,
     FakeSdkSnapshot,
 )
 
@@ -186,6 +189,24 @@ def test_real_b4_models_accept_rule_bearing_policy_projection() -> None:
     assert projected.rules[0].action.headers[0].value_ref.secret_ref.secret_id == "mcp-token"
     assert projected.rules[0].action.headers[1].value == "static-value"
     assert projected.rules[1].action.scheme == "https"
+
+
+def test_real_b4_disabled_auto_delete_policy_is_rejected() -> None:
+    module_name = ".".join(("azure", "containerapps", "sandbox"))
+    try:
+        sdk = import_module(module_name)
+        installed_version = version("azure-containerapps-sandbox")
+    except (ImportError, PackageNotFoundError):
+        pytest.skip("The optional ACA Sandbox SDK is not installed.")
+    if installed_version != "0.1.0b4":
+        pytest.skip("This regression runs only against the pinned ACA Sandbox SDK.")
+    policy = sdk.LifecyclePolicy(
+        auto_suspend=sdk.AutoSuspendPolicy(enabled=False),
+        auto_delete=sdk.AutoDeletePolicy(enabled=False, delete_interval_seconds=90_300),
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="lifecycle policy is incomplete"):
+        aca_sdk._project_lifecycle_policy(policy)
 
 
 def _install_fake_adapter_boundary(
@@ -647,6 +668,35 @@ async def test_adapter_projects_complete_lifecycle_policy_without_group_readback
     await handle.set_lifecycle_policy(policy)
 
     assert await handle.get_lifecycle_policy() == policy
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("enabled", "delete_interval_seconds"),
+    ((False, 90_300), (True, None)),
+)
+async def test_adapter_rejects_disabled_or_incomplete_auto_delete_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    enabled: bool,
+    delete_interval_seconds: int | None,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    handle = await adapter.create(_request(), persisted_group=_binding())
+    environment.sandboxes[handle.identity.sandbox_id].lifecycle_policy = FakeSdkLifecyclePolicy(
+        auto_suspend=FakeSdkAutoSuspendPolicy(enabled=False),
+        auto_delete=FakeSdkAutoDeletePolicy(
+            enabled=enabled,
+            delete_interval_seconds=delete_interval_seconds,
+        ),
+    )
+
+    with pytest.raises(SandboxProvisioningError, match="lifecycle policy is incomplete"):
+        await handle.get_lifecycle_policy()
+
     await handle.close()
     await adapter.close()
 

@@ -10,10 +10,16 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from .._logger import logger
+from ..config.env import SANDBOX_ENV_PREFIX
 from ..egress.credentials import compile_model_key_headers
 from ..egress.policy import compile_egress_policy
 from ..harness import SANDBOX_MARKER_ENV_VAR
-from ..journal_paths import JOURNAL_ROOT_PATH, SESSION_PATH
+from ..journal_paths import (
+    JOURNAL_ROOT_PATH,
+    SANDBOX_APPLICATION_PATH,
+    SANDBOX_PYTHONPATH,
+    SESSION_PATH,
+)
 from ..transport.transport_models import (
     DiskIdSource,
     DiskSource,
@@ -25,12 +31,8 @@ from ..transport.transport_models import (
     SandboxProvisioningLabels,
 )
 
-SANDBOX_ENV_PREFIX = "SandboxEnv__"
 SANDBOX_DISK_ENV = "AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK"
 SANDBOX_DISK_ID_ENV = "AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID"
-SANDBOX_APPLICATION_DIRECTORY = "/app"
-SANDBOX_SITE_PACKAGES_DIRECTORY = f"{SANDBOX_APPLICATION_DIRECTORY}/.python_packages/lib/site-packages"
-SANDBOX_PYTHONPATH = f"{SANDBOX_APPLICATION_DIRECTORY}:{SANDBOX_SITE_PACKAGES_DIRECTORY}"
 SANDBOX_SESSION_DIRECTORY = SESSION_PATH
 MODEL_API_KEY_PLACEHOLDER = "sandbox-proxy-managed"
 _PROXY_MANAGED_KEY_ENV_NAMES = ("AZURE_OPENAI_API_KEY", "OPENAI_API_KEY")
@@ -102,7 +104,9 @@ def build_sandbox_environment(
             continue
         target = name.removeprefix(SANDBOX_ENV_PREFIX)
         if not target:
-            raise SandboxProvisioningError("SandboxEnv__ settings must name an environment variable.")
+            raise SandboxProvisioningError(
+                f"{SANDBOX_ENV_PREFIX} settings must name an environment variable."
+            )
         if not isinstance(value, str):
             raise SandboxProvisioningError("Sandbox environment values must be strings.")
         if target in _PROXY_MANAGED_KEY_ENV_NAMES:
@@ -144,18 +148,28 @@ def resolve_sandbox_create_source(
 def build_bootstrap_entrypoint(
     session_directory: str = SANDBOX_SESSION_DIRECTORY,
     journal_directory: str = JOURNAL_ROOT_PATH,
+    application_directory: str = SANDBOX_APPLICATION_PATH,
 ) -> tuple[str, str, str]:
     """Return the one-shot Disk-resume bootstrap entrypoint."""
 
-    if not session_directory.startswith("/") or not journal_directory.startswith("/"):
+    if not all(
+        directory.startswith("/")
+        for directory in (session_directory, journal_directory, application_directory)
+    ):
         raise SandboxProvisioningError("Sandbox bootstrap directories must be absolute.")
     quoted_directory = shlex.quote(session_directory)
     quoted_journal_directory = shlex.quote(journal_directory)
+    quoted_application_directory = shlex.quote(application_directory)
     script = "\n".join(
         (
             f"SESS={quoted_directory}",
             'while [ ! -f "$SESS/.boot-ready" ]; do sleep 0.2; done',
-            f'exec python3 "$SESS/bootstrap.py" --session-root "$SESS" --journal-root {quoted_journal_directory} >>"$SESS/bootstrap.log" 2>&1',
+            (
+                'exec python3 -E -S "$SESS/bootstrap.py" --session-root "$SESS" '
+                f"--journal-root {quoted_journal_directory} "
+                f"--application-directory {quoted_application_directory} "
+                '>>"$SESS/bootstrap.log" 2>&1'
+            ),
         )
     )
     return ("/bin/sh", "-c", script)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from azure_functions_agents.config.env import (
+    SANDBOX_ENV_PREFIX,
     _to_bool,
     has_unresolved_placeholders,
     resolve_env_vars_in_data,
@@ -152,7 +153,7 @@ def test_backend_environment_falls_back_only_for_runtime_lookup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("MODEL", raising=False)
-    monkeypatch.setenv("SandboxEnv__MODEL", "sandbox-model")
+    monkeypatch.setenv(f"{SANDBOX_ENV_PREFIX}MODEL", "sandbox-model")
 
     assert runtime_backend_env_value("MODEL") == "sandbox-model"
     assert substitute_env_vars_in_value("$MODEL") == "$MODEL"

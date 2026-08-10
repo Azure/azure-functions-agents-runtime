@@ -16,7 +16,7 @@ _INLINE_PERCENT_PATTERN = re.compile(rf"%({_VAR_NAME_FRAGMENT})%")
 _LITERAL_DOLLAR_SENTINEL = "\x00AF_LITERAL_DOLLAR:"
 _LITERAL_PERCENT_SENTINEL = "\x00AF_LITERAL_PERCENT:"
 _LITERAL_SENTINEL_SUFFIX = "\x00"
-_SANDBOX_ENV_PREFIX = "SandboxEnv__"
+SANDBOX_ENV_PREFIX = "SandboxEnv__"
 
 
 def _escaped_dollar_replacer(match: re.Match[str]) -> str:
@@ -98,7 +98,7 @@ def runtime_backend_env_value(name: str) -> str:
     value = os.environ.get(name)
     if value is not None:
         return value.strip()
-    return (os.environ.get(f"{_SANDBOX_ENV_PREFIX}{name}") or "").strip()
+    return (os.environ.get(f"{SANDBOX_ENV_PREFIX}{name}") or "").strip()
 
 
 def _to_bool(value: Any, default: bool = True) -> bool:

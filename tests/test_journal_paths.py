@@ -22,7 +22,10 @@ from azure_functions_agents.journal_paths import (
     JOURNAL_ROOT_PATH,
     PROCESS_FILENAME,
     RUNS_PATH,
+    SANDBOX_APPLICATION_PATH,
+    SANDBOX_PYTHONPATH,
     SANDBOX_ROOT_PATH,
+    SANDBOX_SITE_PACKAGES_PATH,
     SESSION_MANIFEST_PATH,
     SESSION_PATH,
     checkpoint_name,
@@ -37,6 +40,9 @@ from azure_functions_agents.journal_paths import (
 
 
 def test_journal_paths_share_one_canonical_root() -> None:
+    assert SANDBOX_APPLICATION_PATH == "/app"
+    assert f"{SANDBOX_APPLICATION_PATH}/.python_packages/lib/site-packages" == SANDBOX_SITE_PACKAGES_PATH
+    assert f"{SANDBOX_APPLICATION_PATH}:{SANDBOX_SITE_PACKAGES_PATH}" == SANDBOX_PYTHONPATH
     assert PurePosixPath(SANDBOX_ROOT_PATH).parts == (
         "/",
         "var",

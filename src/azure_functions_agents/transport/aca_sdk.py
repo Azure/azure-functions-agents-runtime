@@ -989,23 +989,26 @@ def _compile_egress_secret_ref(
 
 def _project_lifecycle_policy(policy: LifecyclePolicy) -> SandboxLifecyclePolicy:
     """Project the SDK lifecycle response while keeping its shape adapter-local."""
+    auto_delete = policy.auto_delete
+    if (
+        auto_delete is None
+        or not auto_delete.enabled
+        or auto_delete.delete_interval_seconds is None
+    ):
+        raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
     if policy.auto_suspend is None or not policy.auto_suspend.enabled:
-        if policy.auto_delete is None or policy.auto_delete.delete_interval_seconds is None:
-            raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
         return SandboxLifecyclePolicy.create(
             auto_suspend_seconds=None,
-            auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
+            auto_delete_seconds=auto_delete.delete_interval_seconds,
         )
-    if policy.auto_suspend.interval is None or policy.auto_delete is None:
-        raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
-    if policy.auto_delete.delete_interval_seconds is None:
+    if policy.auto_suspend.interval is None:
         raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
     if policy.auto_suspend.mode is None:
         raise SandboxProvisioningError("Sandbox lifecycle policy is incomplete.")
     return SandboxLifecyclePolicy.create(
         auto_suspend_seconds=policy.auto_suspend.interval,
         auto_suspend_mode=policy.auto_suspend.mode,
-        auto_delete_seconds=policy.auto_delete.delete_interval_seconds,
+        auto_delete_seconds=auto_delete.delete_interval_seconds,
     )
 
 

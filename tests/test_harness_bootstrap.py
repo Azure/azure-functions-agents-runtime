@@ -160,6 +160,143 @@ def test_bootstrap_persists_import_paths_for_a_fresh_harness_interpreter(
     assert result.stdout.strip() == "harness dependency"
 
 
+def test_isolated_bootstrap_does_not_load_unverified_sitecustomize(tmp_path: Path) -> None:
+    session, bootstrap_path = _write_session(tmp_path, _archive({"function_app.py": b"agent"}))
+    application = tmp_path / "app"
+    application.mkdir()
+    marker = tmp_path / "sitecustomize-ran"
+    (application / "sitecustomize.py").write_text(
+        f"from pathlib import Path\nPath({str(marker)!r}).write_text('ran', encoding='utf-8')\n",
+        encoding="utf-8",
+    )
+    (session / "content" / "app.zip").write_bytes(b"tampered")
+    environment = {**os.environ, "PYTHONPATH": str(application)}
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-E",
+            "-S",
+            str(bootstrap_path),
+            "--session-directory",
+            str(session),
+            "--journal-root",
+            str(tmp_path / "journal"),
+            "--application-directory",
+            str(application),
+        ],
+        capture_output=True,
+        check=False,
+        cwd=tmp_path,
+        env=environment,
+        text=True,
+    )
+
+    assert result.returncode == bootstrap.EX_CONFIG
+    assert not marker.exists()
+    assert not (session / "manifest.json").exists()
+
+
+@pytest.mark.parametrize("runtime_minor", (13, 14))
+def test_prepare_sandbox_accepts_compatible_abi3_archive_on_later_cpython(
+    tmp_path: Path,
+    _linux_bootstrap: None,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_minor: int,
+) -> None:
+    monkeypatch.setattr(
+        bootstrap,
+        "_runtime_cpython_version",
+        lambda: (3, runtime_minor),
+        raising=False,
+    )
+    session, bootstrap_path = _write_session(
+        tmp_path,
+        _archive(
+            {
+                "package/module.abi3.so": b"binary",
+                "package-1.0.dist-info/WHEEL": (
+                    b"Wheel-Version: 1.0\n"
+                    b"Tag: cp39-abi3-manylinux_2_17_x86_64\n"
+                ),
+            }
+        ),
+    )
+
+    bootstrap.prepare_sandbox(
+        session,
+        application_directory=tmp_path / "app",
+        bootstrap_path=bootstrap_path,
+    )
+
+
+@pytest.mark.parametrize("runtime_minor", (13, 14))
+def test_prepare_sandbox_rejects_newer_version_specific_abi(
+    tmp_path: Path,
+    _linux_bootstrap: None,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_minor: int,
+) -> None:
+    monkeypatch.setattr(
+        bootstrap,
+        "_runtime_cpython_version",
+        lambda: (3, runtime_minor),
+        raising=False,
+    )
+    incompatible = f"3{runtime_minor + 1}"
+    session, bootstrap_path = _write_session(
+        tmp_path,
+        _archive(
+            {
+                "package-1.0.dist-info/WHEEL": (
+                    f"Wheel-Version: 1.0\nTag: cp{incompatible}-cp{incompatible}-"
+                    "manylinux_2_17_x86_64\n"
+                ).encode()
+            }
+        ),
+    )
+
+    with pytest.raises(bootstrap.BootstrapFailure) as error:
+        bootstrap.prepare_sandbox(
+            session,
+            application_directory=tmp_path / "app",
+            bootstrap_path=bootstrap_path,
+        )
+
+    assert error.value.code == "python_abi_mismatch"
+
+
+@pytest.mark.parametrize("runtime_minor", (13, 14))
+def test_prepare_sandbox_rejects_newer_abi3_requirement(
+    tmp_path: Path,
+    _linux_bootstrap: None,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_minor: int,
+) -> None:
+    monkeypatch.setattr(bootstrap, "_runtime_cpython_version", lambda: (3, runtime_minor))
+    incompatible = f"3{runtime_minor + 1}"
+    session, bootstrap_path = _write_session(
+        tmp_path,
+        _archive(
+            {
+                "package-1.0.dist-info/WHEEL": (
+                    f"Wheel-Version: 1.0\nTag: cp{incompatible}-abi3-"
+                    "manylinux_2_17_x86_64\n"
+                ).encode()
+            }
+        ),
+    )
+
+    with pytest.raises(bootstrap.BootstrapFailure) as error:
+        bootstrap.prepare_sandbox(
+            session,
+            application_directory=tmp_path / "app",
+            bootstrap_path=bootstrap_path,
+        )
+
+    assert error.value.code == "python_abi_mismatch"
+
+
 def test_prepare_sandbox_rejects_digest_mismatch_without_publishing(
     tmp_path: Path,
     _linux_bootstrap: None,
@@ -283,10 +420,14 @@ def test_prepare_sandbox_rejects_musl_compiled_extension(
     assert not (session / "manifest.json").exists()
 
 
+@pytest.mark.parametrize("runtime_minor", (13, 14))
 def test_prepare_sandbox_rejects_musllinux_wheel_tag(
     tmp_path: Path,
     _linux_bootstrap: None,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime_minor: int,
 ) -> None:
+    monkeypatch.setattr(bootstrap, "_runtime_cpython_version", lambda: (3, runtime_minor))
     session, bootstrap_path = _write_session(
         tmp_path,
         _archive(
@@ -294,7 +435,7 @@ def test_prepare_sandbox_rejects_musllinux_wheel_tag(
                 "package-1.0.dist-info/WHEEL": (
                     (
                         "Wheel-Version: 1.0\n"
-                        f"Tag: cp{_cpython_abi()}-cp{_cpython_abi()}-musllinux_1_2_x86_64\n"
+                        f"Tag: cp3{runtime_minor}-abi3-musllinux_1_2_x86_64\n"
                     ).encode()
                 )
             }
@@ -311,12 +452,15 @@ def test_prepare_sandbox_rejects_musllinux_wheel_tag(
     assert not (session / "manifest.json").exists()
 
 
+@pytest.mark.parametrize("runtime_minor", (13, 14))
 def test_prepare_sandbox_rejects_wheel_requiring_newer_glibc(
     tmp_path: Path,
     _linux_bootstrap: None,
     monkeypatch: pytest.MonkeyPatch,
+    runtime_minor: int,
 ) -> None:
     monkeypatch.setattr(bootstrap, "_live_glibc_version", lambda: (2, 36))
+    monkeypatch.setattr(bootstrap, "_runtime_cpython_version", lambda: (3, runtime_minor))
     session, bootstrap_path = _write_session(
         tmp_path,
         _archive(
@@ -324,7 +468,7 @@ def test_prepare_sandbox_rejects_wheel_requiring_newer_glibc(
                 "package-1.0.dist-info/WHEEL": (
                     (
                         "Wheel-Version: 1.0\n"
-                        f"Tag: cp{_cpython_abi()}-cp{_cpython_abi()}-manylinux_2_39_x86_64\n"
+                        f"Tag: cp3{runtime_minor}-abi3-manylinux_2_39_x86_64\n"
                     ).encode()
                 )
             }

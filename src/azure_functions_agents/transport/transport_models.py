@@ -6,7 +6,7 @@ import math
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from types import MappingProxyType
-from typing import Literal
+from typing import Literal, get_args
 
 _MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
 
@@ -400,7 +400,7 @@ class SandboxEgressHeader:
         value: str | None = None,
         secret_ref: SandboxEgressSecretRef | None = None,
     ) -> SandboxEgressHeader:
-        if operation not in {"Set", "Insert", "Remove"}:
+        if operation not in get_args(SandboxEgressHeaderOperation.__value__):
             raise SandboxProvisioningError("Sandbox egress header operation is invalid.")
         _require_nonempty_string(name, "egress header name")
         if operation == "Remove":
@@ -461,7 +461,7 @@ class SandboxEgressRuleAction:
         scheme: str | None = None,
         headers: Iterable[SandboxEgressHeader] = (),
     ) -> SandboxEgressRuleAction:
-        if type not in {"Allow", "Deny", "Transform", "Rewrite"}:
+        if type not in get_args(SandboxEgressRuleActionType.__value__):
             raise SandboxProvisioningError("Sandbox egress rule action is invalid.")
         normalized_headers = tuple(headers)
         if not all(isinstance(header, SandboxEgressHeader) for header in normalized_headers):

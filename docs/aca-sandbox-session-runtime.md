@@ -35,16 +35,19 @@ run is then a separately supervised
 `python -m azure_functions_agents.harness --run-id ...` process.
 
 The create profile supplies `/app` and its captured site-packages directory in
-`PYTHONPATH`. Bootstrap writes a persistent `sitecustomize.py` so fresh harness
-interpreters also process delivered `.pth` files rather than relying on the
+`PYTHONPATH` for harness children. The supervisor starts bootstrap with `-E
+-S`, so an unverified `/app`, delivered `.pth` file, or `sitecustomize.py`
+cannot run before digest and ABI verification. Bootstrap writes a persistent
+`sitecustomize.py` only after staging verified content, so fresh harness
+interpreters process delivered `.pth` files rather than relying on the
 bootstrap process's in-memory `sys.path`.
 
 The verified public-disk ABI pairing is CPython 3.13 on Debian 12 with glibc
 2.36 and CPython 3.14 on Ubuntu 24.04 with glibc 2.39. This is a current
 platform fact, not an immutable public-image contract. The bootstrap reads the
-actual interpreter and glibc version on every boot; customers that need a
-fixed image can provision a compatible custom disk and select its name or ID
-with the settings above.
+actual interpreter and glibc version on every boot. Version-specific CPython
+extensions must match that interpreter; `abi3` extensions and wheel tags are
+accepted on compatible later CPython releases.
 
 The controller delivers the captured application archive, digest sidecar,
 manifest seed, bootstrap source, bootstrap digest, and finally `.boot-ready`.
@@ -58,6 +61,14 @@ The stock disk's public name can roll to a different base image. The bootstrap
 therefore fails closed for an incompatible CPython ABI, unsupported glibc floor,
 musl, malformed archive, digest mismatch, or protocol mismatch. It writes a
 typed `bootstrap.error.json` and never publishes readiness in those cases.
+
+Selecting `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK` or
+`AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID` chooses the base disk only; it is not
+a trust signal for application content. The current protocol always delivers
+the application archive, including `.python_packages`, so its digest and ABI
+checks remain mandatory for custom disks as well. There is no fixed-image
+application-content mode or implicit opt-out based on a disk name or ID. Such a
+mode would require a separately authenticated content-source contract.
 
 ## Sandbox environment
 
