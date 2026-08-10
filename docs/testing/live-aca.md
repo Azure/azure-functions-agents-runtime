@@ -55,7 +55,39 @@ local runs because they would upload incompatible native wheels instead of the
 Linux binaries the sandbox needs. The fixture fails before building the closure
 or creating a sandbox when the host ABI is unsupported.
 
-## Result taxonomy
+## Enable the scheduled CI job
+
+The job already exists — it is `ACAHarnessEntrypointSmoke` in
+`eng/templates/official/jobs/e2e-tests.yml`, which the existing
+`eng/ci/e2e-tests.yml` pipeline expands. **No new pipeline needs to be
+created or registered.** It runs only on `Schedule` or `Manual` builds, never on
+pull requests, and carries `continueOnError: true`.
+
+Azure sign-in is handled by the `AzureCLI@2` task, exactly as the Foundry E2E
+job does: the task performs `az login` as the service connection's identity, and
+`AZURE_TOKEN_CREDENTIALS: 'dev'` makes `DefaultAzureCredential` inside the test
+reuse that login. Nothing needs to be authenticated by hand at run time.
+
+Four things must be supplied before the job can pass:
+
+| # | Item | Where |
+| --- | --- | --- |
+| 1 | A Sandbox Group dedicated to CI | Azure |
+| 2 | A service connection to that subscription, ideally workload-identity federated | ADO project settings |
+| 3 | `SandboxGroup Data Owner` on that group for the connection's identity — needs Owner or User Access Administrator | Azure IAM |
+| 4 | Pipeline variables `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK`, `ACA_SANDBOX_REGION` | ADO pipeline |
+
+The connection name comes from the `acaServiceConnection` template parameter,
+which defaults to `saf-foundry-connection`. That default only exists so the
+template compiles; point it at a connection whose identity actually holds the
+role in item 3.
+
+The preflight step `Verify ACA sandbox group is reachable` runs before any test
+and prints the signed-in identity, then rejects a missing variable, an
+un-substituted `$(NAME)` placeholder, or a resource ID that is not a Sandbox
+Group. Each of those fails at a step whose name is the diagnosis, so setup
+mistakes never surface as test failures.
+
 
 | Result | Meaning | Triage |
 | --- | --- | --- |
