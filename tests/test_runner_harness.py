@@ -16,6 +16,7 @@ from agent_framework import (
 )
 
 from azure_functions_agents import runner
+from azure_functions_agents.client_manager import InferenceTarget
 from azure_functions_agents.config.schema import HarnessAgentConfig
 
 # ---------------------------------------------------------------------------
@@ -90,9 +91,11 @@ def test_build_harness_agent_session_falls_back_on_import_error(monkeypatch: Any
     """When create_harness_agent is missing, harness helper delegates to plain builder."""
     plain_called: list[dict[str, Any]] = []
 
-    async def fake_plain_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
+    async def fake_plain_builder(
+        **kwargs: Any,
+    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         plain_called.append(kwargs)
-        return _FakeAgent(), object(), "fallback-session"
+        return _FakeAgent(), object(), "fallback-session", None, InferenceTarget()
 
     import builtins
 
@@ -139,11 +142,16 @@ def test_build_harness_agent_session_forces_provider_managed_history(
 
     import agent_framework
 
-    monkeypatch.setattr(agent_framework, "create_harness_agent", fake_create_harness_agent)
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+        raising=False,
+    )
     monkeypatch.setattr(
         runner.get_client_manager(),
-        "build_chat_client",
-        lambda _model: object(),
+        "build_chat_client_with_target",
+        lambda _model: (object(), InferenceTarget()),
     )
     monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
 
@@ -175,8 +183,8 @@ def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) 
 
     monkeypatch.setattr(
         runner.get_client_manager(),
-        "build_chat_client",
-        lambda _model: client,
+        "build_chat_client_with_target",
+        lambda _model: (client, InferenceTarget()),
     )
     monkeypatch.setattr(
         runner,
@@ -200,14 +208,14 @@ def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) 
             "web_request_tools": None,
             "harness_config": HarnessAgentConfig(),
         }
-        first_agent, first_session, _ = await runner._build_harness_agent_session(**common)
+        first_agent, first_session, _, _, _ = await runner._build_harness_agent_session(**common)
         await first_agent.run("Use the Premium plan.", session=first_session)
         assert [message.text for message in stored_messages] == [
             "Use the Premium plan.",
             "response",
         ]
 
-        second_agent, second_session, _ = await runner._build_harness_agent_session(**common)
+        second_agent, second_session, _, _, _ = await runner._build_harness_agent_session(**common)
         await second_agent.run("Which plan did I choose?", session=second_session)
 
     asyncio.run(run_two_turns())
@@ -228,8 +236,8 @@ def test_fresh_harness_agents_compact_externally_loaded_history(monkeypatch: Any
 
     monkeypatch.setattr(
         runner.get_client_manager(),
-        "build_chat_client",
-        lambda _model: client,
+        "build_chat_client_with_target",
+        lambda _model: (client, InferenceTarget()),
     )
     monkeypatch.setattr(
         runner,
@@ -256,10 +264,10 @@ def test_fresh_harness_agents_compact_externally_loaded_history(monkeypatch: Any
                 max_output_tokens=100,
             ),
         }
-        first_agent, first_session, _ = await runner._build_harness_agent_session(**common)
+        first_agent, first_session, _, _, _ = await runner._build_harness_agent_session(**common)
         await first_agent.run(first_prompt, session=first_session)
 
-        second_agent, second_session, _ = await runner._build_harness_agent_session(**common)
+        second_agent, second_session, _, _, _ = await runner._build_harness_agent_session(**common)
         await second_agent.run(second_prompt, session=second_session)
 
     asyncio.run(run_two_turns())
@@ -284,9 +292,17 @@ def test_run_agent_uses_harness_builder_when_config_set(monkeypatch: Any) -> Non
     harness_called: list[dict[str, Any]] = []
     plain_called: list[dict[str, Any]] = []
 
-    async def fake_harness_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
+    async def fake_harness_builder(
+        **kwargs: Any,
+    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         harness_called.append(kwargs)
-        return _FakeAgent("harness response"), object(), "harness-session"
+        return (
+            _FakeAgent("harness response"),
+            object(),
+            "harness-session",
+            None,
+            InferenceTarget(),
+        )
 
     async def fake_plain_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
         plain_called.append(kwargs)
@@ -310,13 +326,17 @@ def test_run_agent_uses_plain_builder_when_config_is_none(monkeypatch: Any) -> N
     harness_called: list[dict[str, Any]] = []
     plain_called: list[dict[str, Any]] = []
 
-    async def fake_harness_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
+    async def fake_harness_builder(
+        **kwargs: Any,
+    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         harness_called.append(kwargs)
-        return _FakeAgent(), object(), "harness-session"
+        return _FakeAgent(), object(), "harness-session", None, InferenceTarget()
 
-    async def fake_plain_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str, None]:
+    async def fake_plain_builder(
+        **kwargs: Any,
+    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         plain_called.append(kwargs)
-        return _FakeAgent("plain response"), object(), "plain-session", None
+        return _FakeAgent("plain response"), object(), "plain-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_plain_builder)
@@ -332,14 +352,16 @@ def test_run_agent_stream_uses_harness_builder_when_config_set(monkeypatch: Any)
     """run_agent_stream calls _build_harness_agent_session when harness_config is not None."""
     harness_called: list[dict[str, Any]] = []
 
-    async def fake_harness_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
+    async def fake_harness_builder(
+        **kwargs: Any,
+    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         harness_called.append(kwargs)
 
         class _StreamingAgent(_FakeAgent):
             async def run(self, _p: str, *, session: Any, options: Any = None) -> Any:  # type: ignore[override]
                 return SimpleNamespace(text="streamed", messages=[])
 
-        return _StreamingAgent(), object(), "stream-harness-session"
+        return _StreamingAgent(), object(), "stream-harness-session", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
 
@@ -356,9 +378,11 @@ def test_run_agent_passes_harness_config_fields_to_builder(monkeypatch: Any) -> 
     captured: list[dict[str, Any]] = []
     cfg = HarnessAgentConfig(max_context_window_tokens=200_000, max_output_tokens=16_000)
 
-    async def fake_harness_builder(**kwargs: Any) -> tuple[_FakeAgent, object, str]:
+    async def fake_harness_builder(
+        **kwargs: Any,
+    ) -> tuple[_FakeAgent, object, str, None, InferenceTarget]:
         captured.append(kwargs)
-        return _FakeAgent(), object(), "s"
+        return _FakeAgent(), object(), "s", None, InferenceTarget()
 
     monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
 

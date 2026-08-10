@@ -60,10 +60,10 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -80,7 +80,7 @@ from ._observability import (
 )
 from ._session_id import SESSION_ID_PATTERN
 from ._slug import delegate_tool_name
-from .client_manager import get_client_manager
+from .client_manager import InferenceTarget, get_client_manager
 from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
@@ -131,6 +131,91 @@ DEFAULT_MODEL: str | None = runtime_env_value("AZURE_FUNCTIONS_AGENTS_MODEL") or
 # refuse anything that could escape the session directory. Shared with the
 # endpoint layer via ``_session_id`` so the two never drift.
 _SESSION_ID_PATTERN = SESSION_ID_PATTERN
+
+type _AgentExecutionRole = Literal["primary", "delegate", "workflow_subagent"]
+
+_USAGE_FIELD_NAMES: dict[str, str] = {
+    "input_token_count": "input_tokens",
+    "output_token_count": "output_tokens",
+}
+_FINAL_USAGE_TIMEOUT_SECONDS = 1.0
+
+
+def _normalize_usage_details(usage_details: Any) -> dict[str, int]:
+    """Return the valid canonical token counts reported by MAF."""
+    if not isinstance(usage_details, Mapping):
+        return {}
+
+    normalized: dict[str, int] = {}
+    for source_name, record_name in _USAGE_FIELD_NAMES.items():
+        value = usage_details.get(source_name)
+        if (
+            record_name not in normalized
+            and isinstance(value, int)
+            and not isinstance(value, bool)
+            and value >= 0
+        ):
+            normalized[record_name] = value
+    return normalized
+
+
+def _response_usage_details(response: Any) -> Any:
+    try:
+        return getattr(response, "usage_details", None)
+    except Exception:
+        return None
+
+
+def _model_publisher(provider: str | None) -> str | None:
+    return "openai" if provider in {"openai", "azure_openai"} else None
+
+
+async def _stream_usage_details(stream: Any, *, remaining_timeout: float) -> Any:
+    try:
+        get_final_response = getattr(stream, "get_final_response", None)
+        if not callable(get_final_response) or remaining_timeout <= 0:
+            return None
+        response = await asyncio.wait_for(
+            get_final_response(),
+            timeout=min(remaining_timeout, _FINAL_USAGE_TIMEOUT_SECONDS),
+        )
+        return _response_usage_details(response)
+    except Exception:
+        return None
+
+
+@dataclass
+class _AgentUsageRecorder:
+    """Attempt at most one internal token-usage record for a MAF invocation."""
+
+    agent_name: str
+    execution_role: _AgentExecutionRole
+    inference_target: InferenceTarget = field(default_factory=InferenceTarget)
+    _emission_attempted: bool = field(default=False, init=False)
+
+    def emit(self, usage_details: Any = None) -> None:
+        if self._emission_attempted:
+            return
+        self._emission_attempted = True
+
+        try:
+            usage = _normalize_usage_details(usage_details)
+            payload: dict[str, Any] = {
+                "agent_name": self.agent_name,
+                "event_name": "agent_token_usage",
+                "execution_role": self.execution_role,
+                "input_tokens": usage.get("input_tokens"),
+                "model": self.inference_target.model,
+                "model_publisher": _model_publisher(self.inference_target.provider),
+                "output_tokens": usage.get("output_tokens"),
+                "provider": self.inference_target.provider,
+            }
+            logger.info(
+                "Agent token usage: %s",
+                json.dumps(payload, ensure_ascii=True, separators=(",", ":"), sort_keys=True),
+            )
+        except Exception:
+            return
 
 
 # ---------------------------------------------------------------------------
@@ -398,7 +483,9 @@ def _build_role_agent(
     )
 
 
-def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilities) -> Agent[Any]:
+def _build_delegated_agent(
+    resolved: ResolvedAgent, capabilities: AgentCapabilities
+) -> tuple[Agent[Any], InferenceTarget]:
     """Build one specialist's MAF ``Agent`` in the *delegated* execution role.
 
     Runs as itself: own instructions, model, and static tools, but never a
@@ -408,8 +495,8 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
     enforcement of single-level delegation (Decision #6).
     """
     client_manager = get_client_manager()
-    chat_client = client_manager.build_chat_client(resolved.model)
-    return _build_role_agent(
+    chat_client, inference_target = client_manager.build_chat_client_with_target(resolved.model)
+    agent = _build_role_agent(
         chat_client,
         instructions=resolved.instructions,
         tools=list(capabilities.filtered_user_tools or []),
@@ -428,6 +515,7 @@ def _build_delegated_agent(resolved: ResolvedAgent, capabilities: AgentCapabilit
         history_provider=None,
         delegate_tools=None,
     )
+    return agent, inference_target
 
 
 async def run_leaf_agent_task(
@@ -436,10 +524,27 @@ async def run_leaf_agent_task(
     task: str,
     *,
     timeout: float,
+    execution_role: Literal["delegate", "workflow_subagent"],
 ) -> str:
     """Run one fresh stateless specialist and return its response text."""
-    specialist_agent = _build_delegated_agent(resolved, capabilities)
-    response = await asyncio.wait_for(specialist_agent.run(task), timeout=timeout)
+    specialist_agent, inference_target = _build_delegated_agent(resolved, capabilities)
+    usage_recorder = _AgentUsageRecorder(
+        agent_name=resolved.slug,
+        execution_role=execution_role,
+        inference_target=inference_target,
+    )
+    try:
+        response = await asyncio.wait_for(specialist_agent.run(task), timeout=timeout)
+    except asyncio.CancelledError:
+        usage_recorder.emit()
+        raise
+    except TimeoutError:
+        usage_recorder.emit()
+        raise
+    except Exception:
+        usage_recorder.emit()
+        raise
+    usage_recorder.emit(_response_usage_details(response))
     return response.text
 
 
@@ -593,6 +698,7 @@ def _build_delegate_tool(
                 capabilities,
                 task_text,
                 timeout=effective_timeout,
+                execution_role="delegate",
             )
         except asyncio.CancelledError:
             # Parent/request cancellation — never a recoverable delegate
@@ -680,10 +786,10 @@ async def _build_agent_session_history(
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
-) -> tuple[Any, Any, str, _DelegateErrorTracker | None]:
+) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct the chat client, agent, AgentSession, and history provider.
 
-    Returns ``(agent, session, resolved_session_id, delegate_error_tracker)``;
+    Returns ``(agent, session, resolved_session_id, delegate_error_tracker, inference_target)``;
     ``delegate_error_tracker`` is ``None`` unless ``subagents`` is non-empty.
     When non-empty, one ``delegate_<slug>`` tool per reference
     (:func:`build_subagent_tools`) is appended to this (coordinator,
@@ -696,7 +802,7 @@ async def _build_agent_session_history(
     # Build the chat client first so configuration errors surface BEFORE any
     # filesystem state is created.
     client_manager = get_client_manager()
-    chat_client = client_manager.build_chat_client(model)
+    chat_client, inference_target = client_manager.build_chat_client_with_target(model)
 
     # Validate / generate session id.
     validated_id = _validate_session_id(session_id)
@@ -739,7 +845,7 @@ async def _build_agent_session_history(
         workflow_policy=workflow_policy,
     )
 
-    return agent, session, resolved_id, delegate_error_tracker
+    return agent, session, resolved_id, delegate_error_tracker, inference_target
 
 
 async def _build_harness_agent_session(
@@ -758,14 +864,14 @@ async def _build_harness_agent_session(
     web_request_tools: list[Any] | None = None,
     harness_config: HarnessAgentConfig | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
-) -> tuple[Any, Any, str]:
+) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct an agent/session using MAF's ``create_harness_agent``.
 
     Falls back to :func:`_build_agent_session_history` (plain ``Agent``) with a
     warning when ``create_harness_agent`` is not available in the installed
     version of ``agent_framework``.
 
-    Returns ``(agent, session, resolved_session_id)``.
+    Returns ``(agent, session, resolved_session_id, None, inference_target)``.
     """
     import warnings
 
@@ -777,7 +883,7 @@ async def _build_harness_agent_session(
             "create_harness_agent is not available in the installed agent_framework "
             "version; falling back to plain Agent"
         )
-        return (await _build_agent_session_history(
+        return await _build_agent_session_history(
             instructions=instructions,
             session_id=session_id,
             tools=tools,
@@ -791,14 +897,14 @@ async def _build_harness_agent_session(
             agent_name=agent_name,
             web_request_tools=web_request_tools,
             workflow_policy=workflow_policy,
-        ))[:3]
+        )
 
     resolved_config = harness_config if harness_config is not None else HarnessAgentConfig()
 
     from agent_framework import AgentSession
 
     client_manager = get_client_manager()
-    chat_client = client_manager.build_chat_client(model)
+    chat_client, inference_target = client_manager.build_chat_client_with_target(model)
 
     validated_id = _validate_session_id(session_id)
     if validated_id is None:
@@ -871,7 +977,7 @@ async def _build_harness_agent_session(
             default_options={"store": False},
         )
 
-    return agent, session, resolved_id
+    return agent, session, resolved_id, None, inference_target
 
 
 # ---------------------------------------------------------------------------
@@ -1024,41 +1130,44 @@ async def run_agent(
     coordinator_deadline = loop.time() + timeout
 
     if harness_config is not None:
-        agent, session, resolved_id = await _build_harness_agent_session(
-            instructions=instructions,
-            session_id=session_id,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
-            model=model,
-            sandbox_tools=sandbox_tools,
-            system_addendum=system_addendum,
-            workflow_enabled=workflow_enabled,
-            workflow_durable_client=workflow_durable_client,
-            agent_name=agent_name,
-            web_request_tools=web_request_tools,
-            harness_config=harness_config,
-            workflow_policy=workflow_policy,
+        agent, session, resolved_id, delegate_error_tracker, inference_target = (
+            await _build_harness_agent_session(
+                instructions=instructions,
+                session_id=session_id,
+                tools=tools,
+                mcp_tools=mcp_tools,
+                skill_paths=skill_paths,
+                model=model,
+                sandbox_tools=sandbox_tools,
+                system_addendum=system_addendum,
+                workflow_enabled=workflow_enabled,
+                workflow_durable_client=workflow_durable_client,
+                agent_name=agent_name,
+                web_request_tools=web_request_tools,
+                harness_config=harness_config,
+                workflow_policy=workflow_policy,
+            )
         )
-        delegate_error_tracker = None
     else:
-        agent, session, resolved_id, delegate_error_tracker = await _build_agent_session_history(
-            instructions=instructions,
-            session_id=session_id,
-            tools=tools,
-            mcp_tools=mcp_tools,
-            skill_paths=skill_paths,
-            model=model,
-            sandbox_tools=sandbox_tools,
-            system_addendum=system_addendum,
-            workflow_enabled=workflow_enabled,
-            workflow_durable_client=workflow_durable_client,
-            agent_name=agent_name,
-            web_request_tools=web_request_tools,
-            subagents=subagents,
-            catalog=catalog,
-            coordinator_deadline=coordinator_deadline,
-            workflow_policy=workflow_policy,
+        agent, session, resolved_id, delegate_error_tracker, inference_target = (
+            await _build_agent_session_history(
+                instructions=instructions,
+                session_id=session_id,
+                tools=tools,
+                mcp_tools=mcp_tools,
+                skill_paths=skill_paths,
+                model=model,
+                sandbox_tools=sandbox_tools,
+                system_addendum=system_addendum,
+                workflow_enabled=workflow_enabled,
+                workflow_durable_client=workflow_durable_client,
+                agent_name=agent_name,
+                web_request_tools=web_request_tools,
+                subagents=subagents,
+                catalog=catalog,
+                coordinator_deadline=coordinator_deadline,
+                workflow_policy=workflow_policy,
+            )
         )
 
     try:
@@ -1070,14 +1179,30 @@ async def run_agent(
             remaining_after_lock = max(0.0, coordinator_deadline - loop.time())
             if remaining_after_lock <= 0:
                 raise TimeoutError
-            response: AgentResponse[Any] = await asyncio.wait_for(
-                agent.run(
-                    prompt,
-                    session=session,
-                    options=_build_chat_options_from_environment(),
-                ),
-                timeout=remaining_after_lock,
+            usage_recorder = _AgentUsageRecorder(
+                agent_name=agent_name or "main",
+                execution_role="primary",
+                inference_target=inference_target,
             )
+            try:
+                response: AgentResponse[Any] = await asyncio.wait_for(
+                    agent.run(
+                        prompt,
+                        session=session,
+                        options=_build_chat_options_from_environment(),
+                    ),
+                    timeout=remaining_after_lock,
+                )
+            except asyncio.CancelledError:
+                usage_recorder.emit()
+                raise
+            except TimeoutError:
+                usage_recorder.emit()
+                raise
+            except Exception:
+                usage_recorder.emit()
+                raise
+            usage_recorder.emit(_response_usage_details(response))
     except TimeoutError:
         raise RuntimeError(f"Agent run timed out after {timeout}s") from None
 
@@ -1201,41 +1326,44 @@ async def run_agent_stream(
 
     try:
         if harness_config is not None:
-            agent, session, resolved_id = await _build_harness_agent_session(
-                instructions=instructions,
-                session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
-                model=model,
-                sandbox_tools=sandbox_tools,
-                system_addendum=system_addendum,
-                workflow_enabled=workflow_enabled,
-                workflow_durable_client=workflow_durable_client,
-                agent_name=agent_name,
-                web_request_tools=web_request_tools,
-                harness_config=harness_config,
-                workflow_policy=workflow_policy,
+            agent, session, resolved_id, delegate_error_tracker, inference_target = (
+                await _build_harness_agent_session(
+                    instructions=instructions,
+                    session_id=session_id,
+                    tools=tools,
+                    mcp_tools=mcp_tools,
+                    skill_paths=skill_paths,
+                    model=model,
+                    sandbox_tools=sandbox_tools,
+                    system_addendum=system_addendum,
+                    workflow_enabled=workflow_enabled,
+                    workflow_durable_client=workflow_durable_client,
+                    agent_name=agent_name,
+                    web_request_tools=web_request_tools,
+                    harness_config=harness_config,
+                    workflow_policy=workflow_policy,
+                )
             )
-            delegate_error_tracker = None
         else:
-            agent, session, resolved_id, delegate_error_tracker = await _build_agent_session_history(
-                instructions=instructions,
-                session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
-                model=model,
-                sandbox_tools=sandbox_tools,
-                system_addendum=system_addendum,
-                workflow_enabled=workflow_enabled,
-                workflow_durable_client=workflow_durable_client,
-                agent_name=agent_name,
-                web_request_tools=web_request_tools,
-                subagents=subagents,
-                catalog=catalog,
-                coordinator_deadline=deadline,
-                workflow_policy=workflow_policy,
+            agent, session, resolved_id, delegate_error_tracker, inference_target = (
+                await _build_agent_session_history(
+                    instructions=instructions,
+                    session_id=session_id,
+                    tools=tools,
+                    mcp_tools=mcp_tools,
+                    skill_paths=skill_paths,
+                    model=model,
+                    sandbox_tools=sandbox_tools,
+                    system_addendum=system_addendum,
+                    workflow_enabled=workflow_enabled,
+                    workflow_durable_client=workflow_durable_client,
+                    agent_name=agent_name,
+                    web_request_tools=web_request_tools,
+                    subagents=subagents,
+                    catalog=catalog,
+                    coordinator_deadline=deadline,
+                    workflow_policy=workflow_policy,
+                )
             )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
@@ -1334,7 +1462,13 @@ async def run_agent_stream(
                 # finalization is not this generator's responsibility.
                 stream: Any = None
                 stream_settled = False
+                usage_recorder: _AgentUsageRecorder | None = None
                 try:
+                    usage_recorder = _AgentUsageRecorder(
+                        agent_name=agent_name or "main",
+                        execution_role="primary",
+                        inference_target=inference_target,
+                    )
                     stream = agent.run(
                         prompt,
                         stream=True,
@@ -1418,10 +1552,22 @@ async def run_agent_stream(
                         if call_id not in emitted_tool_calls:
                             emitted_tool_calls.add(call_id)
                             yield f"data: {json.dumps(event)}\n\n"
-                    yield f"data: {json.dumps({'type': 'done'})}\n\n"
                     span.set_attribute("af.agent.outcome", "success")
                     stream_settled = True
+                    try:
+                        yield f"data: {json.dumps({'type': 'done'})}\n\n"
+                    finally:
+                        usage_details = None
+                        try:
+                            usage_details = await _stream_usage_details(
+                                stream,
+                                remaining_timeout=max(0.0, deadline - loop.time()),
+                            )
+                        finally:
+                            usage_recorder.emit(usage_details)
                 except TimeoutError as exc:
+                    if usage_recorder is not None:
+                        usage_recorder.emit()
                     if not stream_settled:
                         # Reached when the deadline/cancellation surfaced
                         # from somewhere the inner handler above didn't cover
@@ -1435,7 +1581,13 @@ async def run_agent_stream(
                         TimeoutError(f"Timeout after {timeout}s"), fault_domain=FaultDomain.RUNTIME
                     )
                     yield f"data: {json.dumps({'type': 'error', 'content': f'Timeout after {timeout}s'})}\n\n"
+                except asyncio.CancelledError:
+                    if usage_recorder is not None:
+                        usage_recorder.emit()
+                    raise
                 except Exception as exc:
+                    if usage_recorder is not None:
+                        usage_recorder.emit()
                     if not stream_settled:
                         # Same reasoning as the `TimeoutError` branch above:
                         # an ordinary exception that reached here without
@@ -1479,6 +1631,8 @@ async def run_agent_stream(
                             "run_agent_stream torn down before completion"
                         )
                         await _finalize_maf_stream(stream, exc_at_teardown)
+                        if usage_recorder is not None:
+                            usage_recorder.emit()
         except TimeoutError:
             span.set_attribute("af.agent.outcome", "error")
             span.record_exception(
