@@ -8,6 +8,7 @@ from typing import Annotated
 
 from pydantic import BaseModel, ConfigDict, StringConstraints, ValidationError
 
+from ..client_manager import MAFProvider
 from ..config.env import substitute_env_vars_in_value
 from ..transport.transport_models import (
     SandboxEgressHeader,
@@ -79,20 +80,20 @@ def compile_static_header(
 
 
 def compile_model_key_headers(
-    provider: str | None,
+    provider: MAFProvider | None,
     environment: Mapping[str, str] | None = None,
 ) -> tuple[SandboxEgressHeader, ...]:
     """Compile only the resolved provider's conventional model-key header."""
 
     source = os.environ if environment is None else environment
-    if provider == "azure_openai":
+    if provider is MAFProvider.AZURE_OPENAI:
         azure_openai_key = _app_setting(source, AZURE_OPENAI_API_KEY_ENV)
         return (
             ()
             if not azure_openai_key
             else (compile_static_header("api-key", azure_openai_key),)
         )
-    if provider == "openai":
+    if provider is MAFProvider.OPENAI:
         openai_key = _app_setting(source, OPENAI_API_KEY_ENV)
         return (
             ()

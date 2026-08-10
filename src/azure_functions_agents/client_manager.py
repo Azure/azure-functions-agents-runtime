@@ -26,6 +26,7 @@ from __future__ import annotations
 import os
 from abc import ABC, abstractmethod
 from collections.abc import Mapping
+from enum import StrEnum
 from typing import Any
 
 from ._credential import build_async_credential
@@ -74,11 +75,19 @@ _DEFAULT_OPENAI_MODEL = "gpt-4o-mini"
 _DEFAULT_FOUNDRY_MODEL = "gpt-4o-mini"
 
 
+class MAFProvider(StrEnum):
+    """The supported MAF provider wire values."""
+
+    OPENAI = "openai"
+    AZURE_OPENAI = "azure_openai"
+    FOUNDRY = "foundry"
+
+
 def resolve_maf_provider(
     environment: Mapping[str, str],
     *,
     required: bool = True,
-) -> str | None:
+) -> MAFProvider | None:
     """Resolve MAF provider precedence from an explicit environment mapping."""
 
     explicit = runtime_backend_env_value_from(
@@ -86,13 +95,20 @@ def resolve_maf_provider(
         "AZURE_FUNCTIONS_AGENTS_PROVIDER",
     ).lower()
     if explicit:
-        return explicit
+        try:
+            return MAFProvider(explicit)
+        except ValueError:
+            accepted = ", ".join(provider.value for provider in MAFProvider)
+            raise RuntimeError(
+                f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{explicit}'. "
+                f"Use one of: {accepted}."
+            ) from None
     if runtime_backend_env_value_from(environment, "AZURE_OPENAI_ENDPOINT"):
-        return "azure_openai"
+        return MAFProvider.AZURE_OPENAI
     if runtime_backend_env_value_from(environment, "FOUNDRY_PROJECT_ENDPOINT"):
-        return "foundry"
+        return MAFProvider.FOUNDRY
     if runtime_backend_env_value_from(environment, "OPENAI_API_KEY"):
-        return "openai"
+        return MAFProvider.OPENAI
     if not required:
         return None
     raise RuntimeError(
@@ -100,16 +116,16 @@ def resolve_maf_provider(
         "OPENAI_API_KEY (OpenAI), "
         "AZURE_OPENAI_ENDPOINT (+ AZURE_OPENAI_API_KEY or managed identity) for Azure OpenAI, "
         "or FOUNDRY_PROJECT_ENDPOINT for Microsoft Foundry. "
-        "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry "
-        "to override."
+        "You can also set AZURE_FUNCTIONS_AGENTS_PROVIDER="
+        f"{'|'.join(provider.value for provider in MAFProvider)} to override."
     )
 
 
 class MAFClientManager(ClientManager):
     """Build Microsoft Agent Framework chat clients.
 
-    Selects a provider from environment variables — explicit
-    ``AZURE_FUNCTIONS_AGENTS_PROVIDER=openai|azure_openai|foundry`` wins. Otherwise:
+    Selects a provider from environment variables — an explicit
+    ``AZURE_FUNCTIONS_AGENTS_PROVIDER`` value wins. Otherwise:
 
     1. ``AZURE_OPENAI_ENDPOINT``      → Azure OpenAI
     2. ``FOUNDRY_PROJECT_ENDPOINT``   → Microsoft Foundry
@@ -124,26 +140,25 @@ class MAFClientManager(ClientManager):
             return requested
         provider = self._provider()
         runtime_model = runtime_backend_env_value("AZURE_FUNCTIONS_AGENTS_MODEL")
-        if provider == "azure_openai":
+        if provider is MAFProvider.AZURE_OPENAI:
             return self._env("AZURE_OPENAI_DEPLOYMENT") or runtime_model or _DEFAULT_OPENAI_MODEL
-        if provider == "foundry":
+        if provider is MAFProvider.FOUNDRY:
             return self._env("FOUNDRY_MODEL") or runtime_model or _DEFAULT_FOUNDRY_MODEL
-        return runtime_model or _DEFAULT_OPENAI_MODEL
+        if provider is MAFProvider.OPENAI:
+            return runtime_model or _DEFAULT_OPENAI_MODEL
+        raise AssertionError("Resolved MAF provider is unsupported.")
 
     def build_chat_client(self, model: str | None) -> Any:
         provider = self._provider()
         resolved = self.resolve_model(model)
         logger.info("MAF provider=%s model=%s", provider, resolved)
-        if provider == "openai":
+        if provider is MAFProvider.OPENAI:
             return self._build_openai(resolved)
-        if provider == "azure_openai":
+        if provider is MAFProvider.AZURE_OPENAI:
             return self._build_azure_openai(resolved)
-        if provider == "foundry":
+        if provider is MAFProvider.FOUNDRY:
             return self._build_foundry(resolved)
-        raise RuntimeError(
-            f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
-            "Use one of: openai, azure_openai, foundry."
-        )
+        raise AssertionError("Resolved MAF provider is unsupported.")
 
     # ------------------------------------------------------------------
     # Internals
@@ -160,7 +175,7 @@ class MAFClientManager(ClientManager):
         return runtime_backend_env_value(name)
 
     @classmethod
-    def _provider(cls) -> str:
+    def _provider(cls) -> MAFProvider:
         provider = resolve_maf_provider(os.environ)
         assert provider is not None
         return provider
@@ -181,7 +196,7 @@ class MAFClientManager(ClientManager):
         endpoint = cls._env("AZURE_OPENAI_ENDPOINT")
         if not endpoint:
             raise RuntimeError(
-                "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "
+                f"AZURE_FUNCTIONS_AGENTS_PROVIDER={MAFProvider.AZURE_OPENAI.value} requires "
                 "AZURE_OPENAI_ENDPOINT to be set."
             )
         kwargs: dict[str, Any] = {
@@ -208,7 +223,7 @@ class MAFClientManager(ClientManager):
         endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
         if not endpoint:
             raise RuntimeError(
-                "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "
+                f"AZURE_FUNCTIONS_AGENTS_PROVIDER={MAFProvider.FOUNDRY.value} requires "
                 "FOUNDRY_PROJECT_ENDPOINT to be set."
             )
         return FoundryChatClient(
