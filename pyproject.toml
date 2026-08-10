@@ -58,12 +58,17 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
-    # Bring azure-data-tables into dev directly (not via the [aca_sandbox] extra) so
+    # Bring azure-data-tables into dev directly (not only via the [aca_sandbox] extra) so
     # mypy/pytest can exercise session_state's Table store and its real-Azurite
-    # tests without a separate install step. Deliberately does NOT pull in the
-    # preview azure-containerapps-sandbox SDK that also lives in [aca_sandbox] --
-    # that SDK stays out of the default dev/CI install (see the mypy override below).
+    # tests without a separate install step.
     "azure-data-tables>=12.7.0,<13",
+    # Bring the preview ACA Sandbox SDK into dev so the default dev/CI environment
+    # type-checks transport/aca_sdk.py against the real SDK instead of degrading its
+    # TYPE_CHECKING-only imports to Any. Without this the one module that talks to the
+    # live service is the least validated code in the repo: a wrong attribute name or a
+    # dropped None-check passes mypy and the unit suite, then raises AttributeError
+    # against real Azure. Keep the pin in sync with the [aca_sandbox] extra above.
+    "azure-containerapps-sandbox==0.1.0b4",
     # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
     # every sample against the editable repo install (no per-sample requirements.txt install).
     # daily-azure-report:
@@ -136,13 +141,14 @@ exclude = ["build", "dist", "samples"]
 module = "azure_functions_agents.*"
 strict = true
 
-# The preview ACA Sandbox SDK is an optional extra (see pyproject.toml
-# [project.optional-dependencies].aca_sandbox) that this repo's default dev/CI
-# environment does not install (`pip install -e .[dev]` only). aca_sdk.py's
-# TYPE_CHECKING-only import of it resolves to real, fully-checked types in a
-# dev environment that *has* the extra installed (e.g. while working on this
-# transport adapter); ignore_missing_imports lets the same annotations
-# degrade to Any, rather than failing mypy, in an environment that doesn't.
+# The preview ACA Sandbox SDK now ships in the `dev` extra, so the default dev/CI
+# environment installs it and mypy checks aca_sdk.py against the SDK's real types
+# (it is an inline-typed PEP 561 package -- it ships py.typed and no stubs).
+# This override is inert whenever the package is present, because
+# ignore_missing_imports only suppresses diagnostics raised when mypy cannot
+# resolve an import at all. It is kept for environments that deliberately install
+# without the extra (a minimal in-lang-worker-only setup), where the same
+# annotations degrade to Any rather than failing mypy.
 [[tool.mypy.overrides]]
 module = [
     "azure.containerapps.sandbox",
