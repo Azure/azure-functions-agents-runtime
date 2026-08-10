@@ -27,7 +27,7 @@ wheels = [
 
 [[package]]
 name = "agent-framework-foundry"
-version = "1.10.4"
+version = "1.10.3"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
@@ -36,22 +36,22 @@ dependencies = [
     { name = "azure-ai-inference" },
     { name = "azure-ai-projects" },
 ]
-sdist = { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/agent-framework-foundry/1.10.4/agent_framework_foundry-1.10.4.tar.gz", hash = "sha256:85dcebeccfa0bc9f14dada9f3ac7ebebfc730329237421ab02566b08b77f5485" }
+sdist = { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-foundry/1.10.3/agent_framework_foundry-1.10.3.tar.gz", hash = "sha256:d987a319caf4cf03bb904c04ce1cf485e481f74213f0ea119d33445538c53de9" }
 wheels = [
-    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/agent-framework-foundry/1.10.4/agent_framework_foundry-1.10.4-py3-none-any.whl", hash = "sha256:5661926ca0af8705949704691d6b3859c9e3fe2678a1391ba1450b5114eb0731" },
+    { url = "https://ms-feed-25.pkgs.visualstudio.com/6f084628-a36d-42cb-934d-057357e379dc/_packaging/49d7402f-07bb-4b18-a9ce-086e6e98a554/pypi/download/agent-framework-foundry/1.10.3/agent_framework_foundry-1.10.3-py3-none-any.whl", hash = "sha256:8fa43070edae0b470bf91d3396b7403a4c3082397c2c3059bf011647221ffa32" },
 ]
 
 [[package]]
 name = "agent-framework-openai"
-version = "1.12.0"
+version = "1.10.2"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "agent-framework-core" },
     { name = "openai" },
 ]
-sdist = { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/agent-framework-openai/1.12/agent_framework_openai-1.12.0.tar.gz", hash = "sha256:f0da9c0c2a3e68d94d583a97c416b89719b836ef7c265cab6139cdefb0fd8e26" }
+sdist = { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/agent-framework-openai/1.10.2/agent_framework_openai-1.10.2.tar.gz", hash = "sha256:b3d3c0388b01171190e78f5756887ad9f682cc28228368302b7228a1073b669c" }
 wheels = [
-    { url = "https://ms-feed-12.pkgs.visualstudio.com/80ca31fc-64d9-45fa-acb1-85ac9c6202b2/_packaging/00cb4235-4c66-4418-be20-d052995979fb/pypi/download/agent-framework-openai/1.12/agent_framework_openai-1.12.0-py3-none-any.whl", hash = "sha256:1b6a622bb409976440970696f488e8a43efc75c6ba269feee20e621897939328" },
+    { url = "https://ms-feed-17.pkgs.visualstudio.com/02a0e93b-9e7a-46f6-8851-5a56920f8f7e/_packaging/2aa351dc-4441-4d20-a430-25f505f2a55a/pypi/download/agent-framework-openai/1.10.2/agent_framework_openai-1.10.2-py3-none-any.whl", hash = "sha256:4f889a7e7b4c97563f1395f2f637dd2f3c6e4342b92c8e5fd6230a71b0f2c0d5" },
 ]
 
 [[package]]
@@ -455,8 +455,8 @@ monitor = [
 [package.metadata]
 requires-dist = [
     { name = "agent-framework-core", specifier = "==1.13.0" },
-    { name = "agent-framework-foundry", specifier = "==1.10.4" },
-    { name = "agent-framework-openai", specifier = "==1.12.0" },
+    { name = "agent-framework-foundry", specifier = "==1.10.3" },
+    { name = "agent-framework-openai", specifier = "==1.10.2" },
     { name = "aiohttp", specifier = ">=3.14.2,<4" },
     { name = "azure-functions", specifier = ">=2.1.0,<3" },
     { name = "azure-functions-durable", specifier = ">=1.2.10,<2" },
