@@ -157,13 +157,13 @@ def test_harness_agent_config_extra_forbidden() -> None:
 
 
 @pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig(max_context_window_tokens=8192)])
-def test_agent_spec_harness_variants(value: bool | None | HarnessAgentConfig) -> None:
+def test_agent_spec_harness_variants(value: bool | HarnessAgentConfig | None) -> None:
     spec = AgentSpec(name="X", description="Y", harness=value)
     assert spec.harness == value
 
 
 @pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig()])
-def test_global_config_harness_variants(value: bool | None | HarnessAgentConfig) -> None:
+def test_global_config_harness_variants(value: bool | HarnessAgentConfig | None) -> None:
     config = GlobalConfig(harness=value)
     assert config.harness == value
 
