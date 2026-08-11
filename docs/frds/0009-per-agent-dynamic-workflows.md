@@ -1,7 +1,7 @@
 ---
 frd: 0009
 title: Per-agent Dynamic Workflows
-status: Draft
+status: Finalized
 author: TsuyoshiUshio
 created: 2026-08-10
 updated: 2026-08-10
@@ -376,12 +376,12 @@ authentication.
 | 5 | Durable registration lifetime | Once per owner / once per app | Register the Durable engine exactly once per app | Agent | 2026-08-10 |
 | 6 | Workflow handler inventory | First owner's filtered tools / union of owner tools / complete discovered catalog | Register the complete compatible handler catalog once and authorize separately per owner | Agent | 2026-08-10 |
 | 7 | Owner policy representation | Mutable process global / request-time reconstruction / immutable slug-keyed catalog | Build immutable `WorkflowPlanPolicy` values during side-effect-free composition | Agent | 2026-08-10 |
-| 8 | Activity authorization | Trust start-time validation / persist start-time policy / reauthorize deployed policy | Reauthorize tool and Sub Agent Activities against current deployed owner policy; pending nodes fail closed after restrictive changes | Agent; pending human sign-off | 2026-08-10 |
-| 9 | Enabled owner without starter | Warn and disable / silently ignore / fail composition | Propose fail-fast composition because inert workflow configuration is misleading | Agent; pending human sign-off | 2026-08-10 |
-| 10 | Non-HTTP trigger management | Add owner index / shared synthetic session / generated non-discoverable invocation session | Propose generated sessions with no new application index; use Durable/DTS for operator management | Agent; pending human sign-off | 2026-08-10 |
+| 8 | Activity authorization | Trust start-time validation / persist start-time policy / reauthorize deployed policy | Reauthorize tool and Sub Agent Activities against current deployed owner policy; pending nodes fail closed after restrictive changes | Human | 2026-08-10 |
+| 9 | Enabled owner without starter | Warn and disable / silently ignore / fail composition | Fail composition because inert workflow configuration is misleading | Human | 2026-08-10 |
+| 10 | Non-HTTP trigger management | Add owner index / shared synthetic session / generated non-discoverable invocation session | Use generated sessions with no new application index; use Durable/DTS for operator management | Human | 2026-08-10 |
 | 11 | Authoring schema | Add owner/config fields / reuse current workflow config | Reuse existing fields; owner identity is runtime-derived | Agent | 2026-08-10 |
 | 12 | Sample proof | Extend a main-agent sample / documentation only / dedicated multi-owner sample | Add a runnable sample with two non-main owners and same-session isolation verification | Human | 2026-08-10 |
-| 13 | Ownership digest width | Retain 48-bit prefix / store literal owner data / expand digest | Propose a 128-bit truncated SHA-256 prefix over a length-delimited owner/session encoding; avoids exposing raw identity while making collisions impractical | Agent; pending human sign-off | 2026-08-10 |
+| 13 | Ownership digest width | Retain 48-bit prefix / store literal owner data / expand digest | Use a 128-bit truncated SHA-256 prefix over a length-delimited owner/session encoding; avoids exposing raw identity while making collisions impractical | Human | 2026-08-10 |
 
 ## 6. Test plan
 
@@ -458,9 +458,12 @@ authentication.
 
 ## 8. Status & sign-off
 
-- **Architecture review (phase 2):** Pending independent review against current
-  `main`, `docs/architecture.md`, FRD 0004, FRD 0007, issues #1274/#1275, and the
-  existing trigger and Workflow Sub Agent implementations.
-- **Human sign-off:** Pending. Decisions #8-#10 and #13 require explicit
-  ratification before setting `status: Finalized` and beginning product
-  implementation.
+- **Architecture review (phase 2):** Completed by an independent rubber-duck
+  reviewer on 2026-08-10 against current `main`, `docs/architecture.md`, FRD
+  0004, FRD 0007, issues #1274/#1275, and the existing trigger and Workflow Sub
+  Agent implementations. No blocking findings remained. Important findings on
+  ownership digest strength, provisional decisions, legacy-ID wording, and
+  verifier prerequisites were incorporated.
+- **Human sign-off:** Completed by TsuyoshiUshio on 2026-08-10. The human
+  approved proceeding with implementation in the same PR, ratifying Decisions
+  #8-#10 and #13. Status set to `Finalized`.
