@@ -759,3 +759,36 @@ def test_dynamic_workflow_subagents_fixture() -> None:
             discovered_skills=[],
             is_referenced_as_subagent=True,
         )
+
+
+# ---------------------------------------------------------------------------
+# 18 — multiple workflow owners with distinct policies
+# ---------------------------------------------------------------------------
+
+
+def test_multi_owner_workflows_fixture() -> None:
+    fixture = FIXTURES_ROOT / "18_multi_owner_workflows"
+    specs = load_agent_specs(fixture, strict=True)
+    resolved = [compose(spec, load_global_config(fixture)) for spec in specs]
+    by_slug = {agent.slug: agent for agent in resolved}
+
+    assert set(by_slug) == {
+        "incident_commander",
+        "release_manager",
+        "incident_analyst",
+        "release_reviewer",
+    }
+    assert not any(agent.is_main for agent in resolved)
+
+    incident = by_slug["incident_commander"]
+    release = by_slug["release_manager"]
+    assert incident.workflows is not None
+    assert incident.workflows.exclude == ("release_evidence",)
+    assert [ref.agent for ref in incident.workflows.subagents] == ["incident_analyst"]
+    assert release.workflows is not None
+    assert release.workflows.exclude == ("incident_evidence",)
+    assert [ref.agent for ref in release.workflows.subagents] == ["release_reviewer"]
+
+    known_slugs = set(by_slug)
+    validate_workflow_subagent_references(incident, known_slugs=known_slugs)
+    validate_workflow_subagent_references(release, known_slugs=known_slugs)
