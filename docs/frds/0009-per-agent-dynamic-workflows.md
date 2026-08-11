@@ -430,7 +430,7 @@ authentication.
   - workflow leaf specialists retain their current isolated execution role.
 - [x] Fixture scenario:
   `tests/fixtures/config_scenarios/18_multi_owner_workflows/`.
-- [ ] E2E: Azure Storage and DTS runs demonstrate concurrent owners, overlapping
+- [x] E2E: Azure Storage and DTS runs demonstrate concurrent owners, overlapping
   session IDs, distinct policies, status/control isolation, and execution after
   starter completion.
 - [x] Sample verifier: one command starts dependencies and proves both successful
