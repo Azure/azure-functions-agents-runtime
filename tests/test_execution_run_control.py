@@ -196,10 +196,8 @@ async def test_submit_stays_indeterminate_even_when_launch_stderr_reports_a_fail
 
     transport.exec_hook = emit_launch_error
 
-    # Captured stderr is a diagnostic for operators, never a classification
-    # signal. A detached harness may still be alive when it writes to stderr, so
-    # retiring the run here could orphan a live process; the reconciler settles
-    # the true outcome instead.
+    # Captured stderr is a diagnostic for operators, never a classification signal;
+    # retiring the run here could orphan a still-live harness.
     with pytest.raises(RunSubmissionIndeterminateError):
         await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
 
@@ -210,8 +208,7 @@ async def test_submit_keeps_indeterminate_when_launch_stderr_has_unrelated_outpu
     control = SandboxRunControl(event_poll_interval_seconds=0.001)
 
     async def emit_unmarked_stderr(_command: str) -> None:
-        # A healthy but slow harness can spill benign startup warnings onto the
-        # same stderr sidecar before it journals acceptance.
+        # A slow but healthy harness can spill benign startup warnings before journaling acceptance.
         transport.seed_file(
             launch_stderr_path("run-1"),
             b"DeprecationWarning: legacy import path is deprecated\n",

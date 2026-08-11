@@ -40,8 +40,9 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 _CLOSURE_ARCHIVE_MAX_BYTES = 80 * 1024 * 1024
 _CREATE_TIMEOUT_SECONDS = 90.0
 _COMMAND_TIMEOUT_SECONDS = 60.0
-_CI_OWNER_HASH = "o1-" + ("c" * 52)
-_CI_APP_HASH = "a1-" + ("d" * 52)
+CI_OWNER_KIND = "aca_smoke_ci"
+CI_OWNER_HASH = "o1-" + ("c" * 52)
+CI_APP_HASH = "a1-" + ("d" * 52)
 _JOURNAL_ROOT_PROBE_CONTENT = b"aca-smoke-journal-root"
 _LABEL_RECONCILIATION_ATTEMPTS = 3
 _LABEL_RECONCILIATION_DELAY_SECONDS = 1.0
@@ -55,7 +56,6 @@ class AcaSmokeConfig:
 
     group_resource_id: str
     disk: str
-    region: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,6 +66,16 @@ class DependencyClosureArchive:
     entry_count: int
 
 
+def ci_smoke_reaper_labels() -> dict[str, str]:
+    """Return the label selector that scopes CI smoke sandboxes for reaping."""
+
+    return {
+        "owner_kind": CI_OWNER_KIND,
+        "owner_hash": CI_OWNER_HASH,
+        "app_hash": CI_APP_HASH,
+    }
+
+
 def aca_smoke_config_from_environment() -> AcaSmokeConfig:
     """Read host-safe ACA smoke configuration from the operator environment."""
 
@@ -73,20 +83,15 @@ def aca_smoke_config_from_environment() -> AcaSmokeConfig:
         "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
     )
     disk = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK")
-    region = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION").casefold()
     require_sandbox_compatible_host(disk)
-    return AcaSmokeConfig(group_resource_id=group_resource_id, disk=disk, region=region)
+    return AcaSmokeConfig(group_resource_id=group_resource_id, disk=disk)
 
 
 def require_sandbox_compatible_host(disk: str) -> None:
-    """Reject closure builds whose compiled dependencies cannot run in the sandbox.
+    """Reject closure builds whose compiled wheels cannot import in the sandbox.
 
-    The closure is built with the host interpreter (``sys.executable``), so its
-    compiled wheels (for example ``pydantic_core`` and ``aiohttp``) carry that
-    interpreter's ABI tag. A ``python-X.Y`` sandbox disk boots CPython X.Y, and a
-    wheel built for a different minor version will not import there. Being on
-    "some Linux CPython" is therefore not enough: the host minor version must
-    equal the target disk's.
+    The closure is built with the host interpreter, so its compiled wheels carry
+    the host ABI tag; the host CPython minor must equal the target disk's minor.
     """
 
     machine = platform.machine().casefold()
@@ -159,9 +164,8 @@ def build_dependency_closure(temporary_directory: Path) -> DependencyClosureArch
         cwd=REPOSITORY_ROOT,
         capture_output=True,
         text=True,
-        # The closure build runs pip over the repo's 9p Windows mount under WSL, where a
-        # cold run measured ~200s; keep a generous ceiling so slow mounts do not spuriously
-        # time out while still bounding a genuine hang.
+        # Generous ceiling so a slow WSL mount does not spuriously time out while still
+        # bounding a genuine hang.
         timeout=900,
     )
     if result.returncode != 0:
@@ -190,10 +194,8 @@ def build_dependency_closure(temporary_directory: Path) -> DependencyClosureArch
 def _format_pip_failure(returncode: int, stdout: str, stderr: str) -> str:
     """Build a diagnosable error from a failed local closure-build pip run.
 
-    This pip invocation runs on the operator's own machine against the local
-    checkout, so its stdout/stderr are trusted local output and are surfaced
-    here in full-tail. This is deliberately unlike untrusted in-sandbox stderr,
-    which stays redacted at its own boundary.
+    This pip runs on the operator's own machine, so its output is trusted local
+    output and is surfaced in full-tail, unlike untrusted in-sandbox stderr.
     """
 
     sections = [f"local dependency closure build exited with code {returncode}."]
@@ -408,24 +410,20 @@ async def provision_aca_smoke_sandbox(
             archive_size / (1024 * 1024),
             closure.entry_count,
         )
-        # 80 MiB is the largest incompressible single write verified against ACA; keep a hard
-        # budget at that measured-safe point rather than using compression for extra headroom.
+        # 80 MiB is the largest incompressible single write verified against ACA.
         _enforce_archive_budget(archive_size)
 
+        adapter = await AcaSandboxAdapter.open(config.group_resource_id)
         group_binding = SandboxGroupBinding.create(
-            resource_id=config.group_resource_id,
-            region=config.region,
-        )
-        adapter = await AcaSandboxAdapter.open(
-            config.group_resource_id,
-            persisted_group=group_binding,
+            resource_id=adapter.group.resource_id,
+            region=adapter.group.region,
         )
         session_id = f"{session_prefix}-{uuid.uuid4().hex}"
         labels_model = SandboxProvisioningLabels.create(
             owner_hash_version="o1",
-            owner_kind="aca_smoke_ci",
-            owner_hash=_CI_OWNER_HASH,
-            app_hash=_CI_APP_HASH,
+            owner_kind=CI_OWNER_KIND,
+            owner_hash=CI_OWNER_HASH,
+            app_hash=CI_APP_HASH,
             session_id=session_id,
         )
         labels = labels_model.to_provider_labels()

@@ -264,10 +264,8 @@ class SandboxRunControl:
                 ),
                 deadline,
             )
-            # Pre-create the run directory and an empty launch-stderr sidecar so
-            # the shell can bind `2>` to it before exec'ing the detached harness.
-            # The harness creates this directory lazily, so without this the
-            # redirect target's parent would be absent at launch time.
+            # Pre-create an empty launch-stderr sidecar so the shell's `2>` redirect has an
+            # existing target; the detached harness only creates the run directory lazily.
             await self._with_deadline(
                 handle.write_file(
                     _launch_stderr_path(normalized_run_id),
@@ -294,11 +292,8 @@ class SandboxRunControl:
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but could not be confirmed."
             ) from exc
-        # A trailing `&` makes the launch a POSIX asynchronous list, so the shell
-        # reports exit code 0 regardless of whether the backgrounded harness
-        # actually started. This guard therefore cannot fire for the current
-        # command form; it is retained as defense-in-depth in case that form ever
-        # changes.
+        # Defense-in-depth: the backgrounded launch normally reports 0, so this rarely fires,
+        # but a non-zero exit still means the harness never started.
         if launch_result.exit_code != 0:
             raise RunSubmissionDefinitiveFailureError(
                 "Run launch failed before harness acceptance."
@@ -311,16 +306,8 @@ class SandboxRunControl:
         except Exception as exc:
             launch_stderr = await self._read_launch_stderr(handle, normalized_run_id)
             if launch_stderr.strip():
-                # Launch stderr originates in the untrusted sandbox and may embed
-                # environment values, so it is recorded for operators but never
-                # placed in the caller-visible exception message.
-                #
-                # The outcome stays indeterminate even when stderr is present. The
-                # detached harness has no configured log handler, so a healthy but
-                # slow run can spill benign import or startup warnings here, and
-                # retiring such a run as a terminal failure would orphan a live
-                # process. The reconciler settles the true outcome later; this
-                # capture exists to make the reason visible, not to classify it.
+                # Untrusted sandbox stderr: logged for operators, never surfaced in the caller
+                # exception. Stays indeterminate; benign startup noise must not orphan a live run.
                 logger.error(
                     "Sandbox harness emitted launch stderr before acceptance for run %s: %s",
                     normalized_run_id,
@@ -507,11 +494,8 @@ class SandboxRunControl:
     ) -> str:
         """Best-effort, size-capped read of the untrusted per-run launch stderr.
 
-        The sidecar is written by the sandbox through a shell stderr redirect,
-        so its contents are untrusted text: it is never JSON-decoded and never
-        reaches a strict journal model. Any failure is swallowed and logged so
-        it can never mask or replace the original submission error, and the read
-        is bounded in both time and size.
+        The sidecar is untrusted sandbox text: never JSON-decoded, bounded in time and
+        size, and any read failure is swallowed so it cannot mask the original error.
         """
         try:
             async with asyncio.timeout(LAUNCH_STDERR_READ_TIMEOUT_SECONDS):

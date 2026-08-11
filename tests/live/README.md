@@ -33,7 +33,6 @@ az login
 export AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE=1
 export AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.App/sandboxGroups/<group>"
 export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK="<sandbox-disk-name>"
-export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION="<sandbox-group-region>"
 python -m pytest -m live_aca \
   tests/live/test_aca_harness_entrypoint_smoke.py \
   tests/live/test_aca_run_journal_acceptance.py \
@@ -88,7 +87,7 @@ Four things must be supplied before the job can pass:
 | 1 | A Sandbox Group dedicated to CI | Azure |
 | 2 | A service connection to that subscription, ideally workload-identity federated | ADO project settings |
 | 3 | `Container Apps SandboxGroup Data Owner` on that group for the connection's identity — needs Owner or User Access Administrator | Azure IAM |
-| 4 | Pipeline variables `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK`, `ACA_SANDBOX_REGION` | ADO pipeline |
+| 4 | Pipeline variables `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK` | ADO pipeline |
 
 The connection name comes from the `acaServiceConnection` template parameter,
 which defaults to `saf-foundry-connection`. That default only exists so the
@@ -105,7 +104,7 @@ mistakes never surface as test failures.
 | Result | Meaning | Triage |
 | --- | --- | --- |
 | Skip | Live ACA was not explicitly enabled. | No action. |
-| Error with `ACA-SMOKE-ENV:` | The opted-in subscription, group, credentials, quota, region, sandbox creation, closure delivery, or closure verification is unusable. | Call ops. |
+| Error with `ACA-SMOKE-ENV:` | The opted-in subscription, group, credentials, quota, sandbox creation, closure delivery, or closure verification is unusable. | Call ops. |
 | Failure | The sandbox was healthy and the synchronous harness probe returned a nonzero exit code. | Call the runtime owners. |
 
 **Triage rule: errors = call ops; failures = call the runtime owners.**
@@ -168,8 +167,7 @@ Ops must provide:
    `c24cf47c-5077-412d-a19c-45202126392c`) for that identity, scoped to the CI
    Sandbox Group.
 4. Non-secret pipeline variables:
-   `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK`, and
-   `ACA_SANDBOX_REGION`.
+   `ACA_SANDBOX_GROUP_RESOURCE_ID` and `ACA_SANDBOX_DISK`.
 
 The job first runs `Verify ACA sandbox group is reachable` through `AzureCLI@2`
 with `AZURE_TOKEN_CREDENTIALS=dev`. That gives authentication, RBAC, and group

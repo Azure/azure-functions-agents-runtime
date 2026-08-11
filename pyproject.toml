@@ -58,17 +58,11 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
-    # Bring azure-data-tables into dev directly (not only via the [aca_sandbox] extra) so
-    # mypy/pytest can exercise session_state's Table store and its real-Azurite
-    # tests without a separate install step.
-    "azure-data-tables>=12.7.0,<13",
-    # Bring the preview ACA Sandbox SDK into dev so the default dev/CI environment
-    # type-checks transport/aca_sdk.py against the real SDK instead of degrading its
-    # TYPE_CHECKING-only imports to Any. Without this the one module that talks to the
-    # live service is the least validated code in the repo: a wrong attribute name or a
-    # dropped None-check passes mypy and the unit suite, then raises AttributeError
-    # against real Azure. Keep the pin in sync with the [aca_sandbox] extra above.
-    "azure-containerapps-sandbox==0.1.0b4",
+    # Pull the aca_sandbox extra by self-reference (not duplicated pins) so dev/CI gets the
+    # preview ACA Sandbox SDK and azure-data-tables. This keeps mypy type-checking
+    # transport/aca_sdk.py against the real SDK and lets pytest exercise session_state's
+    # Table store against Azurite, without drifting out of sync with the [aca_sandbox] pins.
+    "azurefunctions-agents-runtime[aca_sandbox]",
     # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
     # every sample against the editable repo install (no per-sample requirements.txt install).
     # daily-azure-report:

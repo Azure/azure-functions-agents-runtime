@@ -59,8 +59,7 @@ async def test_live_aca_run_journal_acceptance(
         timeout=30.0,
     )
 
-    # 120 seconds allows cold sandbox process startup and closure imports while keeping acceptance
-    # loss bounded.
+    # Generous ceiling to cover cold sandbox startup and closure imports.
     status = await SandboxRunControl().submit(
         aca_run_journal_handle,
         run_id,
@@ -71,8 +70,8 @@ async def test_live_aca_run_journal_acceptance(
     assert status.run_id == run_id
     assert status.session_id == session_id
     assert status.result_available is False
-    # The unmatched name avoids a model call. The harness publishes accepted before catalog lookup,
-    # so the controller can observe that state or its immediate expected terminal failure.
+    # The harness publishes "accepted" before catalog lookup, so either that state or the
+    # unmatched agent's immediate terminal failure is expected.
     assert status.state in {"accepted", "failed"}
     if status.state == "failed":
         assert status.error is not None

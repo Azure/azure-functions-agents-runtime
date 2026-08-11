@@ -525,8 +525,7 @@ def test_main_emits_non_promoting_marker_on_cancellation(
     monkeypatch.setenv(SANDBOX_MARKER_ENV_VAR, "1")
 
     def _raise_cancelled(coro: Coroutine[object, object, int]) -> int:
-        # Close the unused coroutine to avoid a "never awaited" warning, then
-        # simulate a controller cancellation escaping asyncio.run.
+        # Close the unused coroutine (avoids a "never awaited" warning) before raising.
         coro.close()
         raise asyncio.CancelledError
 
@@ -536,8 +535,7 @@ def test_main_emits_non_promoting_marker_on_cancellation(
 
     assert exit_code == 1
     captured = capsys.readouterr()
-    # Cancellation is recorded so a human can see why the run stopped; nothing
-    # parses this text, so it carries the same tag as other launch diagnostics.
+    # Recorded only so a human can see why the run stopped; nothing parses this text.
     assert harness_main._LAUNCH_DIAGNOSTIC_PREFIX in captured.err
     assert "canceled" in captured.err
     assert "Traceback" not in captured.err

@@ -126,7 +126,7 @@ jobs:
             # text "$(NAME)", which is non-empty and would slip past a plain empty
             # check, then fail later as a confusing malformed-URL error. Reject the
             # un-substituted form explicitly so the missing variable is named here.
-            for name in ACA_SANDBOX_GROUP_RESOURCE_ID ACA_SANDBOX_DISK ACA_SANDBOX_REGION; do
+            for name in ACA_SANDBOX_GROUP_RESOURCE_ID ACA_SANDBOX_DISK; do
               eval "value=\${AZURE_SMOKE_${name}:-}"
               if [ -z "${value}" ] || case "${value}" in '$('*')') true;; *) false;; esac; then
                 echo "Pipeline variable ${name} is not set. Define it on the pipeline before running this job." >&2
@@ -150,7 +150,6 @@ jobs:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
           AZURE_SMOKE_ACA_SANDBOX_DISK: $(ACA_SANDBOX_DISK)
-          AZURE_SMOKE_ACA_SANDBOX_REGION: $(ACA_SANDBOX_REGION)
 
       - task: AzureCLI@2
         displayName: 'Run ACA harness entrypoint smoke test'
@@ -168,7 +167,6 @@ jobs:
           AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE: '1'
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
           AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
-          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION: $(ACA_SANDBOX_REGION)
 
       - task: AzureCLI@2
         displayName: 'Reap ACA smoke sandboxes'
@@ -178,36 +176,7 @@ jobs:
           scriptType: bash
           scriptLocation: inlineScript
           inlineScript: |
-            owner_hash="o1-$(printf 'c%.0s' {1..52})"
-            app_hash="a1-$(printf 'd%.0s' {1..52})"
-            export owner_hash app_hash
-            python - <<'PY'
-            import asyncio
-            import os
-
-            from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
-
-
-            async def main() -> None:
-                adapter = await AcaSandboxAdapter.open(
-                    os.environ["AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"]
-                )
-                try:
-                    labels = {
-                        "owner_kind": "aca_smoke_ci",
-                        "owner_hash": os.environ["owner_hash"],
-                        "app_hash": os.environ["app_hash"],
-                    }
-                    sandboxes = await adapter.list_sandboxes(labels=labels)
-                    for sandbox in sandboxes:
-                        await adapter.delete_sandbox(sandbox.sandbox_id)
-                    print(f"Reaped {len(sandboxes)} ACA smoke sandbox(es).")
-                finally:
-                    await adapter.close()
-
-
-            asyncio.run(main())
-            PY
+            python eng/scripts/reap_aca_smoke_sandboxes.py
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

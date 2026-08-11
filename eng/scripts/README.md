@@ -27,3 +27,28 @@ python eng/scripts/generate_config_reference.py --check
 **Integration:**
 - **Pre-commit hook:** Configured in `.pre-commit-config.yaml`
 - **CI pipeline:** Runs in `eng/templates/jobs/ci-tests.yml`
+
+### `reap_aca_smoke_sandboxes.py`
+
+Deletes leftover ACA smoke sandboxes created by the CI-dedicated owner/app.
+
+**Purpose:** Cleanup safety net for the live ACA smoke job. It is label-scoped to
+the CI smoke owner/app hashes, so it only ever deletes sandboxes this pipeline
+created. The label selector is imported from the test-support module
+(`tests/live/aca_smoke_support.py`) rather than duplicated here.
+
+**Usage:**
+```bash
+# Reap every CI smoke sandbox in the configured Sandbox Group
+python eng/scripts/reap_aca_smoke_sandboxes.py
+```
+
+The Sandbox Group is read from the
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID` environment variable.
+
+**When to run:**
+- As an `always()` cleanup step after the ACA smoke job
+
+**Integration:**
+- **CI pipeline:** Runs in `eng/templates/official/jobs/e2e-tests.yml`
+
