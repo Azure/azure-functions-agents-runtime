@@ -7,6 +7,7 @@ import io
 import logging
 import os
 import platform
+import re
 import shlex
 import subprocess
 import sys
@@ -44,6 +45,8 @@ _CI_APP_HASH = "a1-" + ("d" * 52)
 _JOURNAL_ROOT_PROBE_CONTENT = b"aca-smoke-journal-root"
 _LABEL_RECONCILIATION_ATTEMPTS = 3
 _LABEL_RECONCILIATION_DELAY_SECONDS = 1.0
+_PIP_OUTPUT_TAIL_MAX_CHARS = 4000
+_DISK_PYTHON_VERSION_PATTERN = re.compile(r"^python-(\d+)\.(\d+)$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -66,34 +69,67 @@ class DependencyClosureArchive:
 def aca_smoke_config_from_environment() -> AcaSmokeConfig:
     """Read host-safe ACA smoke configuration from the operator environment."""
 
-    require_sandbox_compatible_host()
-    return AcaSmokeConfig(
-        group_resource_id=_required_environment_value(
-            "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
-        ),
-        disk=_required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK"),
-        region=_required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION").casefold(),
+    group_resource_id = _required_environment_value(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
     )
+    disk = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK")
+    region = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION").casefold()
+    require_sandbox_compatible_host(disk)
+    return AcaSmokeConfig(group_resource_id=group_resource_id, disk=disk, region=region)
 
 
-def require_sandbox_compatible_host() -> None:
-    """Reject closure builds whose compiled dependencies cannot run in ACA."""
+def require_sandbox_compatible_host(disk: str) -> None:
+    """Reject closure builds whose compiled dependencies cannot run in the sandbox.
+
+    The closure is built with the host interpreter (``sys.executable``), so its
+    compiled wheels (for example ``pydantic_core`` and ``aiohttp``) carry that
+    interpreter's ABI tag. A ``python-X.Y`` sandbox disk boots CPython X.Y, and a
+    wheel built for a different minor version will not import there. Being on
+    "some Linux CPython" is therefore not enough: the host minor version must
+    equal the target disk's.
+    """
 
     machine = platform.machine().casefold()
-    python_version = sys.version_info[:2]
     if (
         sys.platform != "linux"
         or machine not in {"x86_64", "amd64"}
         or sys.implementation.name != "cpython"
-        or python_version not in {(3, 13), (3, 14)}
     ):
         raise AcaSmokeEnvironmentError(
-            "dependency closure must be built on Linux x86_64 CPython 3.13 or 3.14 "
-            "to match the Linux sandbox ABI; building on "
-            f"{sys.platform}/{machine or 'unknown'} with "
-            f"{sys.implementation.name} {python_version[0]}.{python_version[1]} "
-            "would deliver incompatible binaries."
+            "dependency closure must be built on Linux x86_64 CPython to match the "
+            f"Linux sandbox ABI; building on {sys.platform}/{machine or 'unknown'} with "
+            f"{sys.implementation.name} would deliver incompatible binaries."
         )
+
+    host_version = sys.version_info[:2]
+    target_version = _target_disk_python_version(disk)
+    if target_version is None:
+        if host_version not in {(3, 13), (3, 14)}:
+            raise AcaSmokeEnvironmentError(
+                "dependency closure must be built on CPython 3.13 or 3.14 to match a "
+                "supported Linux sandbox ABI; this host is CPython "
+                f"{host_version[0]}.{host_version[1]}."
+            )
+        return
+    if host_version != target_version:
+        raise AcaSmokeEnvironmentError(
+            "dependency closure must be built on CPython "
+            f"{target_version[0]}.{target_version[1]} to match the {disk!r} sandbox disk; "
+            f"this host is CPython {host_version[0]}.{host_version[1]}, whose compiled "
+            f"wheels are tagged cp{host_version[0]}{host_version[1]} and will not import "
+            f"on the sandbox interpreter. Run the smoke on CPython "
+            f"{target_version[0]}.{target_version[1]} or target the matching "
+            f"python-{host_version[0]}.{host_version[1]} disk."
+        )
+
+
+def _target_disk_python_version(disk: str) -> tuple[int, int] | None:
+    """Return the (major, minor) CPython version a ``python-X.Y`` disk boots."""
+
+    match = _DISK_PYTHON_VERSION_PATTERN.fullmatch(disk.strip().casefold())
+    if match is None:
+        return None
+    return (int(match.group(1)), int(match.group(2)))
 
 
 def _required_environment_value(name: str) -> str:
@@ -123,10 +159,13 @@ def build_dependency_closure(temporary_directory: Path) -> DependencyClosureArch
         cwd=REPOSITORY_ROOT,
         capture_output=True,
         text=True,
-        timeout=300,
+        # The closure build runs pip over the repo's 9p Windows mount under WSL, where a
+        # cold run measured ~200s; keep a generous ceiling so slow mounts do not spuriously
+        # time out while still bounding a genuine hang.
+        timeout=900,
     )
     if result.returncode != 0:
-        raise RuntimeError(f"local dependency closure build exited with code {result.returncode}.")
+        raise RuntimeError(_format_pip_failure(result.returncode, result.stdout, result.stderr))
 
     archive = io.BytesIO()
     entry_count = 0
@@ -146,6 +185,34 @@ def build_dependency_closure(temporary_directory: Path) -> DependencyClosureArch
             output.writestr(entry, path.read_bytes())
             entry_count += 1
     return DependencyClosureArchive(payload=archive.getvalue(), entry_count=entry_count)
+
+
+def _format_pip_failure(returncode: int, stdout: str, stderr: str) -> str:
+    """Build a diagnosable error from a failed local closure-build pip run.
+
+    This pip invocation runs on the operator's own machine against the local
+    checkout, so its stdout/stderr are trusted local output and are surfaced
+    here in full-tail. This is deliberately unlike untrusted in-sandbox stderr,
+    which stays redacted at its own boundary.
+    """
+
+    sections = [f"local dependency closure build exited with code {returncode}."]
+    stderr_tail = _pip_output_tail(stderr)
+    sections.append(f"pip stderr:\n{stderr_tail}" if stderr_tail else "pip stderr was empty.")
+    stdout_tail = _pip_output_tail(stdout)
+    if stdout_tail:
+        sections.append(f"pip stdout (tail):\n{stdout_tail}")
+    return "\n".join(sections)
+
+
+def _pip_output_tail(text: str) -> str:
+    stripped = text.strip()
+    if len(stripped) <= _PIP_OUTPUT_TAIL_MAX_CHARS:
+        return stripped
+    return (
+        f"[truncated to last {_PIP_OUTPUT_TAIL_MAX_CHARS} chars]\n"
+        f"{stripped[-_PIP_OUTPUT_TAIL_MAX_CHARS:]}"
+    )
 
 
 def _setup_error(context: str, error: Exception) -> AcaSmokeEnvironmentError:
