@@ -22,6 +22,7 @@ from pathlib import Path
 from tests.aca_smoke_diagnostics import (
     AcaSmokeEnvironmentError,
     classify_aca_smoke_exception,
+    is_aca_authorization_failure,
 )
 
 from azure_functions_agents.journal_paths import JOURNAL_ROOT_PATH
@@ -217,13 +218,23 @@ def _pip_output_tail(text: str) -> str:
     )
 
 
-def _setup_error(context: str, error: Exception) -> AcaSmokeEnvironmentError:
+def _error_reason(error: BaseException) -> str:
+    """Render a non-empty cause, falling back to the exception type name."""
+
+    text = str(error).strip()
     if isinstance(error, AcaSmokeEnvironmentError):
-        return AcaSmokeEnvironmentError(str(error).removeprefix("ACA-SMOKE-ENV: "))
-    bucket = classify_aca_smoke_exception(error)
-    if bucket == "environment":
-        return AcaSmokeEnvironmentError(f"{context}: {error}")
-    return AcaSmokeEnvironmentError(f"{context}: unexpected setup failure: {error}")
+        text = text.removeprefix("ACA-SMOKE-ENV: ").strip()
+    return text or type(error).__name__
+
+
+def _setup_error(context: str, error: Exception) -> AcaSmokeEnvironmentError:
+    reason = _error_reason(error)
+    if isinstance(error, AcaSmokeEnvironmentError):
+        return AcaSmokeEnvironmentError(reason)
+    reason = reason.removeprefix(f"{context}: ")
+    if classify_aca_smoke_exception(error) != "environment":
+        context = f"{context}: unexpected setup failure"
+    return AcaSmokeEnvironmentError(f"{context}: {reason}")
 
 
 def _python_command(source: str) -> str:
@@ -259,7 +270,15 @@ async def _delete_labelled_sandboxes(
     labels: dict[str, str],
 ) -> int:
     for attempt in range(_LABEL_RECONCILIATION_ATTEMPTS):
-        sandboxes = await adapter.list_sandboxes(labels=labels)
+        try:
+            sandboxes = await adapter.list_sandboxes(labels=labels)
+        except Exception as error:
+            if is_aca_authorization_failure(error):
+                raise AcaSmokeEnvironmentError(
+                    "ACA smoke cleanup cannot list sandboxes: data-plane authorization "
+                    "was denied, which no retry can clear."
+                ) from error
+            raise
         if sandboxes:
             break
         if attempt + 1 < _LABEL_RECONCILIATION_ATTEMPTS:

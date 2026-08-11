@@ -142,6 +142,13 @@ jobs:
               --url "https://management.azure.com${AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID}?api-version=2026-02-01-preview" \
               --query '{id:id, location:location}' \
               --output json
+
+            # ARM (above) is the control plane; the smoke path also needs the data-plane
+            # role, so probe it here to fail in seconds rather than 30 min into pytest.
+            SIGNED_IN_IDENTITY="$(az account show --query user.name --output tsv || true)"
+            AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="${AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID}" \
+            AZURE_FUNCTIONS_AGENTS_ACA_PROBE_IDENTITY="${SIGNED_IN_IDENTITY}" \
+              python eng/scripts/probe_aca_data_plane.py
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

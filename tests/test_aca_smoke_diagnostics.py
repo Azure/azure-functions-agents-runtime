@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import pytest
-from azure.core.exceptions import HttpResponseError
+from azure.core.exceptions import ClientAuthenticationError, HttpResponseError
 
 from azure_functions_agents.transport.transport_models import SandboxGroupBindingError
-from tests.aca_smoke_diagnostics import classify_aca_smoke_exception
+from tests.aca_smoke_diagnostics import (
+    classify_aca_smoke_exception,
+    is_aca_authorization_failure,
+)
 
 
 def _http_response_error(status_code: int) -> HttpResponseError:
@@ -31,3 +34,21 @@ def _http_response_error(status_code: int) -> HttpResponseError:
 )
 def test_aca_smoke_setup_failures_are_operations_errors(name: str, error: BaseException) -> None:
     assert classify_aca_smoke_exception(error) == "environment", name
+
+
+@pytest.mark.parametrize(
+    ("name", "error", "expected"),
+    [
+        ("authentication-401", _http_response_error(401), True),
+        ("authorization-403", _http_response_error(403), True),
+        ("client-authentication", ClientAuthenticationError("no credentials"), True),
+        ("group-not-found-404", _http_response_error(404), False),
+        ("quota-429", _http_response_error(429), False),
+        ("create-timeout", TimeoutError("sandbox creation timed out"), False),
+    ],
+)
+def test_only_401_403_count_as_never_retryable_authorization(
+    name: str, error: BaseException, expected: bool
+) -> None:
+    assert is_aca_authorization_failure(error) is expected, name
+
