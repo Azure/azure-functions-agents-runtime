@@ -89,10 +89,11 @@ Four things must be supplied before the job can pass:
 | 3 | `Container Apps SandboxGroup Data Owner` on that group for the connection's identity — needs Owner or User Access Administrator | Azure IAM |
 | 4 | Pipeline variables `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK` | ADO pipeline |
 
-The connection name comes from the `acaServiceConnection` template parameter,
-which defaults to `saf-foundry-connection`. That default only exists so the
-template compiles; point it at a connection whose identity actually holds the
-role in item 3.
+The connection name is the `acaServiceConnection` **runtime parameter**, exposed
+in the Run pipeline dialog as "ACA smoke: Azure service connection". Set it at
+queue time to point at a connection whose identity holds the role in item 3 —
+no YAML edit is needed to change it. The `saf-foundry-connection` default only
+exists so the template compiles and is unlikely to hold that role.
 
 The preflight step `Verify ACA sandbox group is reachable` runs before any test
 and prints the signed-in identity, then rejects a missing variable, an
@@ -161,8 +162,8 @@ entrypoint change lands.
 Ops must provide:
 
 1. A CI-dedicated ACA Sandbox Group in the intended region.
-2. A federated Azure service connection, passed through the
-   `acaServiceConnection` template parameter.
+2. A federated Azure service connection, selected at queue time through the
+   `acaServiceConnection` runtime parameter.
 3. `Container Apps SandboxGroup Data Owner` (role id
    `c24cf47c-5077-412d-a19c-45202126392c`) for that identity, scoped to the CI
    Sandbox Group.

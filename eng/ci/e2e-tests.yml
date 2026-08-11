@@ -1,3 +1,9 @@
+parameters:
+  - name: acaServiceConnection
+    displayName: 'ACA smoke: Azure service connection'
+    type: string
+    default: 'saf-foundry-connection'
+
 trigger:
   batch: true
   branches:
@@ -53,3 +59,4 @@ extends:
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
+              acaServiceConnection: ${{ parameters.acaServiceConnection }}
