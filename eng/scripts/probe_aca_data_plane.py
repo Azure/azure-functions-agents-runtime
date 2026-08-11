@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
 """Fail fast when the ACA smoke identity lacks data-plane access.
 
-A control-plane ARM read can pass while the data-plane role is missing, so this
-read-only probe issues one label-scoped ``list_sandboxes`` call and turns a
-401/403 into an immediate named diagnosis. The Sandbox Group is read from
+A control-plane ARM read can pass while the data-plane role is missing. The
+data-plane SDK retries 403 for minutes, so this read-only probe issues one
+``list_sandboxes`` call under its own short deadline and treats a 401/403 or that
+deadline as the authorization failure. Group id comes from
 ``AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID``.
 """
 
@@ -23,24 +24,32 @@ _GROUP_RESOURCE_ID_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_
 _IDENTITY_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_PROBE_IDENTITY"
 _DATA_OWNER_ROLE = "Container Apps SandboxGroup Data Owner"
 _DATA_OWNER_ROLE_ID = "c24cf47c-5077-412d-a19c-45202126392c"
+# The data-plane SDK retries 403 for minutes; stay well under that so denial fails fast.
 _PROBE_TIMEOUT_SECONDS = 30.0
 
 
-def _authorization_failure_message(group_resource_id: str) -> str:
-    """Name the missing data-plane role and scope for a 401/403 probe result."""
+def _authorization_failure_message(group_resource_id: str, *, slow: bool = False) -> str:
+    """Name the missing data-plane role and scope for a denied probe result."""
 
     identity = os.environ.get(_IDENTITY_ENV_VAR, "").strip()
     identity_sentence = f" Signed-in identity: {identity}." if identity else ""
+    slow_sentence = (
+        f" The probe hit its {_PROBE_TIMEOUT_SECONDS:.0f}s deadline instead of returning; the "
+        "data-plane SDK retries 403 for minutes, so a slow failure here is itself a symptom of "
+        "repeated authorization denials."
+        if slow
+        else ""
+    )
     return (
         "ACA data-plane authorization failed: this identity can reach the Sandbox Group "
         "over ARM but is denied on the data plane. Assign the "
         f"'{_DATA_OWNER_ROLE}' role (id {_DATA_OWNER_ROLE_ID}), scoped to the Sandbox Group "
-        f"{group_resource_id}.{identity_sentence}"
+        f"{group_resource_id}.{identity_sentence}{slow_sentence}"
     )
 
 
 async def _probe(group_resource_id: str) -> None:
-    """Issue one read-only, label-scoped list call against the data plane."""
+    """Issue one read-only, label-scoped list call under an explicit deadline."""
 
     adapter = await AcaSandboxAdapter.open(group_resource_id)
     try:
@@ -60,6 +69,9 @@ def main() -> int:
         return 1
     try:
         asyncio.run(_probe(group_resource_id))
+    except TimeoutError:
+        print(_authorization_failure_message(group_resource_id, slow=True), file=sys.stderr)
+        return 1
     except Exception as error:
         if is_aca_authorization_failure(error):
             print(_authorization_failure_message(group_resource_id), file=sys.stderr)

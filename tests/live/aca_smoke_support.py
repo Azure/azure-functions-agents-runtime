@@ -273,10 +273,12 @@ async def _delete_labelled_sandboxes(
         try:
             sandboxes = await adapter.list_sandboxes(labels=labels)
         except Exception as error:
+            # The SDK already retried this 403 for minutes; looping here would multiply it.
             if is_aca_authorization_failure(error):
                 raise AcaSmokeEnvironmentError(
                     "ACA smoke cleanup cannot list sandboxes: data-plane authorization "
-                    "was denied, which no retry can clear."
+                    "was denied. A 403 is permanent, so reconciliation stops here rather "
+                    "than repeating the SDK's own retries."
                 ) from error
             raise
         if sandboxes:
