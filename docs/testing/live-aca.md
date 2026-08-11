@@ -74,7 +74,7 @@ Four things must be supplied before the job can pass:
 | --- | --- | --- |
 | 1 | A Sandbox Group dedicated to CI | Azure |
 | 2 | A service connection to that subscription, ideally workload-identity federated | ADO project settings |
-| 3 | `SandboxGroup Data Owner` on that group for the connection's identity — needs Owner or User Access Administrator | Azure IAM |
+| 3 | `Container Apps SandboxGroup Data Owner` on that group for the connection's identity — needs Owner or User Access Administrator | Azure IAM |
 | 4 | Pipeline variables `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK`, `ACA_SANDBOX_REGION` | ADO pipeline |
 
 The connection name comes from the `acaServiceConnection` template parameter,
@@ -151,7 +151,9 @@ Ops must provide:
 1. A CI-dedicated ACA Sandbox Group in the intended region.
 2. A federated Azure service connection, passed through the
    `acaServiceConnection` template parameter.
-3. `SandboxGroup Data Owner` for that identity, scoped to the CI Sandbox Group.
+3. `Container Apps SandboxGroup Data Owner` (role id
+   `c24cf47c-5077-412d-a19c-45202126392c`) for that identity, scoped to the CI
+   Sandbox Group.
 4. Non-secret pipeline variables:
    `ACA_SANDBOX_GROUP_RESOURCE_ID`, `ACA_SANDBOX_DISK`, and
    `ACA_SANDBOX_REGION`.
