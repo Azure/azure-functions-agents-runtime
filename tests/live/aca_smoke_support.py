@@ -14,7 +14,7 @@ import sys
 import tempfile
 import uuid
 import zipfile
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,6 +44,8 @@ _COMMAND_TIMEOUT_SECONDS = 60.0
 CI_OWNER_KIND = "aca_smoke_ci"
 CI_OWNER_HASH = "o1-" + ("c" * 52)
 CI_APP_HASH = "a1-" + ("d" * 52)
+ACA_SMOKE_RUN_ID_ENV_VAR = "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID"
+_MAX_RUN_ID_LENGTH = 16
 _JOURNAL_ROOT_PROBE_CONTENT = b"aca-smoke-journal-root"
 _LABEL_RECONCILIATION_ATTEMPTS = 3
 _LABEL_RECONCILIATION_DELAY_SECONDS = 1.0
@@ -75,6 +77,25 @@ def ci_smoke_reaper_labels() -> dict[str, str]:
         "owner_hash": CI_OWNER_HASH,
         "app_hash": CI_APP_HASH,
     }
+
+
+def aca_smoke_run_id() -> str:
+    """Return a per-run token shared by the smoke test process and its reaper.
+
+    In CI both read ``$(Build.BuildId)`` from the environment and agree; locally
+    the variable is unset and each caller falls back to a distinct random token,
+    so a reaper only ever deletes sandboxes minted by its own run.
+    """
+
+    raw = os.environ.get(ACA_SMOKE_RUN_ID_ENV_VAR, "")
+    sanitized = re.sub(r"[^a-z0-9-]", "", raw.lower()).strip("-")[:_MAX_RUN_ID_LENGTH]
+    return sanitized or uuid.uuid4().hex[:12]
+
+
+def session_belongs_to_run(labels: Mapping[str, str], run_id: str) -> bool:
+    """Return whether a sandbox's session label was minted by the given run."""
+
+    return labels.get("session_id", "").startswith(f"{run_id}-")
 
 
 def aca_smoke_config_from_environment() -> AcaSmokeConfig:
@@ -439,7 +460,7 @@ async def provision_aca_smoke_sandbox(
             resource_id=adapter.group.resource_id,
             region=adapter.group.region,
         )
-        session_id = f"{session_prefix}-{uuid.uuid4().hex}"
+        session_id = f"{aca_smoke_run_id()}-{session_prefix}-{uuid.uuid4().hex[:16]}"
         labels_model = SandboxProvisioningLabels.create(
             owner_hash_version="o1",
             owner_kind=CI_OWNER_KIND,

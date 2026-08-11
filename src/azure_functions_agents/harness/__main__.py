@@ -16,6 +16,7 @@ from ..journal_paths import (
     JOURNAL_ROOT_PATH,
     SANDBOX_APPLICATION_PATH,
 )
+from ..journal_paths import LAUNCH_DIAGNOSTIC_PREFIX as _LAUNCH_DIAGNOSTIC_PREFIX
 from ..runner import run_agent_events
 from ..session_state import validate_run_id
 from . import _ensure_sandbox
@@ -33,9 +34,6 @@ from .watchdog import Watchdog, WatchdogTimeoutError
 _MAX_WORKING_FILE_BYTES = 4 * 1024 * 1024
 _MAX_WORKING_TREE_BYTES = 16 * 1024 * 1024
 _MAX_CONVERSATION_BYTES = 4 * 1024 * 1024
-# Greppable tag on the stderr the controller captures when a failure happens
-# before the first journal write. Purely a human-facing marker; nothing parses it.
-_LAUNCH_DIAGNOSTIC_PREFIX = "azfn-agents-harness-launch-error: "
 
 
 def _emit_launch_diagnostic(message: str) -> None:
@@ -48,6 +46,19 @@ def _emit_launch_diagnostic(message: str) -> None:
     try:
         sys.stderr.write(f"{_LAUNCH_DIAGNOSTIC_PREFIX}{message}\n")
         sys.stderr.flush()
+    except Exception:
+        return
+
+
+def _silence_launch_stderr() -> None:
+    """Detach fd 2 from the launch sidecar so post-acceptance stderr cannot grow it unbounded."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            sys.stderr.flush()
+            os.dup2(devnull, 2)
+        finally:
+            os.close(devnull)
     except Exception:
         return
 
@@ -110,6 +121,7 @@ async def _run_claimed(
         return 0
     writer.write_process_group(_process_group_id())
     writer.write_accepted()
+    _silence_launch_stderr()
     watchdog = Watchdog(writer.run_directory)
     watchdog.write_process_group(_process_group_id())
     checkpoint_store = AtomicCommitStore(journal_root / "session")

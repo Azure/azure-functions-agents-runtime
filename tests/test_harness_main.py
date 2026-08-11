@@ -539,3 +539,23 @@ def test_main_emits_non_promoting_marker_on_cancellation(
     assert harness_main._LAUNCH_DIAGNOSTIC_PREFIX in captured.err
     assert "canceled" in captured.err
     assert "Traceback" not in captured.err
+
+
+@pytest.mark.skipif(os.name != "posix", reason="fd redirection semantics are POSIX-only")
+def test_silence_launch_stderr_stops_writes_reaching_the_sidecar(tmp_path: Path) -> None:
+    sidecar = tmp_path / "launch.stderr"
+    saved_fd2 = os.dup(2)
+    sidecar_fd = os.open(sidecar, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+    try:
+        os.dup2(sidecar_fd, 2)
+        os.write(2, b"launch-window line reaches the sidecar\n")
+        harness_main._silence_launch_stderr()
+        os.write(2, b"post-acceptance chatter must not reach the sidecar\n")
+    finally:
+        os.dup2(saved_fd2, 2)
+        os.close(saved_fd2)
+        os.close(sidecar_fd)
+
+    contents = sidecar.read_bytes()
+    assert b"launch-window line reaches the sidecar" in contents
+    assert b"post-acceptance chatter must not reach the sidecar" not in contents

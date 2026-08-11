@@ -128,3 +128,46 @@ def test_setup_error_does_not_double_prefix_a_wrapped_message(status_code: int |
     message = str(result)
     assert "ACA smoke cleanup failed: ACA smoke cleanup failed:" not in message
     assert message.count("ACA smoke cleanup failed:") == 1
+
+
+def test_aca_smoke_run_id_uses_the_seeded_ci_identifier(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(aca_smoke_support.ACA_SMOKE_RUN_ID_ENV_VAR, "123456")
+
+    assert aca_smoke_support.aca_smoke_run_id() == "123456"
+
+
+def test_aca_smoke_run_id_sanitizes_and_bounds_the_seed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(aca_smoke_support.ACA_SMOKE_RUN_ID_ENV_VAR, "-Build/ID_" + "9" * 40)
+
+    run_id = aca_smoke_support.aca_smoke_run_id()
+
+    assert run_id == "buildid9999999999"[: aca_smoke_support._MAX_RUN_ID_LENGTH]
+    assert set(run_id) <= set("abcdefghijklmnopqrstuvwxyz0123456789-")
+    assert not run_id.startswith("-")
+
+
+def test_aca_smoke_run_id_falls_back_to_a_unique_local_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(aca_smoke_support.ACA_SMOKE_RUN_ID_ENV_VAR, raising=False)
+
+    first = aca_smoke_support.aca_smoke_run_id()
+    second = aca_smoke_support.aca_smoke_run_id()
+
+    assert first and second
+    assert first != second
+
+
+def test_session_belongs_to_run_matches_only_its_own_run() -> None:
+    assert aca_smoke_support.session_belongs_to_run(
+        {"session_id": "123456-aca-harness-smoke-0011223344556677"}, "123456"
+    )
+    # A different run's sandbox must never be selected for deletion.
+    assert not aca_smoke_support.session_belongs_to_run(
+        {"session_id": "999999-aca-harness-smoke-0011223344556677"}, "123456"
+    )
+    # A run id that is a numeric prefix of another must not match across the delimiter.
+    assert not aca_smoke_support.session_belongs_to_run(
+        {"session_id": "1234567-aca-harness-smoke-0011223344556677"}, "123456"
+    )
+    assert not aca_smoke_support.session_belongs_to_run({}, "123456")

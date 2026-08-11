@@ -29,6 +29,7 @@ from ..journal_paths import (
     JOURNAL_ROOT_PATH as _JOURNAL_ROOT_PATH,
 )
 from ..journal_paths import (
+    LAUNCH_DIAGNOSTIC_PREFIX,
     LAUNCH_STDERR_FILENAME,
     inbox_path,
     launch_stderr_path,
@@ -305,13 +306,13 @@ class SandboxRunControl:
             raise
         except Exception as exc:
             launch_stderr = await self._read_launch_stderr(handle, normalized_run_id)
-            if launch_stderr.strip():
-                # Untrusted sandbox stderr: logged for operators, never surfaced in the caller
-                # exception. Stays indeterminate; benign startup noise must not orphan a live run.
+            if launch_stderr:
+                # Untrusted sandbox stderr: only repo-authored marker lines are logged verbatim;
+                # all other content is reduced to metadata so secrets and forged records cannot leak.
                 logger.error(
                     "Sandbox harness emitted launch stderr before acceptance for run %s: %s",
                     normalized_run_id,
-                    launch_stderr,
+                    _summarize_launch_stderr(launch_stderr),
                 )
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but journal acceptance was not confirmed."
@@ -494,12 +495,24 @@ class SandboxRunControl:
     ) -> str:
         """Best-effort, size-capped read of the untrusted per-run launch stderr.
 
-        The sidecar is untrusted sandbox text: never JSON-decoded, bounded in time and
-        size, and any read failure is swallowed so it cannot mask the original error.
+        The sidecar is untrusted sandbox text: stat-gated so an oversized file is never
+        downloaded, never JSON-decoded, bounded in time and size, and any read failure is
+        swallowed so it cannot mask the original error.
         """
+        path = _launch_stderr_path(run_id)
         try:
             async with asyncio.timeout(LAUNCH_STDERR_READ_TIMEOUT_SECONDS):
-                payload = await handle.read_file(_launch_stderr_path(run_id))
+                stat = await handle.stat_file(path)
+                if stat.size is not None and stat.size > MAX_LAUNCH_STDERR_BYTES:
+                    logger.error(
+                        "Skipping oversized launch stderr sidecar for run %s: "
+                        "%d byte(s) exceeds the %d-byte cap.",
+                        run_id,
+                        stat.size,
+                        MAX_LAUNCH_STDERR_BYTES,
+                    )
+                    return ""
+                payload = await handle.read_file(path)
         except Exception as exc:
             logger.debug("Could not read launch stderr sidecar for run %s: %r", run_id, exc)
             return ""
@@ -616,6 +629,24 @@ def _process_path(run_id: str) -> str:
 
 def _launch_stderr_path(run_id: str) -> str:
     return launch_stderr_path(validate_run_id(run_id))
+
+
+def _sanitize_log_line(text: str) -> str:
+    """Escape control characters so untrusted text cannot forge or split a log record."""
+    return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in text)
+
+
+def _summarize_launch_stderr(text: str) -> str:
+    """Reduce untrusted launch stderr to safe metadata plus allow-listed marker lines."""
+    lines = text.splitlines()
+    markers = [
+        _sanitize_log_line(line) for line in lines if line.startswith(LAUNCH_DIAGNOSTIC_PREFIX)
+    ]
+    byte_count = len(text.encode("utf-8", errors="replace"))
+    summary = f"{len(lines)} line(s), {byte_count} byte(s)"
+    if markers:
+        return f"{summary}; harness markers: {' | '.join(markers)}"
+    return f"{summary}; no harness markers, content withheld"
 
 
 def _launch_command(run_id: str) -> str:

@@ -27,6 +27,9 @@ CHECKPOINT_NAME_PREFIX = "checkpoint_"
 HEARTBEAT_FILENAME = "heartbeat.json"
 PROCESS_FILENAME = "process.json"
 LAUNCH_STDERR_FILENAME = "launch.stderr"
+# Prefix on the only launch-sidecar lines the controller may log verbatim: repo-authored,
+# secret-free markers. Everything else in that sidecar is untrusted sandbox output.
+LAUNCH_DIAGNOSTIC_PREFIX = "azfn-agents-harness-launch-error: "
 
 
 def inbox_path(run_id: str) -> str:

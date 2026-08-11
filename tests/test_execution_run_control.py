@@ -278,6 +278,82 @@ async def test_submit_swallows_launch_stderr_read_failure_without_masking() -> N
 
 
 @pytest.mark.asyncio
+async def test_submit_does_not_log_secret_bearing_non_marker_launch_stderr(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+    sandbox_secret = "AZURE_CLIENT_SECRET=super-secret-value-do-not-leak"
+
+    async def emit_secret_bearing_stderr(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            (
+                "azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n"
+                f"Traceback (most recent call last):\nRuntimeError: {sandbox_secret}"
+            ).encode(),
+        )
+
+    transport.exec_hook = emit_secret_bearing_stderr
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    log_output = caplog.text
+    assert sandbox_secret not in log_output
+    assert "super-secret-value-do-not-leak" not in log_output
+    assert "Traceback" not in log_output
+    assert "azfn-agents-harness-launch-error: Sandbox run inbox is missing." in log_output
+
+
+@pytest.mark.asyncio
+async def test_submit_launch_stderr_log_cannot_forge_a_second_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_injection_attempt(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: real\r\n"
+            b"ERROR:root:forged administrator override accepted",
+        )
+
+    transport.exec_hook = emit_injection_attempt
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert "forged administrator override accepted" not in caplog.text
+    launch_records = [
+        record for record in caplog.records if "emitted launch stderr" in record.getMessage()
+    ]
+    assert len(launch_records) == 1
+    assert "\n" not in launch_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_read_launch_stderr_skips_downloading_an_oversized_sidecar(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from azure_functions_agents.execution.run_control import MAX_LAUNCH_STDERR_BYTES
+
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        launch_stderr_path("run-1"),
+        b"x" * (MAX_LAUNCH_STDERR_BYTES + 1),
+    )
+
+    with caplog.at_level("ERROR"):
+        launch_stderr = await SandboxRunControl()._read_launch_stderr(transport, "run-1")
+
+    assert launch_stderr == ""
+    assert [call.operation for call in transport.calls] == ["stat_file"]
+    assert "Skipping oversized launch stderr sidecar" in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_get_status_reads_terminal_result_when_available() -> None:
     transport = FakeSandboxTransport()
     transport.seed_file(
