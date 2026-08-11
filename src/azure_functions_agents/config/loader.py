@@ -153,6 +153,16 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     normalized["instructions"] = instructions
     # Keep the real on-disk path so diagnostics reference the file the user can actually edit
     normalized["source_file"] = str(resolved_source)
+    raw_builtin_endpoints = normalized.get("builtin_endpoints")
+    internal_metadata = dict(normalized.get("metadata") or {})
+    internal_metadata["_workflow_chat_api_starter"] = bool(
+        raw_builtin_endpoints is True
+        or (
+            isinstance(raw_builtin_endpoints, dict)
+            and raw_builtin_endpoints.get("chat_api") is True
+        )
+    )
+    normalized["metadata"] = internal_metadata
     # agent.md and CLAUDE.md (and their case variants) are aliases for main.agent.md;
     # check the normalized name to determine main-agent status
     normalized["is_main"] = normalized_file.name.lower() == "main.agent.md"

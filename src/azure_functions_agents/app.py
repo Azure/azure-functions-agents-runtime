@@ -15,7 +15,7 @@ from ._source_marker import source_marker
 from .config.loader import load_agent_specs, load_global_config
 from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
-from .config.schema import ResolvedAgent, WorkflowConfig
+from .config.schema import ResolvedAgent
 from .config.validation import (
     validate_resolved_agent,
     validate_subagent_references,
@@ -28,7 +28,13 @@ from .registration.capabilities import build_capabilities, validate_subagent_too
 from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
-from .workflows import build_workflow_integration
+from .workflows.integration import (
+    build_owner_workflow_integration,
+    build_workflow_handler_catalog,
+    build_workflow_owner_policy_catalog,
+    register_workflow_runtime,
+    validate_workflow_owner_starter,
+)
 
 
 def _tool_name(tool: object) -> str:
@@ -56,10 +62,6 @@ def _builtin_endpoints_enabled(builtin_endpoints: Any) -> bool:
     return bool(
         builtin_endpoints.debug_chat_ui or builtin_endpoints.chat_api or builtin_endpoints.mcp
     )
-
-
-def _workflows_requested(workflows: WorkflowConfig | None) -> bool:
-    return workflows is not None and workflows.enabled
 
 
 def _fail_on_duplicate_slugs(resolved_agents: list[ResolvedAgent]) -> set[str]:
@@ -154,16 +156,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         if resolved.workflows is not None:
             referenced_slugs.update(ref.agent for ref in resolved.workflows.subagents)
 
-    workflows_requested = any(
-        resolved.is_main and _workflows_requested(resolved.workflows)
-        for resolved in resolved_agents
-    )
-    app: func.FunctionApp = (
-        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
-        if workflows_requested
-        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
-    )
-
     # Collect indexing summary for structured logging
     agents_summary: list[dict[str, Any]] = []
     system_tools_used: set[str] = set()
@@ -186,12 +178,16 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     catalog_entries: dict[str, CatalogEntry] = {}
     for resolved in resolved_agents:
         # Validation is owned by the app factory; compose() stays a pure translation step.
+        if resolved.trigger is None:
+            validate_workflow_owner_starter(resolved)
         validate_resolved_agent(
             resolved,
             discovered_mcp_names=mcp_names,
             discovered_skills=skill_names,
             is_referenced_as_subagent=resolved.slug in referenced_slugs,
         )
+        if resolved.trigger is not None:
+            validate_workflow_owner_starter(resolved)
         capabilities = build_capabilities(
             resolved,
             discovered_user_tools=user_tools,
@@ -203,8 +199,26 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
 
     catalog: AgentCatalog = build_catalog(catalog_entries)
+    workflow_handler_catalog = build_workflow_handler_catalog(workflow_tools)
+    workflow_owner_policies = build_workflow_owner_policy_catalog(
+        catalog,
+        workflow_handler_catalog,
+    )
+    app: func.FunctionApp = (
+        df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
+        if workflow_owner_policies
+        else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
+    )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
+    if workflow_owner_policies:
+        register_workflow_runtime(
+            app,
+            handler_catalog=workflow_handler_catalog,
+            catalog=catalog,
+            owner_policies=workflow_owner_policies,
+        )
+
     for resolved in resolved_agents:
         capabilities = catalog[resolved.slug].capabilities
 
@@ -212,27 +226,16 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         workflow_system_addendum: str | None = None
         trigger_workflow_system_addendum: str | None = None
         workflow_policy = None
-        if resolved.is_main:
-            workflow_integration = build_workflow_integration(
-                app,
-                resolved.metadata,
-                workflow_tools=capabilities.filtered_workflow_tools,
-                workflow_subagents=(
-                    resolved.workflows.subagents if resolved.workflows is not None else ()
-                ),
-                catalog=catalog,
+        workflow_policy = workflow_owner_policies.get(resolved.slug)
+        if workflow_policy is not None:
+            workflow_integration = build_owner_workflow_integration(
+                workflow_policy,
+                workflow_handler_catalog,
             )
             workflows_enabled = workflow_integration.enabled
             workflow_system_addendum = workflow_integration.chat_system_addendum
             trigger_workflow_system_addendum = (
                 workflow_integration.trigger_system_addendum
-            )
-            workflow_policy = workflow_integration.plan_policy
-        elif _workflows_requested(resolved.workflows):
-            logger.warning(
-                "workflows.enabled is only honored on main.agent.md; ignoring "
-                "workflows for agent %s",
-                resolved.name,
             )
 
         capability_names = _serialize_capabilities_for_log(

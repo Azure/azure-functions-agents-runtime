@@ -173,6 +173,7 @@ async def _run_builtin_agent(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
+        workflow_owner_slug=resolved.slug,
         workflow_policy=workflow_policy,
         agent_name=resolved.slug,
         subagents=resolved.subagents,
@@ -208,6 +209,7 @@ def _run_builtin_agent_stream(
         system_addendum=workflow_system_addendum,
         workflow_enabled=workflows_enabled,
         workflow_durable_client=durable_client,
+        workflow_owner_slug=resolved.slug,
         workflow_policy=workflow_policy,
         agent_name=resolved.slug,
         # S1b: `_register_http_chat_stream`'s `handle_chat_stream` (unlike
@@ -552,9 +554,9 @@ def _register_workflow_status_endpoints(
                 media_type="application/json",
             )
         try:
-            envelopes = await fetch_session_workflows(client, session_id)
+            envelopes = await fetch_session_workflows(client, slug, session_id)
         except Exception:
-            logger.exception("workflows list endpoint failed")
+            logger.exception("workflows list endpoint failed owner=%s", slug)
             return Response(
                 json.dumps({"error": "failed to list workflows"}),
                 status_code=500,
@@ -586,9 +588,14 @@ def _register_workflow_status_endpoints(
                 media_type="application/json",
             )
         try:
-            envelope = await fetch_session_workflow_status(client, session_id, workflow_id)
+            envelope = await fetch_session_workflow_status(
+                client,
+                slug,
+                session_id,
+                workflow_id,
+            )
         except Exception:
-            logger.exception("workflow status endpoint failed")
+            logger.exception("workflow status endpoint failed owner=%s", slug)
             return Response(
                 json.dumps({"error": "failed to fetch workflow status"}),
                 status_code=500,

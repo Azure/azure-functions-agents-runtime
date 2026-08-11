@@ -27,6 +27,7 @@ from azure_functions_agents.registration.endpoints import (
     register_builtin_endpoints,
 )
 from azure_functions_agents.runner import _SESSION_ID_PATTERN
+from azure_functions_agents.workflows.context import new_workflow_instance_id
 
 
 class FakeFunctionApp:
@@ -311,6 +312,7 @@ def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     # 0007 §4.3) -- matches round 2's B2 fix for delegated specialists.
     assert calls["run_agent"]["agent_name"] == resolved.slug
     assert calls["run_agent"]["agent_name"] != resolved.name
+    assert calls["run_agent"]["workflow_owner_slug"] == resolved.slug
 
 
 def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_tools(
@@ -357,6 +359,7 @@ def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_t
     assert result == "stream"
     # S1: same contract as the non-streaming builtin-agent test above.
     assert calls["run_agent_stream"]["agent_name"] == resolved.slug
+    assert calls["run_agent_stream"]["workflow_owner_slug"] == resolved.slug
     assert calls["run_agent_stream"]["agent_name"] != resolved.name
 
 
@@ -883,6 +886,7 @@ def test_workflows_enabled_passes_client_to_run_builtin_agent(
     assert response.status_code == 200
     assert run_calls["kwargs"]["workflows_enabled"] is True
     assert run_calls["kwargs"]["durable_client"] is mock_client
+    assert run_calls["kwargs"]["workflow_policy"] is None
 
 
 def test_workflows_disabled_does_not_pass_client_to_run_builtin_agent(
@@ -1263,3 +1267,69 @@ def test_entra_workflow_endpoints_without_identity_are_unauthorized(
         route = next(route for route in app.routes if route["route"] == name)
         response = asyncio.run(route["handler"](DummyRequest({}), client=object()))
         assert response.status_code == 401
+
+
+def test_workflow_status_endpoint_hides_same_session_other_owner(
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(),
+        slug="owner_b",
+        workflows_enabled=True,
+    )
+    route = next(
+        route
+        for route in app.routes
+        if route["route"] == "agents/owner_b/workflow-status"
+    )
+    request = DummyRequest({}, headers={"x-ms-session-id": "same-session"})
+    request.query_params = {
+        "workflow_id": new_workflow_instance_id("owner_a", "same-session")
+    }
+
+    response = asyncio.run(route["handler"](request, client=object()))
+
+    assert response.status_code == 404
+
+
+def test_workflow_list_endpoint_hides_same_session_other_owner(
+    tmp_path: Path,
+) -> None:
+    class _Client:
+        async def get_status_all(self) -> list[Any]:
+            workflow_id = new_workflow_instance_id("owner_a", "same-session")
+            return [
+                SimpleNamespace(
+                    instance_id=workflow_id,
+                    runtime_status="Running",
+                    custom_status=None,
+                    output=None,
+                    created_time=None,
+                    last_updated_time=None,
+                )
+            ]
+
+    app = FakeFunctionApp()
+    resolved = _chat_api_agent(tmp_path, EndpointAuthConfig())
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(),
+        slug="owner_b",
+        workflows_enabled=True,
+    )
+    route = next(
+        route
+        for route in app.routes
+        if route["route"] == "agents/owner_b/workflows"
+    )
+    request = DummyRequest({}, headers={"x-ms-session-id": "same-session"})
+
+    response = asyncio.run(route["handler"](request, client=_Client()))
+
+    assert response.status_code == 200
+    assert json.loads(response.body) == {"workflows": []}

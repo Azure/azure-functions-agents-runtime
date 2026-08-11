@@ -408,6 +408,7 @@ def _build_role_agent(
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
+    workflow_owner_slug: str | None = None,
     agent_name: str | None,
     resolved_id: str | None,
     history_provider: ContextProvider | None,
@@ -444,6 +445,7 @@ def _build_role_agent(
         resolved_tools.extend(
             build_workflow_tools(
                 session_id=resolved_id or "",
+                owner_slug=workflow_owner_slug or agent_name or "main",
                 agent_name=agent_name or "main",
                 durable_client=workflow_durable_client,
                 policy=workflow_policy,
@@ -506,6 +508,7 @@ def _build_delegated_agent(
         system_addendum=None,
         workflow_enabled=False,
         workflow_durable_client=None,
+        workflow_owner_slug=None,
         # The slug, not `resolved.name` (the display name) — this becomes
         # the MAF span's `gen_ai.agent.name`, matching the `delegate_<slug>`
         # tool name so a trace viewer can correlate the two directly.
@@ -779,6 +782,7 @@ async def _build_agent_session_history(
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
+    workflow_owner_slug: str | None,
     agent_name: str | None,
     web_request_tools: list[Any] | None = None,
     subagents: list[SubagentRef] | None = None,
@@ -837,6 +841,7 @@ async def _build_agent_session_history(
         system_addendum=system_addendum,
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
+        workflow_owner_slug=workflow_owner_slug,
         agent_name=agent_name,
         resolved_id=resolved_id,
         history_provider=history_provider,
@@ -923,6 +928,7 @@ async def run_agent(
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
+    workflow_owner_slug: str | None = None,
     agent_name: str | None = None,
     web_request_tools: list[Any] | None = None,
     subagents: list[SubagentRef] | None = None,
@@ -1007,6 +1013,7 @@ async def run_agent(
         system_addendum=system_addendum,
         workflow_enabled=workflow_enabled,
         workflow_durable_client=workflow_durable_client,
+        workflow_owner_slug=workflow_owner_slug,
         agent_name=agent_name,
         web_request_tools=web_request_tools,
         subagents=subagents,
@@ -1115,6 +1122,7 @@ async def run_agent_stream(
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
+    workflow_owner_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
     web_request_tools: list[Any] | None = None,
@@ -1182,6 +1190,7 @@ async def run_agent_stream(
             system_addendum=system_addendum,
             workflow_enabled=workflow_enabled,
             workflow_durable_client=workflow_durable_client,
+            workflow_owner_slug=workflow_owner_slug,
             agent_name=agent_name,
             web_request_tools=web_request_tools,
             subagents=subagents,

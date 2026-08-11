@@ -8,9 +8,11 @@ from typing import Any
 import azure.functions as func
 import pytest
 
+from azure_functions_agents._trigger_support import is_supported_trigger_type
 from azure_functions_agents.config.loader import load_agent_specs
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
+    TRIGGER_TYPES,
     BuiltinEndpointsConfig,
     GlobalConfig,
     ResolvedAgent,
@@ -26,6 +28,11 @@ from azure_functions_agents.registration.triggers import (
     allocate_unique_function_name,
     register_agent,
 )
+
+
+@pytest.mark.parametrize("trigger_type", sorted(TRIGGER_TYPES))
+def test_all_documented_trigger_types_are_supported(trigger_type: str) -> None:
+    assert is_supported_trigger_type(trigger_type)
 
 
 class FakeFunctionApp:

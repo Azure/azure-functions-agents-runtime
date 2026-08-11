@@ -9,6 +9,7 @@ from pydantic import ValidationError
 
 from .._logger import logger
 from .._source_marker import source_marker
+from .._trigger_support import resolve_trigger_decorator_name
 from ..config import EndpointAuthConfig, ResolvedAgent
 from . import _naming
 from ._auth import resolve_endpoint_auth_level
@@ -51,9 +52,9 @@ def _register_builtin_agent(
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> None:
     trigger_params = dict(trigger_params)
-    decorator_fn = getattr(app, trigger_type, None)
-    if decorator_fn is None and trigger_type == "connector_trigger":
-        decorator_fn = getattr(app, "generic_trigger", None)
+    decorator_name = resolve_trigger_decorator_name(app, trigger_type)
+    decorator_fn = getattr(app, decorator_name, None) if decorator_name is not None else None
+    if decorator_name == "generic_trigger" and trigger_type == "connector_trigger":
         trigger_params.setdefault("type", "connectorTrigger")
 
     if decorator_fn is None:
