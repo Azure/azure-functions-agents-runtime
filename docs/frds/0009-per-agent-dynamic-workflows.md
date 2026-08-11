@@ -4,7 +4,7 @@ title: Per-agent Dynamic Workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-08-10
-updated: 2026-08-10
+updated: 2026-08-11
 issues:
   - "Azure/azure-functions-agents-runtime#109"
   - "Azure/azure-functions-bucees-planning#1274"
@@ -318,12 +318,13 @@ Dynamic Workflows surface.
 Existing workflow IDs use a session-only hash prefix. New IDs use an
 owner-plus-session prefix. No application-level legacy fallback is proposed:
 
-- pre-upgrade instances continue running in Durable;
 - new agent tools and polling endpoints cannot list, inspect, cancel, or
-  terminate those legacy IDs;
-- operators can still inspect or control them through Durable/DTS; and
-- deployments requiring continued agent-level management should drain or
-  terminate active workflows before upgrading.
+  terminate pre-upgrade IDs;
+- legacy orchestration inputs contain no `owner_slug`, so in-flight instances
+  fail closed when they next dispatch a `tool` or `sub_agent` Activity;
+- operators can still inspect or control remaining instances through
+  Durable/DTS; and
+- deployments should drain or terminate active workflows before upgrading.
 
 The rest of the public surface remains compatible:
 
@@ -382,6 +383,9 @@ authentication.
 | 11 | Authoring schema | Add owner/config fields / reuse current workflow config | Reuse existing fields; owner identity is runtime-derived | Agent | 2026-08-10 |
 | 12 | Sample proof | Extend a main-agent sample / documentation only / dedicated multi-owner sample | Add a runnable sample with two non-main owners and same-session isolation verification | Human | 2026-08-10 |
 | 13 | Ownership digest width | Retain 48-bit prefix / store literal owner data / expand digest | Use a 128-bit truncated SHA-256 prefix over a length-delimited owner/session encoding; avoids exposing raw identity while making collisions impractical | Human | 2026-08-10 |
+| 14 | Existing exported compatibility helpers | Delete as production-dead / retain unchanged / isolate compatibility state | Retain the exported registry and one-shot integration helper to avoid an unrelated breaking change, but remove the registration token from production `WorkflowSessionContext` and keep it private to the compatibility registry | Agent | 2026-08-11 |
+| 15 | Trigger decorator resolution | New shared resolver / duplicate capability validation / retain registration-local fallback | Keep the existing registration-local `connector_trigger` → `generic_trigger` fallback; workflow eligibility uses documented `TRIGGER_TYPES`, avoiding a new helper and an unrelated hard failure for non-workflow agents | Agent | 2026-08-11 |
+| 16 | Activity failure propagation | Let Durable wrapper behavior surface / explicitly rethrow failed wave result | Explicitly rethrow a failed `task_all` result so owner-policy denials retain their original actionable error instead of becoming a secondary `TypeError` | Agent | 2026-08-11 |
 
 ## 6. Test plan
 
@@ -414,6 +418,7 @@ authentication.
   - missing or disabled owner policy fails closed;
   - restrictive policy changes reject a pending disallowed node;
   - every capability-bearing Activity payload contains `owner_slug`;
+  - failed Activity waves preserve the original authorization/execution error;
   - `wait` tasks retain existing behavior.
 - [x] Integration: invocation channels
   - multiple workflow-enabled agents register distinct chat, streaming, MCP,
@@ -422,7 +427,9 @@ authentication.
     channel addendum;
   - HTTP workflow polling routes cannot observe another owner under the same
     session ID;
-  - trigger starters return/end without waiting for terminal workflow state.
+  - trigger starters return/end without waiting for terminal workflow state;
+  - explicitly configured coercible `chat_api` values are evaluated consistently
+    with the validated endpoint model.
 - [x] Workflow Sub Agent isolation
   - each owner can schedule only its own `workflows.subagents` grants;
   - one specialist may be granted to multiple owners without duplicate Activity

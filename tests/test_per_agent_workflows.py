@@ -56,6 +56,30 @@ workflows:
     assert "agent_incident_builtin_chat" in names
 
 
+@pytest.mark.parametrize("chat_api", ['"true"', "1"])
+def test_workflow_owner_accepts_coercible_explicit_chat_api(
+    tmp_path,
+    chat_api: str,
+) -> None:
+    _write_agent(
+        tmp_path,
+        "incident.agent.md",
+        f"""
+name: Incident
+description: Triage incidents.
+builtin_endpoints:
+  chat_api: {chat_api}
+workflows:
+  enabled: true
+""",
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert isinstance(app, df.DFApp)
+    assert "agent_incident_builtin_chat" in _function_names(app)
+
+
 def test_multiple_workflow_owners_register_one_durable_blueprint(tmp_path) -> None:
     for slug in ("incident", "release"):
         _write_agent(
@@ -399,7 +423,6 @@ async def test_same_session_cross_owner_management_is_not_found() -> None:
         session_id="same-session",
         agent_name="Owner B",
         durable_client=client,
-        token="",
     )
 
     assert await tools.fetch_session_workflows(client, "owner_b", "same-session") == []

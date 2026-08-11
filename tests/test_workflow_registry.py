@@ -106,17 +106,7 @@ class _CappedDurableClient:
 
 @pytest.fixture
 def failing_workflow_session():
-    session_id = "session-1"
-    token = context.register_workflow_session(
-        "test-agent",
-        session_id,
-        "test-agent",
-        _FailingDurableClient(),
-    )
-    try:
-        yield session_id
-    finally:
-        context.unregister_workflow_session("test-agent", session_id, token)
+    return "session-1"
 
 
 def _registered_blueprint_function(
@@ -141,6 +131,34 @@ def test_register_workflow_tool_rejects_collision():
     registry.register_workflow_tool("alpha", "alpha tool", _noop)
     with pytest.raises(ValueError, match="already registered"):
         registry.register_workflow_tool("alpha", "alpha tool again", _noop)
+
+
+def test_compatibility_session_registry_does_not_expose_or_confuse_registration_token():
+    first_client = object()
+    second_client = object()
+    first_token = context.register_workflow_session(
+        "owner",
+        "session",
+        "Owner",
+        first_client,
+    )
+    second_token = context.register_workflow_session(
+        "owner",
+        "session",
+        "Owner",
+        second_client,
+    )
+
+    registered = context.get_workflow_session("owner", "session")
+    assert registered is not None
+    assert registered.durable_client is second_client
+    assert not hasattr(registered, "token")
+
+    context.unregister_workflow_session("owner", "session", first_token)
+    assert context.get_workflow_session("owner", "session") is registered
+
+    context.unregister_workflow_session("owner", "session", second_token)
+    assert context.get_workflow_session("owner", "session") is None
 
 
 def test_register_workflow_tool_rejects_reserved_name():
@@ -639,7 +657,6 @@ async def test_workflow_tools_log_durable_exceptions_without_returning_details(
         session_id=failing_workflow_session,
         agent_name="test-agent",
         durable_client=_FailingDurableClient(),
-        token="",
     )
 
     text_result = await call_tool(workflow_id, session)
@@ -671,7 +688,6 @@ async def test_start_workflow_rejects_new_workflow_when_session_active_cap_reach
         session_id=session_id,
         agent_name="test-agent",
         durable_client=client,
-        token="",
     )
     registry.set_app_config(frozenset())
     result = await tools.start_workflow(
@@ -700,7 +716,6 @@ async def test_start_workflow_uses_passed_policy_for_sub_agent_authorization() -
         session_id="session-1",
         agent_name="coordinator",
         durable_client=_UnexpectedClient(),
-        token="",
     )
     params = tools.StartWorkflowParams(
         tasks=[
@@ -730,7 +745,6 @@ async def test_start_workflow_threads_owner_slug_into_durable_input() -> None:
         session_id="session-1",
         agent_name="Incident",
         durable_client=client,
-        token="",
     )
     policy = schema.WorkflowPlanPolicy(
         allowed_tools=frozenset(),

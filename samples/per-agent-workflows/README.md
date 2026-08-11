@@ -109,54 +109,9 @@ Open either debug UI:
 - <http://localhost:7071/agents/incident_commander/>
 - <http://localhost:7071/agents/release_manager/>
 
-The equivalent chat APIs are:
+### Run the incident workflow in chat
 
-- `POST /agents/incident_commander/chat`
-- `POST /agents/release_manager/chat`
-
-Use the same valid `x-ms-session-id` header when demonstrating owner isolation.
-Workflow polling is owner-specific:
-
-```text
-GET /agents/incident_commander/workflow-status?workflow_id=<id>
-GET /agents/incident_commander/workflows
-GET /agents/release_manager/workflow-status?workflow_id=<id>
-GET /agents/release_manager/workflows
-```
-
-### Send the sample messages yourself
-
-Keep `func start` running from `samples\per-agent-workflows\src`. In a second
-PowerShell terminal, move to the sample root:
-
-```powershell
-Set-Location samples\per-agent-workflows
-```
-
-Send only the incident workflow message:
-
-```powershell
-python scripts/send.py incident
-```
-
-Send only the release workflow message:
-
-```powershell
-python scripts/send.py release
-```
-
-Or start both owners with the same session ID to observe owner isolation:
-
-```powershell
-python scripts/send.py both
-```
-
-This script does not start Docker, emulators, or the Functions host and does not
-poll for completion. It only posts the documented prompt, then prints the
-workflow ID and owner-specific status URL. Use `--base-url` for a non-default
-host and `--session-id` to choose the shared session.
-
-### Exact incident demo prompt
+Open the Incident Commander UI, paste the following message, and send it:
 
 > Start exactly one incident workflow now for incident INC-4821 on checkout-api.
 > Use parallel task IDs incident_logs, incident_metrics, and
@@ -167,11 +122,16 @@ host and `--session-id` to choose the shared session.
 > results, and the whole specialist result. Return the workflow ID without
 > polling.
 
+The agent immediately returns a workflow ID. The chat page then displays a live
+workflow card and updates it until the workflow completes.
+
 Expected terminal output: `runtime_status` is `Completed`; the
 `output.results.incident_report` object contains `INCIDENT_REPORT_READY`,
 `"severity": "SEV2"`, and `"decision": "ROLLBACK"`.
 
-### Exact release demo prompt
+### Run the release workflow in chat
+
+Open the Release Manager UI, paste the following message, and send it:
 
 > Start exactly one release-readiness workflow now for release REL-2026.08.11
 > on checkout-api. Use parallel task IDs release_prs, release_tests,
@@ -187,7 +147,39 @@ Expected terminal output: `runtime_status` is `Completed`; the
 `"decision": "NO_GO"` because the deterministic evidence includes an
 unexcepted critical vulnerability.
 
-## One-command verification
+### Optional: send the same prompts from a terminal
+
+Keep `func start` running. In a second PowerShell terminal, move to the sample
+root and send either prompt:
+
+```powershell
+Set-Location samples\per-agent-workflows
+python scripts/send.py incident
+python scripts/send.py release
+```
+
+To start both owners with the same session ID and demonstrate owner isolation:
+
+```powershell
+python scripts/send.py both
+```
+
+This helper does not start Docker, emulators, or the Functions host and does not
+poll for completion. It prints the workflow ID and owner-specific status URL.
+Use `--base-url` for a non-default host and `--session-id` to choose the shared
+session.
+
+The equivalent APIs are `POST /agents/incident_commander/chat` and
+`POST /agents/release_manager/chat`. Workflow polling remains owner-specific:
+
+```text
+GET /agents/incident_commander/workflow-status?workflow_id=<id>
+GET /agents/incident_commander/workflows
+GET /agents/release_manager/workflow-status?workflow_id=<id>
+GET /agents/release_manager/workflows
+```
+
+## Optional automated E2E verification
 
 The verifier creates uniquely named Docker containers with ephemeral host
 ports, makes an isolated temporary app copy under this sample directory, writes

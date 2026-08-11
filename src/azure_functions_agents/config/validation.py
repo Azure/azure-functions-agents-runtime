@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 from azure_functions_agents._logger import logger as _logger
-from azure_functions_agents._trigger_support import is_supported_trigger_type
 
 from .schema import ResolvedAgent, SubagentRef, WorkflowSubagentRef
 
@@ -92,16 +91,6 @@ def validate_resolved_agent(
                     "#trigger",
                 )
             )
-        if not is_supported_trigger_type(trigger_type):
-            raise ValueError(
-                _format_error(
-                    source_file,
-                    "trigger.type",
-                    f"Unknown or unsupported trigger type `{trigger_type}`.",
-                    "#trigger",
-                )
-            )
-
     known_mcp = set(discovered_mcp_names)
     for name in resolved.mcp_exclude_names:
         if name not in known_mcp:

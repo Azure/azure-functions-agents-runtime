@@ -25,8 +25,11 @@ import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents._logger import logger
-from azure_functions_agents._trigger_support import is_supported_trigger_type
-from azure_functions_agents.config.schema import ResolvedAgent, WorkflowSubagentRef
+from azure_functions_agents.config.schema import (
+    TRIGGER_TYPES,
+    ResolvedAgent,
+    WorkflowSubagentRef,
+)
 from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
@@ -421,8 +424,9 @@ def _build_plan_policy(
 
 
 def _has_eligible_starter(resolved: ResolvedAgent) -> bool:
-    if resolved.trigger is not None and is_supported_trigger_type(
-        str(resolved.trigger.type or "").strip()
+    if (
+        resolved.trigger is not None
+        and str(resolved.trigger.type or "").strip() in TRIGGER_TYPES
     ):
         return True
     endpoints = resolved.builtin_endpoints
@@ -435,11 +439,17 @@ def _has_eligible_starter(resolved: ResolvedAgent) -> bool:
 
 def validate_workflow_owner_starter(resolved: ResolvedAgent) -> None:
     """Reject an enabled owner that has no Durable-capable invocation surface."""
-    if (
-        resolved.workflows is not None
-        and resolved.workflows.enabled
-        and not _has_eligible_starter(resolved)
-    ):
+    if resolved.workflows is None or not resolved.workflows.enabled:
+        return
+    if resolved.trigger is not None:
+        trigger_type = str(resolved.trigger.type or "").strip()
+        if trigger_type not in TRIGGER_TYPES:
+            raise ValueError(
+                f"{resolved.source_file or '<unknown>'}: field `trigger.type`: "
+                "Unknown or unsupported "
+                f"trigger type `{trigger_type}`. See docs/front-matter-spec.md#trigger."
+            )
+    if not _has_eligible_starter(resolved):
         raise ValueError(
             f"Agent {resolved.slug!r} sets workflows.enabled=true but has no "
             "eligible workflow starter. Configure a trigger, "

@@ -510,11 +510,31 @@ fail closed rather than continuing under a stale policy snapshot.
 ### Migration from legacy workflow IDs
 
 This experimental feature intentionally changes IDs from a session-only 48-bit
-prefix to the owner-and-session 128-bit prefix. Pre-upgrade instances continue
-running in Durable, but new agent tools and polling routes cannot list, inspect,
-cancel, or terminate those legacy IDs. Drain or terminate active workflows
-before upgrading when agent-level management must remain available; otherwise
-use Durable Functions or DTS tooling to inspect or control legacy instances.
+prefix to the owner-and-session 128-bit prefix. New agent tools and polling
+routes cannot list, inspect, cancel, or terminate pre-upgrade IDs. In addition,
+legacy orchestration inputs contain no `owner_slug`, so an in-flight legacy
+workflow fails closed when it next dispatches a `tool` or `sub_agent` Activity;
+pure `wait` nodes do not require owner authorization. Drain or terminate active
+workflows before upgrading. Use Durable Functions or DTS tooling to inspect or
+control any legacy instances that remain.
+
+### Operational scaling notes
+
+Each worker reconstructs the immutable owner-policy and handler catalogs from
+the same deployed agent project during app startup. Orchestrators persist
+`owner_slug` in their input and pass it to Activities, so an Activity may safely
+run on a different worker. Do not share a Task Hub between applications or
+deployments with different agent definitions. During a rolling deployment,
+old and new workers may briefly enforce different policy versions; restrictive
+changes can therefore fail pending nodes closed as soon as a new worker handles
+them.
+
+Session workflow listing currently calls Durable's task-hub status API and
+filters by owner/session prefix in the application. Configure backend retention
+or periodically purge completed orchestration history so polling cost does not
+grow without bound. The active-workflow limit is per `(owner_slug, session_id)`;
+non-HTTP trigger invocations generate new session IDs, so that limit is not an
+owner-wide throttle.
 
 ## Observability
 

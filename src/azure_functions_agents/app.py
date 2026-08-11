@@ -178,6 +178,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     catalog_entries: dict[str, CatalogEntry] = {}
     for resolved in resolved_agents:
         # Validation is owned by the app factory; compose() stays a pure translation step.
+        # Preserve trigger diagnostics: validate an authored trigger before reporting that
+        # the workflow owner has no eligible starter.
         if resolved.trigger is None:
             validate_workflow_owner_starter(resolved)
         validate_resolved_agent(
@@ -225,7 +227,6 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         workflows_enabled = False
         workflow_system_addendum: str | None = None
         trigger_workflow_system_addendum: str | None = None
-        workflow_policy = None
         workflow_policy = workflow_owner_policies.get(resolved.slug)
         if workflow_policy is not None:
             workflow_integration = build_owner_workflow_integration(

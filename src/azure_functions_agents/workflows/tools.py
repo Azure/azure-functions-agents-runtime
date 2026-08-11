@@ -211,10 +211,6 @@ def status_envelope(status: Any) -> dict[str, Any]:
     }
 
 
-# Backwards-compatible alias for in-module call sites; do not export.
-_status_envelope = status_envelope
-
-
 def _runtime_status_name(status: Any) -> str:
     return getattr(status.runtime_status, "name", str(status.runtime_status))
 
@@ -475,7 +471,7 @@ async def get_workflow_status(
         )
         return _error("failed to fetch workflow status")
 
-    envelope = _status_envelope(status)
+    envelope = status_envelope(status)
     if envelope["runtime_status"] == "not_found":
         return _error(
             f"workflow {params.workflow_id!r} not found",
@@ -599,7 +595,6 @@ def _build_session(
         session_id=session_id,
         agent_name=agent_name,
         durable_client=durable_client,
-        token="",
     )
 
 

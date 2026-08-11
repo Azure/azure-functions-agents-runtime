@@ -424,6 +424,11 @@ def register_workflows(
                 }
 
             wave_results = wave_task.result
+            if isinstance(wave_results, BaseException):
+                for spec, task in zip(wave_specs, wave_tasks, strict=True):
+                    if spec["type"] == WAIT_TASK_TYPE and not task.is_completed:
+                        task.cancel()
+                raise wave_results
             for spec, raw in zip(wave_specs, wave_results, strict=True):
                 tid = spec["id"]
                 if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:

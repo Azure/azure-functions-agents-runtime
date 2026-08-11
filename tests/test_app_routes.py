@@ -101,9 +101,7 @@ def test_bare_agent_md_with_workflows_creates_durable_app(tmp_path: Path):
     assert isinstance(function_app, df.DFApp)
 
 
-def test_non_main_trigger_workflows_enable_durable(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-):
+def test_non_main_trigger_workflows_enable_durable(tmp_path: Path):
     _write_main_agent(tmp_path)
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
@@ -118,10 +116,16 @@ def test_non_main_trigger_workflows_enable_durable(
     function_app = app_module.create_function_app(app_root=tmp_path)
 
     assert isinstance(function_app, df.DFApp)
-    assert not any(
-        "workflows.enabled is only honored on main.agent.md" in record.message
-        for record in caplog.records
-    )
+    trigger_bindings = [
+        [binding.get_dict_repr()["type"] for binding in builder._function._bindings]
+        for builder in function_app._function_builders
+        if any(
+            binding.get_dict_repr()["type"] == "timerTrigger"
+            for binding in builder._function._bindings
+        )
+    ]
+    assert len(trigger_bindings) == 1
+    assert "durableClient" in trigger_bindings[0]
 
 
 def test_non_workflow_routes_do_not_register_durable_client_binding(tmp_path: Path):

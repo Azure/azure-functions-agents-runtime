@@ -99,6 +99,24 @@ def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
     assert [t.name for t in capabilities.filtered_user_tools] == ["keep"]
 
 
+def test_build_capabilities_warns_for_unknown_workflow_exclude(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    resolved = _resolved()
+    resolved.workflows = SimpleNamespace(enabled=True, exclude=["missing"])
+
+    capabilities = build_capabilities(
+        resolved,
+        discovered_user_tools=[],
+        discovered_workflow_tools=[_named_tool("known")],
+        discovered_mcp_tools={},
+        discovered_skills={},
+    )
+
+    assert [tool.name for tool in capabilities.filtered_workflow_tools] == ["known"]
+    assert "unknown workflow tool name(s): ['missing']" in caplog.text
+
+
 def test_build_capabilities_tools_disabled_returns_empty_user_tools() -> None:
     capabilities = build_capabilities(
         _resolved(tools_disabled=True),

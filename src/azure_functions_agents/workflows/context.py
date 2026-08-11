@@ -2,16 +2,10 @@
 
 Two concerns live here:
 
-1. **Per-turn registry.** Workflow tool handlers need the Durable
-   Functions ``client`` the Functions host injected into the chat
-   handler via ``durable_client_input`` and the owner/session pair.
-   The current MAF integration builds workflow tools per agent session, so this
-   registry is retained only for tests and backwards-compatible helper access.
-   Concurrent turns on the same ``session_id`` are possible; to keep a
-   late-arriving turn from evicting a newer registration,
-   :func:`register_workflow_session` returns an opaque token and
-   :func:`unregister_workflow_session` is a no-op unless that token
-   still owns the slot.
+1. **Compatibility registry.** Production workflow tools receive a request-local
+   context directly. The process-local registry remains for callers of the
+   original helper API. Its registration token is private bookkeeping and is
+   not part of workflow session state.
 
 2. **Instance-ID ownership.** Every workflow started via
    ``start_workflow`` receives an instance ID whose leading
@@ -33,6 +27,8 @@ from threading import Lock
 from typing import Any
 
 OWNER_SESSION_PREFIX_LEN = 32
+# Compatibility alias retained for callers that imported the original constant.
+# Its value follows the current owner/session format, not the legacy 12-hex format.
 SESSION_PREFIX_LEN = OWNER_SESSION_PREFIX_LEN
 
 
@@ -80,10 +76,15 @@ class WorkflowSessionContext:
     session_id: str
     agent_name: str
     durable_client: Any  # azure.durable_functions.DurableOrchestrationClient
+
+
+@dataclass(frozen=True)
+class _WorkflowSessionRegistration:
+    context: WorkflowSessionContext
     token: str
 
 
-_registry: dict[tuple[str, str], WorkflowSessionContext] = {}
+_registry: dict[tuple[str, str], _WorkflowSessionRegistration] = {}
 _lock = Lock()
 
 
@@ -99,12 +100,15 @@ def register_workflow_session(
     :func:`unregister_workflow_session` in its ``finally`` block.
     """
     token = uuid.uuid4().hex
+    context = WorkflowSessionContext(
+        owner_slug=owner_slug,
+        session_id=session_id,
+        agent_name=agent_name,
+        durable_client=durable_client,
+    )
     with _lock:
-        _registry[(owner_slug, session_id)] = WorkflowSessionContext(
-            owner_slug=owner_slug,
-            session_id=session_id,
-            agent_name=agent_name,
-            durable_client=durable_client,
+        _registry[(owner_slug, session_id)] = _WorkflowSessionRegistration(
+            context=context,
             token=token,
         )
     return token
@@ -134,7 +138,8 @@ def get_workflow_session(
     if not owner_slug or not session_id:
         return None
     with _lock:
-        return _registry.get((owner_slug, session_id))
+        registration = _registry.get((owner_slug, session_id))
+        return registration.context if registration is not None else None
 
 
 __all__ = [

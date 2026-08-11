@@ -314,6 +314,30 @@ def _run_orchestrator(
         return stop.value
 
 
+def test_orchestrator_preserves_activity_failure() -> None:
+    class _FailedWaveContext(_FakeOrchestrationContext):
+        def task_all(self, tasks: list[_Task]) -> _Task:
+            self.last_wave = _Task(RuntimeError("activity authorization failed"))
+            return self.last_wave
+
+    context = _FailedWaveContext(
+        [
+            {
+                "id": "publish",
+                "type": TOOL_TASK_TYPE,
+                "tool": "publish",
+                "args": {},
+                "depends_on": [],
+            }
+        ],
+        lambda name, payload: {"id": payload["id"], "result": {"ok": True}},
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="activity authorization failed"):
+        _run_orchestrator(orchestrator, context)
+
+
 def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> None:
     tasks = [
         {

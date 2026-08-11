@@ -27,7 +27,10 @@ from azure_functions_agents.registration.endpoints import (
     register_builtin_endpoints,
 )
 from azure_functions_agents.runner import _SESSION_ID_PATTERN
-from azure_functions_agents.workflows.context import new_workflow_instance_id
+from azure_functions_agents.workflows.context import (
+    new_workflow_instance_id,
+    session_instance_prefix,
+)
 
 
 class FakeFunctionApp:
@@ -1333,3 +1336,54 @@ def test_workflow_list_endpoint_hides_same_session_other_owner(
 
     assert response.status_code == 200
     assert json.loads(response.body) == {"workflows": []}
+
+
+def test_workflow_list_endpoint_uses_resolved_owner_slug_not_route_slug(
+    tmp_path: Path,
+) -> None:
+    class _Client:
+        async def get_status_all(self) -> list[Any]:
+            workflow_id = new_workflow_instance_id(
+                "canonical-owner",
+                "same-session",
+            )
+            return [
+                SimpleNamespace(
+                    instance_id=workflow_id,
+                    runtime_status="Running",
+                    custom_status=None,
+                    output=None,
+                    created_time=None,
+                    last_updated_time=None,
+                )
+            ]
+
+    app = FakeFunctionApp()
+    resolved = _resolved_agent(
+        name="Owner",
+        slug="canonical-owner",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(chat_api=True),
+        source_file=tmp_path / "route-owner.agent.md",
+    )
+    register_builtin_endpoints(
+        app,
+        resolved,
+        AgentCapabilities(),
+        slug="route-owner",
+        workflows_enabled=True,
+    )
+    route = next(
+        route
+        for route in app.routes
+        if route["route"] == "agents/route-owner/workflows"
+    )
+    request = DummyRequest({}, headers={"x-ms-session-id": "same-session"})
+
+    response = asyncio.run(route["handler"](request, client=_Client()))
+
+    assert response.status_code == 200
+    [workflow] = json.loads(response.body)["workflows"]
+    assert workflow["workflow_id"].startswith(
+        session_instance_prefix("canonical-owner", "same-session")
+    )

@@ -533,6 +533,7 @@ def _register_workflow_status_endpoints(
     app: func.FunctionApp,
     *,
     slug: str,
+    owner_slug: str,
     base_function_name: str,
     auth: EndpointAuthConfig,
 ) -> None:
@@ -554,9 +555,9 @@ def _register_workflow_status_endpoints(
                 media_type="application/json",
             )
         try:
-            envelopes = await fetch_session_workflows(client, slug, session_id)
+            envelopes = await fetch_session_workflows(client, owner_slug, session_id)
         except Exception:
-            logger.exception("workflows list endpoint failed owner=%s", slug)
+            logger.exception("workflows list endpoint failed owner=%s", owner_slug)
             return Response(
                 json.dumps({"error": "failed to list workflows"}),
                 status_code=500,
@@ -590,12 +591,12 @@ def _register_workflow_status_endpoints(
         try:
             envelope = await fetch_session_workflow_status(
                 client,
-                slug,
+                owner_slug,
                 session_id,
                 workflow_id,
             )
         except Exception:
-            logger.exception("workflow status endpoint failed owner=%s", slug)
+            logger.exception("workflow status endpoint failed owner=%s", owner_slug)
             return Response(
                 json.dumps({"error": "failed to fetch workflow status"}),
                 status_code=500,
@@ -765,6 +766,7 @@ def register_builtin_endpoints(
             _register_workflow_status_endpoints(
                 app,
                 slug=slug,
+                owner_slug=resolved.slug,
                 base_function_name=base_function_name,
                 auth=auth,
             )
