@@ -171,11 +171,16 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
 
 `ResolvedAgent.harness_config` selects MAF's `create_harness_agent`; `None` selects the plain
-`Agent`. Harness runs force provider-managed history (`store=false`) because the runtime creates a
-fresh `AgentSession` for every request and persists the public session through Blob storage (or the
-local file provider). With both harness token limits configured, MAF compacts the externally loaded
-conversation history immediately before each model call. Agent instructions remain part of every
-call; compaction controls accumulated message-history growth.
+`Agent`. Both modes reuse the same runtime history provider, keyed by the public session ID returned
+to the caller and supplied on later turns. In Azure, `BlobHistoryProvider` stores that history in the
+Function App's configured storage account, so a request handled by another worker can reload the
+same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
+cross-worker sharing. Harness runs force provider-managed history (`store=false`) because the runtime
+creates a fresh `AgentSession` for every request; Blob/File history, rather than a provider-side
+conversation ID, remains authoritative. Cross-worker turn ordering is not coordinated, so callers
+must still avoid concurrent turns for the same session ID. With both harness token limits configured,
+MAF compacts the externally loaded conversation history immediately before each model call. Agent
+instructions remain part of every call; compaction controls accumulated message-history growth.
 
 For a workflow-enabled main agent, `workflows/integration.py` produces one
 immutable `WorkflowPlanPolicy` from the concrete workflow tools and

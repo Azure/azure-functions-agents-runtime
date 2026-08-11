@@ -176,6 +176,75 @@ def test_build_harness_agent_session_forces_provider_managed_history(
     assert captured[0]["default_options"] == {"store": False}
 
 
+def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
+    """Harness agents expose delegation tools and return their error tracker."""
+    captured_agent_options: list[dict[str, Any]] = []
+    captured_delegate_options: list[tuple[Any, Any, float]] = []
+    delegate_tool = SimpleNamespace(name="delegate_billing")
+    delegate_tracker = runner._DelegateErrorTracker()
+    subagents = [SimpleNamespace(agent="billing")]
+    catalog = object()
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured_agent_options.append(kwargs)
+        return _FakeAgent()
+
+    async def fake_build_subagent_tools(
+        received_subagents: Any,
+        received_catalog: Any,
+        *,
+        coordinator_deadline: float,
+    ) -> tuple[list[Any], runner._DelegateErrorTracker]:
+        captured_delegate_options.append(
+            (received_subagents, received_catalog, coordinator_deadline)
+        )
+        return [delegate_tool], delegate_tracker
+
+    import agent_framework
+
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (object(), InferenceTarget()),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
+    monkeypatch.setattr(runner, "build_subagent_tools", fake_build_subagent_tools)
+
+    _, _, _, returned_tracker, _ = asyncio.run(
+        runner._build_harness_agent_session(
+            instructions="coordinate specialists",
+            session_id="shared-session",
+            tools=[SimpleNamespace(name="local_tool")],
+            mcp_tools=[],
+            skill_paths=None,
+            model=None,
+            sandbox_tools=None,
+            system_addendum=None,
+            workflow_enabled=False,
+            workflow_durable_client=None,
+            agent_name="coordinator",
+            web_request_tools=None,
+            harness_config=HarnessAgentConfig(),
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=123.0,
+        )
+    )
+
+    assert captured_delegate_options == [(subagents, catalog, 123.0)]
+    assert [tool.name for tool in captured_agent_options[0]["tools"]] == [
+        "local_tool",
+        "delegate_billing",
+    ]
+    assert returned_tracker is delegate_tracker
+
+
 def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) -> None:
     """Turn two receives turn-one history even though both agents and sessions are fresh."""
     client = _RecordingStoringChatClient()
@@ -295,6 +364,8 @@ def test_run_agent_uses_harness_builder_when_config_set(monkeypatch: Any) -> Non
     """run_agent calls _build_harness_agent_session when harness_config is not None."""
     harness_called: list[dict[str, Any]] = []
     plain_called: list[dict[str, Any]] = []
+    subagents = [SimpleNamespace(agent="billing")]
+    catalog = object()
 
     async def fake_harness_builder(
         **kwargs: Any,
@@ -316,11 +387,19 @@ def test_run_agent_uses_harness_builder_when_config_set(monkeypatch: Any) -> Non
     monkeypatch.setattr(runner, "_build_agent_session_history", fake_plain_builder)
 
     result = asyncio.run(
-        runner.run_agent("hello", harness_config=HarnessAgentConfig())
+        runner.run_agent(
+            "hello",
+            harness_config=HarnessAgentConfig(),
+            subagents=subagents,
+            catalog=catalog,
+        )
     )
 
     assert len(harness_called) == 1
     assert len(plain_called) == 0
+    assert harness_called[0]["subagents"] is subagents
+    assert harness_called[0]["catalog"] is catalog
+    assert isinstance(harness_called[0]["coordinator_deadline"], float)
     assert result.content == "harness response"
     assert result.session_id == "harness-session"
 
@@ -355,6 +434,8 @@ def test_run_agent_uses_plain_builder_when_config_is_none(monkeypatch: Any) -> N
 def test_run_agent_stream_uses_harness_builder_when_config_set(monkeypatch: Any) -> None:
     """run_agent_stream calls _build_harness_agent_session when harness_config is not None."""
     harness_called: list[dict[str, Any]] = []
+    subagents = [SimpleNamespace(agent="billing")]
+    catalog = object()
 
     async def fake_harness_builder(
         **kwargs: Any,
@@ -370,11 +451,22 @@ def test_run_agent_stream_uses_harness_builder_when_config_set(monkeypatch: Any)
     monkeypatch.setattr(runner, "_build_harness_agent_session", fake_harness_builder)
 
     async def collect() -> list[str]:
-        return [chunk async for chunk in runner.run_agent_stream("hi", harness_config=HarnessAgentConfig())]
+        return [
+            chunk
+            async for chunk in runner.run_agent_stream(
+                "hi",
+                harness_config=HarnessAgentConfig(),
+                subagents=subagents,
+                catalog=catalog,
+            )
+        ]
 
     asyncio.run(collect())
     assert len(harness_called) == 1
     assert harness_called[0]["harness_config"] == HarnessAgentConfig()
+    assert harness_called[0]["subagents"] is subagents
+    assert harness_called[0]["catalog"] is catalog
+    assert isinstance(harness_called[0]["coordinator_deadline"], float)
 
 
 def test_run_agent_passes_harness_config_fields_to_builder(monkeypatch: Any) -> None:

@@ -863,6 +863,9 @@ async def _build_harness_agent_session(
     agent_name: str | None,
     web_request_tools: list[Any] | None = None,
     harness_config: HarnessAgentConfig | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    coordinator_deadline: float | None = None,
     workflow_policy: WorkflowPlanPolicy | None = None,
 ) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
     """Construct an agent/session using MAF's ``create_harness_agent``.
@@ -871,7 +874,9 @@ async def _build_harness_agent_session(
     warning when ``create_harness_agent`` is not available in the installed
     version of ``agent_framework``.
 
-    Returns ``(agent, session, resolved_session_id, None, inference_target)``.
+    Returns ``(agent, session, resolved_session_id, delegate_error_tracker,
+    inference_target)``; ``delegate_error_tracker`` is ``None`` unless
+    ``subagents`` is non-empty.
     """
     import warnings
 
@@ -896,6 +901,9 @@ async def _build_harness_agent_session(
             workflow_durable_client=workflow_durable_client,
             agent_name=agent_name,
             web_request_tools=web_request_tools,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
             workflow_policy=workflow_policy,
         )
 
@@ -946,6 +954,18 @@ async def _build_harness_agent_session(
     if resolved_mcp_tools:
         resolved_tools.extend(resolved_mcp_tools)
 
+    delegate_error_tracker: _DelegateErrorTracker | None = None
+    if subagents:
+        effective_deadline = (
+            coordinator_deadline
+            if coordinator_deadline is not None
+            else asyncio.get_running_loop().time() + DEFAULT_TIMEOUT
+        )
+        delegate_tools, delegate_error_tracker = await build_subagent_tools(
+            subagents, catalog, coordinator_deadline=effective_deadline
+        )
+        resolved_tools.extend(delegate_tools)
+
     effective_instructions = instructions.strip() if instructions and instructions.strip() else None
     if system_addendum:
         effective_instructions = (effective_instructions or "") + system_addendum
@@ -977,7 +997,7 @@ async def _build_harness_agent_session(
             default_options={"store": False},
         )
 
-    return agent, session, resolved_id, None, inference_target
+    return agent, session, resolved_id, delegate_error_tracker, inference_target
 
 
 # ---------------------------------------------------------------------------
@@ -1145,6 +1165,9 @@ async def run_agent(
                 agent_name=agent_name,
                 web_request_tools=web_request_tools,
                 harness_config=harness_config,
+                subagents=subagents,
+                catalog=catalog,
+                coordinator_deadline=coordinator_deadline,
                 workflow_policy=workflow_policy,
             )
         )
@@ -1341,6 +1364,9 @@ async def run_agent_stream(
                     agent_name=agent_name,
                     web_request_tools=web_request_tools,
                     harness_config=harness_config,
+                    subagents=subagents,
+                    catalog=catalog,
+                    coordinator_deadline=deadline,
                     workflow_policy=workflow_policy,
                 )
             )
