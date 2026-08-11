@@ -273,7 +273,11 @@ def test_fresh_harness_agents_compact_externally_loaded_history(monkeypatch: Any
     asyncio.run(run_two_turns())
 
     assert client.calls[0] == [first_prompt]
-    assert client.calls[1] == [second_prompt]
+    assert client.calls[1], "expected a second model call"
+    assert client.calls[1][-1] == second_prompt
+    assert first_prompt not in client.calls[1], (
+        "expected prior history to be compacted (no full first prompt in the second call)"
+    )
     assert [message.text for message in stored_messages] == [
         first_prompt,
         response_text,
