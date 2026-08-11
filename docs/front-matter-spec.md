@@ -26,7 +26,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
-- Can enable Dynamic Workflows on `main.agent.md`
+- Can enable Dynamic Workflows on any agent with an eligible starter
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
@@ -90,7 +90,7 @@ YAML front matter at the top of each agent file.
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
-- `workflows` — Object to enable Dynamic Workflows on `main.agent.md`
+- `workflows` — Object to enable Dynamic Workflows on an eligible agent
 - `subagents` — Array of `{agent, when?}` references to specialist agents this agent may delegate to at chat time
 - `input_schema` — Object, JSON Schema for HTTP request validation
 - `response_schema` — Object, JSON Schema for response validation
@@ -125,7 +125,7 @@ Fields are organized into categories based on how they can be used:
 - `mcp` — MCP servers discovered from `mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
-- `workflows` — Dynamic Workflow enablement and workflow-tool excludes (`main.agent.md` only)
+- `workflows` — Dynamic Workflow enablement, workflow-tool excludes, and workflow Sub Agent grants
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
   - `dynamic_sessions_code_interpreter` — ACA Dynamic Sessions code interpreter
   - `web_request` — Built-in outbound HTTP request tool (default-on, SSRF-guarded)
@@ -567,7 +567,7 @@ tools: false
 
 #### `workflows`
 - **Type:** `object`
-- **Location:** Agent front matter (`main.agent.md` only in v1)
+- **Location:** Agent front matter (any agent with an eligible workflow starter)
 - **Description:** Enables Dynamic Workflows, filters discovered workflow tools, and
   grants access to leaf specialists for workflow tasks.
 
@@ -584,8 +584,10 @@ workflows:
 
 `workflows.enabled` is a strict boolean. When true, it injects
 workflow-management tools (`start_workflow`, `get_workflow_status`,
-`list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public
-`@workflow_tool` handlers discovered from `tools/*.py` as workflow task targets.
+`list_workflows`, `cancel_workflow`, `terminate_workflow`) and exposes the
+owner-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
+workflow task targets. No new owner or starter fields are required; owner
+identity comes from the agent's canonical slug.
 The v1 runtime currently requires workflow tool handlers to be synchronous,
 accept one dictionary argument, and return JSON-serializable values. This is an
 implementation constraint of the v1 registry and Activity runner, not a Durable
@@ -593,7 +595,14 @@ Functions requirement.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 
-`workflows.exclude` filters only workflow Activity targets; it does not affect normal tools. Conversely, `tools.exclude` filters normal MAF tools and does not hide workflow tools. In v1, setting `workflows.enabled: true` outside `main.agent.md` logs a warning and is ignored.
+`workflows.exclude` filters only that owner's workflow Activity targets; it does
+not affect normal tools or another owner's workflow policy. Conversely,
+`tools.exclude` filters normal MAF tools and does not hide workflow tools.
+
+An enabled owner must expose at least one eligible starter: a supported declared
+`trigger`, `builtin_endpoints.chat_api`, or `builtin_endpoints.mcp`.
+`builtin_endpoints.debug_chat_ui` alone is insufficient because the UI depends
+on the chat API. An enabled owner without a starter fails startup.
 
 `workflows.subagents` is independent from top-level [`subagents`](#subagents).
 It is deny-by-default: only listed specialist slugs can appear in a workflow
@@ -654,7 +663,7 @@ relevant, then give the customer a single consolidated answer.
 
 **Delegated execution ("runs as itself"):** A specialist invoked through delegation uses its own instructions, model, and static tools (its own user tools, MCP servers, and skills) exactly as if it had been triggered directly — same identity, same configuration. What differs is context and role:
 - **Context isolation:** the specialist receives a single self-contained string argument, `task` (`propagate_session=False`) — it does not see the coordinator's conversation history or share session state.
-- **No per-request sandbox or Dynamic Workflow tools:** these are naturally absent for a delegated specialist (not stripped — they were never part of its own static configuration to begin with, since sandbox sessions are per-request and `workflows` only applies to `main.agent.md`).
+- **No per-request sandbox or Dynamic Workflow tools:** these are naturally absent for a delegated specialist (not stripped) because both capabilities belong to the top-level direct invocation, not the delegated execution role.
 - **No recursive delegation:** delegation is single-level. A specialist invoked through `subagents:` never gets its own `delegate_*` tools, even if it declares `subagents:` of its own — its references are simply not wired for that call. This is enforced structurally (the specialist-building code path never reads a delegated agent's own `subagents`), not with a runtime depth counter, so mutual `A` ↔ `B` references are harmless.
 
 **Trust boundary:** `subagents` is an explicit **capability grant** from the app author. A delegated call runs in-process and does not pass through the specialist's own endpoint authorization (`auth_level`, etc.) — treat one deployed app as one trust domain, and only delegate to specialists you are comfortable exposing to anyone who can reach the coordinator.

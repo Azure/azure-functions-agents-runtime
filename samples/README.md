@@ -12,13 +12,14 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [daily-azure-report](daily-azure-report/) | Timer + HTTP | ✅ azure_rest | ✅ Office 365 Outlook | ✅ MS Learn + Office 365 Outlook | ✅ azure-resources | | ✅ |
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
+| [per-agent-workflows](per-agent-workflows/) | HTTP | ✅ workflow-safe | | | | | ✅ |
+| [workflow-subagents-preview](workflow-subagents-preview/) | Queue | ✅ workflow-safe | | | ✅ | | |
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
 
-## Design previews
-
-- [workflow-subagents-preview](workflow-subagents-preview/) is a non-runnable,
-  reviewer-facing preview of the proposed Dynamic Workflow Sub Agent authoring
-  surface. It intentionally has no `host.json`.
+[`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
+two non-main owners share one Durable engine while retaining separate policies.
+From its directory, `python scripts/verify.py` verifies Azure Storage/Azurite;
+add `--backend dts` to verify Durable Task Scheduler.
 
 ## Run Locally (optional)
 

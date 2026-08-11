@@ -190,7 +190,7 @@ Enable Dynamic Workflows, filter workflow tools, and grant leaf specialists.
 
 | Property | Type | Required | Default | Description |
 |----------|------|----------|---------|-------------|
-| `enabled` | boolean | No | `false` | Enable Dynamic Workflows for this agent. In v1, only `main.agent.md` is honored. |
+| `enabled` | boolean | No | `false` | Enable Dynamic Workflows for this agent. The agent must have a supported trigger, chat API, or MCP endpoint. |
 | `exclude` | string[] | No | `[]` | Discovered `@workflow_tool` names to withhold from workflow plans. |
 | `subagents` | object[] | No | `[]` | Independent, deny-by-default leaf-specialist grants. [Details](#agent-workflows-subagents) |
 

@@ -11,6 +11,10 @@ pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77,
 
 # FRD 0004 — Dynamic workflows
 
+> **Superseded scope note:** FRD 0009 extends this historical main-agent-only
+> design to [eligible per-agent workflow owners](0009-per-agent-dynamic-workflows.md).
+> The original decisions below remain the record of the initial v1 design.
+
 ## 1. Summary
 
 Add experimental Dynamic Workflows support to the markdown-first Azure Functions

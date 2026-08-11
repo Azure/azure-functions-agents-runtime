@@ -428,7 +428,10 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
 Use both `@tool` and `@workflow_tool` when the same callable should be
 available both directly in chat and inside workflows. See
 [`docs/workflows.md`](docs/workflows.md) for the Activity handler
-contract and `workflows.exclude`.
+contract and `workflows.exclude`. Any agent with a supported trigger, chat API,
+or MCP endpoint can own workflows; see the
+[`per-agent-workflows`](samples/per-agent-workflows) sample for two independent
+non-main owners sharing one Durable engine.
 
 ## Built-in Endpoint Routes
 
@@ -552,6 +555,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 - [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
+- [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow owners and one-command Storage/DTS verification
 
 ## Deployment Notes
 

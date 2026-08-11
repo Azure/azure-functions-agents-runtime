@@ -385,7 +385,7 @@ authentication.
 
 ## 6. Test plan
 
-- [ ] Unit: composition and owner-policy catalog
+- [x] Unit: composition and owner-policy catalog
   - any eligible non-main agent can enable workflows;
   - an app with only non-main workflow owners is a `df.DFApp`;
   - `main.agent.md` remains supported;
@@ -394,20 +394,20 @@ authentication.
   - distinct owners receive independent tool excludes, Sub Agent grants, and
     prompt guidance;
   - owner-policy mappings and values are immutable.
-- [ ] Unit: one-time runtime registration
+- [x] Unit: one-time runtime registration
   - multiple enabled owners register one orchestrator and one copy of each
     Activity;
   - complete workflow handler and Agent catalogs remain available;
   - excluding a handler for one owner does not unregister it for another;
   - production execution does not authorize from the singleton app allowlist.
-- [ ] Unit: owner-scoped context and management
+- [x] Unit: owner-scoped context and management
   - the same session ID under two owner slugs generates different prefixes;
   - active limits, list, status, cancel, and terminate require both owner and
     session;
   - cross-owner operations return empty/not-found without disclosing existence;
   - legacy session-only IDs do not match an owner-scoped prefix, are treated as
     not-found, and their Durable instances are not deleted or mutated.
-- [ ] Unit: plan and Activity authorization
+- [x] Unit: plan and Activity authorization
   - prompt guidance and start-time validation use the same owner policy;
   - tool and Workflow Sub Agent Activities reject capabilities belonging only to
     another owner;
@@ -415,7 +415,7 @@ authentication.
   - restrictive policy changes reject a pending disallowed node;
   - every capability-bearing Activity payload contains `owner_slug`;
   - `wait` tasks retain existing behavior.
-- [ ] Integration: invocation channels
+- [x] Integration: invocation channels
   - multiple workflow-enabled agents register distinct chat, streaming, MCP,
     HTTP trigger, and non-HTTP trigger surfaces as configured;
   - each enabled surface receives the Durable client binding and correct
@@ -423,19 +423,21 @@ authentication.
   - HTTP workflow polling routes cannot observe another owner under the same
     session ID;
   - trigger starters return/end without waiting for terminal workflow state.
-- [ ] Workflow Sub Agent isolation
+- [x] Workflow Sub Agent isolation
   - each owner can schedule only its own `workflows.subagents` grants;
   - one specialist may be granted to multiple owners without duplicate Activity
     registration;
   - workflow leaf specialists retain their current isolated execution role.
-- [ ] Fixture scenario:
-  `tests/fixtures/config_scenarios/<next>_multi_owner_workflows/`.
+- [x] Fixture scenario:
+  `tests/fixtures/config_scenarios/18_multi_owner_workflows/`.
 - [ ] E2E: Azure Storage and DTS runs demonstrate concurrent owners, overlapping
   session IDs, distinct policies, status/control isolation, and execution after
   starter completion.
-- [ ] Sample verifier: one command starts dependencies and proves both successful
-  workflows plus cross-owner denial.
-- [ ] Canonical gate:
+- [x] Sample verifier: one command starts dependencies and proves both successful
+  workflows plus cross-owner denial. The script and its pure verification tests
+  are implemented; model-backed Storage/DTS execution remains covered by the
+  unchecked E2E item above.
+- [x] Canonical gate:
   - `python -m ruff check src tests`;
   - `python -m mypy src`;
   - `python -m pytest --cache-clear --cov=./src/azure_functions_agents
@@ -443,17 +445,17 @@ authentication.
 
 ## 7. Docs impact
 
-- [ ] `docs/architecture.md` — add the owner-policy catalog, one-time Durable
+- [x] `docs/architecture.md` — add the owner-policy catalog, one-time Durable
   registration, owner-scoped execution, and Activity reauthorization.
-- [ ] `docs/front-matter-spec.md` — remove the `main.agent.md` restriction and
+- [x] `docs/front-matter-spec.md` — remove the `main.agent.md` restriction and
   document eligible starter surfaces.
-- [ ] `docs/workflows.md` — document multiple owners, identity, isolation,
+- [x] `docs/workflows.md` — document multiple owners, identity, isolation,
   migration, trigger ownership, and operator guidance.
-- [ ] `docs/triggers.md` — clarify that each workflow-enabled declared trigger
+- [x] `docs/triggers.md` — clarify that each workflow-enabled declared trigger
   uses its owning agent's policy and Durable client.
-- [ ] `README.md` — link the per-agent workflow sample.
-- [ ] `samples/README.md` — list the runnable sample and its one-command verifier.
-- [ ] `docs/front-matter-reference.md` — no change expected because no schema
+- [x] `README.md` — link the per-agent workflow sample.
+- [x] `samples/README.md` — list the runnable sample and its one-command verifier.
+- [x] `docs/front-matter-reference.md` — no change expected because no schema
   change is planned.
 
 ## 8. Status & sign-off
