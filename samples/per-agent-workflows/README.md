@@ -119,6 +119,38 @@ GET /agents/release_manager/workflow-status?workflow_id=<id>
 GET /agents/release_manager/workflows
 ```
 
+### Send the sample messages yourself
+
+Keep `func start` running from `samples\per-agent-workflows\src`. In a second
+PowerShell terminal, move to the sample root:
+
+```powershell
+Set-Location samples\per-agent-workflows
+```
+
+Send only the incident workflow message:
+
+```powershell
+python scripts/send.py incident
+```
+
+Send only the release workflow message:
+
+```powershell
+python scripts/send.py release
+```
+
+Or start both owners with the same session ID to observe owner isolation:
+
+```powershell
+python scripts/send.py both
+```
+
+This script does not start Docker, emulators, or the Functions host and does not
+poll for completion. It only posts the documented prompt, then prints the
+workflow ID and owner-specific status URL. Use `--base-url` for a non-default
+host and `--session-id` to choose the shared session.
+
 ### Exact incident demo prompt
 
 > Start exactly one incident workflow now for incident INC-4821 on checkout-api.

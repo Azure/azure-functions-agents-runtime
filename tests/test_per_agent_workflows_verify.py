@@ -63,6 +63,19 @@ def _clear_provider_environment(
         monkeypatch.delenv(key, raising=False)
 
 
+def _use_template_settings(
+    monkeypatch: pytest.MonkeyPatch,
+    verify: ModuleType,
+    tmp_path: Path,
+) -> None:
+    template = verify.SAMPLE_SRC / "local.settings.template.json"
+    (tmp_path / template.name).write_text(
+        template.read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(verify, "SAMPLE_SRC", tmp_path)
+
+
 @pytest.mark.parametrize(
     ("values", "provider"),
     [
@@ -92,11 +105,13 @@ def _clear_provider_environment(
 )
 def test_provider_values_select_environment_provider_over_template_default(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     values: dict[str, str],
     provider: str,
 ) -> None:
     verify = _load_verify_module()
     _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
     for key, value in values.items():
         monkeypatch.setenv(key, value)
 
@@ -114,11 +129,13 @@ def test_provider_values_select_environment_provider_over_template_default(
 )
 def test_provider_values_requires_complete_azure_openai_configuration(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
     missing: str,
     message: str,
 ) -> None:
     verify = _load_verify_module()
     _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
     values = {
         "AZURE_OPENAI_ENDPOINT": "https://example.test/openai",
         "AZURE_OPENAI_DEPLOYMENT": "azure-deployment",
@@ -134,9 +151,11 @@ def test_provider_values_requires_complete_azure_openai_configuration(
 
 def test_provider_values_requires_openai_model(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     verify = _load_verify_module()
     _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
     monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-secret")
 
     with pytest.raises(RuntimeError, match="OPENAI_CHAT_MODEL_ID"):
