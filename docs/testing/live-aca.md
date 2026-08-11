@@ -17,10 +17,12 @@ Shared provisioning, dependency-closure delivery, and cleanup live in
 
 ## Run locally
 
-The dependency closure is built for the host platform, so these tests must run
-on **Linux (or WSL) x86_64 with CPython 3.13 or 3.14** to match the sandbox ABI.
-On Windows or macOS the fixture fails fast with an `ACA-SMOKE-ENV` error rather
-than shipping incompatible native wheels into the sandbox.
+The dependency closure is built for the host platform with the host interpreter,
+so these tests must run on **Linux (or WSL) x86_64 with the CPython minor
+version that matches the target sandbox disk** — CPython 3.13 for a
+`python-3.13` disk, 3.14 for `python-3.14`. On Windows or macOS, or on a
+mismatched minor version, the fixture fails fast with an `ACA-SMOKE-ENV` error
+rather than shipping incompatible native wheels into the sandbox.
 
 Install the ACA transport extra, authenticate with the Azure CLI, and set the
 following values for a CI-only Sandbox Group:
@@ -48,12 +50,23 @@ in normal local development or ordinary unit-test jobs.
 
 ### Host ABI prerequisite
 
-Run the live test only from Linux x86_64, including WSL, with CPython 3.13 or
-3.14. The fixture builds the dependency closure with the host interpreter, and
-the ACA sandbox is Linux x86_64. Windows and macOS hosts are unsupported for
-local runs because they would upload incompatible native wheels instead of the
-Linux binaries the sandbox needs. The fixture fails before building the closure
-or creating a sandbox when the host ABI is unsupported.
+Run the live tests only from Linux x86_64, including WSL, on the CPython minor
+version that matches the sandbox disk you are targeting. The fixture builds the
+dependency closure with the host interpreter, so compiled wheels such as
+`pydantic_core` and `aiohttp` carry that interpreter's ABI tag: a `cp314` wheel
+cannot import on the CPython 3.13 that a `python-3.13` disk boots. Being on
+"some Linux CPython" is not sufficient.
+
+The guard therefore requires host minor == disk minor, and its error names both
+versions and the two ways out: run on the matching interpreter, or target the
+`python-<host-version>` disk. Windows and macOS hosts are rejected outright. All
+of these checks run before the closure is built and before any sandbox is
+created, so a mismatch costs nothing.
+
+A `uv`-created virtual environment may ship without `pip`. The closure build
+shells out to `pip`, so run `python -m ensurepip` once in such an environment;
+the failure surfaces pip's own message, so this is self-explanatory the first
+time it happens.
 
 ## Enable the scheduled CI job
 
