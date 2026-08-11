@@ -1,0 +1,57 @@
+site_name: Azure Functions Agents Runtime
+site_description: A markdown-first programming model for building AI agents on Azure Functions, powered by the Microsoft Agent Framework.
+site_url: https://azure.github.io/azure-functions-agents-runtime/
+repo_url: https://github.com/Azure/azure-functions-agents-runtime
+repo_name: Azure/azure-functions-agents-runtime
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.top
+    - search.highlight
+    - search.suggest
+  palette:
+    - scheme: default
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - scheme: slate
+      primary: indigo
+      accent: indigo
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - attr_list
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences
+  - toc:
+      permalink: true
+
+# frds/ and auto-generated reference docs are intentionally excluded from the
+# public nav (internal process docs); this just keeps that expected omission
+# from being noisy without hiding genuinely broken links elsewhere.
+validation:
+  nav:
+    omitted_files: info
+  links:
+    anchors: info
+
+nav:
+  - Home: index.md
+  - Getting started: getting-started.md
+  - Concepts:
+      - Architecture: architecture.md
+      - Triggers: triggers.md
+      - Observability: observability.md
+      - Dynamic workflows: workflows.md
+  - Reference:
+      - Front matter spec: front-matter-spec.md

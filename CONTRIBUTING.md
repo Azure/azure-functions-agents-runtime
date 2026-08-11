@@ -99,3 +99,17 @@ You can override these defaults per command, for example:
 ```bash
 uv build --default-index https://pypi.org/simple
 ```
+
+## Documentation site
+
+The published docs at [azure.github.io/azure-functions-agents-runtime](https://azure.github.io/azure-functions-agents-runtime/)
+are built from `docs/` with [MkDocs](https://www.mkdocs.org/) and deployed by
+`.github/workflows/docs.yml` on every push to `main`. To preview changes locally:
+
+```bash
+python -m pip install -r requirements-docs.txt
+python -m mkdocs serve
+```
+
+Open http://127.0.0.1:8000/. Pull requests run `mkdocs build --strict` as a CI check but do not
+deploy; only pushes to `main` (or a manual workflow dispatch) publish the site.
