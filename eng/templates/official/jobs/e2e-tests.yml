@@ -117,15 +117,11 @@ jobs:
           inlineScript: |
             set -euo pipefail
 
-            # Show which identity the service connection logged in as, so an RBAC
-            # failure below is obviously an identity problem and not a code problem.
             echo "Authenticated as:"
             az account show --query '{subscription:name, subscriptionId:id, user:user.name}' --output json
 
-            # An undefined pipeline variable is passed through by ADO as the literal
-            # text "$(NAME)", which is non-empty and would slip past a plain empty
-            # check, then fail later as a confusing malformed-URL error. Reject the
-            # un-substituted form explicitly so the missing variable is named here.
+            # An undefined pipeline variable arrives as the literal "$(NAME)", which is
+            # non-empty and would pass a plain empty check.
             for name in ACA_SANDBOX_GROUP_RESOURCE_ID ACA_SANDBOX_DISK; do
               eval "value=\${AZURE_SMOKE_${name}:-}"
               if [ -z "${value}" ] || case "${value}" in '$('*')') true;; *) false;; esac; then

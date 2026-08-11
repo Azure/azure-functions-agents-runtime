@@ -58,10 +58,8 @@ dev = [
     # azure.monitor.opentelemetry) and mypy on src still resolve it. Keep in sync with the pin in the
     # [monitor] extra above.
     "azure-monitor-opentelemetry==1.8.8",
-    # Pull the aca_sandbox extra by self-reference (not duplicated pins) so dev/CI gets the
-    # preview ACA Sandbox SDK and azure-data-tables. This keeps mypy type-checking
-    # transport/aca_sdk.py against the real SDK and lets pytest exercise session_state's
-    # Table store against Azurite, without drifting out of sync with the [aca_sandbox] pins.
+    # Self-reference the aca_sandbox extra rather than duplicating its pins, so dev/CI
+    # type-checks against the real preview SDK and cannot drift out of sync.
     "azurefunctions-agents-runtime[aca_sandbox]",
     # Extra runtime dependencies used by sample apps, needed so the E2E `func start` tests can boot
     # every sample against the editable repo install (no per-sample requirements.txt install).
@@ -135,14 +133,8 @@ exclude = ["build", "dist", "samples"]
 module = "azure_functions_agents.*"
 strict = true
 
-# The preview ACA Sandbox SDK now ships in the `dev` extra, so the default dev/CI
-# environment installs it and mypy checks aca_sdk.py against the SDK's real types
-# (it is an inline-typed PEP 561 package -- it ships py.typed and no stubs).
-# This override is inert whenever the package is present, because
-# ignore_missing_imports only suppresses diagnostics raised when mypy cannot
-# resolve an import at all. It is kept for environments that deliberately install
-# without the extra (a minimal in-lang-worker-only setup), where the same
-# annotations degrade to Any rather than failing mypy.
+# Inert while the SDK is installed via the `dev` extra: ignore_missing_imports only
+# fires when an import cannot be resolved. Kept for installs without that extra.
 [[tool.mypy.overrides]]
 module = [
     "azure.containerapps.sandbox",
