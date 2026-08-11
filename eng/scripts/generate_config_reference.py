@@ -664,7 +664,8 @@ def generate_markdown() -> str:
         "- `name` (always required)",
         "- `description` (always required)",
         "- `trigger` (required unless at least one `builtin_endpoints` value is enabled, "
-        "or the agent is referenced only as an internal specialist via another agent's `subagents:`)",
+        "or the agent is referenced as an internal specialist via another agent's "
+        "`subagents` or `workflows.subagents`)",
         "",
         "**Global Configuration:**",
         "- No required properties (entire file is optional)",

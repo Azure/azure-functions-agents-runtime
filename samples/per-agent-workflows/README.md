@@ -27,6 +27,11 @@ There is intentionally no `main.agent.md`. Each owner has a distinct
 `workflows.exclude` set and one distinct `workflows.subagents` grant. Specialists
 are internal files without triggers or built-in endpoints.
 
+The root-versus-`agents/` placement is only an organizational convention in this
+sample. Roles come from configuration: the two root agents enable workflows and
+chat starters, while the internal files are referenced through
+`workflows.subagents`.
+
 ## Workflow diagrams
 
 ### Incident workflow

@@ -174,6 +174,10 @@ agent markdown stays focused on the domain.
 > UI alone is insufficient because it calls the chat API; enable `chat_api` too.
 > Startup fails rather than silently accepting an enabled but inert owner.
 
+File placement does not assign these roles. See
+[Agent roles and reachability](./front-matter-spec.md#agent-roles-and-reachability)
+for how direct agents, workflow owners, and internal specialists are identified.
+
 ### App-wide engine, per-owner policy
 
 The app discovers complete, immutable catalogs of workflow handlers and agents.

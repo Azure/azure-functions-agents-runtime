@@ -111,7 +111,27 @@ YAML front matter at the top of each agent file.
   ...
 ```
 
-Agent markdown files (`*.agent.md`) can be placed at the app root or in an `agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`). Files from both locations are combined and sorted by path for deterministic ordering. `main.agent.md` in either location is marked as the main agent.
+Agent markdown files (`*.agent.md`) can be placed at the app root or in an
+`agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`).
+Files from both locations are combined and sorted by path for deterministic
+ordering. `main.agent.md` in either location is marked as the main agent for
+compatibility, but neither its filename nor its directory determines whether an
+agent is directly invokable, a coordinator, a workflow owner, or a specialist.
+
+### Agent roles and reachability
+
+Roles come from invocation surfaces and references, not file placement:
+
+| Role | How it is identified |
+| --- | --- |
+| Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
+| Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
+| Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
+| Workflow owner | Sets `workflows.enabled: true` and has an eligible starter: a supported trigger, chat API, or MCP endpoint. |
+| Workflow Sub Agent | Is referenced by an owner's `workflows.subagents`. It does not need `workflows.enabled` and may omit its own trigger/endpoints when it is internal-only. |
+
+These roles can overlap. For example, an agent can have its own HTTP trigger and
+also be referenced as another agent's Chat or Workflow Sub Agent.
 
 ---
 
@@ -136,7 +156,7 @@ Fields are organized into categories based on how they can be used:
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced only as an internal specialist via another agent's `subagents:`)
+- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
 - `logger`, `substitute_variables` — Agent runtime behavior switches
@@ -147,7 +167,10 @@ Fields are organized into categories based on how they can be used:
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name` and `description`. It must also have either a `trigger` or at least one enabled `builtin_endpoints` value.
+**Summary:** Every `.agent.md` file must have `name` and `description`. It must
+also have either a `trigger` or at least one enabled `builtin_endpoints` value,
+unless another agent references it through `subagents` or
+`workflows.subagents` as an internal specialist.
 
 #### `name`
 - **Type:** `string`
@@ -1237,7 +1260,7 @@ step-by-step answers.
 **Agent Front Matter (`.agent.md`):**
 1. **`name`** — Must always be present (string)
 2. **`description`** — Must always be present (string)
-3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled, **or** the agent is referenced only as an internal specialist via another agent's `subagents:` (see "Internal specialist agents" under [File Naming Conventions](#file-naming-conventions) below)
+3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled, **or** the agent is referenced as an internal specialist through another agent's `subagents` or `workflows.subagents` (see "Internal specialist agents" under [File Naming Conventions](#file-naming-conventions) below)
 
 **Global Configuration (`agents.config.yaml`):**
 - **No required properties** — The entire file is optional
@@ -1331,9 +1354,18 @@ In other words, the display `name:` field is never used to derive registered Azu
 **Endpoint-only agents:**
 Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`, and registers an MCP tool named `main` on the shared runtime MCP transport.
 
-**Internal specialist agents:** An agent may also omit both `trigger` and `builtin_endpoints` if — and only if — another agent's `subagents:` references it. Such an agent has no endpoint of its own and is reachable only through delegation; see [`subagents`](#subagents) and [Example 6](#example-6-coordinator-with-delegated-specialists) above.
+**Internal specialist agents:** An agent may also omit both `trigger` and
+`builtin_endpoints` if — and only if — another agent references it through
+top-level `subagents` or `workflows.subagents`. Such an agent has no endpoint of
+its own. A top-level reference makes it reachable through a `delegate_<slug>`
+tool; a workflow reference makes it reachable as a workflow `sub_agent` node.
+See [`subagents`](#subagents),
+[`workflows`](#workflows), and
+[Example 6](#example-6-coordinator-with-delegated-specialists) above.
 
-Agents with neither `trigger` nor enabled `builtin_endpoints`, and that are not referenced by any other agent's `subagents:`, are invalid.
+Agents with neither `trigger` nor enabled `builtin_endpoints`, and that are not
+referenced by any other agent's `subagents` or `workflows.subagents`, are
+invalid.
 
 **Example project structure:**
 ```

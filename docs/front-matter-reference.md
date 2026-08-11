@@ -316,7 +316,7 @@ Applies to all string values in `agents.config.yaml`, `mcp.json`, and agent `.ag
 **Agent Front Matter:**
 - `name` (always required)
 - `description` (always required)
-- `trigger` (required unless at least one `builtin_endpoints` value is enabled, or the agent is referenced only as an internal specialist via another agent's `subagents:`)
+- `trigger` (required unless at least one `builtin_endpoints` value is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 
 **Global Configuration:**
 - No required properties (entire file is optional)
