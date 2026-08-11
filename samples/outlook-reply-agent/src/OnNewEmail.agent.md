@@ -3,7 +3,7 @@ name: Outlook Reply Agent
 description: Drafts a reply when new Office 365 Outlook email comes from the watched sender.
 
 trigger:
-  type: generic_trigger
+  type: connector_trigger
   args:
     type: connectorTrigger
 ---
