@@ -334,6 +334,86 @@ async def test_submit_launch_stderr_log_cannot_forge_a_second_record(
 
 
 @pytest.mark.asyncio
+async def test_submit_does_not_log_a_secret_carried_on_the_marker_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+    sandbox_secret = "AZURE_CLIENT_SECRET=super-secret-value-do-not-leak"
+
+    async def emit_forged_marker(_command: str) -> None:
+        # The prefix is repo-authored but the remainder is attacker-chosen: a closed-set check,
+        # not a prefix check, is what keeps this out of operator logs.
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            f"azfn-agents-harness-launch-error: {sandbox_secret}\n".encode(),
+        )
+
+    transport.exec_hook = emit_forged_marker
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    log_output = caplog.text
+    assert sandbox_secret not in log_output
+    assert "super-secret-value-do-not-leak" not in log_output
+    launch_records = [
+        record for record in caplog.records if "emitted launch stderr" in record.getMessage()
+    ]
+    assert len(launch_records) == 1
+    assert "no harness markers, content withheld" in launch_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_submit_logs_a_repo_authored_launch_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_allow_listed_marker(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n",
+        )
+
+    transport.exec_hook = emit_allow_listed_marker
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert "azfn-agents-harness-launch-error: Sandbox run inbox is missing." in caplog.text
+    assert "content withheld" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_log_a_near_miss_launch_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_near_miss_marker(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: Sandbox run inbox is missing. and a secret tail\n",
+        )
+
+    transport.exec_hook = emit_near_miss_marker
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    launch_records = [
+        record for record in caplog.records if "emitted launch stderr" in record.getMessage()
+    ]
+    assert len(launch_records) == 1
+    message = launch_records[0].getMessage()
+    assert "and a secret tail" not in message
+    assert "no harness markers, content withheld" in message
+
+
+@pytest.mark.asyncio
 async def test_read_launch_stderr_skips_downloading_an_oversized_sidecar(
     caplog: pytest.LogCaptureFixture,
 ) -> None:

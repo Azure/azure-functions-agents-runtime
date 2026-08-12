@@ -211,6 +211,23 @@ def _hardcoded_var_lib_lines(tree: ast.AST) -> list[int]:
     ]
 
 
+def _harness_journal_error_messages(tree: ast.AST) -> tuple[list[str], list[int]]:
+    """Return literal HarnessJournalError messages and the line of any non-literal argument."""
+    literals: list[str] = []
+    dynamic: list[int] = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+            continue
+        if node.func.id != "HarnessJournalError" or not node.args:
+            continue
+        argument = node.args[0]
+        if isinstance(argument, ast.Constant) and isinstance(argument.value, str):
+            literals.append(argument.value)
+        else:
+            dynamic.append(node.lineno)
+    return literals, dynamic
+
+
 def test_frozen_dataclass_guard_detects_direct_post_init_only() -> None:
     frozen_tree = ast.parse(
         """
@@ -357,3 +374,26 @@ def test_source_and_tests_have_no_feature_bookkeeping() -> None:
     findings = _repository_provenance_findings(paths, root)
 
     assert not findings, "\n".join(findings)
+
+
+def test_harness_launch_diagnostics_are_allow_listed() -> None:
+    from azure_functions_agents.journal_paths import ALLOWED_LAUNCH_DIAGNOSTICS
+
+    root = _repository_root()
+    harness = root / "src" / "azure_functions_agents" / "harness"
+    missing: list[str] = []
+    dynamic: list[str] = []
+    for path in (harness / "__main__.py", harness / "journal_writer.py"):
+        tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+        literals, dynamic_lines = _harness_journal_error_messages(tree)
+        missing.extend(
+            f"{path.relative_to(root)}: {message!r}"
+            for message in literals
+            if message not in ALLOWED_LAUNCH_DIAGNOSTICS
+        )
+        dynamic.extend(f"{path.relative_to(root)}:{line}" for line in dynamic_lines)
+
+    assert not dynamic, "non-literal HarnessJournalError argument(s): " + ", ".join(dynamic)
+    assert not missing, "HarnessJournalError message(s) absent from the allow-list:\n" + "\n".join(
+        missing
+    )

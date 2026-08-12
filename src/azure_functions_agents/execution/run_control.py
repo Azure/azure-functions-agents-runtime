@@ -23,12 +23,7 @@ from pydantic import (
 
 from .._logger import logger
 from ..journal_paths import (
-    INBOX_PATH as _INBOX_PATH,
-)
-from ..journal_paths import (
-    JOURNAL_ROOT_PATH as _JOURNAL_ROOT_PATH,
-)
-from ..journal_paths import (
+    ALLOWED_LAUNCH_DIAGNOSTICS,
     LAUNCH_DIAGNOSTIC_PREFIX,
     LAUNCH_STDERR_FILENAME,
     inbox_path,
@@ -37,6 +32,12 @@ from ..journal_paths import (
     result_path,
     run_path,
     status_path,
+)
+from ..journal_paths import (
+    INBOX_PATH as _INBOX_PATH,
+)
+from ..journal_paths import (
+    JOURNAL_ROOT_PATH as _JOURNAL_ROOT_PATH,
 )
 from ..journal_paths import (
     RUNS_PATH as _RUNS_PATH,
@@ -307,7 +308,7 @@ class SandboxRunControl:
         except Exception as exc:
             launch_stderr = await self._read_launch_stderr(handle, normalized_run_id)
             if launch_stderr:
-                # Untrusted sandbox stderr: only repo-authored marker lines are logged verbatim;
+                # Untrusted sandbox stderr: only exact allow-listed marker lines are logged verbatim;
                 # all other content is reduced to metadata so secrets and forged records cannot leak.
                 logger.error(
                     "Sandbox harness emitted launch stderr before acceptance for run %s: %s",
@@ -636,11 +637,22 @@ def _sanitize_log_line(text: str) -> str:
     return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in text)
 
 
+def _is_allowed_launch_diagnostic(line: str) -> bool:
+    """Return whether a launch-stderr line is a repo-authored diagnostic safe to log verbatim.
+
+    The marker prefix is not an authorship check: the sidecar is untrusted, so a line counts
+    only when its marker-stripped remainder is an exact member of the closed allow-list.
+    """
+    if not line.startswith(LAUNCH_DIAGNOSTIC_PREFIX):
+        return False
+    return line.removeprefix(LAUNCH_DIAGNOSTIC_PREFIX).strip() in ALLOWED_LAUNCH_DIAGNOSTICS
+
+
 def _summarize_launch_stderr(text: str) -> str:
     """Reduce untrusted launch stderr to safe metadata plus allow-listed marker lines."""
     lines = text.splitlines()
     markers = [
-        _sanitize_log_line(line) for line in lines if line.startswith(LAUNCH_DIAGNOSTIC_PREFIX)
+        _sanitize_log_line(line) for line in lines if _is_allowed_launch_diagnostic(line)
     ]
     byte_count = len(text.encode("utf-8", errors="replace"))
     summary = f"{len(lines)} line(s), {byte_count} byte(s)"
