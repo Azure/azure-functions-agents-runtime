@@ -444,3 +444,21 @@ async def test_unauthorized_response_body_is_ignored() -> None:
             return ["platform-specific", "error"]
 
     assert await support._json_body(UnauthorizedResponse()) == {}  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_typed_setup_timeout_body_is_preserved() -> None:
+    class SetupTimeoutResponse:
+        status = 504
+
+        async def json(self, *, content_type: object = None) -> object:
+            del content_type
+            return {
+                "error": "setup_deadline_exceeded",
+                "retry_with": "respond-async",
+            }
+
+    assert await support._json_body(SetupTimeoutResponse()) == {  # type: ignore[arg-type]
+        "error": "setup_deadline_exceeded",
+        "retry_with": "respond-async",
+    }

@@ -180,11 +180,6 @@ async def json_request(
 
     try:
         async with session.request(method, url, headers=headers, json=payload) as response:
-            if response.status >= 502:
-                raise AcaSmokeEnvironmentError(
-                    f"Function App was unavailable at {redact_deployed_aca_evidence(url)} "
-                    f"(HTTP {response.status})."
-                )
             return response.status, await _json_body(response), dict(response.headers)
     except (TimeoutError, OSError) as exc:
         raise AcaSmokeEnvironmentError(

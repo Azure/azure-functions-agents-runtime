@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import uuid
 from datetime import timedelta
 
@@ -33,6 +34,9 @@ from tests.live.aca_deployed_lifecycle_support import (
     wait_for_suspended_sandbox,
     wait_until_reclaim_due,
 )
+
+_SETUP_RETRY_ATTEMPTS = 4
+_SETUP_RETRY_DELAY_SECONDS = 5.0
 
 if not deployed_aca_smoke_enabled():
     pytest.skip(
@@ -178,13 +182,25 @@ async def _submit_and_wait(
     request_headers = {**headers, "Idempotency-Key": uuid.uuid4().hex}
     if session_id is not None:
         request_headers["x-ms-session-id"] = session_id
-    accepted_status, accepted, response_headers = await json_request(
-        client,
-        "POST",
-        config.deployed.chat_url,
-        headers=request_headers,
-        payload=submission_payload("Return a brief acknowledgement."),
-    )
+    accepted_status = 0
+    accepted: dict[str, object] = {}
+    response_headers: object = {}
+    for attempt in range(_SETUP_RETRY_ATTEMPTS):
+        accepted_status, accepted, response_headers = await json_request(
+            client,
+            "POST",
+            config.deployed.chat_url,
+            headers=request_headers,
+            payload=submission_payload("Return a brief acknowledgement."),
+        )
+        if accepted_status != 504 or accepted.get("error") != "setup_deadline_exceeded":
+            break
+        if attempt + 1 == _SETUP_RETRY_ATTEMPTS:
+            raise AssertionError(
+                "The resumed public session did not become ready within the bounded "
+                "setup-deadline retry window."
+            )
+        await asyncio.sleep(_SETUP_RETRY_DELAY_SECONDS)
     if accepted_status in {401, 403, 404}:
         raise AcaSmokeEnvironmentError(
             "The protected deployed chat route rejected the app-only token or is missing."

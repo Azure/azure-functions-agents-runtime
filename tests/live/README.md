@@ -194,6 +194,12 @@ the protected non-secret variables `ACA_DEPLOYED_TABLE_SERVICE_URI`,
 `ACA_DEPLOYED_TABLE_NAME`, `ACA_DEPLOYED_APP_SUBSCRIPTION_ID`, and
 `ACA_DEPLOYED_APP_SITE_NAME`.
 
+ACA resume can outlast one 30-second request setup budget while the provider
+continues bringing the sandbox online. The lifecycle client retries only the
+typed `setup_deadline_exceeded` response, with the same session and idempotency
+key, for a fixed bounded window. This is a public client retry; it does not add
+an outer retry or timeout around the runtime's attach/resume handshake.
+
 The qualification proves only normal lifecycle behavior: ACA reports the
 owned sandbox `Stopped` or `Suspended`; a second public turn resumes the same
 sandbox ID and generation; and the deployed controller timer deletes the owned
