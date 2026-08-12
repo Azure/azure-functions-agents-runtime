@@ -12,6 +12,7 @@ from datetime import datetime
 
 import pytest
 from aiohttp import ClientSession, ClientTimeout, TCPConnector
+from azure.core.exceptions import AzureError
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 from tests.live.aca_deployed_agent_support import (
     AcceptedRun,
@@ -46,11 +47,13 @@ from tests.live.aca_deployed_load_support import (
 )
 
 from azure_functions_agents.session_state import (
+    TERMINAL_RUN_STATUSES,
     DurableSessionOperation,
     DurableSessionRecord,
     EntraUserOwnerContext,
     owner_partition,
 )
+from azure_functions_agents.transport.transport_models import SandboxTransportError
 
 _LOGGER = logging.getLogger(__name__)
 _ACTIVE_STATES = frozenset({"accepted", "running"})
@@ -66,6 +69,7 @@ _SETUP_DEADLINE_RETRY_SECONDS = 5.0
 _RECOVERY_ATTEMPTS = 5
 _RECOVERY_POLL_SECONDS = 1.0
 _OVERLAP_BUDGET_MARGIN_SECONDS = 15.0
+_SETTLEMENT_TIMEOUT_SECONDS = 480.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
 _LOAD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
@@ -169,6 +173,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
     unclassified_service_throttle_count = 0
     unresolved_idempotency_count = 0
     cleanup_complete = False
+    settlement_complete = True
     metrics = None
     cleanup_error: BaseException | None = None
     try:
@@ -236,16 +241,36 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
                     ],
                 )
             finally:
+                inner_primary_error = sys.exception()
                 for task in event_tasks:
                     if not task.done():
                         task.cancel()
                 if event_tasks:
                     await asyncio.gather(*event_tasks, return_exceptions=True)
+                if inner_primary_error is not None and submitted:
+                    try:
+                        await _settle_failed_runs(
+                            resources,
+                            config,
+                            partition_key,
+                            submitted,
+                            control,
+                            authorization,
+                        )
+                    except (AcaSmokeEnvironmentError, AssertionError):
+                        settlement_complete = False
+                        _note_settlement_failure(inner_primary_error)
     finally:
         primary_error = sys.exception()
         try:
             if resources is not None and submitted:
-                cleanup_complete = await _cleanup_load_sessions(resources, config, partition_key, submitted)
+                if settlement_complete:
+                    cleanup_complete = await _cleanup_load_sessions(
+                        resources, config, partition_key, submitted
+                    )
+                else:
+                    await _provider_cleanup_last_resort(resources, config, partition_key, submitted)
+                    cleanup_complete = False
             if unresolved_idempotency_count:
                 cleanup_complete = False
         except (AcaSmokeEnvironmentError, AssertionError) as exc:
@@ -290,6 +315,10 @@ def _raise_or_note_cleanup_failure(
     raise AcaSmokeEnvironmentError(
         "ACA load cleanup did not complete after preserving admitted session candidates."
     ) from cleanup_error
+
+
+def _note_settlement_failure(primary_error: BaseException) -> None:
+    primary_error.add_note("ACA load durable settlement also failed before provider cleanup.")
 
 
 async def _submit_distinct_sessions(
@@ -639,7 +668,11 @@ async def _read_active_observation(
     completed_monotonic = time.perf_counter()
     completed_utc = utc_now()
     assert_session_belongs_to_deployment(session, config)
-    if run.status not in _ACTIVE_STATES or session.active_run_id != accepted.run_id:
+    if (
+        session.status != "running"
+        or run.status not in _ACTIVE_STATES
+        or session.active_run_id != accepted.run_id
+    ):
         return None
     _assert_active_operation_consistency(session, operations, accepted.run_id)
     return _ActiveObservation(
@@ -690,7 +723,6 @@ async def _exercise_one_active_race(
         headers={
             **headers,
             "Idempotency-Key": submitted.idempotency_key,
-            "x-ms-session-id": accepted.session_id,
         },
         payload=submission_payload(_LOAD_PROMPT),
     )
@@ -823,6 +855,139 @@ async def _read_terminal_observation(
     assert session.active_operation_id is None
     assert not [operation for operation in operations if operation.state == "active"]
     return True
+
+
+async def _settle_failed_runs(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    submitted: list[_SubmittedRun],
+    client: ClientSession,
+    authorization: str,
+) -> None:
+    """Use only public cancellation, then wait for durable slots to become terminal and idle."""
+    outcomes = await asyncio.gather(
+        *(
+            _settle_one_failed_run(
+                resources,
+                config,
+                partition_key,
+                item,
+                client,
+                authorization,
+            )
+            for item in submitted
+        ),
+        return_exceptions=True,
+    )
+    failures = [
+        outcome
+        for outcome in outcomes
+        if isinstance(outcome, (AcaSmokeEnvironmentError, AssertionError))
+    ]
+    if failures:
+        raise AcaSmokeEnvironmentError(
+            "One or more failed load runs did not settle to a terminal idle durable state."
+        ) from failures[0]
+    unexpected = [outcome for outcome in outcomes if isinstance(outcome, BaseException)]
+    if unexpected:
+        raise AcaSmokeEnvironmentError(
+            "A failed load-run settlement could not complete its read-only observation."
+        ) from unexpected[0]
+
+
+async def _settle_one_failed_run(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    submitted: _SubmittedRun,
+    client: ClientSession,
+    authorization: str,
+) -> None:
+    """Allow provisioning to settle before a single public cancellation request."""
+    deadline = time.perf_counter() + _SETTLEMENT_TIMEOUT_SECONDS
+    cancel_requested = False
+    accepted = submitted.accepted
+    while True:
+        session, run, operations = await asyncio.gather(
+            read_authoritative_session(
+                resources, session_id=accepted.session_id, partition_key=partition_key
+            ),
+            read_authoritative_run(
+                resources,
+                session_id=accepted.session_id,
+                run_id=accepted.run_id,
+                partition_key=partition_key,
+            ),
+            read_session_operations(
+                resources, session_id=accepted.session_id, partition_key=partition_key
+            ),
+        )
+        assert_session_belongs_to_deployment(session, config)
+        if run.status in TERMINAL_RUN_STATUSES:
+            if (
+                session.active_run_id is None
+                and session.active_operation_id is None
+                and not [operation for operation in operations if operation.state == "active"]
+            ):
+                return
+        elif session.status in {"running", "canceling"} and not cancel_requested:
+            status, projection, _ = await json_request(
+                client,
+                "POST",
+                accepted.management_urls["cancel_url"],
+                headers={"Authorization": authorization},
+            )
+            assert status == 200
+            assert projection.get("state") in TERMINAL_RUN_STATUSES
+            cancel_requested = True
+        if time.perf_counter() >= deadline:
+            raise AcaSmokeEnvironmentError(
+                "Failed load runs did not settle from provisioning to a terminal idle durable state."
+            )
+        await asyncio.sleep(_POLL_SECONDS)
+
+
+async def _provider_cleanup_last_resort(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    submitted: list[_SubmittedRun],
+) -> None:
+    """Remove only exact-label provider backing after a failed durable settlement."""
+    sessions = await asyncio.gather(
+        *(
+            read_authoritative_session(
+                resources, session_id=item.accepted.session_id, partition_key=partition_key
+            )
+            for item in submitted
+        )
+    )
+    sessions_with_backing = []
+    for session in sessions:
+        assert_session_belongs_to_deployment(session, config)
+        if session.sandbox_id is None:
+            continue
+        sessions_with_backing.append(session)
+        try:
+            snapshots = await owned_snapshots(resources, session)
+            for snapshot in snapshots:
+                await resources.adapter.delete_snapshot(snapshot.snapshot_id)
+            sandbox = await owned_sandbox(resources, session)
+            if sandbox is not None:
+                await resources.adapter.delete_sandbox(sandbox.sandbox_id)
+        except (AzureError, SandboxTransportError) as exc:
+            raise AcaSmokeEnvironmentError(
+                "Last-resort exact-label provider cleanup could not delete owned ACA resources."
+            ) from exc
+    remaining = await asyncio.gather(
+        *(owned_sandbox(resources, session) for session in sessions_with_backing),
+        *(owned_snapshots(resources, session) for session in sessions_with_backing),
+    )
+    if not all(not item for item in remaining):
+        raise AcaSmokeEnvironmentError(
+            "Last-resort exact-label provider cleanup left owned sandbox or snapshot resources behind."
+        )
 
 
 async def _cleanup_load_sessions(

@@ -326,6 +326,305 @@ async def test_cleanup_accepts_empty_snapshot_tuple_and_propagates_errors(
         )
 
 
+@pytest.mark.asyncio
+async def test_creating_session_is_not_an_active_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    submitted = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+        idempotency_key="key-a",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace(status="creating", active_run_id="run-a", active_operation_id=None)
+
+    async def read_run(*_: object, **__: object) -> object:
+        return SimpleNamespace(status="accepted")
+
+    async def read_operations(*_: object, **__: object) -> tuple[()]:
+        return ()
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+    monkeypatch.setattr(module, "read_session_operations", read_operations)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+
+    assert (
+        await module._read_active_observation(  # type: ignore[attr-defined]
+            object(), object(), "partition", submitted
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+async def test_active_race_replay_omits_session_header_and_conflict_includes_it(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    accepted = SimpleNamespace(session_id="session-a", run_id="run-a")
+    submitted = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=accepted,
+        idempotency_key="original-key",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+    captured_headers: list[dict[str, str]] = []
+
+    async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        captured_headers.append(dict(kwargs["headers"]))  # type: ignore[arg-type,index]
+        if len(captured_headers) == 1:
+            return 202, {"session_id": "session-a", "run_id": "run-a"}, {}
+        return 409, {"error": "active_run_exists"}, {}
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module, "parse_accepted_run", lambda *_: accepted)
+
+    assert await module._exercise_one_active_race(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        {"Authorization": "redacted"},
+        submitted,
+    ) == (1, 1)
+    assert captured_headers[0]["Idempotency-Key"] == "original-key"
+    assert "x-ms-session-id" not in captured_headers[0]
+    assert captured_headers[1]["x-ms-session-id"] == "session-a"
+    assert captured_headers[1]["Idempotency-Key"] != "original-key"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("initial_status", ["running", "creating"])
+async def test_failed_run_settlement_waits_then_cancels_and_requires_idle_state(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+    initial_status: str,
+) -> None:
+    module = load_module
+    submitted = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(
+            session_id="session-a", run_id="run-a", management_urls={"cancel_url": "/cancel"}
+        ),
+        idempotency_key="key-a",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+    state = {"phase": "initial", "cancel_phase": None}
+    cancel_calls: list[str] = []
+
+    async def read_session(*_: object, **__: object) -> object:
+        if state["phase"] == "terminal":
+            return SimpleNamespace(status="ready", active_run_id=None, active_operation_id=None)
+        return SimpleNamespace(
+            status=initial_status if state["phase"] == "initial" else "running",
+            active_run_id="run-a",
+            active_operation_id="operation-a",
+        )
+
+    async def read_run(*_: object, **__: object) -> object:
+        return SimpleNamespace(status="canceled" if state["phase"] == "terminal" else "accepted")
+
+    async def read_operations(*_: object, **__: object) -> tuple[object, ...]:
+        if state["phase"] == "terminal":
+            return ()
+        return (SimpleNamespace(state="active"),)
+
+    async def request(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        state["cancel_phase"] = state["phase"]
+        cancel_calls.append("cancel")
+        return 200, {"state": "canceled"}, {}
+
+    async def advance(_: float) -> None:
+        if cancel_calls:
+            state["phase"] = "terminal"
+        elif state["phase"] == "initial":
+            state["phase"] = "running"
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+    monkeypatch.setattr(module, "read_session_operations", read_operations)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module.asyncio, "sleep", advance)
+
+    await module._settle_one_failed_run(  # type: ignore[attr-defined]
+        object(), object(), "partition", submitted, object(), "redacted"
+    )
+
+    assert cancel_calls == ["cancel"]
+    if initial_status == "creating":
+        assert state["cancel_phase"] == "running"
+
+
+@pytest.mark.asyncio
+async def test_failed_run_settlement_waits_for_all_candidates_before_reporting_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    completed: list[str] = []
+
+    async def settle_one(*args: object) -> None:
+        candidate = args[3]
+        if candidate == "first":
+            raise AcaSmokeEnvironmentError("first failed")
+        completed.append("second")
+
+    monkeypatch.setattr(module, "_settle_one_failed_run", settle_one)
+    with pytest.raises(AcaSmokeEnvironmentError, match="did not settle"):
+        await module._settle_failed_runs(  # type: ignore[attr-defined]
+            object(), object(), "partition", ["first", "second"], object(), "redacted"
+        )
+
+    assert completed == ["second"]
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_settlement_waits_for_idle_without_public_cancel(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    submitted = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(
+            session_id="session-a", run_id="run-a", management_urls={"cancel_url": "/cancel"}
+        ),
+        idempotency_key="key-a",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+    settled = False
+    cancel_requests = 0
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace(
+            status="running",
+            active_run_id=None if settled else "run-a",
+            active_operation_id=None if settled else "operation-a",
+        )
+
+    async def read_run(*_: object, **__: object) -> object:
+        return SimpleNamespace(status="succeeded")
+
+    async def read_operations(*_: object, **__: object) -> tuple[object, ...]:
+        return () if settled else (SimpleNamespace(state="active"),)
+
+    async def unexpected_cancel(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        nonlocal cancel_requests
+        cancel_requests += 1
+        return 200, {"state": "canceled"}, {}
+
+    async def settle_after_poll(_: float) -> None:
+        nonlocal settled
+        settled = True
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+    monkeypatch.setattr(module, "read_session_operations", read_operations)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+    monkeypatch.setattr(module, "json_request", unexpected_cancel)
+    monkeypatch.setattr(module.asyncio, "sleep", settle_after_poll)
+
+    await module._settle_one_failed_run(  # type: ignore[attr-defined]
+        object(), object(), "partition", submitted, object(), "redacted"
+    )
+
+    assert settled
+    assert cancel_requests == 0
+
+
+@pytest.mark.asyncio
+async def test_last_resort_cleanup_deletes_owned_snapshots_before_sandbox(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    submitted = [
+        module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+            idempotency_key="key-a",
+            submitted_at=1.0,
+            accepted_at=2.0,
+        )
+    ]
+    deleted: list[tuple[str, str]] = []
+
+    class Adapter:
+        async def delete_snapshot(self, snapshot_id: str) -> None:
+            deleted.append(("snapshot", snapshot_id))
+
+        async def delete_sandbox(self, sandbox_id: str) -> None:
+            deleted.append(("sandbox", sandbox_id))
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace(sandbox_id="sandbox-a")
+
+    async def snapshots(*_: object, **__: object) -> tuple[object, ...]:
+        return (
+            ()
+            if ("snapshot", "snapshot-a") in deleted
+            else (SimpleNamespace(snapshot_id="snapshot-a"),)
+        )
+
+    async def sandbox(*_: object, **__: object) -> object:
+        return (
+            None
+            if ("sandbox", "sandbox-a") in deleted
+            else SimpleNamespace(sandbox_id="sandbox-a")
+        )
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "owned_snapshots", snapshots)
+    monkeypatch.setattr(module, "owned_sandbox", sandbox)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+
+    await module._provider_cleanup_last_resort(  # type: ignore[attr-defined]
+        SimpleNamespace(adapter=Adapter()), object(), "partition", submitted
+    )
+
+    assert deleted == [("snapshot", "snapshot-a"), ("sandbox", "sandbox-a")]
+
+
+@pytest.mark.asyncio
+async def test_last_resort_cleanup_does_not_match_nullable_snapshot_ownership(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    submitted = [
+        module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+            idempotency_key="key-a",
+            submitted_at=1.0,
+            accepted_at=2.0,
+        )
+    ]
+    inventory_reads = 0
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace(sandbox_id=None)
+
+    async def unexpected_inventory(*_: object, **__: object) -> object:
+        nonlocal inventory_reads
+        inventory_reads += 1
+        return ()
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "owned_snapshots", unexpected_inventory)
+    monkeypatch.setattr(module, "owned_sandbox", unexpected_inventory)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+
+    await module._provider_cleanup_last_resort(  # type: ignore[attr-defined]
+        SimpleNamespace(adapter=object()), object(), "partition", submitted
+    )
+
+    assert inventory_reads == 0
+
+
 def test_primary_product_failure_is_not_masked_by_cleanup_failure(load_module: object) -> None:
     module = load_module
 
@@ -346,6 +645,30 @@ def test_primary_product_failure_is_not_masked_by_cleanup_failure(load_module: o
                 module._raise_or_note_cleanup_failure(primary, cleanup_error)  # type: ignore[attr-defined]
             raise
 
+    assert any("cleanup also failed" in note for note in failure.value.__notes__)
+
+
+def test_primary_product_failure_stays_primary_when_settlement_and_cleanup_fail(
+    load_module: object,
+) -> None:
+    module = load_module
+
+    def product_failure() -> None:
+        raise AssertionError("product failure")
+
+    with pytest.raises(AssertionError, match="product failure") as failure:
+        try:
+            product_failure()
+        except AssertionError:
+            primary = sys.exception()
+            assert primary is not None
+            module._note_settlement_failure(primary)  # type: ignore[attr-defined]
+            module._raise_or_note_cleanup_failure(  # type: ignore[attr-defined]
+                primary, AcaSmokeEnvironmentError("cleanup failure")
+            )
+            raise
+
+    assert any("settlement also failed" in note for note in failure.value.__notes__)
     assert any("cleanup also failed" in note for note in failure.value.__notes__)
 
 

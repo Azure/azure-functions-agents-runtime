@@ -272,7 +272,7 @@ The formal assertion uses conservative overlapping observations rather than
 claiming an atomic Table snapshot: each owned row is read twice no faster than
 one second apart, and the common interval is bounded by the latest first-read
 completion and earliest second-read start. Every distinct durable run must be
-`accepted` or `running`, every session identifies that run as active, and any
+`accepted` or `running`, every session is `running` and identifies that run as active, and any
 active operation must target that run and generation. During that proven common
 interval, a bounded sample repeats each original idempotency key (same run) and
 submits a different key to the same session (`409 active_run_exists`).
@@ -287,6 +287,12 @@ SSE ending in `done`, a successful status/result, a terminally consistent
 read-only Table projection, terminal latency of at least 299 seconds for the
 300-second hold, and no owned sandbox or snapshot leak after controller-observed
 cleanup.
+If another qualification assertion fails before the hold completes, the runner
+first waits (for up to the load agent's 480-second authored budget) for
+provisioning to reach `running` or terminal, publicly cancels nonterminal
+running work, and requires the read-only durable projection to become terminal
+and idle before controller cleanup. If that settlement fails, exact-label
+provider cleanup is only a last resort and durable cleanup is reported failed.
 
 ### Host ABI prerequisite
 
