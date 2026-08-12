@@ -45,6 +45,19 @@ def test_load_concurrency_rejects_invalid_environment(monkeypatch: pytest.Monkey
         support.load_concurrency_from_option_or_environment(_config(None))
 
 
+def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only() -> None:
+    root = Path(__file__).parent.parent
+    runbook = (root / "tests" / "live" / "README.md").read_text()
+    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+
+    assert "`N=5` is the sole agent/CI diagnostic validation size." in runbook
+    assert "`N=100` is formal Decision #29 acceptance and is **human-only**" in runbook
+    assert "ACA_DEPLOYED_LOAD_CONCURRENCY=100" in runbook
+    assert "N=10/25/50/100" not in runbook
+    assert 'ACA_DEPLOYED_LOAD_CONCURRENCY="100"' not in pipeline
+    assert "ACA_DEPLOYED_LOAD_CONCURRENCY=100" not in pipeline
+
+
 def test_load_orchestration_preserves_public_and_read_only_boundaries() -> None:
     source = (Path(__file__).parent / "live" / "test_aca_deployed_load.py").read_text()
 

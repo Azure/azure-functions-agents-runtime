@@ -234,26 +234,41 @@ prepared session is public-terminal and durably idle.
 
 Use the same deployed settings as the lifecycle test, then supply the load
 concurrency explicitly. Omission intentionally skips this test even when the
-deployed-smoke opt-in is set:
+deployed-smoke opt-in is set.
+
+**`N=5` is the sole agent/CI diagnostic validation size.** It verifies the
+public orchestration, bounded common-active interval, replay/`409` behavior,
+and controller cleanup path; it is not a capacity or formal acceptance claim.
+Agents and CI must run only this diagnostic size, including the persistent
+pipeline default:
 
 ```bash
 export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
-export AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY=100
+export AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY=5
 python -m pytest -m live_aca tests/live/test_aca_deployed_load.py -v \
   -o log_cli=true -o log_cli_level=INFO
 
 # Equivalent explicit CLI input; this wins over the environment fallback.
 python -m pytest -m live_aca tests/live/test_aca_deployed_load.py \
-  --aca-load-concurrency 100 -v -o log_cli=true -o log_cli_level=INFO
+  --aca-load-concurrency 5 -v -o log_cli=true -o log_cli_level=INFO
 ```
 
-`N=100` is the target formal U3 acceptance run, not a claimed pass until a
-live execution produces its evidence. Values from 1 through 99 are diagnostics
-only; values outside 1..100 are rejected. This is manual-only and
-the `ACADeployedAgentTurn` ADO job remains `Manual` plus `continueOnError`.
-For an ADO run, define the non-secret `ACA_DEPLOYED_LOAD_CONCURRENCY` variable;
-when it is omitted the script does not map an unresolved `$(VAR)` token and the
-load test skips.
+The CLI and environment range remains **1..100** so the formal value is still
+possible. `N=100` is formal Decision #29 acceptance and is **human-only**: it
+must not be queued or executed by an agent or CI. A human operator performs the
+formal run only when ready, using this exact explicit override (never as a
+default):
+
+```bash
+az pipelines run --id 1777 --branch larohra-u3-ga-gate \
+  --organization https://dev.azure.com/azfunc --project internal \
+  --variables ACA_DEPLOYED_LOAD_CONCURRENCY=100
+```
+
+The `ACADeployedAgentTurn` ADO job remains manual plus `continueOnError`.
+For an ADO run, `ACA_DEPLOYED_LOAD_CONCURRENCY` is non-secret and
+allow-override remains enabled; when it is omitted the script does not map an
+unresolved `$(VAR)` token and the load test skips.
 
 This run can consume at least 500 sandbox-minutes at `N=100`, plus model and
 storage costs, and needs ACA and model quota for all sessions. The fixed

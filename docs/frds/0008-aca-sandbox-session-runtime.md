@@ -394,7 +394,7 @@ controlling amendments.
 | 151 | Egress lifecycle | Legacy inspection or mutable policy / Full create-time policy | Use explicit Deny plus Full inspection, ordered rules, capped policy, and drain/new session for policy or credential rotation. | Human | 2026-08-07 | U2 |
 | 152 | ACA backend availability and create source | Unconditional unavailable gate / supported opt-in runtime | Remove the unconditional `aca_sandbox backend not available in this build` gate. On Linux x86_64 CPython 3.13/3.14, valid `aca_sandbox` configuration activates the real adapter and `SandboxCreateProfile`; the Function interpreter selects public `python-3.13`/`python-3.14` by default, or a customer can pin a private disk ID. Bootstrap, application, and complete dependency closure cross the file plane; no custom bootstrap image exists. Platform/configuration validation remains fail-closed and the in-language worker remains default. | Human + Agent | 2026-08-12 | U3 |
 | 153 | U3 live turn, identity, and lifecycle evidence | Synthetic-only proof / lower-level and deployed proof | Record real adapter create, exact 80 MiB single-write delivery, full dependency closure, harness entrypoint, envelope/journal acceptance, and SDK-aware mypy from PR #152; a lower-level Luna turn and an Easy-Auth-protected deployed public turn passed (ADO 297517). Record lifecycle pass (ADO 297555): auto-suspend, same sandbox/generation resume, second suspend, then controller-only timer reclaim/tombstone with zero sandbox or snapshot leaks. This supersedes Decision #66's absolute identity-less wording: runtime attaches no identity and forwards no controller/token/storage credential, but a customer-attached, dedicated least-privileged Sandbox Group identity is guest-usable for egress-exempt token acquisition and has model inference only, never state-store rights. OBO remains inert. | Human + Agent | 2026-08-12 | U3 |
-| 154 | U3 load acceptance | Declare Decision #29 passed / retain staged qualification | The committed public Easy-Auth load runner performs staged N=10/25/50/100 qualification. Evidence is in progress; do not mark Decision #29 or N=100 load acceptance passed until the final N=100 evidence is supplied. | Human | 2026-08-12 | U3 |
+| 154 | U3 load acceptance | Declare Decision #29 passed / retain agent diagnostic policy | The committed public Easy-Auth load runner uses N=5 as its sole agent/CI diagnostic validation. N=100 remains human-only formal Decision #29 acceptance; do not mark Decision #29 or N=100 load acceptance passed until human-supplied N=100 evidence is available. | Human | 2026-08-12 | U3 |
 | 155 | U3 local quality evidence | Omit / record current gate | Record current local gate: Ruff clean; strict mypy clean for 97 files; Python 3.13 pytest result 1792 passed, 61 skipped, 82 deselected. | Human + Agent | 2026-08-12 | U3 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
@@ -459,9 +459,10 @@ policy rather than relying on a group default.
 The runtime is MAF-only, preserves in-process subagent delegation in the same
 sandbox, confines preview SDK usage to `transport/aca_sdk.py`, and has passed
 the recorded real adapter, model, deployed Easy Auth, and lifecycle evidence.
-The staged public load qualification remains pending; it does not close Decision
-#29 until N=100 evidence arrives. The append-only Decisions log records the
-sign-off, amendments, and historical provenance for these controlling contracts.
+The N=5 public load diagnostic validates orchestration and cleanup only; it does
+not close Decision #29. N=100 remains human-only formal acceptance, pending
+human-supplied evidence. The Decisions log records the sign-off, amendments,
+and historical provenance for these controlling contracts.
 
 ## 8. SDK-verified ACA platform contract
 
@@ -1231,7 +1232,7 @@ an enabled v1 surface.
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, static and secret credential Transform sources, group-identity boundaries, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.
 * Harness: bootstrap ABI/protocol/digest failure, no anonymous ingress, workflows/code-interpreter fail-closed, semantic golden traces every CI, advertise capability only after exercised trace.
 * Delegation: static/single-level guard, cycle/depth guard, egress union, co-location/no second run, recoverable specialist failure, whole-chain sync timeout.
-* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. Only destructive real-Azure loss-to-410 acceptance test/sign-off remains deferred. The committed public Easy-Auth load runner is staged N=10/25/50/100; Decision #29 is not passed until N=100 evidence is supplied. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
+* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. Only destructive real-Azure loss-to-410 acceptance test/sign-off remains deferred. The committed public Easy-Auth load runner uses N=5 as the sole agent/CI diagnostic validation for orchestration and cleanup; it is not capacity evidence. Decision #29 remains human-only N=100 formal acceptance and is not passed until human-supplied N=100 evidence is available. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
 
 ## 11. Sandbox harness integration
 
