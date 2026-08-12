@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Contoso Ops Assistant — AI App</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <a class="btn primary sm" href="create-ai-app.html">＋ New AI App</a>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink active" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <div class="breadcrumb"><a href="index.html">AI Apps</a> / Contoso Ops Assistant</div>
+        <div class="page-title">
+          <h1>Contoso Ops Assistant</h1>
+          <span class="badge amber" id="statusBadge"><span class="dot"></span>Draft</span>
+        </div>
+        <p class="page-sub mono" id="pageSub">contoso-ops-assistant · eastus2 · gpt-5.4</p>
+
+        <!-- What the customer sees right after generation: a draft, ready to deploy -->
+        <div class="card" id="deployBanner" style="margin-bottom: 18px; display: flex; align-items: center; gap: 16px; justify-content: space-between; flex-wrap: wrap">
+          <div>
+            <div style="font-weight: 600">Generated — ready to deploy</div>
+            <div class="muted" style="font-size: 13px; max-width: 620px">
+              This AI App was generated from your description but isn't deployed yet. Deploy it to provision the Azure
+              Function App and its agents, then get live endpoints.
+            </div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge gray">Subscription: Private Test Sub</span>
+              <span class="badge gray">Resource group: ai-apps-rg</span>
+              <span class="badge gray">Region: eastus2</span>
+              <span class="badge gray">Model: gpt-5.4</span>
+            </div>
+          </div>
+          <button class="btn primary" id="deployBtn" onclick="openDeploy()">🚀 Deploy to Azure</button>
+        </div>
+
+        <!-- Choose where to deploy: a brand-new Function App or an existing one -->
+        <div class="card" id="deployPanel" style="margin-bottom: 18px; display: none">
+          <h3>Deploy to Azure</h3>
+          <p class="muted" style="margin-top: 0; font-size: 13px">
+            Each AI App maps 1:1 to an Azure Function App. Create a new one, or deploy into an app you already have.
+          </p>
+          <div class="grid cols-2" style="margin-bottom: 12px">
+            <button type="button" class="pick active" id="pickNew" onclick="chooseTarget('new')">
+              <span class="ico">✨</span>
+              <span><span class="t">Create new Function App</span><span class="d">Provision a new Function App and its resources.</span></span>
+            </button>
+            <button type="button" class="pick" id="pickExisting" onclick="chooseTarget('existing')">
+              <span class="ico">📦</span>
+              <span><span class="t">Use existing Function App</span><span class="d">Deploy into a Function App you already have.</span></span>
+            </button>
+          </div>
+
+          <div id="newTarget">
+            <div class="grid cols-2">
+              <div class="field"><label>Function App name</label><input type="text" id="fnName" value="contoso-ops-assistant" /></div>
+              <div class="field">
+                <label>Region</label>
+                <select id="fnRegion"><option>eastus2</option><option>westus3</option><option>westeurope</option><option>swedencentral</option></select>
+              </div>
+            </div>
+            <div class="grid cols-2">
+              <div class="field">
+                <label>Subscription</label>
+                <select id="fnSub"><option>Private Test Sub</option><option>Contoso Production</option><option>Contoso Non-Prod</option></select>
+              </div>
+              <div class="field">
+                <label>Resource group</label>
+                <select id="fnRg"><option>ai-apps-rg</option><option>contoso-ops-rg</option><option>(new) rg-ai-apps</option></select>
+              </div>
+            </div>
+          </div>
+
+          <div id="existingTarget" style="display: none">
+            <div class="field">
+              <label>Existing Function App</label>
+              <select id="fnExisting">
+                <option value="contoso-fn-prod|eastus2|Contoso Production|contoso-ops-rg">contoso-fn-prod · eastus2 · Contoso Production</option>
+                <option value="ops-automation-fn|eastus2|Private Test Sub|ai-apps-rg">ops-automation-fn · eastus2 · Private Test Sub</option>
+                <option value="shared-agents-eastus2|eastus2|Contoso Non-Prod|shared-rg">shared-agents-eastus2 · eastus2 · Contoso Non-Prod</option>
+              </select>
+              <div class="hint">The AI App's agents, tools, and triggers deploy into this app; existing functions are preserved.</div>
+            </div>
+          </div>
+
+          <div class="pill-row" style="margin-top: 6px">
+            <button class="btn primary" id="deployBtn2" onclick="deploy()">🚀 Deploy</button>
+            <button class="btn" onclick="closeDeploy()">Cancel</button>
+          </div>
+        </div>
+
+        <!-- Revealed after deploy: live endpoints -->
+        <div class="card" id="endpoints" style="margin-bottom: 18px; display: none">
+          <h3>Endpoints</h3>
+          <dl class="meta-grid">
+            <dt>Function App</dt><dd class="mono" id="epUrl">https://contoso-ops-assistant.azurewebsites.net</dd>
+            <dt>Chat UI</dt><dd class="mono">GET /agents/main/</dd>
+            <dt>Chat API</dt><dd class="mono">POST /agents/main/chat</dd>
+            <dt>resource_summary</dt><dd class="mono">POST /resource-summary</dd>
+            <dt>daily_azure_report</dt><dd class="muted">Timer · daily 15:00 UTC</dd>
+          </dl>
+        </div>
+
+        <div class="tabs">
+          <button class="tab active" onclick="tab(event,'overview')">Overview</button>
+          <button class="tab" id="tabAgents" onclick="tab(event,'agents')">Agents (3)</button>
+          <button class="tab" id="tabMcp" onclick="tab(event,'mcp')">MCP servers (2)</button>
+          <button class="tab" id="tabTriggers" onclick="tab(event,'triggers')">Connector triggers (1)</button>
+          <button class="tab" id="tabSkills" onclick="tab(event,'skills')">Skills (2)</button>
+        </div>
+
+        <section id="overview" class="tabpane active">
+          <div class="grid cols-2">
+            <div class="card">
+              <h3>Details</h3>
+              <dl class="meta-grid">
+                <dt>Function App</dt><dd class="mono" id="ovFnName">contoso-ops-assistant</dd>
+                <dt>Subscription</dt><dd id="ovSub">Private Test Sub</dd>
+                <dt>Resource group</dt><dd class="mono" id="ovRg">ai-apps-rg</dd>
+                <dt>Region</dt><dd id="ovRegion">eastus2</dd>
+                <dt>Foundry model</dt><dd>gpt-5.4</dd>
+              </dl>
+            </div>
+            <div class="card">
+              <h3>Composition</h3>
+              <div class="stat-row">
+                <div class="stat"><span class="n">3</span><span class="l">Agents</span></div>
+                <div class="stat"><span class="n">2</span><span class="l">MCP tools</span></div>
+                <div class="stat"><span class="n">1</span><span class="l">Triggers</span></div>
+                <div class="stat"><span class="n">2</span><span class="l">Skills</span></div>
+              </div>
+              <div class="divider"></div>
+              <div class="span-lbl">Skills</div>
+              <div class="chips">
+                <span class="badge gray">📊 Daily Azure Report</span>
+                <span class="badge gray">💬 Chat Assistant</span>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <!-- Agents: view + create (uses the app's Foundry model) -->
+        <section id="agents" class="tabpane">
+          <div class="toolbar"><button class="btn primary" onclick="toggle('agentForm')">＋ Add agent</button></div>
+          <div class="card" id="agentForm" style="display: none; margin-bottom: 16px">
+            <h3>New agent</h3>
+            <div class="grid cols-2">
+              <div class="field"><label>Name</label><input type="text" id="agName" placeholder="resource_summary" oninput="agFileName()" /></div>
+              <div class="field">
+                <label>Trigger</label>
+                <select id="agTrigger" onchange="agTrig()">
+                  <option value="http">HTTP — request/response</option>
+                  <option value="timer">Timer — scheduled</option>
+                  <option value="connector">Connector — event-driven</option>
+                  <option value="chat">Chat — built-in chat UI + API + MCP</option>
+                </select>
+              </div>
+            </div>
+            <div class="grid cols-2" id="agHttp">
+              <div class="field"><label>Route</label><input type="text" id="agRoute" placeholder="resource-summary" /></div>
+              <div class="field"><label>Methods</label><select id="agMethods"><option>POST</option><option>GET</option><option>GET, POST</option></select></div>
+            </div>
+            <div class="field" id="agTimer" style="display: none"><label>Schedule (CRON)</label><input type="text" id="agSchedule" value="0 0 7 * * *" /><div class="hint">NCRONTAB — <span class="mono">0 0 7 * * *</span> is daily 07:00 UTC.</div></div>
+            <div class="grid cols-2" id="agConn" style="display: none">
+              <div class="field"><label>Connector</label><select id="agConnector"><option>Office 365 Outlook</option><option>Microsoft Teams</option><option>SharePoint</option><option>Service Bus</option></select></div>
+              <div class="field"><label>Operation</label><input type="text" id="agConnOp" placeholder="When a new email arrives" /></div>
+            </div>
+            <div class="field" id="agChat" style="display: none"><div class="hint">Exposes <span class="mono">debug_chat_ui</span>, <span class="mono">chat_api</span>, and an <span class="mono">mcp</span> endpoint (builtin_endpoints).</div></div>
+            <div class="field"><label>Instructions</label><input type="text" id="agInstr" placeholder="Given a subscription ID, list resources and return a structured summary…" /></div>
+            <div class="grid cols-2">
+              <div class="field">
+                <label>Attach a skill (optional)</label>
+                <select id="agSkill"><option value="">None</option><option>azure-resources</option><option>Daily Azure Report</option><option>Chat Assistant</option></select>
+              </div>
+              <div class="field">
+                <label>Tools &amp; MCP (optional)</label>
+                <select id="agTool"><option value="">None</option><option>azure_rest (custom tool)</option><option>Microsoft Learn (MCP)</option><option>Office 365 Outlook (MCP)</option></select>
+              </div>
+            </div>
+            <div class="field"><label>Model</label><input type="text" value="gpt-5.4" disabled /></div>
+            <div class="hint mono" id="agFile">Generates resource_summary.agent.md</div>
+            <div class="pill-row" style="margin-top: 12px">
+              <button class="btn primary" onclick="addAgent()">Add agent</button>
+              <button class="btn" onclick="toggle('agentForm')">Cancel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Agent</th><th>Trigger</th><th>Description</th></tr></thead>
+              <tbody id="agentRows">
+                <tr><td class="cell-title mono">daily_azure_report</td><td><span class="badge blue">timer</span></td><td class="cell-sub">Runs daily; emails resources created or changed in the last 24 hours.</td></tr>
+                <tr><td class="cell-title mono">resource_summary</td><td><span class="badge blue">http</span></td><td class="cell-sub">Returns a structured JSON summary of resources by type and location.</td></tr>
+                <tr><td class="cell-title mono">main</td><td><span class="badge blue">http</span></td><td class="cell-sub">HTTP chat agent exposing the built-in chat UI, chat API, and MCP tool.</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="mcp" class="tabpane">
+          <div class="toolbar"><button class="btn primary" onclick="toggle('mcpForm')">＋ Add MCP server</button></div>
+          <div class="card" id="mcpForm" style="display: none; margin-bottom: 16px">
+            <h3>Add MCP server</h3>
+            <div class="grid cols-2">
+              <div class="field"><label>Source</label>
+                <select id="mcpPreset" onchange="mcpPreset()">
+                  <option value="learn">Microsoft Learn</option>
+                  <option value="o365">Office 365 Outlook</option>
+                  <option value="custom">Custom server</option>
+                </select>
+              </div>
+              <div class="field"><label>Server key</label><input type="text" id="mcpKey" value="microsoft-learn" /></div>
+            </div>
+            <div class="grid cols-2">
+              <div class="field"><label>Type</label><select id="mcpType"><option value="http">http</option><option value="stdio">stdio</option></select></div>
+              <div class="field"><label>URL</label><input type="text" id="mcpUrl" value="https://learn.microsoft.com/api/mcp" /></div>
+            </div>
+            <div class="field"><label>Tools allow-list (optional, comma-separated)</label><input type="text" id="mcpTools" placeholder="office365_SendEmailV2" /></div>
+            <div class="hint mono">Adds a server to mcp.json.</div>
+            <div class="pill-row" style="margin-top: 12px">
+              <button class="btn primary" onclick="addMcp()">Add server</button>
+              <button class="btn" onclick="toggle('mcpForm')">Cancel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Server</th><th>Type</th><th>URL / tools</th></tr></thead>
+              <tbody id="mcpRows">
+                <tr><td class="cell-title mono">microsoft-learn</td><td><span class="badge gray">http</span></td><td class="cell-sub mono">https://learn.microsoft.com/api/mcp</td></tr>
+                <tr><td class="cell-title mono">office365-outlook</td><td><span class="badge gray">http</span></td><td class="cell-sub mono">$O365_MCP_SERVER_URL · office365_SendEmailV2</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Connector triggers: view + create -->
+        <section id="triggers" class="tabpane">
+          <div class="toolbar"><button class="btn primary" onclick="toggle('trigForm')">＋ Add connector trigger</button></div>
+          <div class="card" id="trigForm" style="display: none; margin-bottom: 16px">
+            <h3>New connector trigger</h3>
+            <p class="muted" style="margin-top: 0; font-size: 13px">Creates an event-driven agent (<span class="mono">generic_trigger · connectorTrigger</span>) that runs when the connector fires.</p>
+            <div class="grid cols-2">
+              <div class="field"><label>Agent name</label><input type="text" id="tgName" placeholder="on_new_email" oninput="tgFileName()" /></div>
+              <div class="field">
+                <label>Connector</label>
+                <select id="tgConnector" onchange="tgConn()">
+                  <option>Office 365 Outlook</option><option>Microsoft Teams</option><option>SharePoint</option><option>Service Bus</option><option>SQL Server</option>
+                </select>
+              </div>
+            </div>
+            <div class="field"><label>Trigger operation</label>
+              <select id="tgOp"><option>When a new email arrives</option><option>When a new email arrives (V3)</option><option>When an event is added, updated or deleted</option></select>
+            </div>
+            <div class="field"><label>Instructions</label><input type="text" id="tgInstr" placeholder="When new Outlook email arrives, draft a helpful reply…" /></div>
+            <div class="hint mono" id="tgFile">Generates on_new_email.agent.md</div>
+            <div class="pill-row" style="margin-top: 12px">
+              <button class="btn primary" onclick="addTrigger()">Add trigger</button>
+              <button class="btn" onclick="toggle('trigForm')">Cancel</button>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Trigger</th><th>Connector</th><th>Operation</th></tr></thead>
+              <tbody id="trigRows">
+                <tr><td class="cell-title mono">send_report</td><td>Office 365 Outlook</td><td class="cell-sub">Send an email</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        <!-- Skills: view, add from catalog, or create a custom one -->
+        <section id="skills" class="tabpane">
+          <div class="toolbar"><button class="btn primary" onclick="toggle('skillForm')">＋ Add skill</button></div>
+          <div class="card" id="skillForm" style="display: none; margin-bottom: 16px">
+            <h3>Add a skill</h3>
+            <div class="field">
+              <label>From catalog</label>
+              <select id="skPick">
+                <option>azure-resources</option>
+                <option>api-assistant</option>
+                <option>Outlook Reply Agent</option>
+                <option>Daily Tech News Email</option>
+                <option>Incident Triage</option>
+              </select>
+              <div class="hint">Skills bundle instructions, custom tools, and MCP servers. Adds <span class="mono">skills/&lt;name&gt;/SKILL.md</span>.</div>
+            </div>
+            <div class="pill-row" style="margin-bottom: 14px"><button class="btn" onclick="addCatalogSkill()">Add from catalog</button></div>
+            <div class="divider"></div>
+            <div class="span-lbl">Or create a custom skill</div>
+            <div class="grid cols-2">
+              <div class="field"><label>Name</label><input type="text" id="skName" placeholder="Cost Guardrails" /></div>
+              <div class="field">
+                <label>Category</label>
+                <select id="skCat"><option>Automation</option><option>Assistant</option><option>Integration</option><option>Knowledge</option></select>
+              </div>
+            </div>
+            <div class="field"><label>Summary</label><input type="text" id="skSummary" placeholder="Alerts when spend exceeds a budget and suggests savings…" /></div>
+            <div class="pill-row">
+              <button class="btn primary" onclick="addCustomSkill()">Create skill</button>
+              <button class="btn" onclick="toggle('skillForm')">Cancel</button>
+            </div>
+          </div>
+          <div class="grid" id="skillCards">
+            <div class="card">
+              <div class="card-head">
+                <h3>📊 Daily Azure Report <span class="badge gray">Automation</span></h3>
+                <button class="btn danger sm" onclick="this.closest('.card').remove(); bumpCount('tabSkills', -1)">Remove</button>
+              </div>
+              <p class="muted" style="margin-top: 0">A timer agent that emails a daily report of Azure resource changes, plus an HTTP resource summary.</p>
+              <div class="chips">
+                <span class="badge blue">daily_azure_report · timer</span>
+                <span class="badge blue">resource_summary · http</span>
+                <span class="badge purple">Microsoft Learn</span>
+                <span class="badge purple">Office 365 Outlook</span>
+                <span class="badge amber">Office 365 Outlook</span>
+              </div>
+            </div>
+            <div class="card">
+              <div class="card-head">
+                <h3>💬 Chat Assistant <span class="badge gray">Assistant</span></h3>
+                <button class="btn danger sm" onclick="this.closest('.card').remove(); bumpCount('tabSkills', -1)">Remove</button>
+              </div>
+              <p class="muted" style="margin-top: 0">An interactive chat agent with a built-in web chat UI, chat API, and MCP endpoint.</p>
+              <div class="chips"><span class="badge blue">main · http</span></div>
+            </div>
+          </div>
+        </section>
+
+        <div class="divider"></div>
+        <button class="btn danger">Delete AI App</button>
+      </main>
+    </div>
+
+    <script>
+      function tab(e, id) {
+        document.querySelectorAll('.main .tab').forEach((t) => t.classList.remove('active'))
+        e.currentTarget.classList.add('active')
+        document.querySelectorAll('.main .tabpane').forEach((p) => p.classList.remove('active'))
+        document.getElementById(id).classList.add('active')
+      }
+      function toggle(id) {
+        const el = document.getElementById(id)
+        el.style.display = el.style.display === 'none' ? 'block' : 'none'
+      }
+      function bumpCount(tabId, delta) {
+        const el = document.getElementById(tabId)
+        el.textContent = el.textContent.replace(/\((\d+)\)/, (_, n) => `(${+n + delta})`)
+      }
+      function slug(v, fallback) {
+        return (v.trim() || fallback).replace(/[^a-z0-9_]/gi, '_').toLowerCase()
+      }
+
+      // ---- Deploy: choose a new or existing Function App, then provision ----
+      let deployTarget = 'new'
+      function openDeploy() {
+        document.getElementById('deployPanel').style.display = 'block'
+        document.getElementById('deployBtn').disabled = true
+      }
+      function closeDeploy() {
+        document.getElementById('deployPanel').style.display = 'none'
+        document.getElementById('deployBtn').disabled = false
+      }
+      function chooseTarget(which) {
+        deployTarget = which
+        document.getElementById('pickNew').classList.toggle('active', which === 'new')
+        document.getElementById('pickExisting').classList.toggle('active', which === 'existing')
+        document.getElementById('newTarget').style.display = which === 'new' ? 'block' : 'none'
+        document.getElementById('existingTarget').style.display = which === 'existing' ? 'block' : 'none'
+      }
+      function deploy() {
+        let app, region, sub, rg
+        if (deployTarget === 'existing') {
+          ;[app, region, sub, rg] = document.getElementById('fnExisting').value.split('|')
+        } else {
+          app = slug(document.getElementById('fnName').value, 'contoso-ops-assistant').replace(/_/g, '-')
+          region = document.getElementById('fnRegion').value
+          sub = document.getElementById('fnSub').value
+          rg = document.getElementById('fnRg').value
+        }
+        const badge = document.getElementById('statusBadge')
+        const btn = document.getElementById('deployBtn2')
+        badge.className = 'badge amber'
+        badge.innerHTML = '<span class="dot"></span>Deploying…'
+        btn.disabled = true
+        btn.textContent = 'Deploying…'
+        document.getElementById('deployPanel').style.display = 'none'
+        setTimeout(() => {
+          badge.className = 'badge green'
+          badge.innerHTML = '<span class="dot"></span>Running'
+          document.getElementById('deployBanner').style.display = 'none'
+          document.getElementById('epUrl').textContent = `https://${app}.azurewebsites.net`
+          document.getElementById('ovFnName').textContent = app
+          document.getElementById('ovSub').textContent = sub
+          document.getElementById('ovRg').textContent = rg
+          document.getElementById('ovRegion').textContent = region
+          document.getElementById('pageSub').textContent = `${app} · ${region} · gpt-5.4`
+          document.getElementById('endpoints').style.display = 'block'
+        }, 1400)
+      }
+
+      // ---- Agents: trigger-aware create on the app's Foundry model (gpt-5.4) ----
+      const AG_BADGE = { http: 'http', timer: 'timer', connector: 'connector', chat: 'http' }
+      function agFileName() {
+        document.getElementById('agFile').textContent = 'Generates ' + slug(document.getElementById('agName').value, 'new_agent') + '.agent.md'
+      }
+      function agTrig() {
+        const t = document.getElementById('agTrigger').value
+        document.getElementById('agHttp').style.display = t === 'http' ? 'grid' : 'none'
+        document.getElementById('agTimer').style.display = t === 'timer' ? 'block' : 'none'
+        document.getElementById('agConn').style.display = t === 'connector' ? 'grid' : 'none'
+        document.getElementById('agChat').style.display = t === 'chat' ? 'block' : 'none'
+      }
+      function addAgent() {
+        const name = slug(document.getElementById('agName').value, 'new_agent')
+        const t = document.getElementById('agTrigger').value
+        const instr = document.getElementById('agInstr').value.trim() || 'Custom agent.'
+        const skill = document.getElementById('agSkill').value
+        const tool = document.getElementById('agTool').value
+        let detail = ''
+        if (t === 'http') detail = ` · POST /${slug(document.getElementById('agRoute').value, name).replace(/_/g, '-')}`
+        if (t === 'timer') detail = ` · ${document.getElementById('agSchedule').value.trim()}`
+        if (t === 'connector') detail = ` · ${document.getElementById('agConnector').value}`
+        if (t === 'chat') detail = ' · chat UI + API + MCP'
+        const extras = [skill && `skill: ${skill}`, tool].filter(Boolean).join(' · ')
+        const desc = instr + detail + (extras ? ' · ' + extras : '') + ' · gpt-5.4'
+        const row = document.createElement('tr')
+        row.innerHTML = `<td class="cell-title mono">${name}</td><td><span class="badge blue">${AG_BADGE[t]}</span></td><td class="cell-sub">${desc}</td>`
+        document.getElementById('agentRows').appendChild(row)
+        bumpCount('tabAgents', 1)
+        toggle('agentForm')
+      }
+
+      // ---- MCP servers: presets mirror mcp.json ----
+      const MCP = {
+        learn: { key: 'microsoft-learn', type: 'http', url: 'https://learn.microsoft.com/api/mcp', tools: '' },
+        o365: { key: 'office365-outlook', type: 'http', url: '$O365_MCP_SERVER_URL', tools: 'office365_SendEmailV2' },
+        custom: { key: 'my-mcp-server', type: 'http', url: 'https://example.com/mcp', tools: '' },
+      }
+      function mcpPreset() {
+        const p = MCP[document.getElementById('mcpPreset').value]
+        document.getElementById('mcpKey').value = p.key
+        document.getElementById('mcpType').value = p.type
+        document.getElementById('mcpUrl').value = p.url
+        document.getElementById('mcpTools').value = p.tools
+      }
+      function addMcp() {
+        const key = slug(document.getElementById('mcpKey').value, 'my_mcp').replace(/_/g, '-')
+        const type = document.getElementById('mcpType').value
+        const url = document.getElementById('mcpUrl').value.trim() || 'https://example.com/mcp'
+        const tools = document.getElementById('mcpTools').value.trim()
+        const row = document.createElement('tr')
+        row.innerHTML = `<td class="cell-title mono">${key}</td><td><span class="badge gray">${type}</span></td><td class="cell-sub mono">${url}${tools ? ' · ' + tools : ''}</td>`
+        document.getElementById('mcpRows').appendChild(row)
+        bumpCount('tabMcp', 1)
+        toggle('mcpForm')
+      }
+
+      // ---- Connector triggers: connector drives the operation list ----
+      const OPS = {
+        'Office 365 Outlook': ['When a new email arrives', 'When a new email arrives (V3)', 'When an event is added, updated or deleted'],
+        'Microsoft Teams': ['When a new channel message is added', 'When someone @mentions me'],
+        SharePoint: ['When an item is created', 'When an item is created or modified', 'When a file is created in a folder'],
+        'Service Bus': ['When a message is received in a queue', 'When a message is received in a topic subscription'],
+        'SQL Server': ['When a row is inserted', 'When an item is modified'],
+      }
+      function tgConn() {
+        const c = document.getElementById('tgConnector').value
+        document.getElementById('tgOp').innerHTML = OPS[c].map((o) => `<option>${o}</option>`).join('')
+      }
+      function tgFileName() {
+        document.getElementById('tgFile').textContent = 'Generates ' + slug(document.getElementById('tgName').value, 'on_event') + '.agent.md'
+      }
+      function addTrigger() {
+        const name = slug(document.getElementById('tgName').value, 'on_event')
+        const conn = document.getElementById('tgConnector').value
+        const op = document.getElementById('tgOp').value
+        const row = document.createElement('tr')
+        row.innerHTML = `<td class="cell-title mono">${name}</td><td>${conn}</td><td class="cell-sub">${op}</td>`
+        document.getElementById('trigRows').appendChild(row)
+        bumpCount('tabTriggers', 1)
+        toggle('trigForm')
+      }
+
+      // ---- Skills: real catalog from the runtime samples ----
+      const CATALOG = {
+        'azure-resources': { icon: '📊', cat: 'Knowledge', summary: 'Query and manage Azure resources via the ARM REST API. Bundles the azure_rest custom tool and the Microsoft Learn MCP server.', chips: '<span class="badge amber">azure_rest · tool</span><span class="badge purple">Microsoft Learn</span>' },
+        'api-assistant': { icon: '📚', cat: 'Knowledge', summary: 'A skill packaged with includes — reusable examples/ and references/ folders shared across agents.', chips: '<span class="badge gray">includes: examples</span><span class="badge gray">includes: references</span>' },
+        'Outlook Reply Agent': { icon: '✉️', cat: 'Integration', summary: 'Drafts a reply when new Outlook email arrives from a watched sender.', chips: '<span class="badge blue">on_new_email · connector</span><span class="badge purple">Office 365 Outlook</span>' },
+        'Daily Tech News Email': { icon: '📰', cat: 'Automation', summary: 'A timer agent that emails a daily tech-news digest.', chips: '<span class="badge blue">daily_tech_news · timer</span><span class="badge purple">Office 365 Outlook</span>' },
+        'Incident Triage': { icon: '🚨', cat: 'Automation', summary: 'An HTTP workflow agent that classifies incidents and proposes next steps.', chips: '<span class="badge blue">incident_triage · http</span>' },
+      }
+      function skillCard(icon, name, cat, summary, chips) {
+        const div = document.createElement('div')
+        div.className = 'card'
+        div.innerHTML =
+          `<div class="card-head"><h3>${icon} ${name} <span class="badge gray">${cat}</span></h3>` +
+          `<button class="btn danger sm" onclick="this.closest('.card').remove(); bumpCount('tabSkills', -1)">Remove</button></div>` +
+          `<p class="muted" style="margin-top:0">${summary}</p><div class="chips">${chips}</div>`
+        document.getElementById('skillCards').appendChild(div)
+        bumpCount('tabSkills', 1)
+      }
+      function addCatalogSkill() {
+        const name = document.getElementById('skPick').value
+        const s = CATALOG[name]
+        skillCard(s.icon, name, s.cat, s.summary, s.chips)
+        toggle('skillForm')
+      }
+      function addCustomSkill() {
+        const name = document.getElementById('skName').value.trim() || 'Custom Skill'
+        const cat = document.getElementById('skCat').value
+        const summary = document.getElementById('skSummary').value.trim() || 'A custom skill.'
+        const agent = slug(name, 'custom_skill')
+        skillCard('🧩', name, cat, summary, `<span class="badge blue">${agent} · http</span>`)
+        toggle('skillForm')
+      }
+    </script>
+  </body>
+</html>

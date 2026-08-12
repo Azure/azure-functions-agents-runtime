@@ -1,109 +1,279 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Serverless Agent Portal — Dashboard</title>
-<link rel="stylesheet" href="styles.css">
-</head>
-<body>
-<div class="app">
-  <header class="header">
-    <div class="logo"><span class="mark">⚡</span> Serverless Agent Portal</div>
-    <div class="spacer"></div>
-    <input class="search" placeholder="Search agents, sessions, tools…">
-    <div class="user">SN</div>
-  </header>
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>AI Apps</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <a class="btn primary sm" href="create-ai-app.html">＋ New AI App</a>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
 
-  <nav class="nav">
-    <div class="group-label">Overview</div>
-    <a class="item active" href="index.html"><span class="ico">▤</span> Dashboard</a>
-    <a class="item" href="monitoring.html"><span class="ico">📈</span> Monitoring</a>
-    <div class="group-label">Build</div>
-    <a class="item" href="function-apps.html"><span class="ico">📦</span> Function Apps</a>
-    <a class="item" href="agents.html"><span class="ico">🤖</span> Agents</a>
-    <a class="item" href="create-agent.html"><span class="ico">＋</span> Create agent</a>
-    <a class="item" href="playground.html"><span class="ico">💬</span> Playground</a>
-    <a class="item" href="source-control.html"><span class="ico">🔀</span> Source &amp; history</a>
-    <div class="group-label">Configure</div>
-    <a class="item" href="connectors.html"><span class="ico">🔗</span> Connectors</a>
-    <a class="item" href="providers.html"><span class="ico">🔌</span> Providers</a>
-    <a class="item" href="environments.html"><span class="ico">🌐</span> Environments</a>
-    <a class="item" href="settings.html"><span class="ico">⚙️</span> Settings</a>
-  </nav>
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink active" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
 
-  <main class="main">
-    <div class="mock-banner">📐 Static mockup — illustrative only, no live data or backend.</div>
-    <div class="breadcrumb">Home / Dashboard</div>
-    <div class="page-title"><h1>Dashboard</h1></div>
-    <p class="page-sub">Fleet overview for the <strong>serverless-agent</strong> project · environment <span class="badge blue"><span class="dot"></span>dev</span></p>
+      <main class="main">
+        <div class="page-title"><h1>AI Apps</h1></div>
+        <p class="page-sub">
+          AI Apps are Azure Function Apps that run the agent runtime. This dashboard discovers them across your
+          subscriptions by the <code>agent-runtime</code> resource tag.
+        </p>
 
-    <div class="grid cols-4">
-      <div class="card stat">
-        <span class="ico-badge">🤖</span>
-        <div class="label">Agents</div>
-        <div class="value">6</div>
-        <div class="delta up">4 deployed · 2 draft</div>
-      </div>
-      <div class="card stat">
-        <span class="ico-badge">▶️</span>
-        <div class="label">Invocations (24h)</div>
-        <div class="value">1,284</div>
-        <div class="delta up">▲ 12% vs. prev day</div>
-      </div>
-      <div class="card stat">
-        <span class="ico-badge" style="background:var(--red-soft);color:var(--red)">⚠️</span>
-        <div class="label">Errors (24h)</div>
-        <div class="value">17</div>
-        <div class="delta down">1.3% error rate</div>
-      </div>
-      <div class="card stat">
-        <span class="ico-badge" style="background:var(--green-soft);color:var(--green)">⏱️</span>
-        <div class="label">p95 latency</div>
-        <div class="value">2.4s</div>
-        <div class="delta up">▼ 0.3s vs. prev day</div>
-      </div>
-    </div>
-
-    <div class="divider"></div>
-
-    <div class="grid cols-2">
-      <div class="card">
-        <div class="card-head"><h3>Agent health</h3><a class="btn sm ghost" href="agents.html">View all →</a></div>
-        <table>
-          <thead><tr><th>Agent</th><th>Status</th><th>Success</th><th>p95</th><th>Last run</th></tr></thead>
-          <tbody>
-            <tr><td class="cell-title">main <span class="cell-sub">basic-chat</span></td><td><span class="badge green"><span class="dot"></span>Healthy</span></td><td>99.2%</td><td>2.1s</td><td>2m ago</td></tr>
-            <tr><td class="cell-title">daily-report <span class="cell-sub">timer</span></td><td><span class="badge green"><span class="dot"></span>Healthy</span></td><td>100%</td><td>8.4s</td><td>3h ago</td></tr>
-            <tr><td class="cell-title">outlook-reply <span class="cell-sub">O365</span></td><td><span class="badge amber"><span class="dot"></span>Degraded</span></td><td>94.1%</td><td>3.9s</td><td>12m ago</td></tr>
-            <tr><td class="cell-title">incident-triage <span class="cell-sub">workflow</span></td><td><span class="badge red"><span class="dot"></span>Failing</span></td><td>71.0%</td><td>—</td><td>26m ago</td></tr>
-            <tr><td class="cell-title">tech-news-email <span class="cell-sub">timer</span></td><td><span class="badge gray"><span class="dot"></span>Idle</span></td><td>—</td><td>—</td><td>1d ago</td></tr>
-          </tbody>
-        </table>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h3>Invocations · last 14 days</h3><span class="muted" style="font-size:12px">HTTP + triggers</span></div>
-        <div class="spark" style="height:120px; align-items:flex-end;">
-          <span style="height:40%"></span><span style="height:55%"></span><span style="height:48%"></span>
-          <span style="height:70%"></span><span style="height:62%"></span><span style="height:80%"></span>
-          <span style="height:58%"></span><span style="height:90%"></span><span style="height:72%"></span>
-          <span style="height:65%"></span><span style="height:100%"></span><span style="height:78%"></span>
-          <span style="height:85%"></span><span style="height:60%"></span>
+        <!-- How AI Apps are identified -->
+        <div class="card callout">
+          <span class="ico">🔖</span>
+          <div>
+            <b>Identified by the <code>agent-runtime</code> property</b>
+            <div class="muted" style="font-size: 13px; max-width: 720px">
+              Rather than searching every Function App, the portal lists only apps whose resource tags include
+              <code>agent-runtime</code> — the marker the runtime stamps on each AI App. Scope the list by subscription
+              below.
+            </div>
+            <div class="mono arg">resources | where type =~ 'microsoft.web/sites' | where isnotempty(tags['agent-runtime'])</div>
+          </div>
         </div>
-        <div class="divider"></div>
-        <h3>Recent failures</h3>
-        <table>
-          <thead><tr><th>Agent</th><th>Error</th><th>When</th><th></th></tr></thead>
-          <tbody>
-            <tr><td class="cell-title">incident-triage</td><td class="cell-sub">Tool timeout: azure_rest</td><td>26m ago</td><td><a href="agent-detail.html">Trace →</a></td></tr>
-            <tr><td class="cell-title">outlook-reply</td><td class="cell-sub">MCP 429 throttled</td><td>1h ago</td><td><a href="agent-detail.html">Trace →</a></td></tr>
-            <tr><td class="cell-title">main</td><td class="cell-sub">Model 400: API version</td><td>3h ago</td><td><a href="agent-detail.html">Trace →</a></td></tr>
-          </tbody>
-        </table>
-      </div>
+
+        <!-- Tenant-wide discovery summary -->
+        <div class="stat-row" style="margin: 2px 0 18px">
+          <div class="stat"><span class="n">8</span><span class="l">AI Apps</span></div>
+          <div class="stat"><span class="n">6</span><span class="l">Running</span></div>
+          <div class="stat"><span class="n">3</span><span class="l">Subscriptions</span></div>
+        </div>
+
+        <!-- Subscription is the primary filter (a flat list across every sub would be too long) -->
+        <div class="filters">
+          <div class="fl">
+            <label>Subscription</label>
+            <select id="subFilter" onchange="applyFilters()">
+              <option value="all">All subscriptions</option>
+              <option value="prod">Contoso Production</option>
+              <option value="nonprod">Contoso Non-Prod</option>
+              <option value="test">Private Test Sub</option>
+            </select>
+          </div>
+          <div class="fl">
+            <label>Status</label>
+            <select id="statusFilter" onchange="applyFilters()">
+              <option value="all">All statuses</option>
+              <option value="running">Running</option>
+              <option value="provisioning">Provisioning</option>
+              <option value="stopped">Stopped</option>
+            </select>
+          </div>
+          <div class="fl">
+            <label>Find by name</label>
+            <input type="text" id="q" placeholder="Filter…" oninput="applyFilters()" />
+          </div>
+          <div class="spacer"></div>
+          <span class="count" id="resultCount"></span>
+          <a class="btn primary" href="create-ai-app.html">＋ New AI App</a>
+        </div>
+
+        <div class="card-grid" id="grid">
+          <a class="card" href="ai-app-detail.html" data-sub="prod" data-status="running" data-name="contoso ops assistant">
+            <div class="card-head">
+              <h3>Contoso Ops Assistant</h3>
+              <span class="badge green"><span class="dot"></span>Running</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">contoso-ops-assistant · eastus2</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Production</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">3</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">2</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">📊 Daily Azure Report</span>
+              <span class="badge gray">💬 Chat Assistant</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 6d ago</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="prod" data-status="running" data-name="support inbox bot">
+            <div class="card-head">
+              <h3>Support Inbox Bot</h3>
+              <span class="badge green"><span class="dot"></span>Running</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">support-inbox-bot · westus3</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Production</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">2</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">2</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">✉️ Outlook Reply Agent</span>
+              <span class="badge gray">📚 Docs Q&amp;A</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 2d ago</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="prod" data-status="running" data-name="outlook auto-reply">
+            <div class="card-head">
+              <h3>Outlook Auto-Reply</h3>
+              <span class="badge green"><span class="dot"></span>Running</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">outlook-auto-reply · eastus2</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Production</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">1</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">✉️ Outlook Reply Agent</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 5h ago</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="prod" data-status="running" data-name="incident triage bot">
+            <div class="card-head">
+              <h3>Incident Triage Bot</h3>
+              <span class="badge green"><span class="dot"></span>Running</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">incident-triage-bot · eastus2</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Production</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">2</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">0</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">0</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">🚨 Incident Triage</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 1d ago</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="nonprod" data-status="running" data-name="tech news daily">
+            <div class="card-head">
+              <h3>Tech News Daily</h3>
+              <span class="badge green"><span class="dot"></span>Running</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">tech-news-daily · westeurope</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Non-Prod</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">1</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">📰 Daily Tech News Email</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 3d ago</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="nonprod" data-status="running" data-name="docs q&amp;a assistant">
+            <div class="card-head">
+              <h3>Docs Q&amp;A Assistant</h3>
+              <span class="badge green"><span class="dot"></span>Running</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">docs-qa-assistant · swedencentral</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Non-Prod</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">1</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">0</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">0</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">📚 Docs Q&amp;A</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 4d ago</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="nonprod" data-status="provisioning" data-name="release notes digest">
+            <div class="card-head">
+              <h3>Release Notes Digest</h3>
+              <span class="badge amber"><span class="dot"></span>Provisioning</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">release-notes-digest · centralus</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Contoso Non-Prod</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">1</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">📰 Daily Tech News Email</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated just now</div>
+          </a>
+
+          <a class="card" href="ai-app-detail.html" data-sub="test" data-status="stopped" data-name="sandbox chat">
+            <div class="card-head">
+              <h3>Sandbox Chat</h3>
+              <span class="badge gray"><span class="dot"></span>Stopped</span>
+            </div>
+            <div class="mono muted" style="font-size: 12px">sandbox-chat · eastus2</div>
+            <div class="chips" style="margin-top: 8px">
+              <span class="badge purple">🔖 agent-runtime</span>
+              <span class="badge gray">Private Test Sub</span>
+            </div>
+            <div class="stat-row">
+              <div class="stat"><span class="n">1</span><span class="l">Agents</span></div>
+              <div class="stat"><span class="n">1</span><span class="l">MCP tools</span></div>
+              <div class="stat"><span class="n">0</span><span class="l">Triggers</span></div>
+            </div>
+            <div class="chips" style="margin-top: 12px">
+              <span class="badge gray">💬 Chat Assistant</span>
+            </div>
+            <div class="muted" style="font-size: 12px; margin-top: 12px">Updated 2w ago</div>
+          </a>
+        </div>
+        <div class="empty" id="emptyState" style="display: none">No AI Apps match these filters. Try “All subscriptions”.</div>
+      </main>
     </div>
-  </main>
-</div>
-</body>
+
+    <script>
+      function applyFilters() {
+        const sub = document.getElementById('subFilter').value
+        const status = document.getElementById('statusFilter').value
+        const q = document.getElementById('q').value.trim().toLowerCase()
+        let shown = 0
+        const cards = document.querySelectorAll('#grid .card')
+        cards.forEach((c) => {
+          const okSub = sub === 'all' || c.dataset.sub === sub
+          const okStatus = status === 'all' || c.dataset.status === status
+          const okName = !q || c.dataset.name.includes(q)
+          const show = okSub && okStatus && okName
+          c.style.display = show ? '' : 'none'
+          if (show) shown++
+        })
+        document.getElementById('resultCount').textContent = `Showing ${shown} of ${cards.length} AI Apps`
+        document.getElementById('emptyState').style.display = shown ? 'none' : 'block'
+      }
+      applyFilters()
+    </script>
+  </body>
 </html>

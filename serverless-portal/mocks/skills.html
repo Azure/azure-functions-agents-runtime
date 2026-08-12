@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Skills — AI Apps</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <a class="btn primary sm" href="create-ai-app.html">＋ New AI App</a>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink active" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <div class="page-title"><h1>Skills</h1></div>
+        <p class="page-sub">
+          The maintained catalog of skills. Each skill is a reusable building block that contributes agents, MCP tools,
+          and connector triggers to an AI App.
+        </p>
+        <div class="toolbar"><a class="btn primary" href="create-ai-app.html">＋ New AI App from skills</a></div>
+
+        <div class="card-grid" id="grid"></div>
+      </main>
+    </div>
+
+    <script>
+      const SKILLS = [
+        { name: 'Chat Assistant', category: 'Assistant', icon: '💬',
+          summary: 'An interactive chat agent with a built-in web chat UI, chat API, and MCP endpoint.',
+          agents: ['main · http'], mcp: [], triggers: [] },
+        { name: 'Daily Azure Report', category: 'Automation', icon: '📊',
+          summary: 'A timer agent that emails a daily report of Azure resource changes, plus an HTTP resource summary.',
+          agents: ['daily_azure_report · timer', 'resource_summary · http'],
+          mcp: ['Microsoft Learn', 'Office 365 Outlook'], triggers: ['Office 365 Outlook: Send an email'] },
+        { name: 'Outlook Reply Agent', category: 'Integration', icon: '✉️',
+          summary: 'Replies to incoming Outlook email, triggered by a connector when a new message arrives.',
+          agents: ['outlook_reply · connector'], mcp: ['Office 365 Outlook'],
+          triggers: ['Office 365 Outlook: When a new email arrives'] },
+        { name: 'Daily Tech News Email', category: 'Automation', icon: '📰',
+          summary: 'A timer agent that curates technology news and emails a daily digest.',
+          agents: ['daily_tech_news · timer'], mcp: ['Office 365 Outlook'], triggers: ['Office 365 Outlook: Send an email'] },
+        { name: 'Docs Q&A', category: 'Knowledge', icon: '📚',
+          summary: 'An HTTP agent that answers Azure questions grounded in Microsoft Learn documentation.',
+          agents: ['docs_qa · http'], mcp: ['Microsoft Learn'], triggers: [] },
+        { name: 'Incident Triage', category: 'Automation', icon: '🚨',
+          summary: 'An HTTP workflow agent that classifies an incident and proposes next steps as structured JSON.',
+          agents: ['incident_triage · http'], mcp: [], triggers: [] },
+      ]
+      const sect = (label, items, cls) =>
+        items.length
+          ? `<div class="span-lbl">${label}</div><div class="chips">${items.map((i) => `<span class="badge ${cls}">${i}</span>`).join('')}</div>`
+          : ''
+      document.getElementById('grid').innerHTML = SKILLS.map((s) => `
+        <div class="card">
+          <div class="card-head"><h3>${s.icon} ${s.name}</h3><span class="badge gray">${s.category}</span></div>
+          <p class="muted" style="margin-top:0">${s.summary}</p>
+          ${sect('Agents', s.agents, 'blue')}
+          ${sect('MCP tools', s.mcp, 'purple')}
+          ${sect('Connector triggers', s.triggers, 'amber')}
+        </div>`).join('')
+    </script>
+  </body>
+</html>

@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Create AI App</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <header class="appbar">
+      <a class="brand" href="index.html"><span class="brand-mark">⚡</span><span class="brand-name">AI Apps</span></a>
+      <div class="appbar-spacer"></div>
+      <div class="appbar-user" title="Signed in">SN</div>
+    </header>
+
+    <div class="body">
+      <aside class="sidebar">
+        <nav class="sidenav">
+          <div class="group-label">Build</div>
+          <a class="sidelink active" href="index.html"><span class="ico">🧩</span><span class="label">AI Apps</span></a>
+          <a class="sidelink" href="skills.html"><span class="ico">📚</span><span class="label">Skills</span></a>
+        </nav>
+      </aside>
+
+      <main class="main">
+        <div class="breadcrumb"><a href="index.html">AI Apps</a> / Create</div>
+        <div class="page-title"><h1>Create AI App</h1></div>
+        <p class="page-sub">Start with a Foundry model, then describe your app — the assistant generates the configuration.</p>
+
+        <div class="steps">
+          <span class="step active" id="s1">1 · Model</span>
+          <span class="step-sep">›</span>
+          <span class="step" id="s2">2 · Describe &amp; generate</span>
+        </div>
+
+        <!-- Step 1: Foundry model -->
+        <section id="step1" class="tabpane active">
+          <div class="card" style="max-width: 620px">
+            <h3>Foundry model</h3>
+            <p class="muted" style="margin-top: 0">Every AI App runs on an Azure AI Foundry model. Provide one to continue.</p>
+            <div class="field">
+              <label>Foundry project endpoint</label>
+              <input type="text" id="fEndpoint" placeholder="https://my-project.services.ai.azure.com/api/projects/my-project" />
+              <div class="hint">The Azure AI Foundry project that hosts your model deployment.</div>
+            </div>
+            <div class="field">
+              <label>Model deployment</label>
+              <select id="fModel">
+                <option>gpt-5.4</option>
+                <option>gpt-5.4-mini</option>
+                <option>gpt-4o</option>
+                <option>o4-mini</option>
+              </select>
+            </div>
+            <div class="pill-row"><button class="btn primary" onclick="go(2)">Continue</button></div>
+          </div>
+        </section>
+
+        <!-- Step 2: Describe & generate -->
+        <section id="step2" class="tabpane">
+          <div class="two-pane">
+            <div class="card chat">
+              <div class="chat-head">🪄 Describe your app</div>
+              <div class="thread" id="thread"></div>
+              <div class="suggest" id="suggest"></div>
+              <div class="composer">
+                <input type="text" id="composerInput" placeholder="e.g. Email me a daily report of my Azure resource changes"
+                  onkeydown="if(event.key==='Enter'){send()}" />
+                <button class="btn primary" onclick="send()">Send</button>
+              </div>
+            </div>
+
+            <div class="card">
+              <h3>Generated AI App</h3>
+              <dl class="meta-grid">
+                <dt>Model</dt><dd id="gModel" class="mono">—</dd>
+                <dt>Name</dt><dd id="gName">—</dd>
+                <dt>Function App</dt><dd id="gFn" class="mono">—</dd>
+              </dl>
+              <div id="genBody" class="gen-empty">Describe your app to generate its configuration.</div>
+              <div class="pill-row" style="margin-top: 16px">
+                <button class="btn" onclick="go(1)">Back</button>
+                <a class="btn primary" id="createBtn" href="ai-app-detail.html" style="pointer-events: none; opacity: .55">Create AI App</a>
+              </div>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <script>
+      const SKILLS = {
+        'chat-assistant': { name: 'Chat Assistant', icon: '💬', agents: ['main · http'], mcp: [], triggers: [] },
+        'daily-azure-report': { name: 'Daily Azure Report', icon: '📊',
+          agents: ['daily_azure_report · timer', 'resource_summary · http'],
+          mcp: ['Microsoft Learn', 'Office 365 Outlook'], triggers: ['Office 365 Outlook: Send an email'] },
+        'outlook-reply': { name: 'Outlook Reply Agent', icon: '✉️', agents: ['outlook_reply · connector'],
+          mcp: ['Office 365 Outlook'], triggers: ['Office 365 Outlook: When a new email arrives'] },
+        'daily-tech-news': { name: 'Daily Tech News Email', icon: '📰', agents: ['daily_tech_news · timer'],
+          mcp: ['Office 365 Outlook'], triggers: ['Office 365 Outlook: Send an email'] },
+        'docs-qa': { name: 'Docs Q&A', icon: '📚', agents: ['docs_qa · http'], mcp: ['Microsoft Learn'], triggers: [] },
+        'incident-triage': { name: 'Incident Triage', icon: '🚨', agents: ['incident_triage · http'], mcp: [], triggers: [] },
+      }
+      // Map described intent → a generated app spec.
+      const SCENARIOS = [
+        { kw: ['azure', 'resource', 'report', 'subscription'], name: 'Contoso Ops Assistant', skills: ['daily-azure-report', 'chat-assistant'] },
+        { kw: ['outlook', 'reply', 'inbox', 'respond'], name: 'Inbox Autoresponder', skills: ['outlook-reply'] },
+        { kw: ['news', 'digest', 'headlines'], name: 'Tech News Digest', skills: ['daily-tech-news'] },
+        { kw: ['docs', 'question', 'learn', 'documentation', 'answer'], name: 'Azure Docs Helper', skills: ['docs-qa', 'chat-assistant'] },
+        { kw: ['incident', 'triage', 'classify', 'alert'], name: 'Incident Triage Bot', skills: ['incident-triage'] },
+      ]
+      const SUGGESTIONS = [
+        'Email me a daily report of my Azure resource changes and let me chat about them',
+        'Reply to incoming Outlook email automatically',
+        'Send me a daily tech news digest',
+        'Answer Azure questions from the docs',
+      ]
+
+      const slug = (s) => (s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')) || 'ai-app'
+      const uniq = (a) => [...new Set(a)]
+      let model = 'gpt-5.4'
+
+      function go(step) {
+        document.getElementById('step1').classList.toggle('active', step === 1)
+        document.getElementById('step2').classList.toggle('active', step === 2)
+        document.getElementById('s1').classList.toggle('active', step === 1)
+        document.getElementById('s2').classList.toggle('active', step === 2)
+        if (step === 2) {
+          model = document.getElementById('fModel').value
+          document.getElementById('gModel').textContent = model
+          const th = document.getElementById('thread')
+          if (!th.dataset.init) {
+            addBot("Tell me what you want your AI App to do, and I'll generate its agents, tools, and triggers.")
+            renderSuggest()
+            th.dataset.init = '1'
+          }
+        }
+      }
+
+      function bubble(role, text) {
+        const el = document.createElement('div')
+        el.className = 'msg ' + role
+        el.innerHTML = `<span class="av">${role === 'user' ? 'SN' : '🪄'}</span><div class="bubble">${text}</div>`
+        document.getElementById('thread').appendChild(el)
+        document.getElementById('thread').scrollTop = 1e9
+      }
+      const addUser = (t) => bubble('user', t)
+      const addBot = (t) => bubble('bot', t)
+
+      function renderSuggest() {
+        document.getElementById('suggest').innerHTML = SUGGESTIONS.map(
+          (s) => `<button class="chip-btn" onclick="sendText(this.dataset.t)" data-t="${s.replace(/"/g, '&quot;')}">${s}</button>`,
+        ).join('')
+      }
+
+      function send() {
+        const inp = document.getElementById('composerInput')
+        const v = inp.value.trim()
+        if (!v) return
+        inp.value = ''
+        sendText(v)
+      }
+      function sendText(text) {
+        addUser(text)
+        document.getElementById('suggest').innerHTML = ''
+        const spec = generate(text)
+        const s = spec.skills.map((id) => SKILLS[id].name).join(', ')
+        const agents = uniq(spec.skills.flatMap((id) => SKILLS[id].agents))
+        const mcp = uniq(spec.skills.flatMap((id) => SKILLS[id].mcp))
+        const trig = uniq(spec.skills.flatMap((id) => SKILLS[id].triggers))
+        addBot(
+          `Based on that, I've drafted <b>${spec.name}</b> using the <b>${s}</b> skill(s) on <b>${model}</b>.\n` +
+            `It includes ${agents.length} agent(s), ${mcp.length} MCP tool(s), and ${trig.length} connector trigger(s). Review it on the right and create when ready.`,
+        )
+      }
+
+      function generate(text) {
+        const t = text.toLowerCase()
+        let sc = SCENARIOS.find((s) => s.kw.some((k) => t.includes(k)))
+        if (!sc) sc = { name: 'My AI App', skills: ['chat-assistant'] }
+        renderGenerated(sc)
+        return sc
+      }
+
+      function renderGenerated(sc) {
+        const agents = uniq(sc.skills.flatMap((id) => SKILLS[id].agents))
+        const mcp = uniq(sc.skills.flatMap((id) => SKILLS[id].mcp))
+        const trig = uniq(sc.skills.flatMap((id) => SKILLS[id].triggers))
+        document.getElementById('gName').textContent = sc.name
+        document.getElementById('gFn').textContent = slug(sc.name)
+        const chips = (label, items, cls) =>
+          items.length
+            ? `<div class="span-lbl">${label}</div><div class="chips">${items.map((i) => `<span class="badge ${cls}">${i}</span>`).join('')}</div>`
+            : ''
+        document.getElementById('genBody').innerHTML =
+          `<div class="span-lbl">Skills</div><div class="chips">${sc.skills
+            .map((id) => `<span class="badge gray">${SKILLS[id].icon} ${SKILLS[id].name}</span>`)
+            .join('')}</div>` +
+          chips('Agents', agents, 'blue') +
+          chips('MCP tools', mcp, 'purple') +
+          chips('Connector triggers', trig, 'amber')
+        const btn = document.getElementById('createBtn')
+        btn.style.pointerEvents = 'auto'
+        btn.style.opacity = '1'
+      }
+    </script>
+  </body>
+</html>
