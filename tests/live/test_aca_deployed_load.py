@@ -67,9 +67,10 @@ _ACTIVE_PROOF_TIMEOUT_SECONDS = 120.0
 _EVENT_STREAM_GRACE_SECONDS = 360.0
 _HOLD_SECONDS = 300.0
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
-_SETUP_DEADLINE_ATTEMPTS = 6
+_SETUP_DEADLINE_ATTEMPTS = 12
 _SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0
 _PROVISION_BATCH_TIMEOUT_SECONDS = 660.0
+_PHASE_B_ADMISSION_TIMEOUT_SECONDS = 660.0
 _RECOVERY_ATTEMPTS = 5
 _RECOVERY_POLL_SECONDS = 1.0
 _FINAL_RECOVERY_TIMEOUT_SECONDS = 60.0
@@ -501,17 +502,23 @@ async def _submit_existing_sessions(
     attempted_idempotency_keys: list[str],
 ) -> _AdmissionSummary:
     """Launch the formal held turns concurrently against the already prepared sessions."""
-    admission = await _submit_session_batch(
-        client,
-        config,
-        headers,
-        resources,
-        partition_key,
-        session_ids=[item.accepted.session_id for item in prepared],
-        prompt=_LOAD_PROMPT,
-        submitted=held,
-        attempted_idempotency_keys=attempted_idempotency_keys,
-    )
+    try:
+        async with asyncio.timeout(_PHASE_B_ADMISSION_TIMEOUT_SECONDS):
+            admission = await _submit_session_batch(
+                client,
+                config,
+                headers,
+                resources,
+                partition_key,
+                session_ids=[item.accepted.session_id for item in prepared],
+                prompt=_LOAD_PROMPT,
+                submitted=held,
+                attempted_idempotency_keys=attempted_idempotency_keys,
+            )
+    except TimeoutError as exc:
+        raise AcaSmokeEnvironmentError(
+            "The formal Phase B admission did not complete within its bounded setup deadline."
+        ) from exc
     _assert_phase_b_session_identity(prepared, held)
     return admission
 

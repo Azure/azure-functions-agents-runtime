@@ -85,6 +85,7 @@ from azure_functions_agents.session_state import (
 from azure_functions_agents.transport.transport_models import (
     DiskSource,
     SandboxCapacityError,
+    SandboxFileNotFoundError,
     SandboxFileOperationError,
 )
 from tests.doubles.content_package import content_package
@@ -718,6 +719,51 @@ async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     assert recovered.session_id == operation.target.session_id
     assert recovered.run_id == operation.target.run_id
     assert recovered.state == "accepted"
+    assert len(provider.sandboxes) == 1
+    assert len(provider.create_calls) == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_provision_artifact_leaves_a_resumable_operation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    handle.write_errors.append(SandboxFileNotFoundError("/sandbox/runtime/content"))
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="missing-artifact-retry")
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+
+    assert store.session is not None
+    operation = next(iter(store.durable_operations.values()))
+    assert operation.phase == "provision_content"
+    assert store.session.active_run_id == operation.target.run_id
+    assert store.session.sandbox_id == operation.target.sandbox_id
+
+    _expire_provision_lease(store, operation)
+    recovered = await backend.start_run(request)
+
+    assert recovered.session_id == operation.target.session_id
+    assert recovered.run_id == operation.target.run_id
     assert len(provider.sandboxes) == 1
     assert len(provider.create_calls) == 1
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1

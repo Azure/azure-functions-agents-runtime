@@ -263,12 +263,14 @@ batch reaches public-terminal, durable ready/suspended idle before the next
 batch posts. Every public setup POST has an enforced 45-second attempt bound,
 and each complete Phase A batch has an outermost 660-second (11m)
 deadline covering submission, retry waits, public terminal evidence, and
-durable idle validation. Six attempts plus five bounded 60-second lease waits
-cap one session at 570 seconds; 25 enforced 11m Phase A batches cap
-`N=100` provisioning at 275m. Do not add individual 540-second
+durable idle validation. Setup may retry up to 12 times, but individual retry
+waits are not additive:
+the outer 11m batch deadline is enforced. The same 11m bound applies to the
+Phase B admission and backing-loss held admission. Twenty-five enforced 11m
+Phase A batches cap `N=100` provisioning at 275m. Do not add individual 540-second
 `ClientSession` values to that bound: the batch deadline is outermost. Phase B
-setup is concurrent and has the same 9.5-minute per-run bound before its
-300-second formal hold and 11-minute event bound. The load-only agent has a
+setup is concurrent before its 300-second formal hold and 11-minute event
+bound. The load-only agent has a
 900-second authored timeout; plan for batch provisioning plus the hold, and use
 a CI-dedicated Sandbox Group. The manual ADO job has a 360-minute safety cap;
 the remaining 85m cover Phase B, the other deployed qualifications,

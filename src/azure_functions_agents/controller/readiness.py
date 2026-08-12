@@ -1317,6 +1317,10 @@ async def _provision_reserved_session(
             package,
             setup_deadline,
         )
+    except SandboxFileNotFoundError as exc:
+        raise SessionActivationSetupTimeoutError(
+            "Sandbox file-plane provisioning artifact is temporarily unavailable."
+        ) from exc
     except SandboxFileOperationError as exc:
         if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
             raise SessionActivationSetupTimeoutError(

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import importlib
 import sys
+from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +12,10 @@ import pytest
 from azure_functions_agents.session_state import AppIdentity, EntraUserOwnerContext, owner_partition
 from tests.live import aca_deployed_agent_support as agent_support
 from tests.live import aca_deployed_loss_support as support
+
+
+def _admission_deadline(module: object) -> float:
+    return asyncio.get_running_loop().time() + module._HELD_RUN_SETUP_TIMEOUT_SECONDS  # type: ignore[attr-defined]
 
 
 def test_loss_partition_derives_from_the_easy_auth_owner() -> None:
@@ -170,7 +176,7 @@ async def test_loss_submission_retries_the_same_key_after_setup_deadline(
     module = loss_module
     headers_seen: list[dict[str, str]] = []
     responses = iter(
-        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 5
+        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 11
         + [(202, {"session_id": "session-1", "run_id": "run-1"}, {})]
     )
 
@@ -195,12 +201,13 @@ async def test_loss_submission_retries_the_same_key_after_setup_deadline(
         {"Authorization": "redacted", "Content-Type": "application/json"},
         "partition",
         "fixed-key",
+        admission_deadline=_admission_deadline(module),
     )
 
     assert actual is accepted
-    assert len(headers_seen) == 6
+    assert len(headers_seen) == 12
     assert {headers["Idempotency-Key"] for headers in headers_seen} == {"fixed-key"}
-    assert retry_delays == [60.0] * 5
+    assert retry_delays == [60.0] * 11
 
 
 @pytest.mark.asyncio
@@ -229,6 +236,7 @@ async def test_loss_submission_recovers_a_candidate_after_transport_error(
         {"Authorization": "redacted", "Content-Type": "application/json"},
         "partition",
         "recoverable-key",
+        admission_deadline=_admission_deadline(module),
     )
 
     assert actual is accepted
@@ -262,9 +270,199 @@ async def test_loss_submission_timeout_recovers_a_candidate(
         {"Authorization": "redacted", "Content-Type": "application/json"},
         "partition",
         "timeout-key",
+        admission_deadline=_admission_deadline(module),
     )
 
     assert actual is accepted
+
+
+@pytest.mark.asyncio
+async def test_loss_outer_setup_deadline_recovers_the_fixed_idempotency_key(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_module: object,
+) -> None:
+    module = loss_module
+    accepted = SimpleNamespace(session_id="session-1", run_id="run-1")
+    never = module.asyncio.Event()  # type: ignore[attr-defined]
+    recovered_keys: list[str] = []
+
+    async def blocking_request(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        await never.wait()
+        raise AssertionError("unreachable")
+
+    async def recover(*args: object) -> object:
+        recovered_keys.append(args[-1])
+        return accepted
+
+    monkeypatch.setattr(module, "_HELD_RUN_SETUP_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(module, "json_request", blocking_request)
+    monkeypatch.setattr(module, "_recover_candidate", recover)
+
+    actual = await module._submit_held_run(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        {"Authorization": "redacted", "Content-Type": "application/json"},
+        "partition",
+        "fixed-key",
+        admission_deadline=_admission_deadline(module),
+    )
+
+    assert actual is accepted
+    assert recovered_keys == ["fixed-key"]
+
+
+@pytest.mark.asyncio
+async def test_loss_setup_deadline_reserves_the_remaining_absolute_budget_for_recovery(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_module: object,
+) -> None:
+    module = loss_module
+    accepted = SimpleNamespace(session_id="session-1", run_id="run-1")
+    clock = iter((100.0, 720.0))
+    timeout_budgets: list[float] = []
+
+    @asynccontextmanager
+    async def timeout(seconds: float) -> object:
+        timeout_budgets.append(seconds)
+        yield
+
+    async def timed_out_retry(*_: object) -> object:
+        raise TimeoutError
+
+    async def recover(*_: object) -> object:
+        return accepted
+
+    monkeypatch.setattr(module, "_setup_deadline_now", lambda: next(clock))
+    monkeypatch.setattr(module.asyncio, "timeout", timeout)
+    monkeypatch.setattr(module, "_submit_held_run_with_retries", timed_out_retry)
+    monkeypatch.setattr(module, "_recover_candidate", recover)
+
+    actual = await module._submit_held_run(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        {"Authorization": "redacted", "Content-Type": "application/json"},
+        "partition",
+        "fixed-key",
+        admission_deadline=760.0,
+    )
+
+    assert actual is accepted
+    assert timeout_budgets == [600.0, 40.0]
+
+
+@pytest.mark.asyncio
+async def test_outer_loss_recovery_skips_when_the_shared_admission_deadline_is_exhausted(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_module: object,
+) -> None:
+    module = loss_module
+    recovery_calls = 0
+
+    async def unexpected_recovery(*_: object) -> object:
+        nonlocal recovery_calls
+        recovery_calls += 1
+        return SimpleNamespace()
+
+    monkeypatch.setattr(module, "_setup_deadline_now", lambda: 660.0)
+    monkeypatch.setattr(module, "_recover_candidate", unexpected_recovery)
+
+    recovered = await module._recover_before_admission_deadline(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        "partition",
+        "fixed-key",
+        admission_deadline=660.0,
+    )
+
+    assert recovered is None
+    assert recovery_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_outer_loss_recovery_uses_only_the_shared_deadline_remainder(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_module: object,
+) -> None:
+    module = loss_module
+    accepted = SimpleNamespace(session_id="session-1", run_id="run-1")
+    timeout_budgets: list[float] = []
+
+    @asynccontextmanager
+    async def timeout(seconds: float) -> object:
+        timeout_budgets.append(seconds)
+        yield
+
+    async def recover(*_: object) -> object:
+        return accepted
+
+    monkeypatch.setattr(module, "_setup_deadline_now", lambda: 620.0)
+    monkeypatch.setattr(module.asyncio, "timeout", timeout)
+    monkeypatch.setattr(module, "_recover_candidate", recover)
+
+    recovered = await module._recover_before_admission_deadline(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        "partition",
+        "fixed-key",
+        admission_deadline=660.0,
+    )
+
+    assert recovered is accepted
+    assert timeout_budgets == [40.0]
+
+
+@pytest.mark.asyncio
+async def test_loss_setup_deadline_cancels_blocking_retry_and_recovery_within_total_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_module: object,
+) -> None:
+    module = loss_module
+    never = module.asyncio.Event()  # type: ignore[attr-defined]
+    retry_cancelled = False
+    recovery_cancelled = False
+
+    async def blocking_request(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        nonlocal retry_cancelled
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            retry_cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    async def blocking_recovery(*_: object, **__: object) -> object:
+        nonlocal recovery_cancelled
+        try:
+            await never.wait()
+        except asyncio.CancelledError:
+            recovery_cancelled = True
+            raise
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(module, "_HELD_RUN_SETUP_TIMEOUT_SECONDS", 0.10)
+    monkeypatch.setattr(module, "_HELD_RUN_RECOVERY_RESERVE_SECONDS", 0.04)
+    monkeypatch.setattr(module, "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS", 60.0)
+    monkeypatch.setattr(module, "json_request", blocking_request)
+    monkeypatch.setattr(module, "_recover_candidate", blocking_recovery)
+    started = asyncio.get_running_loop().time()
+
+    with pytest.raises(module.AcaSmokeEnvironmentError, match="bounded setup deadline"):
+        await module._submit_held_run(  # type: ignore[attr-defined]
+            object(),
+            object(),
+            SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+            {"Authorization": "redacted", "Content-Type": "application/json"},
+            "partition",
+            "fixed-key",
+            admission_deadline=_admission_deadline(module),
+        )
+
+    assert asyncio.get_running_loop().time() - started < 0.20
+    assert retry_cancelled
+    assert recovery_cancelled
 
 
 @pytest.mark.asyncio
@@ -293,6 +491,7 @@ async def test_loss_submission_propagates_unresolved_transport_error_after_recov
             {"Authorization": "redacted", "Content-Type": "application/json"},
             "partition",
             "unresolved-key",
+            admission_deadline=_admission_deadline(module),
         )
 
     assert recovered_keys == ["unresolved-key"]

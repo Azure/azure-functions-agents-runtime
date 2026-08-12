@@ -405,6 +405,60 @@ async def test_existing_session_phase_submits_each_held_run_with_its_session_hea
 
 
 @pytest.mark.asyncio
+async def test_phase_b_timeout_preserves_accepted_candidates_and_attempted_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    blocked = module.asyncio.Event()  # type: ignore[attr-defined]
+    attempted_keys: list[str] = []
+    held: list[object] = []
+
+    async def submit_one(*args: object, **kwargs: object) -> object:
+        session_id = kwargs["session_id"]
+        assert isinstance(session_id, str)
+        keys = args[5]
+        assert isinstance(keys, list)
+        keys.append(f"key-{session_id}")
+        if session_id == "blocked":
+            await blocked.wait()
+        return module._AdmissionOutcome(  # type: ignore[attr-defined]
+            f"key-{session_id}",
+            module._SubmittedRun(  # type: ignore[attr-defined]
+                accepted=SimpleNamespace(session_id=session_id, run_id=f"run-{session_id}"),
+                idempotency_key=f"key-{session_id}",
+                submitted_at=1.0,
+                accepted_at=2.0,
+                session_id_header=session_id,
+            ),
+            0,
+            0,
+            None,
+            False,
+        )
+
+    prepared = [
+        module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id=session_id, run_id=f"prepared-{session_id}"),
+            idempotency_key=f"prepared-{session_id}",
+            submitted_at=1.0,
+            accepted_at=2.0,
+        )
+        for session_id in ("retained", "blocked")
+    ]
+    monkeypatch.setattr(module, "_PHASE_B_ADMISSION_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_submit_one", submit_one)
+
+    with pytest.raises(module.AcaSmokeEnvironmentError, match="Phase B admission"):
+        await module._submit_existing_sessions(  # type: ignore[attr-defined]
+            object(), SimpleNamespace(), {}, prepared, held, object(), "partition", attempted_keys
+        )
+
+    assert [item.accepted.session_id for item in held] == ["retained"]
+    assert attempted_keys == ["key-retained", "key-blocked"]
+
+
+@pytest.mark.asyncio
 async def test_existing_session_response_retains_a_different_session_identity_as_failure(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
@@ -749,18 +803,18 @@ async def test_final_setup_deadline_recovers_cleanup_candidate(
     assert outcome.submitted.accepted.session_id == "session-recovered"
     assert not outcome.unresolved_idempotency
     assert len(keys) == 1
-    assert retry_delays == [60.0] * 5
+    assert retry_delays == [60.0] * 11
 
 
 @pytest.mark.asyncio
-async def test_load_submission_retries_five_setup_leases_with_the_same_key(
+async def test_load_submission_retries_eleven_setup_leases_with_the_same_key(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
 ) -> None:
     module = load_module
     deployed = SimpleNamespace(chat_url="https://example.test/chat")
     responses = iter(
-        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 5
+        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 11
         + [(202, {"session_id": "session-accepted", "run_id": "run-accepted"}, {})]
     )
     headers_seen: list[dict[str, str]] = []
@@ -793,12 +847,12 @@ async def test_load_submission_retries_five_setup_leases_with_the_same_key(
 
     assert outcome.submitted is not None
     assert outcome.submitted.accepted is accepted
-    assert outcome.retries == 5
-    assert len(headers_seen) == 6
+    assert outcome.retries == 11
+    assert len(headers_seen) == 12
     assert {headers["Idempotency-Key"] for headers in headers_seen} == {keys[0]}
     assert all("x-ms-session-id" not in headers for headers in headers_seen)
-    assert payloads_seen == [{"prompt": module._READINESS_PROMPT}] * 6  # type: ignore[attr-defined]
-    assert retry_delays == [60.0] * 5
+    assert payloads_seen == [{"prompt": module._READINESS_PROMPT}] * 12  # type: ignore[attr-defined]
+    assert retry_delays == [60.0] * 11
 
 
 @pytest.mark.asyncio
@@ -1439,10 +1493,14 @@ def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
     runbook = (root / "docs" / "testing" / "live-aca.md").read_text()
 
     assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in load_source
+    assert "_SETUP_DEADLINE_ATTEMPTS = 12" in load_source
     assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in loss_source
+    assert "_SETUP_RETRY_ATTEMPTS = 12" in loss_source
     assert "_PROVISION_BATCH_TIMEOUT_SECONDS = 660.0" in load_source
+    assert "_PHASE_B_ADMISSION_TIMEOUT_SECONDS = 660.0" in load_source
+    assert "_HELD_RUN_SETUP_TIMEOUT_SECONDS = 660.0" in loss_source
     assert "timeoutInMinutes: 360" in job
-    assert "570 seconds" in runbook
+    assert "up to 12 times" in runbook
     assert "11m" in runbook
     assert "275m" in runbook
     assert "85m" in runbook

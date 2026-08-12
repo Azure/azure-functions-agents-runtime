@@ -50,8 +50,10 @@ from azure_functions_agents.transport.transport_models import SandboxSummary, Sa
 
 _LOAD_AGENT_SLUG = "deployed_load"
 _HOLD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
-_SETUP_RETRY_ATTEMPTS = 6
+_SETUP_RETRY_ATTEMPTS = 12
 _SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0
+_HELD_RUN_SETUP_TIMEOUT_SECONDS = 660.0
+_HELD_RUN_RECOVERY_RESERVE_SECONDS = 60.0
 _RECOVERY_ATTEMPTS = 5
 _POLL_SECONDS = 1.0
 _CONTROLLER_WAIT_SECONDS = 300.0
@@ -104,6 +106,7 @@ async def test_deployed_aca_reconciles_lost_active_backing_without_table_mutatio
         }
         timeout = ClientTimeout(total=config.deployed.timeout_seconds)
         async with ClientSession(timeout=timeout) as client:
+            admission_deadline = _setup_deadline_now() + _HELD_RUN_SETUP_TIMEOUT_SECONDS
             try:
                 accepted = await _submit_held_run(
                     client,
@@ -112,6 +115,7 @@ async def test_deployed_aca_reconciles_lost_active_backing_without_table_mutatio
                     headers,
                     partition_key,
                     idempotency_key,
+                    admission_deadline=admission_deadline,
                 )
                 await _wait_for_qualification_hold_start(
                     client,
@@ -177,14 +181,20 @@ async def test_deployed_aca_reconciles_lost_active_backing_without_table_mutatio
                 primary_error = sys.exception()
                 if accepted is None:
                     try:
-                        accepted = await _recover_candidate(
+                        accepted = await _recover_before_admission_deadline(
                             resources,
                             config,
                             partition_key,
                             idempotency_key,
+                            admission_deadline=admission_deadline,
                         )
                     except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
                         cleanup_error = exc
+                    if accepted is None and cleanup_error is None:
+                        cleanup_error = AcaSmokeEnvironmentError(
+                            "ACA backing-loss cleanup has an unresolved admission after its "
+                            "bounded recovery deadline."
+                        )
                 if accepted is not None and not reconciled:
                     try:
                         await _cleanup_failed_loss_candidate(
@@ -215,6 +225,72 @@ def _load_config(config: DeployedAcaLifecycleConfig) -> DeployedAcaLifecycleConf
 
 
 async def _submit_held_run(
+    client: ClientSession,
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    headers: dict[str, str],
+    partition_key: str,
+    idempotency_key: str,
+    *,
+    admission_deadline: float,
+) -> AcceptedRun:
+    retry_budget = max(
+        0.0,
+        admission_deadline - _setup_deadline_now() - _HELD_RUN_RECOVERY_RESERVE_SECONDS,
+    )
+    try:
+        async with asyncio.timeout(retry_budget):
+            return await _submit_held_run_with_retries(
+                client,
+                resources,
+                config,
+                headers,
+                partition_key,
+                idempotency_key,
+            )
+    except TimeoutError as exc:
+        recovered = await _recover_before_admission_deadline(
+            resources,
+            config,
+            partition_key,
+            idempotency_key,
+            admission_deadline=admission_deadline,
+        )
+        if recovered is not None:
+            return recovered
+        raise AcaSmokeEnvironmentError(
+            "The backing-loss held public admission exceeded its bounded setup deadline."
+        ) from exc
+
+
+def _setup_deadline_now() -> float:
+    return asyncio.get_running_loop().time()
+
+
+async def _recover_before_admission_deadline(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    idempotency_key: str,
+    *,
+    admission_deadline: float,
+) -> AcceptedRun | None:
+    remaining = max(0.0, admission_deadline - _setup_deadline_now())
+    if not remaining:
+        return None
+    try:
+        async with asyncio.timeout(remaining):
+            return await _recover_candidate(
+                resources,
+                config,
+                partition_key,
+                idempotency_key,
+            )
+    except TimeoutError:
+        return None
+
+
+async def _submit_held_run_with_retries(
     client: ClientSession,
     resources: DeployedAcaLifecycleResources,
     config: DeployedAcaLifecycleConfig,
