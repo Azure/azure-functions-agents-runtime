@@ -13,6 +13,10 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [workflow-incident-triage](workflow-incident-triage/) | HTTP | | | | | | ✅ |
 | [workflow-queue-p0-report](workflow-queue-p0-report/) | Queue | ✅ workflow-safe | | | | | |
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
+| [hybrid-function-agent](hybrid-function-agent/) | HTTP + Queue | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
+| [hybrid-durable-agent](hybrid-durable-agent/) | Durable Activity + Orchestrator | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
+
+The [hybrid-function-agent](hybrid-function-agent/) sample demonstrates `AiApp` injecting one agent into async HTTP and queue handlers. The [hybrid-durable-agent](hybrid-durable-agent/) sample demonstrates `DurableAiApp` injection into an async activity and a replay-safe orchestrator.
 
 ## Design previews
 

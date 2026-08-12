@@ -1,5 +1,14 @@
 # Dynamic workflows (experimental v1)
 
+## Durable smart agent input
+
+The `agent_input` feature is separate from markdown-authored Dynamic Workflows. It lets customer-owned Durable handlers invoke one markdown agent while retaining their own orchestration code:
+
+- Activities declare `mode="activity"`, must use `async def`, and receive a fresh raw `agent_framework.Agent`. The Agent is closed when the activity handler exits and must not be retained.
+- Synchronous generator orchestrators declare `mode="orchestrator"` and receive `DurableAiAgent`. Its non-streaming `run()` returns a `TaskBase` for the handler to yield; model and tool I/O occurs only in the runtime-generated `_afa_agent_binding_run` activity, preserving replay determinism.
+
+The yielded orchestrator result is a JSON object with `text`, `messages`, `response_id`, and `usage`. Messages and options passed to the proxy must be JSON-serializable.
+
 > [!NOTE]
 > **Status: public experimental v1.** The API is intentionally small and
 > may change based on early feedback, but the behavior described here is

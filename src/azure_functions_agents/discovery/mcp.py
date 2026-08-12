@@ -17,8 +17,36 @@ from ..config.env import has_unresolved_placeholders, resolve_env_vars_in_data
 
 type MCPTool = MCPStreamableHTTPTool
 
-_DISCOVERED_MCP_SERVERS_CACHE: dict[Path, dict[str, MCPTool]] = {}
+_DISCOVERED_MCP_DEFINITIONS_CACHE: dict[
+    Path,
+    tuple[dict[str, MCPServerDefinition], list[tuple[str, str]]],
+] = {}
 _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
+
+
+@dataclass(frozen=True)
+class MCPServerDefinition:
+    """Immutable resolved MCP configuration that can build an owned tool."""
+
+    name: str
+    config_json: str
+
+    def build_tool(self) -> MCPTool:
+        config = cast(dict[str, Any], json.loads(self.config_json))
+        tool, error = _build_mcp_tool(self.name, config)
+        if tool is None:
+            raise RuntimeError(
+                f"Validated MCP server {self.name!r} could not be built: {error}"
+            )
+        return tool
+
+
+@dataclass
+class MCPDefinitionDiscoveryResult:
+    """Resolved MCP definitions and discovery failures."""
+
+    definitions: dict[str, MCPServerDefinition]
+    failed_loads: list[tuple[str, str]]
 
 
 @dataclass
@@ -31,7 +59,7 @@ class MCPDiscoveryResult:
 
 def clear_mcp_cache() -> None:
     """Clear cached MCP server discovery results."""
-    _DISCOVERED_MCP_SERVERS_CACHE.clear()
+    _DISCOVERED_MCP_DEFINITIONS_CACHE.clear()
 
 
 def _build_header_provider(server: dict[str, Any]) -> Any:
@@ -164,23 +192,71 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
     return None, error
 
 
-def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
+def _definition_from_config(
+    name: str,
+    server: dict[str, Any],
+) -> tuple[MCPServerDefinition | None, str | None]:
+    server_type = str(server.get("type", "")).lower()
+    if "command" in server or server_type in {"local", "stdio"}:
+        error = "MCP stdio transport is not supported"
+        logger.warning("%s; skipping server '%s'", error, name)
+        return None, error
+
+    if "url" in server or server_type in {"http", "streamable-http"}:
+        if server_type and server_type not in {"http", "streamable-http"}:
+            error = (
+                f"unknown server type '{server_type}'; supported types are "
+                "'http' and 'streamable-http'"
+            )
+            logger.warning("MCP server '%s': %s", name, error)
+            return None, error
+        url = str(server.get("url", "")).strip()
+        if not url:
+            error = "missing 'url'"
+            logger.warning("MCP server '%s': %s, skipping", name, error)
+            return None, error
+        if has_unresolved_placeholders(url):
+            error = f"could not resolve url '{url}'"
+            logger.warning("MCP server '%s': %s, skipping", name, error)
+            return None, error
+        return MCPServerDefinition(
+            name=name,
+            config_json=json.dumps(server, sort_keys=True, separators=(",", ":")),
+        ), None
+
+    if server_type:
+        error = (
+            f"unknown server type '{server_type}'; supported types are "
+            "'http' and 'streamable-http'"
+        )
+        logger.warning("MCP server '%s': %s", name, error)
+    else:
+        error = "unrecognized config (expected 'url' plus type 'http' or 'streamable-http')"
+        logger.warning("MCP server '%s': %s, skipping", name, error)
+    return None, error
+
+
+def discover_mcp_server_definitions(app_root: Path) -> MCPDefinitionDiscoveryResult:
+    """Load and cache immutable resolved MCP server definitions."""
     resolved_root = Path(app_root).resolve()
-    cached_servers = _DISCOVERED_MCP_SERVERS_CACHE.get(resolved_root)
-    if cached_servers is not None:
-        return MCPDiscoveryResult(servers=dict(cached_servers), failed_loads=[])
+    cached = _DISCOVERED_MCP_DEFINITIONS_CACHE.get(resolved_root)
+    if cached is not None:
+        return MCPDefinitionDiscoveryResult(
+            definitions=dict(cached[0]),
+            failed_loads=list(cached[1]),
+        )
 
     path = resolved_root / "mcp.json"
     if not path.exists():
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        _DISCOVERED_MCP_DEFINITIONS_CACHE[resolved_root] = ({}, [])
+        return MCPDefinitionDiscoveryResult(definitions={}, failed_loads=[])
 
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except Exception as exc:
         logger.warning("Failed to read MCP config from %s: %s", path, exc)
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        _DISCOVERED_MCP_DEFINITIONS_CACHE[resolved_root] = ({}, [])
+        return MCPDefinitionDiscoveryResult(definitions={}, failed_loads=[])
 
     if not isinstance(data, dict):
         logger.warning(
@@ -188,33 +264,51 @@ def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
             path,
             type(data).__name__,
         )
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        _DISCOVERED_MCP_DEFINITIONS_CACHE[resolved_root] = ({}, [])
+        return MCPDefinitionDiscoveryResult(definitions={}, failed_loads=[])
 
     data = cast(dict[str, Any], resolve_env_vars_in_data(data))
     servers = data.get("servers", {})
     if not isinstance(servers, dict):
         logger.warning("Invalid MCP config in %s: 'servers' must be an object", path)
-        _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = {}
-        return MCPDiscoveryResult(servers={}, failed_loads=[])
+        _DISCOVERED_MCP_DEFINITIONS_CACHE[resolved_root] = ({}, [])
+        return MCPDefinitionDiscoveryResult(definitions={}, failed_loads=[])
 
-    tools: dict[str, MCPTool] = {}
+    definitions: dict[str, MCPServerDefinition] = {}
     failed_loads: list[tuple[str, str]] = []
     for name in sorted(servers.keys()):
         config = servers[name]
         if not isinstance(name, str) or not isinstance(config, dict):
             continue
-        built, error = _build_mcp_tool(name, config)
-        if built is not None:
-            tools[name] = built
+        definition, error = _definition_from_config(name, config)
+        if definition is not None:
+            definitions[name] = definition
         elif error is not None:
             failed_loads.append((name, error))
 
-    if tools:
-        logger.info("Loaded %d MCP server(s) from %s", len(tools), path)
+    if definitions:
+        logger.info("Loaded %d MCP server(s) from %s", len(definitions), path)
     else:
         logger.info("No valid MCP servers found in %s", path)
     if failed_loads:
         logger.warning("Failed to load %d MCP server(s)", len(failed_loads))
-    _DISCOVERED_MCP_SERVERS_CACHE[resolved_root] = tools
-    return MCPDiscoveryResult(servers=dict(tools), failed_loads=failed_loads)
+    _DISCOVERED_MCP_DEFINITIONS_CACHE[resolved_root] = (
+        dict(definitions),
+        list(failed_loads),
+    )
+    return MCPDefinitionDiscoveryResult(
+        definitions=dict(definitions),
+        failed_loads=list(failed_loads),
+    )
+
+
+def discover_mcp_servers(app_root: Path) -> MCPDiscoveryResult:
+    """Build fresh MAF MCP tools from cached immutable definitions."""
+    discovered = discover_mcp_server_definitions(app_root)
+    return MCPDiscoveryResult(
+        servers={
+            name: definition.build_tool()
+            for name, definition in discovered.definitions.items()
+        },
+        failed_loads=discovered.failed_loads,
+    )

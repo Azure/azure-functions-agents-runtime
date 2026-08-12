@@ -110,6 +110,12 @@ except ImportError:
 
 from ._function_tool import tool, workflow_tool  # noqa: E402
 from .app import create_function_app  # noqa: E402
+from .bindings import (  # noqa: E402
+    AiApp,
+    DurableAiAgent,
+    DurableAiApp,
+    agent_input,
+)
 from .client_manager import (  # noqa: E402
     ClientManager,
     MAFClientManager,
@@ -132,9 +138,13 @@ __all__ = [
     "DEFAULT_MODEL",
     "DEFAULT_TIMEOUT",
     "AgentResult",
+    "AiApp",
     "ClientManager",
+    "DurableAiAgent",
+    "DurableAiApp",
     "MAFClientManager",
     "__version__",
+    "agent_input",
     "create_function_app",
     "create_sandbox_tools",
     "create_web_request_tools",

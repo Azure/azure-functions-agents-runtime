@@ -154,6 +154,39 @@ def test_build_skills_provider_returns_provider_for_skill_paths(tmp_path: Path) 
     assert isinstance(provider, ContextProvider)
 
 
+@pytest.mark.asyncio
+async def test_build_skills_provider_allows_unattended_read_only_tools(
+    tmp_path: Path,
+) -> None:
+    from agent_framework import AgentSession, SessionContext
+
+    skill_dir = tmp_path / "alpha"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: alpha\ndescription: A test skill.\n---\n\n# Alpha\n",
+        encoding="utf-8",
+    )
+
+    from azure_functions_agents.runner import _build_skills_provider
+
+    provider = _build_skills_provider([skill_dir])
+    assert provider is not None
+    context = SessionContext(input_messages=[])
+    await provider.before_run(
+        agent=SimpleNamespace(),  # type: ignore[arg-type]
+        session=AgentSession(),
+        context=context,
+        state={},
+    )
+
+    approval_modes = {tool.name: tool.approval_mode for tool in context.tools}
+    assert approval_modes == {
+        "load_skill": "never_require",
+        "read_skill_resource": "never_require",
+        "run_skill_script": "always_require",
+    }
+
+
 # ---------------------------------------------------------------------------
 # web_request tool channel — build-once-at-registration, default-on wiring.
 # The factory import is lazy (``import_module`` inside ``capabilities.py``),

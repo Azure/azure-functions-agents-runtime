@@ -356,7 +356,11 @@ def _build_skills_provider(skill_paths: list[Path] | None) -> Any:
 
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", category=ExperimentalWarning)
-        return SkillsProvider.from_paths(list(skill_paths))
+        return SkillsProvider.from_paths(
+            list(skill_paths),
+            disable_load_skill_approval=True,
+            disable_read_skill_resource_approval=True,
+        )
 
 
 # ---------------------------------------------------------------------------

@@ -1,0 +1,2 @@
+model: $FOUNDRY_MODEL
+timeout: 120

@@ -87,6 +87,7 @@ def test_discover_mcp_servers_caches_by_resolved_app_root(
 
     assert list(first.servers) == ["demo"]
     assert list(second.servers) == ["demo"]
+    assert first.servers["demo"] is not second.servers["demo"]
     assert read_count == 1
 
 
