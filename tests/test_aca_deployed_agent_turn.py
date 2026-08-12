@@ -201,3 +201,18 @@ def test_deployed_evidence_redaction_removes_query_and_bearer_token() -> None:
     assert "top-secret" not in token_evidence
     assert "another-secret" not in token_evidence
     assert "[redacted]" in token_evidence
+
+
+@pytest.mark.asyncio
+async def test_unauthorized_response_body_is_ignored() -> None:
+    class UnauthorizedResponse:
+        status = 401
+
+        async def read(self) -> bytes:
+            return b'["platform-specific", "error"]'
+
+        async def json(self, *, content_type: object = None) -> object:
+            del content_type
+            raise AssertionError("Unauthorized bodies must not be parsed.")
+
+    assert await support._json_body(UnauthorizedResponse()) == {}  # type: ignore[arg-type]

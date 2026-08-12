@@ -310,6 +310,9 @@ def _raise_unavailable_response(url: str, status: int) -> None:
 
 
 async def _json_body(response: ClientResponse) -> dict[str, object]:
+    if response.status in {401, 403}:
+        await response.read()
+        return {}
     try:
         payload = await response.json(content_type=None)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
@@ -317,8 +320,6 @@ async def _json_body(response: ClientResponse) -> dict[str, object]:
             raise AcaSmokeEnvironmentError(
                 f"Function App returned HTTP {response.status}."
             ) from exc
-        if response.status in {401, 403}:
-            return {}
         raise AssertionError(f"Expected JSON response, received HTTP {response.status}.") from exc
     if not isinstance(payload, dict):
         raise AssertionError("Expected a JSON object response.")
