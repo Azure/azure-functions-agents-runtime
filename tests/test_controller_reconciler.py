@@ -47,16 +47,25 @@ class InventoryProvider:
         *,
         sandboxes: tuple[SandboxSummary, ...],
         snapshots: tuple[SandboxSnapshot, ...] = (),
+        refreshed_sandboxes: tuple[SandboxSummary, ...] | None = None,
     ) -> None:
         self.sandboxes = sandboxes
+        self.refreshed_sandboxes = refreshed_sandboxes
         self.snapshots = {snapshot.snapshot_id: snapshot for snapshot in snapshots}
         self.deleted_sandboxes: list[str] = []
         self.deleted_snapshots: list[str] = []
+        self.list_calls = 0
 
     async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+        self.list_calls += 1
+        sandboxes = (
+            self.sandboxes
+            if self.list_calls == 1 or self.refreshed_sandboxes is None
+            else self.refreshed_sandboxes
+        )
         return tuple(
             sandbox
-            for sandbox in self.sandboxes
+            for sandbox in sandboxes
             if all(sandbox.labels.get(key) == value for key, value in labels.items())
         )
 
@@ -1915,6 +1924,140 @@ async def test_reconciler_expires_a_no_retry_submit_operation_and_rearms_before_
     assert store.session is not None
     assert store.session.idle_policy_armed
     assert store.operations[-2:] == ["advance_operation", "completed_operation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["provision_submit", "submit_run"])
+async def test_expired_submit_operation_with_lost_persisted_backing_tombstones_without_remote_reads(
+    kind: str,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(
+        now,
+        status="creating" if kind == "provision_submit" else "running",
+        active_run_id="run-1",
+    )
+    run = _run(base, now, status="accepted")
+    operation = (
+        _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+        if kind == "submit_run"
+        else replace(
+            _provision_operation(base, run, now),
+            target=SessionOperationTarget.create(
+                session_id=base.session_id,
+                sandbox_id=base.sandbox_id,
+                generation=base.generation,
+                digest_kind=base.digest_kind,
+                digest=base.digest,
+                run_id=run.run_id,
+            ),
+        )
+    )
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(sandboxes=())
+
+    remote_reads: list[str] = []
+
+    async def terminal_reader(_: DurableSessionRecord, __: DurableRunRecord) -> None:
+        remote_reads.append("terminal")
+        return None
+
+    async def heartbeat_reader(_: DurableSessionRecord, __: DurableRunRecord) -> None:
+        remote_reads.append("heartbeat")
+        return None
+
+    async def apply_idle_lifecycle(_: SessionOperationFence) -> bool:
+        raise AssertionError("lost backing must not be rearmed")
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        terminal_reader=terminal_reader,
+        heartbeat_reader=heartbeat_reader,
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        now=lambda: now,
+    ).run_once()
+
+    assert provider.list_calls == 2
+    assert remote_reads == []
+    assert report.abandoned_runs == 1
+    assert report.tombstoned_sessions == 1
+    assert store.runs[run.run_id].status == "abandoned"
+    assert store.runs[run.run_id].status_reason == "sandbox_backing_lost"
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert store.session.tombstone_reason == "sandbox_backing_lost"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    assert store.durable_operations[operation.operation_id].state == "completed"
+    assert store.operations[-2:] == ["takeover_expired_operation", "completed_operation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["provision_submit", "submit_run"])
+async def test_expired_submit_operation_freshly_finds_stale_inventory_backing(kind: str) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(
+        now,
+        status="creating" if kind == "provision_submit" else "running",
+        active_run_id="run-1",
+    )
+    run = _run(base, now, status="accepted")
+    operation = (
+        _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+        if kind == "submit_run"
+        else replace(
+            _provision_operation(base, run, now),
+            target=SessionOperationTarget.create(
+                session_id=base.session_id,
+                sandbox_id=base.sandbox_id,
+                generation=base.generation,
+                digest_kind=base.digest_kind,
+                digest=base.digest,
+                run_id=run.run_id,
+            ),
+        )
+    )
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(sandboxes=(), refreshed_sandboxes=(_sandbox(now),))
+    terminal_reads = 0
+
+    async def terminal_reader(_: DurableSessionRecord, __: DurableRunRecord) -> None:
+        nonlocal terminal_reads
+        terminal_reads += 1
+        return None
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        terminal_reader=terminal_reader,
+        now=lambda: now,
+    ).run_once()
+
+    assert provider.list_calls == 2
+    assert terminal_reads == 1
+    assert report.tombstoned_sessions == 0
+    assert store.session is not None
+    assert store.session.status == base.status
+    assert store.session.active_run_id == run.run_id
+    assert store.session.active_operation_id == operation.operation_id
+    assert store.durable_operations[operation.operation_id].state == "active"
 
 
 @pytest.mark.asyncio

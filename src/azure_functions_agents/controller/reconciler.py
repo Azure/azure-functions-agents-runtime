@@ -597,6 +597,15 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
+        missing_backing = await self._complete_lost_submit_operation(
+            run,
+            fence,
+            inventory,
+            now,
+            report,
+        )
+        if missing_backing is not None:
+            return missing_backing
         terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
             finalized = await self._finish_reusable_operation(
@@ -649,6 +658,84 @@ class SessionReconciler:
         return _replace_report(
             report,
             abandoned_runs=report.abandoned_runs + int(finalized),
+        )
+
+    async def _complete_lost_submit_operation(
+        self,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
+        inventory: dict[str, SandboxSummary],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport | None:
+        """Fence an absent persisted submit target before avoiding remote lifecycle work."""
+        target_sandbox_id = fence.target.sandbox_id
+        if target_sandbox_id is None or target_sandbox_id in inventory:
+            return None
+        if fence.target.run_id != run.run_id:
+            return report
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if (
+            not fence.matches(current.record, operation.record)
+            or current.record.sandbox_id != target_sandbox_id
+            or current.record.active_run_id != run.run_id
+        ):
+            return report
+        fresh_inventory = {
+            item.sandbox_id
+            for item in await self._provider.list_sandboxes(
+                labels={"app_hash": self._app_hash}
+            )
+        }
+        if target_sandbox_id in fresh_inventory:
+            return None
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if (
+            not fence.matches(current.record, operation.record)
+            or current.record.sandbox_id != target_sandbox_id
+            or current.record.active_run_id != run.run_id
+        ):
+            return report
+        current_run = await self._store.get_run(
+            fence.owner_partition,
+            fence.session_id,
+            run.run_id,
+        )
+        terminal = (
+            None
+            if current_run.record.status in TERMINAL_RUN_STATUSES
+            else terminal_run(
+                current_run.record,
+                status="abandoned",
+                result_available=False,
+                reason="sandbox_backing_lost",
+                updated_at=now,
+            )
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=_tombstoned_operation_session(
+                current.record,
+                tombstone_reason="sandbox_backing_lost",
+                updated_at=now,
+            ),
+            terminal_run=terminal,
+            updated_at=now,
+        )
+        return _replace_report(
+            report,
+            abandoned_runs=report.abandoned_runs + int(terminal is not None),
+            tombstoned_sessions=report.tombstoned_sessions + 1,
         )
 
     async def _expire_pre_pointer_provision(
