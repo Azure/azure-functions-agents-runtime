@@ -12,6 +12,7 @@ import pytest
 
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 from tests.live import aca_deployed_load_support as support
+from tests.live.aca_deployed_agent_support import SseEvent
 
 
 def _config(value: object) -> SimpleNamespace:
@@ -743,14 +744,134 @@ async def test_n100_suspension_evidence_waits_at_one_hz_for_exact_label_backing(
 
 
 def test_readiness_events_reject_the_hold_tool(load_module: object) -> None:
-    from tests.live.aca_deployed_agent_support import SseEvent
-
     module = load_module
     module._assert_no_public_hold_events([SseEvent(1, {"type": "done"})])  # type: ignore[attr-defined]
     with pytest.raises(AssertionError):
         module._assert_no_public_hold_events(  # type: ignore[attr-defined]
             [SseEvent(1, {"type": "tool_start", "tool_name": "qualification_hold"})]
         )
+
+
+def test_public_hold_events_correlate_an_unnamed_maf_tool_result(load_module: object) -> None:
+    module = load_module
+    module._assert_public_hold_events(  # type: ignore[attr-defined]
+        [
+            SseEvent(
+                1,
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "call-1",
+                    "tool_name": "qualification_hold",
+                },
+            ),
+            SseEvent(
+                2,
+                {
+                    "type": "tool_end",
+                    "tool_call_id": "call-1",
+                    "tool_name": None,
+                },
+            ),
+        ]
+    )
+
+
+def test_public_hold_events_accept_a_named_tool_result(load_module: object) -> None:
+    module = load_module
+    module._assert_public_hold_events(  # type: ignore[attr-defined]
+        [
+            SseEvent(
+                1,
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "call-1",
+                    "tool_name": "qualification_hold",
+                },
+            ),
+            SseEvent(
+                2,
+                {
+                    "type": "tool_end",
+                    "tool_call_id": "call-1",
+                    "tool_name": "qualification_hold",
+                },
+            ),
+        ]
+    )
+
+
+def test_public_hold_events_allow_an_unrelated_tool_lifecycle(load_module: object) -> None:
+    module = load_module
+    module._assert_public_hold_events(  # type: ignore[attr-defined]
+        [
+            SseEvent(
+                1,
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "call-1",
+                    "tool_name": "qualification_hold",
+                },
+            ),
+            SseEvent(
+                2,
+                {
+                    "type": "tool_start",
+                    "tool_call_id": "call-2",
+                    "tool_name": "unrelated_tool",
+                },
+            ),
+            SseEvent(
+                3,
+                {
+                    "type": "tool_end",
+                    "tool_call_id": "call-2",
+                    "tool_name": "unrelated_tool",
+                },
+            ),
+            SseEvent(
+                4,
+                {
+                    "type": "tool_end",
+                    "tool_call_id": "call-1",
+                    "tool_name": None,
+                },
+            ),
+        ]
+    )
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        [
+            SseEvent(1, {"type": "tool_start", "tool_call_id": "call-1", "tool_name": "qualification_hold"}),
+            SseEvent(2, {"type": "tool_start", "tool_call_id": "call-1", "tool_name": "qualification_hold"}),
+            SseEvent(3, {"type": "tool_end", "tool_call_id": "call-1", "tool_name": None}),
+        ],
+        [
+            SseEvent(1, {"type": "tool_start", "tool_call_id": "call-1", "tool_name": "qualification_hold"}),
+            SseEvent(2, {"type": "tool_end", "tool_call_id": "call-1", "tool_name": None}),
+            SseEvent(3, {"type": "tool_end", "tool_call_id": "call-1", "tool_name": None}),
+        ],
+        [
+            SseEvent(1, {"type": "tool_start", "tool_call_id": "call-1", "tool_name": "qualification_hold"}),
+            SseEvent(2, {"type": "tool_end", "tool_call_id": "call-2", "tool_name": None}),
+        ],
+        [
+            SseEvent(1, {"type": "tool_start", "tool_call_id": "call-1", "tool_name": "qualification_hold"}),
+            SseEvent(2, {"type": "tool_end", "tool_call_id": "call-1", "tool_name": "other_tool"}),
+        ],
+        [SseEvent(1, {"type": "tool_start", "tool_call_id": "call-1", "tool_name": "qualification_hold"})],
+    ],
+)
+def test_public_hold_events_reject_invalid_tool_correlation(
+    load_module: object,
+    events: list[SseEvent],
+) -> None:
+    module = load_module
+
+    with pytest.raises(AssertionError):
+        module._assert_public_hold_events(events)  # type: ignore[attr-defined]
 
 
 def test_admission_failure_categories_are_aggregated_and_redacted(load_module: object) -> None:

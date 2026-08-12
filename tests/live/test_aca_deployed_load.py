@@ -1217,12 +1217,25 @@ async def _read_events(
 
 
 def _assert_public_hold_events(events: list[SseEvent]) -> None:
-    tool_events = [
+    tool_starts = [
         event.payload
         for event in events
-        if event.payload.get("tool_name") == "qualification_hold"
+        if event.payload.get("type") == "tool_start"
+        and event.payload.get("tool_name") == "qualification_hold"
     ]
-    assert [event.get("type") for event in tool_events] == ["tool_start", "tool_end"]
+    assert len(tool_starts) == 1
+    tool_call_id = tool_starts[0].get("tool_call_id")
+    assert isinstance(tool_call_id, str) and tool_call_id
+
+    matching_tool_ends = [
+        event.payload
+        for event in events
+        if event.payload.get("type") == "tool_end"
+        and event.payload.get("tool_call_id") == tool_call_id
+    ]
+    assert len(matching_tool_ends) == 1
+    tool_end = matching_tool_ends[0]
+    assert tool_end.get("tool_name") in {None, "qualification_hold"}
 
 
 def _assert_no_public_hold_events(events: list[SseEvent]) -> None:
