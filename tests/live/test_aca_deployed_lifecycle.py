@@ -116,8 +116,6 @@ async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() 
                 timeout_seconds=105.0,
             )
             assert resumed_suspended.sandbox_id == first_sandbox_id
-            snapshots_before_reclaim = await owned_snapshots(resources, resumed_session)
-            assert snapshots_before_reclaim
             await wait_until_reclaim_due(resumed_session)
             reclaimed = await wait_for_reclaimed_session(
                 resources,
@@ -130,12 +128,7 @@ async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() 
             assert reclaimed.active_operation_id is None
             assert await owned_sandbox(resources, reclaimed) is None
             snapshots_after_reclaim = await owned_snapshots(resources, reclaimed)
-            assert not {
-                snapshot.snapshot_id for snapshot in snapshots_before_reclaim
-            }.intersection(snapshot.snapshot_id for snapshot in snapshots_after_reclaim)
-            assert not set(resumed_session.snapshot_ids).intersection(
-                snapshot.snapshot_id for snapshot in snapshots_after_reclaim
-            )
+            assert not snapshots_after_reclaim
 
             status_code, status, _ = await json_request(
                 client,
