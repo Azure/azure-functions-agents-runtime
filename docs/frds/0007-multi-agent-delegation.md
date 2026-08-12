@@ -381,8 +381,9 @@ Do not build specialists once at startup:
   confirmed in pinned `agent-framework-core==1.3.*` and remains true upstream.
   One warm Functions worker can serve concurrent requests, so sharing one live
   agent would create the race class already guarded by the per-session lock.
-- Fresh construction is cheap. `ClientManager` already reuses the expensive
-  model client process-wide. A lightweight `Agent` wrapper adds little work,
+- Fresh construction is cheap. `ClientManager` reuses the expensive model
+  client process-wide (the implementation was corrected by Issue #157; see
+  Decision #21). A lightweight `Agent` wrapper adds little work,
   prevents cross-request state sharing, and uses less cold-start time and memory
   than pre-building every agent.
 
@@ -439,8 +440,8 @@ individually expanded remote functions).
 Construct the specialist's `FunctionTool` wrapper while assembling one
 invocation's coordinator tools; the specialist `Agent` itself is not built
 there — its handler builds one fresh on every call (§4.7, §5 Decision #20).
-`ClientManager` builds each specialist client for that specialist's own
-resolved model and reuses provider/credential state process-wide. Do not
+`ClientManager` resolves each specialist client for that specialist's own
+model and reuses the matching provider client and credential process-wide. Do not
 cache mutable MAF agents between Functions requests, or between calls within
 one request. Declaring a specialist creates one cheap wrapper and adds its
 schema to the coordinator prompt; the specialist's model does not run until
@@ -639,6 +640,7 @@ handoff participant may itself declare `subagents` and delegate.
 | 18 | Who may declare `subagents` | any independently runnable agent / main-agent-only (mirror FRD 0004 `workflows.enabled`) | **Any independently runnable agent** may declare `subagents`. Single-level (#6) still applies, so when that agent is itself invoked as a sub-agent its `subagents` are not wired and it cannot delegate onward. Simpler than a main/non-main split and matches the cross-framework norm (#15) | Human (user) | 2026-07-15 |
 | 19 | Observability approach | new bespoke tracing / rely on existing auto-instrumentation + add delegation enrichment / defer all enrichment | **Rely on auto-instrumentation, add delegation enrichment** — the runtime already enables MAF `gen_ai` spans and Azure Monitor export (`_observability.py`), and the delegate tool calling `Agent.run()` (originally via `as_tool()`→`run()`; the hand-written tool added by #20 calls `run()` directly, same effect) + `FunctionTool.invoke()` auto-nest a delegated call under one trace/`OperationId` with no new tracing code (verified against MAF tag `python-1.3.0` and the Functions Python worker's context attach). v1 additionally adds `af.delegate.*` attributes, delegate metrics, and explicit delegated-error accounting for parity with sandbox/web_request. Token roll-up across the boundary and SSE stream-through of specialist internals are documented limitations | Human (user) | 2026-07-15 |
 | 20 | Delegate execution mechanism, revisited post-implementation | keep `as_tool()` + per-specialist `asyncio.Lock` + `specialist_agent.run` monkeypatch/stream-capture (as first implemented, #1/#3) / rewrite as a hand-written non-streaming `@tool(schema=...)` function tool, building a fresh specialist `Agent` per call | **Hand-written non-streaming tool, built fresh per call** — a delegate only ever needs the specialist's final text (§4.12's "SSE is a black box at the boundary" was already a non-goal), so there is no reason to run the specialist through `Agent.run(stream=True, ...)` at all, which is all `as_tool()`'s own `_agent_wrapper` ever did internally before `await`-ing `stream.get_final_response()` back into one string anyway. That streaming requirement was the *only* reason the first implementation needed to monkeypatch `specialist_agent.run` (to capture the `ResponseStream` `as_tool()` builds internally, so it could be force-finalized on timeout/cancellation — `ResponseStream.__anext__`'s cleanup hooks only fire from its own `except StopAsyncIteration`/`except Exception` branches, never `BaseException`) and, because the specialist `Agent` object was shared across calls in a turn, to serialize concurrent same-specialist calls behind a per-specialist `asyncio.Lock` so that monkeypatch rebind was race-free. Switching to plain, non-streaming `agent.run(task)` — verified against installed `agent-framework-core==1.3.0` (`AgentTelemetryLayer._run`, `ChatTelemetryLayer._get_response` in `agent_framework.observability`) to close its OTel spans deterministically on *any* exception, `asyncio.CancelledError` included, via the ordinary `with`/context-manager `__exit__` guarantee (no `BaseException` gap like the streaming path has) — removes the need to capture or finalize a stream at all. Building the specialist `Agent` fresh on every call, instead of once per tool-build and reused, removes the shared mutable state the lock existed to protect, so the lock is removed too: same-specialist calls now simply run in parallel, each on its own instance (revises #14). Net result: less code, a cleaner and more debuggable per-call span timeline (each specialist run's span opens/closes at one well-defined point per call, on every path — success, recoverable failure, timeout, cancel), and no behavior change visible to the coordinator or its model | Human (user) | 2026-07-16 |
+| 21 | Provider-client lifecycle after Issue #157 exposed per-run Foundry session leaks | construct and close per run / cache only Foundry / cache all built-in MAF provider clients per worker process | **Cache built-in provider clients by provider, resolved model, and non-secret endpoint configuration in the process-wide `MAFClientManager`; share its managed-identity credential and keep `Agent` instances per call.** This implements the process-wide reuse already required by §4.7, follows Azure Functions SDK-client guidance, and avoids per-run TCP/TLS churn and SNAT pressure. The Functions Python worker runs async invocations on one persistent worker event loop; cached async transports share that loop. Cleanup remains explicit because `FunctionApp` has no supported async shutdown callback. With pinned Agent Framework 1.3, full Foundry cleanup requires awaiting both private attributes (`chat_client.client.close()` for httpx and `chat_client.project_client.close()` for aiohttp); contract tests and warnings guard that version coupling. | Human (user), Issue #157 | 2026-08-12 |
 
 ## 6. Test plan
 
@@ -672,6 +674,11 @@ handoff participant may itself declare `subagents` and delegate.
       build and run on their own independent instance, in parallel, both
       producing correct results (no shared-instance lock — #20); calls to
       different specialists also run in parallel; verify every result.
+- [ ] Regression: repeated primary/delegated builds for one provider/model reuse
+      one process-owned MAF client and credential; distinct model/endpoint keys
+      remain isolated; explicit manager shutdown awaits both Foundry transports
+      exactly once and continues cleanup after an individual close failure
+      (Issue #157, Decision #21).
 - [ ] Observability — with instrumentation enabled, one delegated call produces
       nested `execute_tool delegate_<slug>` and `invoke_agent {specialist}` spans
       under the coordinator's `agent.run` span, all sharing one trace id;

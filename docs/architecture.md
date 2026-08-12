@@ -62,7 +62,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/sandbox.py` | Builds the ACA Dynamic Sessions-backed `execute_python` tool for a resolved agent/session, using a fresh GUID when no explicit session id is provided. | `create_sandbox_tools()` |
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
-| `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
+| `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. The default manager owns a worker-process cache of provider clients/connection pools keyed by provider, model, and non-secret endpoint configuration, plus its shared async credential. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()`, `shutdown_client_manager()` |
 | `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool and Sub Agent execution, immutable owner policy, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()`, `WorkflowPlanPolicy` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
@@ -168,7 +168,7 @@ The `create_function_app()` docstring in `src/azure_functions_agents/app.py:crea
 
 ### Where the registration stage hands off to execution
 
-Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` to build a chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`).
+Registration does not run the agent itself. Instead, `registration/_handlers.py` builds closures that call `runner.run_agent()` or `runner.run_agent_stream()`, passing the `ResolvedAgent` instructions plus the already-filtered `AgentCapabilities` — and, when the agent declares `subagents`, its `ResolvedAgent.subagents` list plus the frozen `AgentCatalog`. For non-HTTP triggers, the closure delegates payload construction to `registration/_trigger_serialization.py`: native `to_dict()`/`model_dump()` contracts are used first, then public Azure Functions binding adapters, batch recursion, and byte encoding produce JSON-safe prompt data. HTTP handlers build their request-body JSON separately and do not use this serializer. The runner then asks the active `ClientManager` for the provider/model chat client, builds any `delegate_<slug>` tools fresh for this request, and executes through the Microsoft Agent Framework (`src/azure_functions_agents/runner.py`, `src/azure_functions_agents/client_manager.py`). The default manager returns a process-cached client for an identical target rather than constructing a new SDK client and connection pool per invocation.
 
 For a workflow-enabled main agent, `workflows/integration.py` produces one
 immutable `WorkflowPlanPolicy` from the concrete workflow tools and
@@ -347,9 +347,51 @@ To plug in a different chat backend, implement the `ClientManager` interface and
 
 This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it. Delegated specialists resolve their model through the same `ClientManager`, so a custom implementation applies uniformly to coordinators and specialists alike.
 
+Install a custom manager before the default manager serves a request. Replacing
+an unused default manager atomically retires it so a thread holding the old
+reference cannot create orphaned resources afterward. If the default manager
+already owns provider clients, first `await shutdown_client_manager()` and then
+call `set_client_manager(...)`; synchronous replacement is rejected rather than
+abandoning live connection pools.
+
 The runner calls `build_chat_client_with_target()` and receives the client plus a frozen `InferenceTarget` containing nullable `provider` and `model` fields. Its concrete base implementation calls the existing abstract `build_chat_client()` once and returns an empty descriptor, so existing custom managers remain compatible. A custom manager can override the new method when it can authoritatively describe the target used to construct its client.
 
 `MAFClientManager` resolves provider and effective model once for client construction and metadata. Subclasses that override the existing `build_chat_client()` hook retain that dispatch and receive an empty descriptor; they can override `build_chat_client_with_target()` when they can provide authoritative metadata.
+
+### Provider-client lifetime
+
+`MAFClientManager` is a process-wide owner, not only a factory. It lazily caches
+one built-in MAF chat client for each provider, resolved model, and relevant
+non-secret endpoint/API configuration. Primary agents, declared triggers,
+built-in endpoints, delegated specialists, and Workflow Sub Agent activities
+therefore reuse the same SDK connection pool when they resolve to the same
+target. `Agent`, `AgentSession`, history, and tools remain per run because those
+objects carry mutable request state.
+
+This follows the Azure Functions recommendation to
+[reuse SDK client instances across invocations](https://learn.microsoft.com/azure/azure-functions/manage-connections#manage-sdk-client-connections).
+Each Python language-worker process owns its own manager and cache. Async
+invocations in that worker share its persistent event loop, which is also the
+lifetime boundary for the cached aiohttp/httpx transports. Provider/model
+configuration is expected to remain stable for the worker lifetime; endpoint
+and API-version values participate in the cache key so an embedded host that
+changes them does not receive a client for the old endpoint.
+
+Managed-identity-backed Azure OpenAI and Foundry clients share one
+manager-owned async credential and token cache. `MAFClientManager.close()` is
+idempotent and closes cached client transports before that credential.
+Agent Framework 1.3 does not expose a public close method on its chat clients,
+so the manager currently awaits the pinned implementation's `client.close()`
+(`AsyncOpenAI`/httpx) and, for Foundry, the independent
+`project_client.close()` (`AIProjectClient`/aiohttp). Missing attributes produce
+an explicit warning and tests guard this version-sensitive contract.
+
+Azure Functions' Python `FunctionApp` has no supported async shutdown callback.
+The runtime therefore does not install `atexit` or process-signal handlers that
+could run cleanup on the wrong or an already-closed event loop. Strong
+process-lifetime ownership prevents the unbounded per-invocation session leak
+and connection churn reported by Issue #157; `shutdown_client_manager()` is the
+explicit cleanup API for tests and embedding hosts that own an async lifecycle.
 
 ### Custom tools
 

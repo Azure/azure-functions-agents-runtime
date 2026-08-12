@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import time
+from concurrent.futures import ThreadPoolExecutor
+from types import SimpleNamespace
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -12,6 +16,9 @@ from azure_functions_agents.client_manager import (
     ClientManager,
     InferenceTarget,
     MAFClientManager,
+    get_client_manager,
+    set_client_manager,
+    shutdown_client_manager,
 )
 
 
@@ -156,6 +163,376 @@ def test_maf_target_uses_one_provider_and_model_resolution_pass(
     assert target.model == "resolved-model"
     provider.assert_called_once_with()
     resolve.assert_called_once_with("requested-model", "foundry")
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_reuses_provider_client_on_one_worker_loop(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    client = object()
+
+    with patch.object(MAFClientManager, "_build_foundry", return_value=client) as build:
+        first, first_target = manager.build_chat_client_with_target("shared-model")
+        await asyncio.sleep(0)
+        second, second_target = manager.build_chat_client_with_target("shared-model")
+
+    assert first is client
+    assert second is first
+    assert first_target == second_target == InferenceTarget("foundry", "shared-model")
+    build.assert_called_once_with("shared-model")
+
+
+def test_maf_manager_partitions_cached_clients_by_resolved_model(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    clients = [object(), object()]
+
+    with patch.object(MAFClientManager, "_build_foundry", side_effect=clients) as build:
+        first, _ = manager.build_chat_client_with_target("model-one")
+        second, _ = manager.build_chat_client_with_target("model-two")
+
+    assert first is clients[0]
+    assert second is clients[1]
+    assert first is not second
+    assert build.call_count == 2
+
+
+def test_maf_manager_partitions_cached_clients_by_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project-one.example")
+    manager = MAFClientManager()
+    clients = [object(), object()]
+
+    with patch.object(MAFClientManager, "_build_foundry", side_effect=clients) as build:
+        first, _ = manager.build_chat_client_with_target("shared-model")
+        monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project-two.example")
+        second, _ = manager.build_chat_client_with_target("shared-model")
+
+    assert first is clients[0]
+    assert second is clients[1]
+    assert build.call_count == 2
+
+
+def test_maf_manager_partitions_azure_openai_clients_by_api_version(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://account.openai.azure.com")
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "version-one")
+    manager = MAFClientManager()
+    clients = [object(), object()]
+
+    with patch.object(MAFClientManager, "_build_azure_openai", side_effect=clients) as build:
+        first, _ = manager.build_chat_client_with_target("shared-model")
+        monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "version-two")
+        second, _ = manager.build_chat_client_with_target("shared-model")
+
+    assert first is clients[0]
+    assert second is clients[1]
+    assert build.call_count == 2
+
+
+def test_maf_manager_publishes_one_client_during_concurrent_first_use(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    client = object()
+
+    def _build(_model: str) -> object:
+        time.sleep(0.02)
+        return client
+
+    with (
+        patch.object(MAFClientManager, "_build_foundry", side_effect=_build) as build,
+        ThreadPoolExecutor(max_workers=8) as executor,
+    ):
+        futures = [
+            executor.submit(manager.build_chat_client_with_target, "shared-model")
+            for _ in range(8)
+        ]
+        built_clients = [future.result()[0] for future in futures]
+
+    assert all(built is client for built in built_clients)
+    build.assert_called_once_with("shared-model")
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_closes_foundry_transports_and_credential_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    openai_client = SimpleNamespace(close=AsyncMock())
+    project_client = SimpleNamespace(close=AsyncMock())
+    chat_client = SimpleNamespace(client=openai_client, project_client=project_client)
+    credential = SimpleNamespace(close=AsyncMock())
+
+    with (
+        patch(
+            "agent_framework.foundry.FoundryChatClient",
+            return_value=chat_client,
+        ),
+        patch(
+            "azure_functions_agents.client_manager.build_async_credential",
+            return_value=credential,
+        ),
+    ):
+        built, _ = manager.build_chat_client_with_target("shared-model")
+        await manager.close()
+        await manager.close()
+
+    assert built is chat_client
+    openai_client.close.assert_awaited_once_with()
+    project_client.close.assert_awaited_once_with()
+    credential.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_closes_openai_transport_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    manager = MAFClientManager()
+    transport = SimpleNamespace(close=AsyncMock())
+    chat_client = SimpleNamespace(client=transport)
+
+    with patch.object(MAFClientManager, "_build_openai", return_value=chat_client):
+        manager.build_chat_client_with_target("shared-model")
+        await manager.close()
+
+    transport.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_shares_credential_across_foundry_models(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    credential = SimpleNamespace(close=AsyncMock())
+    chat_clients = [
+        SimpleNamespace(
+            client=SimpleNamespace(close=AsyncMock()),
+            project_client=SimpleNamespace(close=AsyncMock()),
+        ),
+        SimpleNamespace(
+            client=SimpleNamespace(close=AsyncMock()),
+            project_client=SimpleNamespace(close=AsyncMock()),
+        ),
+    ]
+
+    with (
+        patch(
+            "agent_framework.foundry.FoundryChatClient",
+            side_effect=chat_clients,
+        ) as client_ctor,
+        patch(
+            "azure_functions_agents.client_manager.build_async_credential",
+            return_value=credential,
+        ) as credential_builder,
+    ):
+        manager.build_chat_client_with_target("model-one")
+        manager.build_chat_client_with_target("model-two")
+        await manager.close()
+
+    credential_builder.assert_called_once_with()
+    assert [item.kwargs["credential"] for item in client_ctor.call_args_list] == [
+        credential,
+        credential,
+    ]
+
+
+@pytest.mark.asyncio
+async def test_foundry_client_exposes_pinned_transport_cleanup_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv(
+        "FOUNDRY_PROJECT_ENDPOINT",
+        "https://example.services.ai.azure.com/api/projects/test",
+    )
+    manager = MAFClientManager()
+    credential = SimpleNamespace(close=AsyncMock(), get_token=AsyncMock())
+
+    with patch(
+        "azure_functions_agents.client_manager.build_async_credential",
+        return_value=credential,
+    ):
+        client, _ = manager.build_chat_client_with_target("test-model")
+        reused, _ = manager.build_chat_client_with_target("test-model")
+
+        assert reused is client
+        assert callable(client.client.close)
+        assert callable(client.project_client.close)
+        await manager.close()
+
+    credential.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_attempts_all_cleanup_after_close_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    openai_client = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("httpx close")))
+    project_client = SimpleNamespace(close=AsyncMock())
+    chat_client = SimpleNamespace(client=openai_client, project_client=project_client)
+    credential = SimpleNamespace(close=AsyncMock())
+
+    with (
+        patch("agent_framework.foundry.FoundryChatClient", return_value=chat_client),
+        patch(
+            "azure_functions_agents.client_manager.build_async_credential",
+            return_value=credential,
+        ),
+    ):
+        manager.build_chat_client_with_target("shared-model")
+        with pytest.raises(ExceptionGroup, match="Failed to close"):
+            await manager.close()
+
+    openai_client.close.assert_awaited_once_with()
+    project_client.close.assert_awaited_once_with()
+    credential.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_rejects_build_after_close(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    manager = MAFClientManager()
+
+    await manager.close()
+
+    with (
+        patch.object(MAFClientManager, "_build_openai", return_value=object()),
+        pytest.raises(RuntimeError, match="closed"),
+    ):
+        manager.build_chat_client_with_target("model-one")
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_cleanup_survives_caller_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
+    manager = MAFClientManager()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    async def _slow_close() -> None:
+        close_started.set()
+        await allow_close.wait()
+
+    openai_client = SimpleNamespace(close=AsyncMock(side_effect=_slow_close))
+    project_client = SimpleNamespace(close=AsyncMock())
+    chat_client = SimpleNamespace(client=openai_client, project_client=project_client)
+    credential = SimpleNamespace(close=AsyncMock())
+
+    with (
+        patch("agent_framework.foundry.FoundryChatClient", return_value=chat_client),
+        patch(
+            "azure_functions_agents.client_manager.build_async_credential",
+            return_value=credential,
+        ),
+    ):
+        manager.build_chat_client_with_target("shared-model")
+        first_close = asyncio.create_task(manager.close())
+        await close_started.wait()
+        first_close.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_close
+
+        allow_close.set()
+        await manager.close()
+
+    openai_client.close.assert_awaited_once_with()
+    project_client.close.assert_awaited_once_with()
+    credential.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_does_not_clear_manager_installed_while_old_manager_closes() -> None:
+    get_client_manager()
+    close_started = asyncio.Event()
+    allow_close = asyncio.Event()
+
+    class BlockingManager(ClientManager):
+        def resolve_model(self, requested: str | None) -> str:
+            return requested or "blocking-model"
+
+        def build_chat_client(self, model: str | None) -> Any:
+            return object()
+
+        async def close(self) -> None:
+            close_started.set()
+            await allow_close.wait()
+
+    blocking = BlockingManager()
+    replacement = BlockingManager()
+    set_client_manager(blocking)
+    shutdown = asyncio.create_task(shutdown_client_manager())
+    await close_started.wait()
+
+    set_client_manager(replacement)
+    allow_close.set()
+    await shutdown
+
+    assert get_client_manager() is replacement
+    set_client_manager(MAFClientManager())
+
+
+@pytest.mark.asyncio
+async def test_set_client_manager_rejects_abandoning_owned_provider_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    get_client_manager()
+    manager = MAFClientManager()
+    chat_client = SimpleNamespace(client=SimpleNamespace(close=AsyncMock()))
+
+    with patch.object(MAFClientManager, "_build_openai", return_value=chat_client):
+        manager.build_chat_client_with_target("shared-model")
+    set_client_manager(manager)
+
+    with pytest.raises(RuntimeError, match="owns provider resources"):
+        set_client_manager(MAFClientManager())
+
+    await shutdown_client_manager()
+    set_client_manager(MAFClientManager())
+
+
+def test_set_client_manager_retires_displaced_unused_maf_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
+    displaced = MAFClientManager()
+    replacement = MAFClientManager()
+    set_client_manager(displaced)
+
+    set_client_manager(replacement)
+
+    with (
+        patch.object(MAFClientManager, "_build_openai", return_value=object()),
+        pytest.raises(RuntimeError, match="closed"),
+    ):
+        displaced.build_chat_client_with_target("model-one")
 
 
 def test_custom_manager_target_fallback_builds_client_once() -> None:

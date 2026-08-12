@@ -39,6 +39,7 @@ import azure_functions_agents.runner as runner
 from azure_functions_agents.client_manager import (
     ClientManager,
     InferenceTarget,
+    MAFClientManager,
     get_client_manager,
     set_client_manager,
 )
@@ -166,9 +167,9 @@ def _restore_client_manager() -> Any:
     tests that exercise it install ``_FakeClientManager`` and must not leak that
     substitution into unrelated tests/modules.
     """
-    original = get_client_manager()
+    get_client_manager()
     yield
-    set_client_manager(original)
+    set_client_manager(MAFClientManager())
 
 
 class _RecordingSpan:
