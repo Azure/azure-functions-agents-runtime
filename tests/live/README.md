@@ -27,9 +27,8 @@ evidence. None provisions infrastructure from CI.
 - **GA deployed persistent-session lifecycle qualification**:
   `tests/live/test_aca_deployed_lifecycle.py` creates and resumes turns only
   through that same protected public route. It uses an authorized, read-only
-  Table observation and ACA inventory to establish lifecycle evidence, then
-  invokes the production `SessionReconciler` against the same real Table store
-  and `AcaSandboxAdapter` for reclaim rather than waiting for the hourly timer.
+  Table observation and ACA inventory to establish lifecycle evidence. The
+  deployed controller timer is the sole state writer and reclaimer.
 
 Shared provisioning, dependency-closure delivery, and cleanup live in
 `tests/live/aca_smoke_support.py`.
@@ -162,8 +161,9 @@ are positive and strictly greater than the selected auto-suspend value; 120
 leaves a full minute to observe suspension and submit the resumed public turn.
 The runtime's reclamation eligibility includes its 300-second safety grace, so
 the reclaim phase begins about seven minutes after the resumed terminal turn.
-The test invokes the real reconciler at that eligibility point rather than
-waiting for the normal 3600-second deployed timer cadence.
+The deployed Function App must set
+`AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS=60`; after eligibility the
+test observes up to four controller cadence windows for the timer to reclaim.
 
 Republish the fixture after changing retention, then run the lifecycle file
 with the same public endpoint settings plus the non-secret state and app
@@ -186,8 +186,9 @@ python -m pytest -m live_aca tests/live/test_aca_deployed_lifecycle.py -v \
 ```
 
 Expected duration is the two real public turns plus roughly 60 seconds for
-provider auto-suspend and roughly 420 seconds for reclaim eligibility
-(`120 + 300` safety grace). The manual `ACADeployedAgentTurn` ADO job runs
+provider auto-suspend, 120 seconds of idle retention, 300 seconds of safety
+grace, and up to four 60-second controller windows. The manual-only
+`ACADeployedAgentTurn` ADO job runs
 this file alongside the existing deployed-turn test and additionally requires
 the protected non-secret variables `ACA_DEPLOYED_TABLE_SERVICE_URI`,
 `ACA_DEPLOYED_TABLE_NAME`, `ACA_DEPLOYED_APP_SUBSCRIPTION_ID`, and
@@ -195,13 +196,17 @@ the protected non-secret variables `ACA_DEPLOYED_TABLE_SERVICE_URI`,
 
 The qualification proves only normal lifecycle behavior: ACA reports the
 owned sandbox `Stopped` or `Suspended`; a second public turn resumes the same
-sandbox ID and generation; and the real reconciler deletes the owned backing
-sandbox and snapshots before writing the documented `reclaimed_idle_session`
-tombstone. It confirms terminal status remains readable and result retrieval
-returns `410`. On a failure, cleanup uses the complete immutable ownership
-label selector before running the same reconciler to avoid leaking the owned
-session. It does **not** certify external sandbox loss, cursor replay,
-cancel, chaos, or load behavior.
+sandbox ID and generation; and the deployed controller timer deletes the owned
+backing sandbox and snapshots before writing the documented
+`reclaimed_idle_session` tombstone. It confirms terminal status remains
+readable and result retrieval returns `410`. CI holds **Storage Table Data
+Reader scoped only to the `AzureFunctionsAgentsSessions` table** and never
+writes Table state; it has no Storage Table Data Contributor or Owner role. On
+a failure, CI may delete only the complete immutable exact-label owned sandbox
+through its Sandbox Group Data Owner role, then must observe the deployed
+controller timer's tombstone; inability to confirm it is an `ACA-SMOKE-ENV`
+error that names the exact selector. It does **not** certify external sandbox
+loss, cursor replay, cancel, chaos, or load behavior.
 
 ### Host ABI prerequisite
 

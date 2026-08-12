@@ -28,8 +28,8 @@ from tests.live.aca_deployed_lifecycle_support import (
     owned_sandbox,
     owned_snapshots,
     read_authoritative_session,
-    reconcile_owned_session,
     wait_for_idle_session,
+    wait_for_reclaimed_session,
     wait_for_suspended_sandbox,
     wait_until_reclaim_due,
 )
@@ -45,7 +45,7 @@ if not deployed_aca_smoke_enabled():
 @pytest.mark.live_aca
 @pytest.mark.asyncio
 async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() -> None:
-    """Use public turns for behavior and real Table/ACA plus the production reconciler for evidence."""
+    """Use public turns and read-only Table/ACA observations of the deployed timer lifecycle."""
 
     config = deployed_aca_lifecycle_config_from_environment()
     resources: DeployedAcaLifecycleResources | None = None
@@ -106,17 +106,16 @@ async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() 
                 seconds=120
             )
 
-            snapshots_before_reclaim = await owned_snapshots(resources, resumed_session)
-            await wait_until_reclaim_due(resumed_session)
-            report = await reconcile_owned_session(
+            resumed_suspended = await wait_for_suspended_sandbox(
                 resources,
-                session=resumed_session,
-                config=config,
+                resumed_session,
+                timeout_seconds=105.0,
             )
-            assert report.tombstoned_sessions == 1
-            assert report.deleted_sandboxes == 1
-
-            reclaimed = await read_authoritative_session(
+            assert resumed_suspended.sandbox_id == first_sandbox_id
+            snapshots_before_reclaim = await owned_snapshots(resources, resumed_session)
+            assert snapshots_before_reclaim
+            await wait_until_reclaim_due(resumed_session)
+            reclaimed = await wait_for_reclaimed_session(
                 resources,
                 session_id=resumed_run.session_id,
             )

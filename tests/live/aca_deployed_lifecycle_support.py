@@ -1,4 +1,4 @@
-"""Read-only observations and real reconciler support for deployed ACA lifecycle evidence."""
+"""Read-only observations for deployed ACA lifecycle evidence."""
 
 from __future__ import annotations
 
@@ -18,19 +18,13 @@ from tests.live.aca_deployed_agent_support import (
     deployed_aca_smoke_config_from_environment,
 )
 
-from azure_functions_agents.controller.reconciler import (
-    ReconcilerConfig,
-    ReconcileReport,
-    SessionReconciler,
-)
+from azure_functions_agents.sandbox_runtime_limits import RECLAIM_SAFETY_GRACE_SECONDS
 from azure_functions_agents.session_state import (
     AppIdentity,
     DurableSessionRecord,
     SessionStateContractError,
     compute_app_hash,
 )
-from azure_functions_agents.session_state.errors import SessionStateStoreError
-from azure_functions_agents.session_state.store import AzureTableSessionStateStore
 from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 from azure_functions_agents.transport.transport_models import (
     SandboxSnapshot,
@@ -47,6 +41,11 @@ _APP_SLOT_NAME_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SLOT_NAME"
 
 LIFECYCLE_AUTO_SUSPEND_SECONDS = 60
 LIFECYCLE_RECLAIM_IDLE_SECONDS = 120
+LIFECYCLE_RECONCILER_CADENCE_SECONDS = 60
+LIFECYCLE_RECLAIM_CONTROLLER_WINDOWS = 4
+LIFECYCLE_RECLAIM_CONTROLLER_WAIT_SECONDS = (
+    LIFECYCLE_RECONCILER_CADENCE_SECONDS * LIFECYCLE_RECLAIM_CONTROLLER_WINDOWS
+)
 _POLL_SECONDS = 5.0
 
 
@@ -67,10 +66,10 @@ class DeployedAcaLifecycleConfig:
 
 @dataclass(slots=True)
 class DeployedAcaLifecycleResources:
-    """Live provider and Table clients bound to the deployed application."""
+    """Live provider and read-only Table clients bound to the deployed application."""
 
     adapter: AcaSandboxAdapter
-    store: AzureTableSessionStateStore
+    table_client: Any
     _service_client: Any
     _credential: DefaultAzureCredential
 
@@ -85,7 +84,7 @@ class DeployedAcaLifecycleResources:
 
 
 def deployed_aca_lifecycle_config_from_environment() -> DeployedAcaLifecycleConfig:
-    """Load the separate read-only and reconciler contract for the manual lifecycle test."""
+    """Load the read-only observation contract for the manual lifecycle test."""
 
     deployed = deployed_aca_smoke_config_from_environment()
     table_service_uri = _table_service_uri(_required_value(_TABLE_SERVICE_URI_ENV))
@@ -129,7 +128,7 @@ async def open_deployed_aca_lifecycle_resources(
         ) from exc
     return DeployedAcaLifecycleResources(
         adapter=adapter,
-        store=AzureTableSessionStateStore(service_client.get_table_client(config.table_name)),
+        table_client=service_client.get_table_client(config.table_name),
         _service_client=service_client,
         _credential=credential,
     )
@@ -143,18 +142,22 @@ async def read_authoritative_session(
     """Read exactly one session row by row key; this helper never writes Table state."""
 
     try:
-        page = await resources.store.query_entities(
-            filter_expression=f"RowKey eq 'session:{session_id}'",
-            top=2,
-        )
-    except SessionStateStoreError as exc:
+        entities = []
+        async for entity in resources.table_client.query_entities(
+            query_filter=f"RowKey eq 'session:{_escape_odata_literal(session_id)}'",
+            results_per_page=2,
+        ):
+            entities.append(entity)
+            if len(entities) == 2:
+                break
+    except AzureError as exc:
         raise AcaSmokeEnvironmentError(
             "The lifecycle qualification could not read the configured session Table."
         ) from exc
-    if len(page.entities) != 1:
+    if len(entities) != 1:
         raise AssertionError("The authoritative Table must contain exactly one session row.")
     try:
-        return DurableSessionRecord.from_table_entity(page.entities[0])
+        return DurableSessionRecord.from_table_entity(entities[0])
     except SessionStateContractError as exc:
         raise AssertionError("The authoritative session row violates the durable contract.") from exc
 
@@ -265,33 +268,37 @@ async def wait_for_suspended_sandbox(
 async def wait_until_reclaim_due(session: DurableSessionRecord) -> None:
     """Wait only for the product's durable reclaim eligibility, not for the timer cadence."""
 
-    due_at = session.expires_at + timedelta(seconds=ReconcilerConfig().safety_grace_seconds)
+    due_at = session.expires_at + timedelta(seconds=RECLAIM_SAFETY_GRACE_SECONDS)
     remaining = (due_at - datetime.now(UTC)).total_seconds()
     if remaining > 0:
         await asyncio.sleep(remaining)
 
 
-async def reconcile_owned_session(
+async def wait_for_reclaimed_session(
     resources: DeployedAcaLifecycleResources,
     *,
-    session: DurableSessionRecord,
-    config: DeployedAcaLifecycleConfig,
-) -> ReconcileReport:
-    """Run the production reconciler on one known session with real Table and ACA adapters."""
+    session_id: str,
+    timeout_seconds: float = LIFECYCLE_RECLAIM_CONTROLLER_WAIT_SECONDS,
+) -> DurableSessionRecord:
+    """Observe the deployed timer's durable reclaim result over bounded cadence windows."""
 
-    assert_session_belongs_to_deployment(session, config)
-    reconciler = SessionReconciler(
-        store=resources.store,
-        provider=resources.adapter,
-        app_hash=config.app_hash,
-        reclaim_idle_seconds=LIFECYCLE_RECLAIM_IDLE_SECONDS,
+    async def condition() -> DurableSessionRecord | None:
+        session = await read_authoritative_session(resources, session_id=session_id)
+        if (
+            session.status == "tombstoned"
+            and session.tombstone_reason == "reclaimed_idle_session"
+            and session.active_run_id is None
+            and session.active_operation_id is None
+        ):
+            return session
+        return None
+
+    return await _wait_for(
+        condition,
+        timeout_seconds,
+        "The deployed controller timer did not tombstone the idle session within "
+        f"{LIFECYCLE_RECLAIM_CONTROLLER_WINDOWS} cadence windows.",
     )
-    try:
-        return await reconciler.reconcile_session(session.owner_partition, session.session_id)
-    except (SandboxTransportError, SessionStateStoreError) as exc:
-        raise AcaSmokeEnvironmentError(
-            "The explicit production reconciler could not reconcile the owned lifecycle session."
-        ) from exc
 
 
 async def cleanup_owned_lifecycle_session(
@@ -300,17 +307,20 @@ async def cleanup_owned_lifecycle_session(
     session: DurableSessionRecord,
     config: DeployedAcaLifecycleConfig,
 ) -> None:
-    """Use only the exact session labels, then reconcile the durable tombstone on test failure."""
+    """Delete only exact-label backing, then require the deployed controller's tombstone."""
 
-    sandbox = await owned_sandbox(resources, session)
-    if sandbox is not None:
-        try:
+    assert_session_belongs_to_deployment(session, config)
+    selector = _format_session_selector(session)
+    try:
+        sandbox = await owned_sandbox(resources, session)
+        if sandbox is not None:
             await resources.adapter.delete_sandbox(sandbox.sandbox_id)
-        except SandboxTransportError as exc:
-            raise AcaSmokeEnvironmentError(
-                "The exact-label lifecycle cleanup could not delete the owned sandbox."
-            ) from exc
-    await reconcile_owned_session(resources, session=session, config=config)
+        await wait_for_reclaimed_session(resources, session_id=session.session_id)
+    except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
+        raise AcaSmokeEnvironmentError(
+            "ACA-SMOKE-ENV cleanup could not confirm the deployed controller tombstone for "
+            f"exact session selector {selector}."
+        ) from exc
 
 
 async def _wait_for[T](
@@ -333,6 +343,14 @@ def _required_value(name: str) -> str:
     if value is None or not value.strip():
         raise AcaSmokeEnvironmentError(f"{name} must be set to a non-blank value.")
     return value.strip()
+
+
+def _escape_odata_literal(value: str) -> str:
+    return value.replace("'", "''")
+
+
+def _format_session_selector(session: DurableSessionRecord) -> str:
+    return ", ".join(f"{name}={value}" for name, value in sorted(session_labels(session).items()))
 
 
 def _table_service_uri(value: str) -> str:
