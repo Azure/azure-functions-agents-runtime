@@ -294,6 +294,32 @@ running work, and requires the read-only durable projection to become terminal
 and idle before controller cleanup. If that settlement fails, exact-label
 provider cleanup is only a last resort and durable cleanup is reported failed.
 
+### Run the deployed backing-loss qualification manually
+
+`tests/live/test_aca_deployed_loss.py` uses exactly one `deployed_load`
+`qualification_hold` run, waits for its active exact-label ACA backing, then
+deletes only that backing through the test's ACA control-plane adapter. It
+never writes Table state: the deployed reconciler is the only durable-state
+writer. The test reads the owner partition derived from the Easy Auth token,
+then requires the controller to write an `abandoned` run and `tombstoned`
+session with reason `sandbox_backing_lost`, clear the active run and operation,
+complete the durable operation, and leave no exact-label sandbox or snapshot.
+It also proves the public status remains a terminal HTTP 200 projection while
+the public result is HTTP 410.
+
+Run it with the same manual deployed lifecycle settings; it does **not**
+require `AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY`, so omitting that value
+skips only the N-load test. The manual `ACADeployedAgentTurn` job runs this
+single-loss proof independently of load size. It polls at most once per second
+for the operation lease plus bounded controller-cadence window. Unit doubles
+cover the selector and public-response contracts only; they cannot certify
+real ACA provider loss, so do not treat them as a substitute for a live pass.
+
+If the exact backing delete succeeds but the controller does not tombstone,
+the test leaves no provider backing and reports an `ACA-SMOKE-ENV` cleanup
+failure with only exact-label selector-key diagnostics. It does not cancel the
+held run or mutate Table rows.
+
 ### Host ABI prerequisite
 
 Run the live tests only from Linux x86_64, including WSL, on the CPython minor

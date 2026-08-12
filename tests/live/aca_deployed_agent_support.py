@@ -8,7 +8,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import NoReturn, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -271,6 +271,46 @@ async def read_sse_events(
         headers=headers,
     )
     return status, events, response_headers
+
+
+async def read_sse_until_matching_event(
+    session: ClientSession,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    matches: Callable[[SseEvent], bool],
+    overall_timeout_seconds: float = 120.0,
+) -> tuple[int, SseEvent | None, Mapping[str, str]]:
+    """Read one public SSE stream until one strictly ordered matching event arrives."""
+    try:
+        async with asyncio.timeout(overall_timeout_seconds):
+            async with session.get(url, headers=headers) as response:
+                status = response.status
+                response_headers = dict(response.headers)
+                if status >= 502:
+                    _raise_unavailable_response(url, status)
+                if status != 200:
+                    return status, None, response_headers
+                events: list[SseEvent] = []
+                pending = ""
+                async for chunk in response.content:
+                    pending += chunk.decode("utf-8").replace("\r\n", "\n")
+                    frames = pending.split("\n\n")
+                    pending = frames.pop()
+                    for event in parse_sse_frames(frames):
+                        events = append_contiguous_sse_events(events, [event])
+                        if matches(event):
+                            return status, event, response_headers
+    except TimeoutError as exc:
+        raise AcaSmokeEnvironmentError(
+            "Function App SSE stream did not emit the required event before the overall deadline."
+        ) from exc
+    except (OSError, UnicodeDecodeError) as exc:
+        raise AcaSmokeEnvironmentError(
+            f"Function App SSE endpoint was unavailable at {redact_deployed_aca_evidence(url)}: "
+            f"{type(exc).__name__}"
+        ) from exc
+    raise AssertionError("Public SSE stream ended before the required event.")
 
 
 async def read_sse_events_with_first_event_time(
