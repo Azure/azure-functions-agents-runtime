@@ -96,9 +96,13 @@ def deployed_aca_smoke_config_from_environment() -> DeployedAcaSmokeConfig:
     if not token_scope.endswith("/.default"):
         raise AcaSmokeEnvironmentError(f"{_TOKEN_SCOPE_ENV} must end with '/.default'.")
     audience = _required_value(_AUDIENCE_ENV)
-    if token_scope != f"{audience.rstrip('/')}/.default":
+    scope_audience = token_scope.removesuffix("/.default").rstrip("/")
+    accepted_audiences = {scope_audience}
+    if scope_audience.startswith("api://"):
+        accepted_audiences.add(scope_audience.removeprefix("api://"))
+    if audience not in accepted_audiences:
         raise AcaSmokeEnvironmentError(
-            f"{_TOKEN_SCOPE_ENV} must be the .default scope for {_AUDIENCE_ENV}."
+            f"{_AUDIENCE_ENV} must match the requested resource URI or its application client ID."
         )
     timeout_seconds = _timeout_from_environment()
     return DeployedAcaSmokeConfig(

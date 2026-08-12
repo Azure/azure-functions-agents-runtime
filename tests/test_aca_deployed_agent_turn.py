@@ -25,7 +25,7 @@ def _set_deployed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     )
     monkeypatch.setenv(
         "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE",
-        "api://deployed-aca",
+        "deployed-aca",
     )
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS", "180")
 
@@ -113,7 +113,7 @@ def test_deployed_config_reads_only_safe_url_and_route_contract(
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE",
             "api://different-audience/.default",
-            "must be the .default scope",
+            "must match",
         ),
         (
             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS",
