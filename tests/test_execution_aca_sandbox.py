@@ -20,6 +20,7 @@ from azure_functions_agents.controller.http import (
     submit_run,
 )
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
+from azure_functions_agents.controller.package import ContentDeliveryVerificationError
 from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     ProvisionedSubmission,
@@ -523,7 +524,7 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
         owner=_owner(),
     )
 
-    with pytest.raises(SandboxFileOperationError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="retryable"))
 
     _expire_provision_lease(store, next(iter(store.durable_operations.values())))
@@ -670,12 +671,16 @@ async def test_concurrent_retry_cannot_take_an_unexpired_journal_launch(
 
 
 @pytest.mark.asyncio
-async def test_provision_content_failure_leaves_a_resumable_operation(
+@pytest.mark.parametrize("status_code", [None, 409, 423, 425, 429, 500, 502, 503, 504])
+async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     tmp_path: Path,
+    status_code: int | None,
 ) -> None:
     script_root = _script_root(tmp_path)
     handle = FakeSandboxSessionHandle("sandbox-1")
-    handle.write_errors.append(SandboxFileOperationError("content write failed"))
+    handle.write_errors.append(
+        SandboxFileOperationError("content write failed", status_code=status_code)
+    )
     provider = FakeSandboxSessionProvider(handle)
     store = FakeSessionStateStore()
 
@@ -697,19 +702,71 @@ async def test_provision_content_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="content-retry")
 
-    with pytest.raises(SandboxFileOperationError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(request)
 
     assert store.session is not None
     operation = next(iter(store.durable_operations.values()))
     assert store.session.active_operation_id == operation.operation_id
     assert operation.phase == "provision_content"
+    assert store.session.active_run_id == operation.target.run_id
+    assert store.session.sandbox_id == operation.target.sandbox_id
 
     _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
+    assert recovered.session_id == operation.target.session_id
+    assert recovered.run_id == operation.target.run_id
     assert recovered.state == "accepted"
     assert len(provider.sandboxes) == 1
+    assert len(provider.create_calls) == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_provision_content_failure_remains_fatal(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    handle.write_errors.append(SandboxFileOperationError("content write rejected", status_code=400))
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SandboxFileOperationError):
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="content-rejected"))
+
+
+@pytest.mark.asyncio
+async def test_content_delivery_verification_failure_is_not_reclassified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def fail_verification(*_: object, **__: object) -> None:
+        raise ContentDeliveryVerificationError("content verification failed")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.controller.readiness.deliver_content_and_bootstrap",
+        fail_verification,
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(ContentDeliveryVerificationError):
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="content-integrity"))
 
 
 @pytest.mark.asyncio
@@ -751,7 +808,7 @@ async def test_provision_lifecycle_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="lifecycle-retry")
 
-    with pytest.raises(SandboxFileOperationError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(request)
 
     operation = next(iter(store.durable_operations.values()))

@@ -310,8 +310,10 @@ writer. The test reads the owner partition derived from the Easy Auth token,
 then requires the controller to write an `abandoned` run and `tombstoned`
 session with reason `sandbox_backing_lost`, clear the active run and operation,
 complete the durable operation, and leave no exact-label sandbox or snapshot.
-It also proves the public status remains a terminal HTTP 200 projection while
-the public result is HTTP 410.
+It also proves the public status remains an `abandoned` HTTP 200 projection
+while the public result is HTTP 410 (`result_unavailable` or `session_gone`).
+Status error metadata is optional; if present it must be the typed
+`session_tombstoned` error.
 
 Run it with the same manual deployed lifecycle settings; it does **not**
 require `AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY`, so omitting that value

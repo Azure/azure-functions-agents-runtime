@@ -104,6 +104,19 @@ def test_loss_public_contract_maps_terminal_status_to_200_and_result_to_410() ->
         result_code=410,
         result={"error": "result_unavailable"},
     )
+    support.assert_public_backing_loss_contract(
+        status_code=200,
+        status={"state": "abandoned"},
+        result_code=410,
+        result={"error": "session_gone"},
+    )
+    with pytest.raises(AssertionError):
+        support.assert_public_backing_loss_contract(
+            status_code=200,
+            status={"state": "abandoned", "error": {"code": "unexpected"}},
+            result_code=410,
+            result={"error": "result_unavailable"},
+        )
     with pytest.raises(AssertionError):
         support.assert_public_backing_loss_contract(
             status_code=410,

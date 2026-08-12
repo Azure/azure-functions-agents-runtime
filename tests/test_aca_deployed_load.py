@@ -76,6 +76,7 @@ def test_load_percentiles_and_report_are_aggregate_and_redacted() -> None:
         unclassified_service_throttle_count=0,
         unresolved_idempotency_count=0,
         cleanup_complete=True,
+        admission_failure_categories=(("ambiguous_public_admission_http_500", 6),),
     )
 
     assert metrics.submission_ms == (2000, 4000, 4000)
@@ -85,6 +86,7 @@ def test_load_percentiles_and_report_are_aggregate_and_redacted() -> None:
     assert "run_id" not in report
     assert "unclassified_service_throttles=0" in report
     assert "unresolved_idempotencies=0" in report
+    assert "admission_failure_categories=ambiguous_public_admission_http_500=6" in report
 
 
 def test_load_module_compiles_and_skips_when_the_deployed_opt_in_is_disabled(
@@ -164,6 +166,34 @@ async def test_admission_aggregate_preserves_mixed_candidates(
     assert failure.value.retries == 1
     assert failure.value.unresolved_idempotencies == 1
     assert failure.value.attempted_idempotency_keys == ("a", "b")
+    assert failure.value.failure_categories == (("setup_deadline_exceeded", 1),)
+
+
+def test_admission_failure_categories_are_aggregated_and_redacted(load_module: object) -> None:
+    module = load_module
+    categories = module._admission_failure_categories(  # type: ignore[attr-defined]
+        [
+            "ambiguous_public_admission_http_500",
+            "ambiguous_public_admission_http_500",
+            "session-id-should-not-appear",
+        ]
+    )
+    error = module._AdmissionFailureError(  # type: ignore[attr-defined]
+        failures=3,
+        retries=0,
+        throttles=0,
+        unresolved_idempotencies=0,
+        attempted_idempotency_keys=(),
+        failure_categories=categories,
+    )
+
+    assert categories == (
+        ("ambiguous_public_admission_http_500", 2),
+        ("other_admission_failure", 1),
+    )
+    assert error.failure_categories == categories
+    assert "ambiguous_public_admission_http_500=2" in str(error)
+    assert "session-id-should-not-appear" not in str(error)
 
 
 @pytest.mark.asyncio

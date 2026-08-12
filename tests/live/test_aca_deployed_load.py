@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import sys
 import time
 import uuid
+from collections import Counter
 from dataclasses import dataclass, replace
 from datetime import datetime
 
@@ -73,6 +75,15 @@ _SETTLEMENT_TIMEOUT_SECONDS = 900.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
 _LOAD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
+_SAFE_ADMISSION_FAILURE_CATEGORY = re.compile(
+    r"^(?:"
+    r"setup_deadline_exceeded|"
+    r"public_admission_request_ambiguous|"
+    r"public_admission_response_invalid|"
+    r"public_admission_http_(?:400|401|403|404)|"
+    r"ambiguous_public_admission_http_\d{3}"
+    r")$"
+)
 
 if not deployed_aca_smoke_enabled():
     pytest.skip(
@@ -133,16 +144,22 @@ class _AdmissionFailureError(AcaSmokeEnvironmentError):
         throttles: int,
         unresolved_idempotencies: int,
         attempted_idempotency_keys: tuple[str, ...],
+        failure_categories: tuple[tuple[str, int], ...],
     ) -> None:
+        category_text = ",".join(
+            f"{category}={count}" for category, count in failure_categories
+        ) or "none"
         super().__init__(
             f"{failures} load admissions failed; "
             f"unclassified_service_throttles={throttles}; retries={retries}; "
-            f"unresolved_idempotencies={unresolved_idempotencies}."
+            f"unresolved_idempotencies={unresolved_idempotencies}; "
+            f"admission_failure_categories={category_text}."
         )
         self.retries = retries
         self.throttles = throttles
         self.unresolved_idempotencies = unresolved_idempotencies
         self.attempted_idempotency_keys = attempted_idempotency_keys
+        self.failure_categories = failure_categories
 
 
 @pytest.mark.live_aca
@@ -172,6 +189,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
     retry_count = 0
     unclassified_service_throttle_count = 0
     unresolved_idempotency_count = 0
+    admission_failure_categories: tuple[tuple[str, int], ...] = ()
     cleanup_complete = False
     settlement_complete = True
     metrics = None
@@ -205,6 +223,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
                     retry_count += exc.retries
                     unclassified_service_throttle_count += exc.throttles
                     unresolved_idempotency_count += exc.unresolved_idempotencies
+                    admission_failure_categories = exc.failure_categories
                     raise
                 retry_count += admission.retries
                 unclassified_service_throttle_count += admission.unclassified_service_throttles
@@ -292,6 +311,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
                 unclassified_service_throttle_count=unclassified_service_throttle_count,
                 unresolved_idempotency_count=unresolved_idempotency_count,
                 cleanup_complete=cleanup_complete,
+                admission_failure_categories=admission_failure_categories,
             ),
         )
         if cleanup_error is not None:
@@ -364,6 +384,9 @@ async def _submit_distinct_sessions(
         for result in results
         if isinstance(result, (AcaSmokeEnvironmentError, AssertionError))
     ]
+    failure_categories = _admission_failure_categories(
+        [*failures, *(["other_admission_failure"] * len(exceptions))]
+    )
     retained_keys = tuple(attempted_idempotency_keys) or tuple(
         outcome.idempotency_key for outcome in outcomes
     )
@@ -375,6 +398,7 @@ async def _submit_distinct_sessions(
             throttles=throttles,
             unresolved_idempotencies=unresolved,
             attempted_idempotency_keys=retained_keys,
+            failure_categories=failure_categories,
         )
         if cause is not None:
             raise error from cause
@@ -384,6 +408,7 @@ async def _submit_distinct_sessions(
             throttles=throttles,
             unresolved_idempotencies=unresolved,
             attempted_idempotency_keys=retained_keys,
+            failure_categories=failure_categories,
         )
     return _AdmissionSummary(
         retries=retries,
@@ -391,6 +416,17 @@ async def _submit_distinct_sessions(
         unresolved_idempotencies=unresolved,
         attempted_idempotency_keys=retained_keys,
     )
+
+
+def _admission_failure_categories(
+    failures: list[str],
+) -> tuple[tuple[str, int], ...]:
+    """Aggregate only safe categories so live diagnostics cannot expose request data."""
+    categories = Counter(
+        failure if _SAFE_ADMISSION_FAILURE_CATEGORY.fullmatch(failure) else "other_admission_failure"
+        for failure in failures
+    )
+    return tuple(sorted(categories.items()))
 
 
 async def _submit_one(

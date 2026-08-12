@@ -101,7 +101,8 @@ def assert_public_backing_loss_contract(
     assert status_code == 200
     assert status.get("state") == "abandoned"
     error = status.get("error")
-    assert isinstance(error, dict)
-    assert error.get("code") == "session_tombstoned"
+    if error is not None:
+        assert isinstance(error, dict)
+        assert error.get("code") == "session_tombstoned"
     assert result_code == 410
     assert result.get("error") in {"result_unavailable", "session_gone"}

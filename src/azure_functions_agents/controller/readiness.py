@@ -71,6 +71,7 @@ from ..transport.transport_models import (
     SandboxCreateRequest,
     SandboxCreateSource,
     SandboxFileNotFoundError,
+    SandboxFileOperationError,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
@@ -109,6 +110,7 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
     }
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
+_RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
 
 type _SessionLockKey = tuple[str, str]
 type TargetedReconciler = Callable[[OwnerPartition, str], Awaitable[None]]
@@ -1296,6 +1298,34 @@ async def provision_new_session_submit(
 
 
 async def _provision_reserved_session(
+    runtime: SessionRuntimeBinding,
+    state_binding: StateStoreBinding,
+    provider: SandboxSessionProvider,
+    session: DurableSessionRecord,
+    fence: SessionOperationFence,
+    package: CapturedContentPackage,
+    setup_deadline: SetupDeadline,
+) -> ActivatedSession:
+    """Provision one reserved session, preserving transient file-plane work for takeover."""
+    try:
+        return await _provision_reserved_session_inner(
+            runtime,
+            state_binding,
+            provider,
+            session,
+            fence,
+            package,
+            setup_deadline,
+        )
+    except SandboxFileOperationError as exc:
+        if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
+            raise SessionActivationSetupTimeoutError(
+                "Sandbox file-plane provisioning is temporarily unavailable."
+            ) from exc
+        raise
+
+
+async def _provision_reserved_session_inner(
     runtime: SessionRuntimeBinding,
     state_binding: StateStoreBinding,
     provider: SandboxSessionProvider,

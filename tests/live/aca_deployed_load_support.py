@@ -108,6 +108,7 @@ def render_load_report(
     unclassified_service_throttle_count: int,
     unresolved_idempotency_count: int,
     cleanup_complete: bool,
+    admission_failure_categories: tuple[tuple[str, int], ...] = (),
 ) -> str:
     """Render only aggregate, redacted evidence suitable for an operator log."""
     interval = (
@@ -122,6 +123,11 @@ def render_load_report(
             f"first_event_ms={_format_quantiles(metrics.first_event_ms)} "
             f"terminal_ms={_format_quantiles(metrics.terminal_ms)}"
         )
+    failure_categories = (
+        ",".join(f"{category}={count}" for category, count in admission_failure_categories)
+        if admission_failure_categories
+        else "none"
+    )
     return (
         "ACA deployed load qualification: "
         f"N={concurrency} common_active_interval={interval} "
@@ -130,6 +136,7 @@ def render_load_report(
         f"retries={retry_count} "
         f"unclassified_service_throttles={unclassified_service_throttle_count} "
         f"unresolved_idempotencies={unresolved_idempotency_count} "
+        f"admission_failure_categories={failure_categories} "
         f"cleanup={'complete' if cleanup_complete else 'incomplete'}"
     )
 
