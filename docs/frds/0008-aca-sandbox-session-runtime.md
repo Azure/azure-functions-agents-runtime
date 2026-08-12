@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-07
+updated: 2026-08-12
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -32,8 +32,8 @@ creates or resumes the sandbox, and routes a run to it. Existing chat calls stay
 synchronous or streaming by default; a caller explicitly requests an asynchronous
 run when work should outlive the HTTP request. A customer-owned, owner-scoped
 state store maps opaque runtime session IDs to ACA sandbox resources. **In v1,
-durability is best-effort via ACA auto-suspend/resume: losing the sandbox (or its
-snapshot) loses the session** (accepted limitation). Mirroring completed
+durability is best-effort via same-sandbox disk auto-suspend/resume; normal
+suspension does not expose an explicit snapshot resource.** Mirroring completed
 conversation checkpoints to external customer storage — so losing a sandbox does
 *not* lose the session — is the **v2 target**, deferred here (Decisions 53–54).
 **Durable Functions is not required for v1.** A coordinator's **subagents**
@@ -64,21 +64,24 @@ End to end, a request flows like this:
    dedicated account, in any environment). Routing is validated by a monotonic
    generation on the row plus a live sandbox manifest cross-check — the row,
    the live ACA resource, and the live manifest must agree.
-4. **Create or resume the sandbox.** If none exists, create one on the generic
-   stdlib-only bootstrap harness image and deliver the **controller-captured
-   script-root content** into it (the epoch digest is computed over that captured
-   zip — code + vendored `.python_packages` — not the Run-From-Package deploy
-   artifact; Decisions 68, 69) with deny-by-default egress; if suspended, resume
-   and re-verify readiness.
+4. **Create or resume the sandbox.** If none exists, create it with
+   `SandboxCreateProfile` on the public `python-3.13`/`python-3.14` disk selected
+   by the Function interpreter (or a customer-pinned disk) and deliver the
+   bootstrap plus **controller-captured script-root content** over the file plane.
+   The epoch digest covers code and vendored `.python_packages`, not the
+   Run-From-Package deploy artifact; there is no custom bootstrap image. The
+   controller applies deny-by-default egress; if suspended, it resumes and
+   re-verifies readiness.
 5. **Run journal.** The controller submits a run over the authenticated ACA data
    plane and reads status/events/result from an on-disk journal (no anonymous
    port). If the coordinator delegates to **subagents**, those specialists run
    *in-process in this same sandbox* — delegation opens no new sandbox.
 6. **Response.** Sync waits (capped at 180 s) and returns today's shape; async
    returns `202` with run-management URLs. **In v1, durability is best-effort via
-   ACA auto-suspend/resume** — losing the sandbox/snapshot loses the session.
-   Mirroring completed turns to external customer storage (so the session survives
-   losing the sandbox) is the **v2 target**, deferred here (Decisions 53–54).
+   ACA disk auto-suspend/resume** — normal suspension retains the same
+   sandbox/generation but is not an external durability guarantee. Mirroring
+   completed turns to external customer storage is the **v2 target**, deferred
+   here (Decisions 53–54).
 
 ```mermaid
 flowchart LR
@@ -101,11 +104,11 @@ flowchart LR
 
 Four assumptions are qualified up front and carried into the sub-FRDs: egress
 policy reduces but does not remove data-classification needs (0008.9); a managed
-identity is **not** user OBO (0008.9); in **v1** the ACA auto-suspend/resume
-snapshot is the *best-effort* durability boundary (losing it loses the session),
-with "a snapshot is never the correctness record" reserved as the **v2 target**
-once the external mirror lands (0008.8, Decisions 53–54); and **ACA Sandboxes is a
-preview dependency**, so the backend stays experimental and opt-in (0008.1, 0008.5).
+identity is **not** user OBO (0008.9); in **v1** same-sandbox disk
+auto-suspend/resume is only a best-effort durability boundary and does not
+expose an explicit normal-path snapshot resource; external checkpoint mirroring
+is the **v2 target** (0008.8, Decisions 53–54); and **ACA Sandboxes is a preview
+dependency**, so the backend stays experimental and opt-in (0008.1, 0008.5).
 
 ## 3. Consolidated design areas
 
@@ -157,9 +160,9 @@ controlling amendments.
   an explicit async run mode with status/event/result/cancel.
 - Make every sandbox-side run addressable by an opaque `run_id`, even for sync
   callers.
-- Persist owner-scoped control metadata in customer-owned storage; never require a
-  runtime-team-owned cross-customer service. Require a dedicated customer-owned
-  state account in production; allow `AzureWebJobsStorage` only for local/preview.
+- Persist owner-scoped control metadata in the customer-owned
+  `AzureWebJobsStorage` Table service; never require a runtime-team-owned
+  cross-customer service.
 - **(v2 goal)** Mirror completed conversation checkpoints to owner-scoped external
   customer storage so losing a sandbox does not lose the session. **v1 is
   best-effort durability via ACA auto-suspend/resume** and does not ship this
@@ -168,12 +171,12 @@ controlling amendments.
   authoritative row (controller-written), live ACA resource, and live manifest
   agree.
 - Enforce one active run per session in v1.
-- Deliver agent content to the sandbox by having the **controller capture `/app`
-  from its own local script root, zip it (code + vendored `.python_packages`), and
-  deliver it over the file transport** — an attached Sandbox Group managed
-  identity is available only for the workload's own authorized calls; the committed ACA image
-  (**Path 2**) is deferred (Decision 48). Ship
-  only the MAF reference adapter in v1 and prove parity first.
+- Deliver agent content by having the **controller capture its local script root,
+  zip code plus vendored `.python_packages`, and deliver the full closure over
+  the file transport**. `SandboxCreateProfile` selects a public Python disk or a
+  customer override; no custom image is built. An attached Sandbox Group managed
+  identity is available only for the workload's own authorized calls. Ship only
+  the MAF reference adapter in v1 and prove parity first.
 - Host **FRD 0007 multi-agent delegation (subagents)** inside the single session
   sandbox without regressions: co-located specialists, catalog/package spanning all
   reachable agents, union egress, and delegation as a negotiated harness
@@ -219,8 +222,9 @@ controlling amendments.
   (Decision 46, 0008.13).
 - **External-storage durability mirroring in v1** (owner-scoped external
   transcript/checkpoint mirror) — deferred to v2 (Decision 54). v1 relies on
-  ACA auto-suspend/resume as a best-effort durability boundary and **accepts
-  session loss on sandbox/snapshot loss** (Decision 53).
+  ACA disk auto-suspend/resume as a best-effort durability boundary. The
+  destructive real-Azure loss-to-`410` acceptance test/sign-off remains deferred
+  for human resolution.
 - Installing harness dependencies from the internet at session creation.
 - Replacing Dynamic Workflows.
 
@@ -388,6 +392,10 @@ controlling amendments.
 | 149 | Sandbox environment | Whole host environment / positive provenance | Forward only the built-in non-secret profile and explicit `AZURE_FUNCTIONS_AGENTS_SANDBOXENV_*`; prefixed credentials are intentional guest exposure. | Human | 2026-08-07 | U2 |
 | 150 | Identity and headers | No group identity / group identity | Guest credentials use the dedicated Sandbox Group identity; static proxy headers are default and optional `secretRef` remains customer-provisioned. | Human | 2026-08-07 | U2 |
 | 151 | Egress lifecycle | Legacy inspection or mutable policy / Full create-time policy | Use explicit Deny plus Full inspection, ordered rules, capped policy, and drain/new session for policy or credential rotation. | Human | 2026-08-07 | U2 |
+| 152 | ACA backend availability and create source | Unconditional unavailable gate / supported opt-in runtime | Remove the unconditional `aca_sandbox backend not available in this build` gate. On Linux x86_64 CPython 3.13/3.14, valid `aca_sandbox` configuration activates the real adapter and `SandboxCreateProfile`; the Function interpreter selects public `python-3.13`/`python-3.14` by default, or a customer can pin a private disk ID. Bootstrap, application, and complete dependency closure cross the file plane; no custom bootstrap image exists. Platform/configuration validation remains fail-closed and the in-language worker remains default. | Human + Agent | 2026-08-12 | U3 |
+| 153 | U3 live turn, identity, and lifecycle evidence | Synthetic-only proof / lower-level and deployed proof | Record real adapter create, exact 80 MiB single-write delivery, full dependency closure, harness entrypoint, envelope/journal acceptance, and SDK-aware mypy from PR #152; a lower-level Luna turn and an Easy-Auth-protected deployed public turn passed (ADO 297517). Record lifecycle pass (ADO 297555): auto-suspend, same sandbox/generation resume, second suspend, then controller-only timer reclaim/tombstone with zero sandbox or snapshot leaks. This supersedes Decision #66's absolute identity-less wording: runtime attaches no identity and forwards no controller/token/storage credential, but a customer-attached, dedicated least-privileged Sandbox Group identity is guest-usable for egress-exempt token acquisition and has model inference only, never state-store rights. OBO remains inert. | Human + Agent | 2026-08-12 | U3 |
+| 154 | U3 load acceptance | Declare Decision #29 passed / retain staged qualification | The committed public Easy-Auth load runner performs staged N=10/25/50/100 qualification. Evidence is in progress; do not mark Decision #29 or N=100 load acceptance passed until the final N=100 evidence is supplied. | Human | 2026-08-12 | U3 |
+| 155 | U3 local quality evidence | Omit / record current gate | Record current local gate: Ruff clean; strict mypy clean for 97 files; Python 3.13 pytest result 1792 passed, 61 skipped, 82 deselected. | Human + Agent | 2026-08-12 | U3 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -404,7 +412,7 @@ at two maturities — v1 = backstop-only at ~1 h (crash-detection,
 submit-operation finalization, reclaim, Table cleanup); v2 tightens the same timer to ~1/min
 and folds in the mirror job to hold the 2-min-p95 SLO. It is not a second timer.
 
-The trade-offs accepted by Decisions #86 and #87 are that session state shares the host's `AzureWebJobsStorage` lifetime and throughput budget. Shared Key remains accepted, so ETag/CAS and live manifest cross-verification provide the durable routing controls. A Sandbox Group identity is separate from the controller identity and receives no state-store permission by default; an attached identity can use state storage only if customer workload permissions deliberately grant it. The deeper state-row integrity story remains the authoritative row, monotonic generation, and live manifest cross-check.
+The trade-offs accepted by Decisions #86 and #87 are that session state shares the host's `AzureWebJobsStorage` lifetime and throughput budget. ETag/CAS and live manifest cross-verification provide the durable routing controls. The controller managed identity is the sole Table writer. A Sandbox Group identity is separate; runtime attaches or forwards no identity or credentials. It must be dedicated and least-privileged, may receive explicitly required workload permissions including authenticated MCP access, and has no controller, Sandbox Group management, or state-store rights. The U3 qualification grants that identity model inference only, with no MCP or state-store permissions. The deeper state-row integrity story remains the authoritative row, monotonic generation, and live manifest cross-check.
 
 *Label-safe encoding note.* Decisions #89–91's worked examples and prose that show a 64-character lower-case hex payload for `a1-`/`o1-`/`s1-` tokens (e.g. `o1:a1-<64hex>:function_app:o1-<64hex>`, `state_store_fingerprint` as `s1-<sha256>`) are **superseded by Decisions #106/#113/#114**: every such token uses the SAME canonical `<version>-<52 lower-case base32 characters>` shape (55 characters total) everywhere — Table partition keys, future manifests, paths, and ACA labels alike. The underlying SHA-256 digest bytes, the `frame_canonical_components` framing, the `a1`/`o1` version discriminators, and the canonicalizer-registry/no-eager-migration behavior are unchanged; only the digest's string encoding moved from hex to base32, because ACA rejects labels over 63 characters and a hex `a1-`/`o1-` token (67 characters) cannot satisfy that limit. Read every `<64hex>`-shaped example elsewhere in this FRD as illustrative superseded text, not the current wire format.
 
@@ -426,30 +434,34 @@ customer runtime dependencies.
 Documentation must keep `docs/architecture.md` as the internal design source,
 with `docs/aca-sandbox-session-runtime.md` as the operator guide. Related
 authoring, trigger, observability, README, and infrastructure documentation
-must describe the same public configuration and capability-gate behavior.
+must describe the same supported-host/configuration validation behavior.
 
 ## 7. Status & sign-off
 
-**Status: Finalized.** The current feature contract is an authenticated
+**Status: Finalized (U3 load acceptance pending).** The current feature contract is an authenticated
 Functions controller, one ACA Sandbox per session, a digest-verified captured
 content package, direct file/process journal transport, and deny-by-default
 egress. The public runtime surface includes synchronous chat, explicit async
 run management, replayable events, idempotency, one active run per session,
 and controller-managed lifecycle repair.
 
-v1 durability is best effort through ACA auto-suspend/resume: sandbox or
-snapshot loss tombstones the session and returns `410`; external checkpoint
-mirroring and state-preserving rebind are v2 work. Persistent session ownership
-uses the standard Functions auth gate with adaptive app/user ownership. The
-controller captures application content, uses `AzureWebJobsStorage` for durable
-state, and maintains the per-sandbox lifecycle policy rather than relying on a
-group default.
+v1 durability is best effort through same-sandbox ACA disk auto-suspend/resume:
+normal suspension resumes the same sandbox/generation and does not imply an
+explicit snapshot resource. External checkpoint mirroring and state-preserving
+rebind are v2 work. The destructive real-Azure loss-to-`410` acceptance
+test/sign-off remains unresolved/deferred for human decision; this record does
+not mark it complete.
+Persistent session ownership uses the standard Functions auth gate with adaptive
+app/user ownership. The controller captures application content, uses
+`AzureWebJobsStorage` for durable state, and maintains the per-sandbox lifecycle
+policy rather than relying on a group default.
 
 The runtime is MAF-only, preserves in-process subagent delegation in the same
-sandbox, confines preview SDK usage to the adapter, and requires real ACA
-smoke and load acceptance before the capability gate opens. The append-only
-Decisions log records the sign-off, amendments, and historical provenance for
-these controlling contracts.
+sandbox, confines preview SDK usage to `transport/aca_sdk.py`, and has passed
+the recorded real adapter, model, deployed Easy Auth, and lifecycle evidence.
+The staged public load qualification remains pending; it does not close Decision
+#29 until N=100 evidence arrives. The append-only Decisions log records the
+sign-off, amendments, and historical provenance for these controlling contracts.
 
 ## 8. SDK-verified ACA platform contract
 
@@ -536,8 +548,10 @@ EgressHeader(
 Static values and secret references are injected by the egress layer rather
 than exposed to sandbox code. An attached Sandbox Group managed identity is
 directly usable by guest code through the platform endpoint; use a dedicated,
-least-privileged identity and do not grant it controller or state-store access
-unless the workload needs that access. The sandbox-group Secrets store
+least-privileged identity with only explicitly required workload permissions,
+including authenticated MCP access where needed, and no controller, Sandbox
+Group management, or state-store access. The U3 qualification grants only model
+inference, with no MCP or state-store permissions. The sandbox-group Secrets store
 (`upsert_secret`, `list_secret_keys`, and `peek_secret`) backs `EgressSecretRef`.
 
 ### Reconciliation, snapshots, and disk images
@@ -628,7 +642,7 @@ class AgentExecutionBackend(Protocol):
 * `RowKey = session:{session_id}` or `run:{session_id}:{run_id}`. Public run locators must contain `session_id` (v1 session-scoped URLs) unless future explicit run index.
 * Session row fields: sandbox pointer/`sandbox_id`, `generation`, `digest_kind`, `digest`, `owner_hash_version`, `protocol`, `status`, `last_activity_at`, `expires_at` (idle-reclaim deadline), `idle_policy_armed`, `active_run_id`, and plan-required `snapshot_ids` for pruning. Run row holds `status`, `expires_at` (run watchdog deadline), and lifecycle data. Run/session admission is an entity-group transaction.
 * Blob container: `azure-functions-agents-state`; paths `sandbox-runtime/history/{owner_hash}/{session_id}.jsonl` and `sandbox-runtime/checkpoints/{owner_hash}/{session_id}/{generation}.json`. It is deletable. v1 provisions but does not populate external history/checkpoint mirror.
-* Controller writes via its Function App identity to the shared `AzureWebJobsStorage` account (Decision #86: no dedicated account; Decision #87: no Shared-Key gate — RBAC or Shared Key both accepted, matching core Functions' own posture). An attached Sandbox Group identity is separate and must not receive state-store access unless workload code genuinely requires it.
+* Controller managed identity is the sole Table writer for the shared `AzureWebJobsStorage` account. An attached Sandbox Group identity is separate, dedicated, and least-privileged; it may receive explicitly required workload permissions, including authenticated MCP access, but has no controller, Sandbox Group management, or state-store role or credential.
 * Every routing/submit does: (1) resolved authenticated owner, never request hash; (2) deterministic owner partition; (3) authoritative row; (4) ETag monotonic generation validation; (5) short lease and group-scoped sandbox resolution; (6) **live ACA data-plane** manifest match for owner/app/session/group/generation/`(digest_kind,digest)`/protocol; (7) real readiness operation then submit. Generation/manifest mismatch -> not-found semantics, security event, quarantine sandbox; do not delete state.
 * Table-only reads are correct for authorization, status, result availability, tombstone/post-reap. Do not require manifest for these reads; terminal status remains readable after sandbox unavailable; result eviction is 410.
 
@@ -637,7 +651,7 @@ class AgentExecutionBackend(Protocol):
 * Generation identifies concrete sandbox backing (instance+disk), not content. It is forward-only, rollback barrier. Digest pair is written at creation and immutable for session lifetime.
 * In v1 generation is effectively fixed: suspend/resume and intact-disk crash recovery retain it. State-preserving rebind to different backing advances generation only v2 with external mirror. Loss/unrecoverable state -> tombstone/410, **never** generation bump. A stale/divergent/lower generation is rollback, never recovery.
 * Current controller digest mismatch (genuine redeploy) is an epoch drain, not generation change: grace active run then abandon, tombstone/410/new session. No drain on restart/scale with same digest.
-* Harness crash with intact disk -> run `abandoned`, same session/backing/generation continues from atomically committed checkpoint. Sandbox/snapshot loss -> session tombstone and same session id returns 410; historical control-record status remains readable.
+* Harness crash with intact disk -> run `abandoned`, same session/backing/generation continues from atomically committed checkpoint. The v1 loss-handling contract tombstones unrecoverable backing and returns 410 while historical control-record status remains readable; only destructive real-Azure loss-to-410 acceptance test/sign-off remains deferred.
 * Atomic per-turn commit includes conversation history + working files; a crash must never resume corrupted state. The contract requires staging -> rename -> fsync pointer and parent fault injection.
 * Retention hierarchy: customer group default < app `session_runtime.retention` in v1 < per-agent override v2. `expires_at` is shared field name by row type; `last_activity_at`/`idle_policy_armed` session only. Reconciler scans single source table with bounded server filters/continuations; no due-work index. v1 timer approximately hourly; one-minute is v2 only. Runtime must enforce `reclaim_idle <= auto_delete - cadence - grace`.
 
@@ -665,7 +679,7 @@ class AgentExecutionBackend(Protocol):
 
 * Management routes are session-scoped: `GET .../sessions/{session_id}/runs/{run_id}`, `.../result`, `.../events`, `POST .../cancel`; headers are `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, `Last-Event-ID`.
 * Async accepted -> `202` + `Location` + `Retry-After: 2`. A failed async **status** read is `200`, never 5xx; a result URL is `410` when no result is available or its session is tombstoned. Active slot -> `409 active_run_exists`; same idempotency key/different payload -> `422 idempotency_key_conflict`; two typed setup/run cap breaches -> `504`. Deduplicate first, then active-run check: same key+payload replay; distinct key while active=409; retry after abandon rotates key.
-* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. Before ACA implementation exists, declaring `aca_sandbox` fails startup (`aca_sandbox backend not available in this build`). Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
+* Config/startup: absence of `session_runtime` (or of the `aca_sandbox` block within it) means `in_lang_worker`. On supported Linux x86_64 CPython 3.13/3.14 hosts, valid `aca_sandbox` configuration selects the real ACA backend; no unconditional unavailable-backend gate remains. Unsupported ACA combinations—including `workflows.enabled` and Dynamic Sessions `execute_python`—fail startup. Reject dropped `max_run_seconds`, `region`, `disk`, `content_package`. `auto_suspend_idle` legal set is `{60,120,300,600,1800,3600}` mapping to `auto_suspend_seconds`; `reclaim_idle` positive and > suspend idle; 10 of the 13 matrix rows fail closed (rows 6 and 7 are superseded by Decisions #87/#86, row 11 is structurally unrepresentable — see the matrix).
 * Config/startup and runtime gates fail closed on: group-not-pre-provisioned, cross-region binding, ABI/protocol/digest mismatch, anonymous ingress, missing readiness, unsafe egress defaults, and snapshot-incompatible mutable entrypoint/cmd/environment. (The former Shared-Key/dedicated-account preflight on state storage no longer applies — Decisions #86/#87; session state always reuses `AzureWebJobsStorage`, with no auth-mode gate at this layer.)
 * Required quality gates: ruff, strict mypy, pytest for every PR; full existing suite unchanged at the local seam; Azurite CAS/EGT/concurrency tests; no `src` import from tests/import graph test; typed seam conformance for local and ACA; journal/Table credential redaction; crash injection; golden traces every CI; real ACA smoke; and full e2e plus 100-concurrent and large-payload gates.
 
@@ -675,7 +689,7 @@ class AgentExecutionBackend(Protocol):
 2. **D5 vs D31 (further revised by #86):** original `AzureWebJobsStorage` default is invalid for production. Preserve only local/dev/explicit preview exception; production must use dedicated account. **Since superseded:** Decision #86 removed the dedicated-account concept entirely — session state always reuses `AzureWebJobsStorage`, in every environment, with no configurability.
 3. **D9 vs D53/54:** “snapshot never correctness record” is not v1. v1 accepts snapshot/sandbox loss; external mirror and never-correctness guarantee are v2.
 4. **D15 vs D55 (also stale 0008.2 cross-cutting note):** Entra-only persistent ownership is invalid. Function key is valid app-scoped ownership; controller adds no ACA identity layer.
-5. **D17/D48 vs D68/69:** signed package, sandbox download of RFP artifact, and baked MAF/runtime are obsolete. Actual v1 content is controller-captured local script-root zip with vendored `.python_packages`; bootstrap is stdlib-only and sandbox has no storage identity. The parent’s later prose that still calls Path 1 “Run-From-Package deploy artifact” must be rewritten/qualified as historical provenance, not runtime source.
+5. **D17/D48 vs D68/69 (further revised by #152):** signed package, sandbox download of RFP artifact, and baked MAF/runtime are obsolete. Actual v1 content is controller-captured local script-root zip with vendored `.python_packages`; bootstrap and the full dependency closure cross the file plane on a public Python disk or customer disk override. The runtime attaches or forwards no identity or credentials, while a customer-attached group identity remains directly guest-usable with explicitly required, least-privileged workload permissions (including authenticated MCP where needed), never controller, Sandbox Group management, or state-store permissions. The U3 qualification grants model inference only. The parent’s later prose that still calls Path 1 “Run-From-Package deploy artifact” must be rewritten/qualified as historical provenance, not runtime source.
 6. **D18/D24 vs D54/D58/D59:** v1 neither mirrors checkpoints nor runs one-minute reconciliation. Use mandatory approximately-hourly backstop; one-minute/2-minute SLO is v2 mirror-only.
 7. **D32/D39 vs D51/D52 (further revised by #87):** KV per-binding signing and WORM binding log are removed. Do not provision KV signing key/WORM container; authoritative row + ETag generation + live manifest are the v1 trust design (Decision #87 dropped the scoped-RBAC/Shared-Key requirement from this list — `AzureWebJobsStorage` accepts either).
 8. **D56/D57 vs D66:** the earlier no-identity model is superseded by §11. Guest code uses an attached Sandbox Group managed identity through native credentials; it is neither the controller identity nor user OBO.
@@ -700,10 +714,10 @@ by real ACA smoke.
 
 #### 1. Governing v1 contracts and boundaries
 
-* Execution is seam-first and additive. `in_lang_worker` remains the default; declaring `aca_sandbox` opts in and hard-fails application startup until the capability gate is open. Discovery is read-only; registration is the only Azure-aware stage; execution is lazy.
+* Execution is seam-first and additive. `in_lang_worker` remains the default; declaring valid `aca_sandbox` configuration opts into the available backend on supported hosts, while unsupported/unsafe combinations fail startup without fallback. Discovery is read-only; registration is the only Azure-aware stage; execution is lazy.
 * The controller (Functions app) owns identity/owner resolution, Azure Tables, sandbox binding/provisioning, package capture/delivery, budgets, HTTP/SSE, egress-policy compilation, and reconciliation. The sandbox/harness owns stdlib bootstrap, MAF adapter, journal writes, whole-turn atomic commit, watchdog, in-process delegation, and workload-scoped use of its attached Sandbox Group managed identity.
 * Runtime sandbox groups are pre-provisioned customer IaC. Runtime never creates a group, never opens inbound ports, and only creates individual sandboxes in the bound region. Group absence or cross-region binding fails closed.
-* The deployment has two targets: controller Functions process and sandbox image. Harness code is importable for tests but guarded by `_ensure_sandbox()` and must raise outside a marked sandbox. The bootstrap image is stdlib-only; MAF is not baked.
+* The deployment has a controller Functions process and a public or customer-selected sandbox disk, not a custom sandbox image. Harness code is importable for tests but guarded by `_ensure_sandbox()` and must raise outside a marked sandbox. Bootstrap, application, and dependency closure are delivered through the file plane; MAF is not baked.
 * Production contains exactly one transport implementation. Test doubles are only `tests/doubles/`, never importable from `src`; `UnavailableBackend` is a typed capability error, never a simulated backend. CI guards: no `src`→`tests` import, SDK imported only in `transport/aca_sdk.py`, and factory cannot return a double.
 
 #### 2. SDK-verified platform facts (controlling)
@@ -777,7 +791,7 @@ At session creation, the first session on a worker process lazily captures its m
 
 The mounted script root is immutable for the worker process's lifetime: modifying it in place after the first capture is unsupported and a customer error, since a later session on that worker would still receive the earlier cached package. Equivalent workers in one deployment independently capture the same deterministic bytes and digest by construction; a rolling deployment may run multiple worker epochs concurrently, and each session is stamped with the digest its own worker captured. Capture includes every deployed file with no filename-based allowlist or credential exclusion — an accidentally deployed secret file is captured like any other file, since filtering by name would silently diverge the captured content from the code tree the worker actually runs. Secrets belong in app settings, Key Vault, or egress-proxy-injected configuration, never in `wwwroot`.
 
-The generic runtime-authored image is byte-identical per customer, pinned by IaC digest, built **FROM** the Azure Functions Linux Python base. It contains only a stdlib bootstrap; MAF/runtime are in the captured tree. Bootstrap uses `site.addsitedir()` (not raw `sys.path.insert`) and ordering that prevents `/app` shadowing stdlib, then imports the harness from captured content. There is one pip-resolved environment: runtime, MAF, and tool dependencies. Supported ABI is Linux x86_64, CPython 3.13/3.14, matching base/glibc/manylinux; registration rejects mismatch up front.
+No runtime-authored image is built. `SandboxCreateProfile` uses the Function interpreter's public `python-3.13`/`python-3.14` disk alias by default, or a customer-pinned disk ID for reproducibility. Bootstrap uses `site.addsitedir()` (not raw `sys.path.insert`) and ordering that prevents `/app` shadowing stdlib, then imports the harness from captured content. One delivered pip-resolved closure contains runtime, MAF, and tool dependencies. Supported ABI is Linux x86_64, CPython 3.13/3.14, matching base/glibc/manylinux; registration rejects mismatch up front.
 
 Session content is immutable for its lifetime. A `(digest_kind,digest)` pair is compared together. Generation identifies backing only. A content digest change is a deployment epoch change: grace, abandon in-flight, drain/tombstone session, then `410` and new session; it is never an in-place content swap or generation bump. The `protocol_version` belongs to the captured per-session runtime epoch and `ensure_ready` is a session-scoped consistency check, not a fleet latest/version-window policy.
 
@@ -809,7 +823,7 @@ For turn N: write all state and tool writes only into private staging/overlay; f
 * **Idle:** auto-suspend about 300s (allowed values are config constrained); resume is same backing/same generation. Recreate token providers, clients, MCP connections, and leases. `ensure_ready` must verify data-plane readiness, protocol, content digest, owner/app/session/group/sandbox identity, Table pointer + ETag/generation, and last-run journal; state reads are only hints.
 * **Result hold:** terminal async permits suspend but defers destroy until `max(remaining idle retention, ~5m)`; under idle-from-terminal policy floor is normally inert. Fetch ends result hold and returns to normal idle retention, not immediate delete. After reaping, result is 410 but Table status remains available.
 * **Harness crash with intact disk:** run becomes `abandoned`, slot frees after verified death, session remains on same sandbox/generation and resumes last committed turn.
-* **Sandbox/snapshot/backing loss (v1):** in-flight run `abandoned`; session tombstones, later calls 410; status survives in Tables, content does not. No v1 generation advance.
+* **Unrecoverable backing loss (v1):** the reconciler detects missing backing, marks an in-flight run `abandoned`, tombstones the session, retains durable status in Tables, and returns `410` for subsequent unavailable result/session behavior with no generation advance. Normal disk auto-suspend is not this case and does not imply a snapshot resource. Only destructive real-Azure loss-to-410 acceptance test/sign-off remains deferred.
 * **v2 only:** external owner-scoped Blob mirror stores completed deltas/bounded checkpoints; recoverable backing loss is a state-preserving rebind/generation advance. True mirror-inclusive loss tombstones. Reaper adopts mirror terminal before marking abandoned and never reaps before mirror confirmation.
 
 Reconciler is timer, not Durable Functions. It uses label-scoped `list_sandboxes` as platform truth, reconciles Table divergence with ETag/CAS, repairs disabled policy, handles stale liveness/verified kill/reclaim, tombstones rather than deletes rows, and prunes snapshots through list/delete. Reclaim constraint: `reclaim_idle <= auto_delete - cadence - grace`; planned active reaper semantics are idle-based, reset by request, including through suspend. Platform auto-delete is coarse backstop only; platform deletion is reconciled, and cannot touch active run because D27 leaves it running. Snapshot resource use is not v1 durability; explicit snapshot listing/deletion is needed for any snapshot created.
@@ -818,7 +832,7 @@ Reconciler is timer, not Durable Functions. It uses label-scoped `list_sandboxes
 
 At sandbox creation compile one per-sandbox, create-time-only policy from web-request allowed hosts, MCP URLs, model, telemetry, and reachable delegates. Emit explicit default Deny plus Full inspection; put exact host/path Transform/Deny rules before broad host allows, first-match-wins, and deploy-time lint against broad allow shadowing. Policy or credential changes do **not** reach live sessions: drain and replace the session. No mutable `set_egress_policy` path exists without a durable fence. The platform re-evaluates redirects and blocks IMDS/wireserver. Azure DNS UDP remains an uninspected platform gap.
 
-An attached Sandbox Group managed identity is directly available through the platform identity endpoint. Native `DefaultAzureCredential` uses that identity for Foundry, Azure OpenAI, and authenticated MCP servers; it is not user OBO or the controller identity. Egress limits token-use destinations, not token acquisition. Use a dedicated least-privileged group identity and do not grant state-store or Sandbox Group management access unless workload code requires it. Static model/MCP headers are proxy transformations and never reach guest process/filesystem; optional group `secretRef` values remain customer-provisioned and runtime-referenced only.
+An attached Sandbox Group managed identity is directly available through the platform identity endpoint. It is not user OBO or the controller identity; runtime attaches or forwards no identity or credentials, and platform token acquisition is egress-exempt while egress limits token-use destinations. Use a dedicated least-privileged group identity with only explicitly required workload permissions, including authenticated MCP access where needed; never grant controller, Sandbox Group management, or state-store access. The controller managed identity is the sole Table writer. The U3 qualification grants the group identity model inference only, with no MCP or state-store permissions. Static model/MCP headers are proxy transformations and never reach guest process/filesystem; optional group `secretRef` values remain customer-provisioned and runtime-referenced only.
 
 Egress is a one-app trust-domain union across coordinator and reachable specialists; no per-specialist isolation in v1. Each sandbox receives its create-time policy, while content redeploy or credential rotation uses drain/new-session semantics. `get_egress_decisions` is a rolling sample rather than a complete audit. Never log URLs/query secrets, authorization/API-key headers, injected values, secret store values, request/response content unless sensitive data explicitly enabled—and secrets never, even then.
 
@@ -1158,7 +1172,7 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 * Content/catalog must contain coordinator and every statically reachable specialist plus agent files, tools, skills, and MCP configuration. Controller captures content and sandbox rebuilds local catalog; no live MAF/catalog objects cross the wire.
 * V1 delegation is single-level/static, task-string only, fresh specialist per call, immutable catalog, globally unique file-stem slugs. Delegated specialists receive no `delegate_*` tools. Multi-level/dynamic target selection is out of scope; arbitrary MCP/user HTTP remains subject to egress policy.
 * The entry/coordinator timeout is one whole-run budget; nested specialists do not reset it. The 180-second synchronous cap covers setup, coordinator, and all delegates; long chains must use explicit async. No per-delegate attribution/preflight estimate in v1.
-* Egress is one precomputed app-wide union across all reachable agents (web/MCP/model destinations). There is no per-specialist isolation. Any sandbox code can reach union destinations, but deny-by-default/full inspection still applies. Guest code uses the dedicated Sandbox Group identity for native workload credentials; user OBO and controller-identity reuse are deferred.
+* Egress is one precomputed app-wide union across all reachable agents (web/MCP/model destinations). There is no per-specialist isolation. Any sandbox code can reach union destinations, but deny-by-default/full inspection still applies. In U3, guest code uses the dedicated Sandbox Group identity only for model inference; user OBO and controller-identity reuse are deferred.
 * Delegation is a negotiated typed harness capability under one protocol version. If `subagents:` is declared and harness lacks in-process delegation, startup fails; unenumerated features fail as unrecognized. Capability can be advertised only after a conformance trace exercises it.
 * Required delegation golden trace: coordinator exposes `delegate_<slug>`, calls it, emits nested `af.delegate.*` spans with target/role, integrates answer, returns a recoverable tool error for failing specialist, and proves no second top-level run/session/binding. No delegation-specific numeric catalog-size cap in v1; platform transfer/cold-start/100-concurrent load gates bound it.
 * Handoff active-participant/shared-context only reserves checkpoint/manifest schema room; durable handoff is v2+ because v1 has no external durability substrate.
@@ -1169,7 +1183,7 @@ V1 loss always tombstones. V2-only state-preserving rebind/rebuild from an exter
 * Dynamic Workflows is this runtime’s Functions Host/Durable Functions feature, not MAF. It exposes five ordinary MAF tools: `start_workflow`, `get_workflow_status`, `list_workflows`, `cancel_workflow`, `terminate_workflow`. `@workflow_tool` inventory is separate from normal MAF tools; only main agents get workflow controls, delegated agents do not.
 * The controller already builds a `DFApp`, registers Durable blueprint/activity/orchestrator, and has host-injected `durable_client_input`; host/task-hub configuration is deployment/`host.json`, not front matter. The controller-side orchestrator exists even for an ACA-configured project.
 * ACA sandbox has no Functions Host, Durable extension/task hub, host binding injection, or credential/egress path to build one. It runs fixed-entry MAF harness logic after discovery/translation, not registration. A sandbox-local workflow client is therefore unavailable and would otherwise soft-fail (`durable_client=None`); fail-closed prevents this silent degradation.
-* No nested execution substrate, direct controller callback ingress, or sandbox-to-Durable direct access is permitted in v1. Default-deny egress and no sandbox credentials reinforce this.
+* No nested execution substrate, direct controller callback ingress, or sandbox-to-Durable direct access is permitted in v1. Default-deny egress and the absence of controller/Durable credential forwarding reinforce this; a customer-attached group identity remains usable only for its authorized workload calls.
 * Analysis-only leading future candidate: keep Durable orchestration/controller registration unchanged and give sandbox tools a controller-mediated proxy for the five control operations. Controller performs Durable calls under its identity; sandbox holds no Durable client/credentials/extra egress. Candidate (b), controller callbacks for workflow steps in a live sandbox, is not recommended; it needs ingress/liveness coupling and replay idempotency. Candidate (c), local shim/MCP, weakens Durable parity/durability. Candidate (d) is v1 status quo.
 * If candidate (a) is implemented, it cannot be an unversioned journal convention. It requires a formally negotiated/versioned reverse-RPC capability through `protocol_version`/`ensure_ready`, e.g. `request_host_call(run_id, request_id, op, args)` and `deliver_host_call_result(run_id, request_id, payload)`, with idempotency, cancellation-while-pending, and reattach semantics. No seventh verb/bridge lands in v1.
 
@@ -1207,17 +1221,17 @@ an enabled v1 surface.
 
 #### 7. Required test coverage / acceptance gates
 
-* Config scenario fixture for every matrix row, absence/default, valid ACA config, dropped fields, hard unavailable-backend startup gate, HTTP-only restriction, ABI rule, and always-hard row 13.
+* Config scenario fixture for every matrix row, absence/default, valid ACA config, dropped fields, supported-host and unsafe-configuration startup failures, HTTP-only restriction, ABI rule, and always-hard row 13.
 * Typed execution seam conformance against Local and ACA backend: all seven states, exclusive cursor semantics, typed cursor expiry, cancellation, result eviction, and default local parity.
 * Azurite: owner vectors, ETag one-active-run race across two controllers, entity-group atomicity, idempotency, generation monotonicity, tombstone/410, loss-always-tombstones, redaction, and generic operation begin/resume/advance/complete/abort with stale-token races. Cover provision reservation's owner claim/run/operation EGT, submit admission's operation EGT, rearm-vs-admission, and terminal-vs-reclaim interactions.
 * Stub transport plus real ACA adapter smoke: six verbs, direct file journal operations, `ensure_ready` authoritative under lag, idempotent cancel, no ingress ports, pre-provisioned group failure, SDK import firewall.
-* HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; snapshot restart; disconnect does not cancel; failed async status read is `200` while unavailable result reads are `410`.
+* HTTP: async submit/poll/result; both typed 504 reasons; 180-second mid-tool cancellation cleanup; three idempotency cases; replay after abandon requires key rotation; resume after disk suspension; disconnect does not cancel; failed async status read is `200` while unavailable result reads are `410`.
 * Crash injection: file-write/rename/pointer-fsync boundaries; disk-intact crash resumes same sandbox; lost sandbox tombstones; stopped/suspended redeploy digest mismatch; OOM/disk full fails cleanly; clock-skew grace; post-terminal lifecycle re-arm.
 * Reconciler: stale heartbeat verification, no false abandon, label-scoped platform divergence, per-sandbox lifecycle writes, no-live-delete CAS, backstop inequality, terminal/tombstone and completed-operation pruning, snapshot pruning, capacity reap-and-retry, resumed incomplete operations, required operation fields, and fail-closed orphan idle markers. Fault injection covers each provider create/lifecycle/content/manifest/journal phase and stable-label recovery after ambiguous create or launch response loss.
 * Security/egress: reject unsafe defaults/bypass, rule ordering lint, static and secret credential Transform sources, group-identity boundaries, redirect/DNS-rebind revalidation, block sandbox-to-control-plane SSRF, journal/Table redaction.
 * Harness: bootstrap ABI/protocol/digest failure, no anonymous ingress, workflows/code-interpreter fail-closed, semantic golden traces every CI, advertise capability only after exercised trace.
 * Delegation: static/single-level guard, cycle/depth guard, egress union, co-location/no second run, recoverable specialist failure, whole-chain sync timeout.
-* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, sandbox loss->410, egress deny/transform audit, and 100-concurrent/load and large-payload gates. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
+* Real ACA E2E/full-system: create-submit-result, stop-resume-ensure-ready, egress deny/transform audit, and large-payload gates are evidenced by U3. Only destructive real-Azure loss-to-410 acceptance test/sign-off remains deferred. The committed public Easy-Auth load runner is staged N=10/25/50/100; Decision #29 is not passed until N=100 evidence is supplied. At default preview quota, assert <=2-second p95 status/event visibility at <=1 poll/s per active stream, reliable cancellation/lifecycle repair, and acceptable cost/throttling; failure is an explicit private-ingress/load-shaping review finding, never a reason to permit anonymous ingress. Every validation slice also requires `ruff`, strict `mypy`, and `pytest`, plus docs/observability/redaction gates.
 
 ## 11. Sandbox harness integration
 

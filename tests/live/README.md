@@ -206,7 +206,7 @@ an outer retry or timeout around the runtime's attach/resume handshake.
 The qualification proves only normal lifecycle behavior: ACA reports the
 owned sandbox `Stopped` or `Suspended`; a second public turn resumes the same
 sandbox ID and generation; and the deployed controller timer deletes the owned
-backing sandbox and snapshots before writing the documented
+backing sandbox and any owned snapshot resources before writing the documented
 `reclaimed_idle_session` tombstone. It confirms terminal status remains
 readable and result retrieval returns `410`. CI holds **Storage Table Data
 Reader scoped only to the `AzureFunctionsAgentsSessions` table** and never

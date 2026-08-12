@@ -458,11 +458,12 @@ Pass `x-ms-session-id` header to continue a conversation across requests. If omi
 
 ### Experimental ACA session-runtime contract
 
-The ACA Sandbox session runtime is opt-in and remains capability-gated closed
-until live end-to-end and load acceptance. Enabling
-`session_runtime.aca_sandbox` still fails startup until that gate opens. See
-[the ACA operator guide](docs/aca-sandbox-session-runtime.md) for configuration,
-identity, egress, lifecycle, and troubleshooting guidance; see
+The ACA Sandbox session runtime is opt-in and available on Linux x86_64 Python
+3.13/3.14. Add the `aca_sandbox` extra and configure a customer-owned Sandbox
+Group; unsafe or unsupported configuration fails at startup and never falls
+back to the in-language worker. The default in-language-worker path is
+unchanged. See [the ACA operator guide](docs/aca-sandbox-session-runtime.md)
+for setup, identity, egress, lifecycle, and live qualification guidance; see
 [architecture.md](docs/architecture.md) and
 [FRD 0008](docs/frds/0008-aca-sandbox-session-runtime.md) for internal design.
 

@@ -588,7 +588,12 @@ session_runtime:
 # equivalent to the default in-process backend.
 ```
 
-> **Status:** Configuring `aca_sandbox` parses successfully today, but application **startup** fails with a clear `aca_sandbox backend not available in this build` diagnostic — the executing backend ships in a later release. Use this section to author configuration ahead of time; do not deploy `aca_sandbox` expecting agents to run yet.
+> **Status:** `aca_sandbox` is an opt-in available backend on Linux x86_64
+> CPython 3.13/3.14 when the ACA transport extra, customer-owned Sandbox Group,
+> identity/RBAC, and configuration validation are in place. Startup rejects
+> unsupported hosts or unsafe/incompatible configuration rather than silently
+> falling back to the in-language worker. See the [ACA operator guide](aca-sandbox-session-runtime.md)
+> for deployment prerequisites.
 
 ---
 
