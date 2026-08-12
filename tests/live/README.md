@@ -1,16 +1,29 @@
 # Live ACA harness smoke coverage
 
-Two opt-in, paid-service smoke tests exercise the ACA sandbox against the real
-service, with no ACA fake:
+The following opt-in, paid-service tests are intentionally different layers of
+evidence. None provisions infrastructure from CI.
 
-- `tests/live/test_aca_harness_entrypoint_smoke.py` — proves the production
+- **#152 adapter/harness coverage**:
+  `tests/live/test_aca_harness_entrypoint_smoke.py` proves the production
   harness entrypoint resolves and runs. It exercises a real
   `AcaSandboxAdapter.create()` call, a real `SandboxSessionHandle`, a direct
   file upload, and synchronous process execution.
-- `tests/live/test_aca_run_journal_acceptance.py` — proves the full
+  `tests/live/test_aca_run_journal_acceptance.py` proves the full
   controller-to-harness round trip: a real `SandboxRunControl.submit()` writes
   an inbox envelope, launches the harness, and observes the journal status the
   harness wrote back.
+- **Lower-level real model/harness smoke**:
+  `tests/live/test_aca_real_agent_turn.py` manually qualifies a captured,
+  minimal no-tools agent catalog through the production content package,
+  bootstrap, harness, journal, and run-control path. The harness performs a
+  real Azure OpenAI MAF turn using the Sandbox Group's user-assigned managed
+  identity (UAMI), then publishes ordered journal events and a successful
+  terminal result.
+- **GA full-stack deployed Function qualification**:
+  `tests/live/test_aca_deployed_agent_turn.py` is the persistent manual proof
+  through only a deployed, Easy-Auth-protected Azure Function's public routes.
+  It submits a run, reads journal SSE, status, and result; it never calls ACA,
+  the harness, or Table storage directly.
 
 Shared provisioning, dependency-closure delivery, and cleanup live in
 `tests/live/aca_smoke_support.py`.
@@ -46,6 +59,93 @@ failures instead of environment errors, which defeats the triage rule below.
 The test skips before collecting a live fixture unless
 `AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE` is exactly `1`. Do not set that variable
 in normal local development or ordinary unit-test jobs.
+
+## Run the lower-level real-agent-turn qualification manually
+
+This lower-level model/harness test is deliberately **manual only**. It is not wired to a
+scheduled CI job until its live reliability has been demonstrated. In addition
+to the common ACA variables above, provide the Azure OpenAI deployment and the
+client ID of the UAMI attached to the dedicated Sandbox Group:
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.App/sandboxGroups/<group>"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK="python-3.13"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REGION="<sandbox-group-region>"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER="azure_openai"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT="https://<account>.openai.azure.com"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT="u3-gpt-5-6-luna-20260709"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_UAMI_CLIENT_ID="<sandbox-group-uami-client-id>"
+export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REASONING_EFFORT="none"
+python -m pytest -m live_aca tests/live/test_aca_real_agent_turn.py \
+  -v -o log_cli=true -o log_cli_level=INFO
+```
+
+The test forwards only the provider, endpoint, deployment, optional reasoning
+effort, and the Sandbox Group UAMI client ID into the guest. It never forwards
+API keys, bearer tokens, controller/CI credentials, storage credentials, or
+state-store permissions. The UAMI must have access to the selected deployment.
+The fixture first classifies guest managed-identity, role, quota, and model
+reachability failures as `ACA-SMOKE-ENV` errors; after that preflight, journal
+or result assertions are product test failures. Prompt and model-result content
+are not logged or asserted verbatim.
+
+This proves one isolated, model-backed sandbox harness turn using the checked-in
+minimal project. It is **not** the GA full-stack proof: it does not prove a
+deployed Function App request or controller identity access, and it does not
+replace the existing adapter/harness acceptance tests. The fixture has no tools; if a future
+qualification adds one, it must set
+`AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REASONING_EFFORT=none`.
+
+## Run the deployed Function GA qualification manually
+
+`tests/fixtures/live_aca_deployed_agent_turn/` is the minimal deployable
+package for this test. It contains one no-tools HTTP agent, a persistent ACA
+session runtime, Easy Auth allow-lists, and no web, MCP, or user tools. It does
+not contain dependencies or secrets. Build the package from this checkout, not
+from a published runtime release:
+
+```bash
+cd tests/fixtures/live_aca_deployed_agent_turn
+python -m pip install --target .python_packages/lib/site-packages \
+  "<path-to-azure-functions-agents-runtime>[aca_sandbox]"
+func azure functionapp publish <function-app-name> --python --no-build
+```
+
+The fixture's `.gitignore` prevents `.python_packages` from being committed, while
+`.funcignore` deliberately includes that locally built Linux dependency tree in the
+published package. Before publish,
+configure the Function App's protected application settings (for example via
+`az functionapp config appsettings set`): `AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai`,
+`AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`,
+`AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK=python-3.13` (the public Python disk),
+`AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`, the Entra tenant,
+Easy Auth audience, and the U3.TestInvoker client ID. `AzureWebJobsStorage`
+must be configured for the runtime's persistent session state. Keep the Azure
+OpenAI endpoint and Function App on managed identity; do not put model keys,
+storage keys, or bearer tokens in the fixture or test environment.
+
+After the app package, Easy Auth policy, U3.TestInvoker role assignment, ACA
+Sandbox Group access, and Azure OpenAI access are ready, run this manually:
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net/api"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG="deployed_turn"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE="api://<app-client-id>/.default"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE="api://<app-client-id>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS=180
+python -m pytest -m live_aca tests/live/test_aca_deployed_agent_turn.py -v
+```
+
+The test acquires its token only through
+`azure.identity.aio.DefaultAzureCredential`; it rejects a bearer-token
+environment variable. The protected `larohra-sandboxgroup-test` ADO service
+connection holds **U3.TestInvoker**. The `ACADeployedAgentTurn` job runs this
+qualification only for manually queued builds, never pull requests or schedules.
+Missing URL/configuration, token acquisition, or unavailable-app failures are
+reported as `ACA-SMOKE-ENV` pytest errors; public response and protocol
+assertions remain pytest failures. Never log prompt or model-result content.
 
 ### Host ABI prerequisite
 
@@ -123,6 +223,12 @@ deterministic `ZIP_STORED` archive, and sends that archive through one
 `write_file` call. The sandbox extracts it into the `PYTHONPATH` directory
 before the verification and probe commands run. No network package install is
 attempted inside a sandbox.
+
+For the lower-level real-agent-turn qualification, that same already-built
+closure is also deterministically embedded in the captured application under
+`.python_packages/lib/site-packages/`. Production bootstrap intentionally runs
+with `-E -S`, so this captured copy is required for bootstrap and cannot rely
+on the sandbox-level `PYTHONPATH`.
 
 The archive budget is 80 MiB. The measured closure contains 5,968 ZIP entries
 and is 75.9 MiB. The budget is deliberately not expanded with compression:

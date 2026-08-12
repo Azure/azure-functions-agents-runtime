@@ -737,7 +737,8 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if session_runtime is not None:
         cadence = resolve_reconciler_cadence()
 
-        async def reconcile_sandbox_sessions(_timer: Any) -> None:
+        async def reconcile_sandbox_sessions(timer: func.TimerRequest) -> None:
+            del timer
             state_binding = await session_runtime.get_state_store()
             provider = await session_runtime.get_provider()
             reconciler = _build_session_reconciler(

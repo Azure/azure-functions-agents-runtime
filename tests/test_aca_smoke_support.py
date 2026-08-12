@@ -1,10 +1,18 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import io
+import zipfile
 
 import pytest
 from azure.core.exceptions import HttpResponseError
 
+from azure_functions_agents.controller.package import (
+    FUNCS_ZIP_DIGEST_KIND,
+    CapturedContentPackage,
+)
+from azure_functions_agents.harness.delegation import rebuild_agent_catalog
 from tests.live import aca_smoke_support
 
 
@@ -30,6 +38,182 @@ class _ForbiddenSandboxAdapter:
         error = HttpResponseError("Operation returned an invalid status 'Forbidden'")
         error.status_code = 403
         raise error
+
+
+def _set_model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER", "azure_openai")
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
+        "https://smoke-model.openai.azure.com",
+    )
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT",
+        "u3-gpt-5-6-luna-20260709",
+    )
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_UAMI_CLIENT_ID",
+        "11111111-2222-3333-4444-555555555555",
+    )
+
+
+def _archive(entries: dict[str, bytes]) -> bytes:
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_STORED) as archive:
+        for name, content in entries.items():
+            archive.writestr(name, content)
+    return buffer.getvalue()
+
+
+def _captured_content_package(entries: dict[str, bytes]) -> CapturedContentPackage:
+    archive = _archive(entries)
+    return CapturedContentPackage.create(
+        archive_bytes=archive,
+        digest_kind=FUNCS_ZIP_DIGEST_KIND,
+        digest=f"sha256:{hashlib.sha256(archive).hexdigest()}",
+    )
+
+
+def test_composite_real_agent_package_contains_catalog_and_delivered_dependencies() -> None:
+    agent_project = _captured_content_package(
+        {
+            "agents.config.yaml": b"default_agent: model_turn\n",
+            "model_turn.agent.md": b"---\nname: model_turn\n---\nReply briefly.\n",
+        }
+    )
+    closure = aca_smoke_support.DependencyClosureArchive(
+        payload=_archive(
+            {
+                "azure_functions_agents/__init__.py": b"VERSION = 'test'\n",
+                "agent_framework/__init__.py": b"",
+            }
+        ),
+        entry_count=2,
+    )
+
+    first = aca_smoke_support.compose_real_agent_project_package(agent_project, closure)
+    second = aca_smoke_support.compose_real_agent_project_package(agent_project, closure)
+
+    assert first.archive_bytes == second.archive_bytes
+    assert first.size <= aca_smoke_support._CLOSURE_ARCHIVE_MAX_BYTES
+    assert first.digest == f"sha256:{hashlib.sha256(first.archive_bytes).hexdigest()}"
+    with zipfile.ZipFile(io.BytesIO(first.archive_bytes)) as archive:
+        assert archive.namelist() == [
+            ".python_packages/lib/site-packages/agent_framework/__init__.py",
+            ".python_packages/lib/site-packages/azure_functions_agents/__init__.py",
+            "agents.config.yaml",
+            "model_turn.agent.md",
+        ]
+        assert archive.read("agents.config.yaml") == b"default_agent: model_turn\n"
+        assert (
+            archive.read(
+                ".python_packages/lib/site-packages/azure_functions_agents/__init__.py"
+            )
+            == b"VERSION = 'test'\n"
+        )
+        assert all(member.extract_version <= 20 for member in archive.infolist())
+
+
+def test_model_config_forwards_only_guest_safe_model_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_model_environment(monkeypatch)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REASONING_EFFORT", "medium")
+
+    config = aca_smoke_support.aca_smoke_model_config_from_environment()
+
+    assert config.sandbox_environment() == {
+        "AZURE_FUNCTIONS_AGENTS_PROVIDER": "azure_openai",
+        "AZURE_OPENAI_ENDPOINT": "https://smoke-model.openai.azure.com",
+        "AZURE_OPENAI_DEPLOYMENT": "u3-gpt-5-6-luna-20260709",
+        "AZURE_CLIENT_ID": "11111111-2222-3333-4444-555555555555",
+        "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT": "medium",
+    }
+
+    policy = config.sandbox_egress_policy()
+    assert policy.default_action == "Deny"
+    assert policy.traffic_inspection == "Full"
+    assert [(rule.host, rule.action) for rule in policy.host_rules] == [
+        ("management.azure.com", "Deny"),
+        ("management.azuredevcompute.io", "Deny"),
+        ("smoke-model.openai.azure.com", "Allow"),
+    ]
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        (
+            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER",
+            "foundry",
+            "must be azure_openai",
+        ),
+        (
+            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
+            "http://smoke-model.openai.azure.com",
+            "must be an HTTPS endpoint",
+        ),
+        (
+            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_UAMI_CLIENT_ID",
+            "not-a-client-id",
+            "must be a managed identity client ID",
+        ),
+        (
+            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REASONING_EFFORT",
+            "maximum",
+            "must be one of",
+        ),
+    ],
+)
+def test_model_config_rejects_invalid_environment_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    value: str,
+    message: str,
+) -> None:
+    _set_model_environment(monkeypatch)
+    monkeypatch.setenv(name, value)
+
+    with pytest.raises(aca_smoke_support.AcaSmokeEnvironmentError, match=message):
+        aca_smoke_support.aca_smoke_model_config_from_environment()
+
+
+def test_redact_aca_smoke_evidence_removes_secret_shaped_values() -> None:
+    evidence = aca_smoke_support.redact_aca_smoke_evidence(
+        "Authorization: Bearer top-secret; api_key=another-secret token: third-secret"
+    )
+
+    assert "top-secret" not in evidence
+    assert "another-secret" not in evidence
+    assert "third-secret" not in evidence
+    assert "[redacted]" in evidence
+
+
+def test_model_preflight_failure_never_surfaces_guest_output() -> None:
+    with pytest.raises(
+        aca_smoke_support.AcaSmokeEnvironmentError,
+        match="guest diagnostics were redacted",
+    ) as error:
+        aca_smoke_support._require_successful_model_preflight(
+            description="model preflight failed",
+            exit_code=1,
+        )
+
+    assert "prompt" not in str(error.value).casefold()
+
+
+def test_real_turn_fixture_rebuilds_a_no_tools_catalog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_SANDBOX", "1")
+    monkeypatch.setenv("AZURE_OPENAI_DEPLOYMENT", "u3-gpt-5-6-luna-20260709")
+
+    catalog = rebuild_agent_catalog(aca_smoke_support._LIVE_MODEL_AGENT_PROJECT_ROOT)
+    entry = catalog["model_turn"]
+
+    assert entry.resolved.model == "u3-gpt-5-6-luna-20260709"
+    assert entry.capabilities.filtered_user_tools == []
+    assert entry.capabilities.filtered_mcp_tools == []
+    assert entry.capabilities.web_request_tools == []
 
 
 @pytest.mark.asyncio

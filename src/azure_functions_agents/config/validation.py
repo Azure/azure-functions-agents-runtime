@@ -434,8 +434,3 @@ def validate_session_runtime(
         _validate_aca_http_auth_parity(resolved)
 
     _validate_platform_capability()
-
-    raise _session_runtime_error(
-        "session_runtime.aca_sandbox",
-        "aca_sandbox backend not available in this build",
-    )
