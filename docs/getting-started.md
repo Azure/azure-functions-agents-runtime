@@ -76,6 +76,8 @@ azurefunctions-agents-runtime
 
 Connector-backed tools are exposed through MCP servers in `mcp.json`, and connector-triggered apps use the Azure Functions Connector Extension through the Functions extension bundle. No package extra is required.
 
+> Add `azurefunctions-agents-runtime[monitor]` instead if you want to export traces to Azure Monitor / Application Insights.
+
 ### 6. Set the model provider
 
 For local development with Microsoft Foundry, sign in with `az login`, then create `local.settings.json`:
@@ -113,7 +115,8 @@ Your agent is now running at `http://localhost:7071/agents/main/` with a built-i
 
 ## Where to go next
 
-- [Front matter spec](front-matter-spec.md) — full `.agent.md` field reference, triggers, built-in endpoints, subagents, and environment variable substitution
+- [Front matter spec](front-matter-spec.md) — full `.agent.md` field reference, triggers, built-in endpoints, subagents, and environment variable substitution, with narrative examples
+- [Front matter reference](front-matter-reference.md) — auto-generated, plain field-by-field reference (handy for quick lookups)
 - [Triggers](triggers.md) — supported trigger types and payload shapes
 - [Architecture](architecture.md) — how the runtime discovers, translates, and registers agents
 - The repository [README](https://github.com/Azure/azure-functions-agents-runtime#readme) also covers custom Python tools, built-in endpoint routes, and multi-agent delegation in more depth

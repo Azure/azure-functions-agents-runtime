@@ -59,3 +59,4 @@ nav:
       - Dynamic workflows: workflows.md
   - Reference:
       - Front matter spec: front-matter-spec.md
+      - Front matter reference: front-matter-reference.md
