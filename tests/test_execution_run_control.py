@@ -19,8 +19,13 @@ from azure_functions_agents.execution.run_control import (
     RunSubmissionDefinitiveFailureError,
     RunSubmissionIndeterminateError,
     SandboxRunControl,
+    _launch_command,
 )
-from azure_functions_agents.journal_paths import inbox_path
+from azure_functions_agents.journal_paths import (
+    LAUNCH_STDERR_FILENAME,
+    inbox_path,
+    launch_stderr_path,
+)
 from azure_functions_agents.transport.transport_models import SandboxExecResult
 from tests.doubles.fake_sandbox_transport import FakeSandboxTransport
 
@@ -85,6 +90,7 @@ async def test_submit_waits_for_the_harness_to_journal_acceptance() -> None:
     assert [call.operation for call in transport.calls] == [
         "read_file",
         "write_file",
+        "write_file",
         "exec",
         "read_file",
     ]
@@ -126,8 +132,9 @@ async def test_submit_keeps_launch_indeterminate_when_acceptance_times_out() -> 
     with pytest.raises(RunSubmissionIndeterminateError):
         await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
 
-    assert [call.operation for call in transport.calls[:3]] == [
+    assert [call.operation for call in transport.calls[:4]] == [
         "read_file",
+        "write_file",
         "write_file",
         "exec",
     ]
@@ -144,8 +151,286 @@ async def test_submit_marks_nonzero_launch_exit_as_definitive_failure() -> None:
     assert [call.operation for call in transport.calls] == [
         "read_file",
         "write_file",
+        "write_file",
         "exec",
     ]
+
+
+def test_launch_command_redirects_stderr_to_the_per_run_sidecar() -> None:
+    command = _launch_command("run-1")
+
+    assert "setsid nohup" in command
+    assert command.rstrip().endswith("&")
+    assert ">/dev/null" in command
+    assert f"2>{launch_stderr_path('run-1')}" in command
+    assert "2>&1" not in command
+
+
+@pytest.mark.asyncio
+async def test_launch_stderr_sidecar_is_excluded_from_event_enumeration() -> None:
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/{LAUNCH_STDERR_FILENAME}",
+        b"Traceback (most recent call last):\nRuntimeError: not a journal document",
+    )
+    transport.seed_file(
+        f"{RUNS_PATH}/run-1/events-000.jsonl",
+        f"{_event(1, 'delta')}\n".encode(),
+    )
+
+    events = await SandboxRunControl()._read_events(transport, _context(), {})
+
+    assert [event.sequence for event in events] == [1]
+
+
+@pytest.mark.asyncio
+async def test_submit_stays_indeterminate_even_when_launch_stderr_reports_a_failure() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_launch_error(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n",
+        )
+
+    transport.exec_hook = emit_launch_error
+
+    # Captured stderr is a diagnostic for operators, never a classification signal;
+    # retiring the run here could orphan a still-live harness.
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_indeterminate_when_launch_stderr_has_unrelated_output() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_unmarked_stderr(_command: str) -> None:
+        # A slow but healthy harness can spill benign startup warnings before journaling acceptance.
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"DeprecationWarning: legacy import path is deprecated\n",
+        )
+
+    transport.exec_hook = emit_unmarked_stderr
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_keeps_indeterminate_when_launch_stderr_is_whitespace_only() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_blank_stderr(_command: str) -> None:
+        transport.seed_file(launch_stderr_path("run-1"), b"   \n\t  \n")
+
+    transport.exec_hook = emit_blank_stderr
+
+    with pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_leak_launch_stderr_in_the_exception_message() -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+    sandbox_secret = "AZURE_CLIENT_SECRET=super-secret-value-do-not-leak"
+
+    async def emit_secret_bearing_stderr(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            (
+                "azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n"
+                f"Traceback (most recent call last):\nRuntimeError: {sandbox_secret}"
+            ).encode(),
+        )
+
+    transport.exec_hook = emit_secret_bearing_stderr
+
+    with pytest.raises(RunSubmissionIndeterminateError) as exc_info:
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    message = str(exc_info.value)
+    assert sandbox_secret not in message
+    assert "super-secret-value-do-not-leak" not in message
+    assert "Traceback" not in message
+
+
+@pytest.mark.asyncio
+async def test_submit_swallows_launch_stderr_read_failure_without_masking() -> None:
+    class _LaunchStderrReadFailsTransport(FakeSandboxTransport):
+        async def read_file(self, path: str) -> bytes:
+            if path.endswith(f"/{LAUNCH_STDERR_FILENAME}"):
+                raise RuntimeError("sidecar read boom must not surface")
+            return await super().read_file(path)
+
+    transport = _LaunchStderrReadFailsTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    with pytest.raises(RunSubmissionIndeterminateError) as exc_info:
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert "sidecar read boom must not surface" not in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_log_secret_bearing_non_marker_launch_stderr(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+    sandbox_secret = "AZURE_CLIENT_SECRET=super-secret-value-do-not-leak"
+
+    async def emit_secret_bearing_stderr(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            (
+                "azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n"
+                f"Traceback (most recent call last):\nRuntimeError: {sandbox_secret}"
+            ).encode(),
+        )
+
+    transport.exec_hook = emit_secret_bearing_stderr
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    log_output = caplog.text
+    assert sandbox_secret not in log_output
+    assert "super-secret-value-do-not-leak" not in log_output
+    assert "Traceback" not in log_output
+    assert "azfn-agents-harness-launch-error: Sandbox run inbox is missing." in log_output
+
+
+@pytest.mark.asyncio
+async def test_submit_launch_stderr_log_cannot_forge_a_second_record(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_injection_attempt(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: real\r\n"
+            b"ERROR:root:forged administrator override accepted",
+        )
+
+    transport.exec_hook = emit_injection_attempt
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert "forged administrator override accepted" not in caplog.text
+    launch_records = [
+        record for record in caplog.records if "emitted launch stderr" in record.getMessage()
+    ]
+    assert len(launch_records) == 1
+    assert "\n" not in launch_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_log_a_secret_carried_on_the_marker_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+    sandbox_secret = "AZURE_CLIENT_SECRET=super-secret-value-do-not-leak"
+
+    async def emit_forged_marker(_command: str) -> None:
+        # The prefix is repo-authored but the remainder is attacker-chosen: a closed-set check,
+        # not a prefix check, is what keeps this out of operator logs.
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            f"azfn-agents-harness-launch-error: {sandbox_secret}\n".encode(),
+        )
+
+    transport.exec_hook = emit_forged_marker
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    log_output = caplog.text
+    assert sandbox_secret not in log_output
+    assert "super-secret-value-do-not-leak" not in log_output
+    launch_records = [
+        record for record in caplog.records if "emitted launch stderr" in record.getMessage()
+    ]
+    assert len(launch_records) == 1
+    assert "no harness markers, content withheld" in launch_records[0].getMessage()
+
+
+@pytest.mark.asyncio
+async def test_submit_logs_a_repo_authored_launch_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_allow_listed_marker(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: Sandbox run inbox is missing.\n",
+        )
+
+    transport.exec_hook = emit_allow_listed_marker
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    assert "azfn-agents-harness-launch-error: Sandbox run inbox is missing." in caplog.text
+    assert "content withheld" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_submit_does_not_log_a_near_miss_launch_diagnostic(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    transport = FakeSandboxTransport()
+    control = SandboxRunControl(event_poll_interval_seconds=0.001)
+
+    async def emit_near_miss_marker(_command: str) -> None:
+        transport.seed_file(
+            launch_stderr_path("run-1"),
+            b"azfn-agents-harness-launch-error: Sandbox run inbox is missing. and a secret tail\n",
+        )
+
+    transport.exec_hook = emit_near_miss_marker
+
+    with caplog.at_level("ERROR"), pytest.raises(RunSubmissionIndeterminateError):
+        await control.submit(transport, "run-1", _envelope(), timeout_seconds=0.05)
+
+    launch_records = [
+        record for record in caplog.records if "emitted launch stderr" in record.getMessage()
+    ]
+    assert len(launch_records) == 1
+    message = launch_records[0].getMessage()
+    assert "and a secret tail" not in message
+    assert "no harness markers, content withheld" in message
+
+
+@pytest.mark.asyncio
+async def test_read_launch_stderr_skips_downloading_an_oversized_sidecar(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from azure_functions_agents.execution.run_control import MAX_LAUNCH_STDERR_BYTES
+
+    transport = FakeSandboxTransport()
+    transport.seed_file(
+        launch_stderr_path("run-1"),
+        b"x" * (MAX_LAUNCH_STDERR_BYTES + 1),
+    )
+
+    with caplog.at_level("ERROR"):
+        launch_stderr = await SandboxRunControl()._read_launch_stderr(transport, "run-1")
+
+    assert launch_stderr == ""
+    assert [call.operation for call in transport.calls] == ["stat_file"]
+    assert "Skipping oversized launch stderr sidecar" in caplog.text
 
 
 @pytest.mark.asyncio

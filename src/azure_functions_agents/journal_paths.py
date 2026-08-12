@@ -26,6 +26,39 @@ ATOMIC_CHECKPOINT_POINTER_PATH = f"{SESSION_PATH}/current"
 CHECKPOINT_NAME_PREFIX = "checkpoint_"
 HEARTBEAT_FILENAME = "heartbeat.json"
 PROCESS_FILENAME = "process.json"
+LAUNCH_STDERR_FILENAME = "launch.stderr"
+# Prefix on the only launch-sidecar lines the controller may log verbatim: repo-authored,
+# secret-free markers. Everything else in that sidecar is untrusted sandbox output.
+LAUNCH_DIAGNOSTIC_PREFIX = "azfn-agents-harness-launch-error: "
+# Closed set of repo-authored diagnostics the harness may emit after LAUNCH_DIAGNOSTIC_PREFIX.
+# A marker line is logged verbatim only when its stripped remainder is an exact member; the
+# prefix alone is not an authorship check, so a forged marker carrying a secret is not one of these.
+ALLOWED_LAUNCH_DIAGNOSTICS: frozenset[str] = frozenset(
+    {
+        "harness canceled.",
+        "Sandbox run identifier is invalid.",
+        "Sandbox run inbox is missing.",
+        "Sandbox run inbox does not match the requested run.",
+        "Sandbox run requested an unknown agent.",
+        "Sandbox runner emitted an invalid event.",
+        "Sandbox runner emitted an invalid completion event.",
+        "Sandbox run locking requires POSIX flock.",
+        "Sandbox run lock could not be acquired.",
+        "Sandbox run inbox exceeds its size limit.",
+        "Sandbox run inbox is invalid.",
+        "Sandbox run inbox has no agent name.",
+        "Sandbox run inbox timeout is invalid.",
+        "Sandbox process group is invalid.",
+        "Sandbox journal event type is invalid.",
+        "Sandbox journal event exceeds its size limit.",
+        "Sandbox run result exceeds its size limit.",
+        "Successful runs must publish a result.",
+        "Existing sandbox run status is invalid.",
+        "Existing sandbox events are invalid.",
+        "Existing sandbox events are not contiguous.",
+        "Sandbox journal events are invalid.",
+    }
+)
 
 
 def inbox_path(run_id: str) -> str:
@@ -56,6 +89,11 @@ def process_path(run_id: str) -> str:
 def heartbeat_path(run_id: str) -> str:
     """Return one run heartbeat path."""
     return f"{run_path(run_id)}/{HEARTBEAT_FILENAME}"
+
+
+def launch_stderr_path(run_id: str) -> str:
+    """Return one run launch-stderr diagnostic sidecar path."""
+    return f"{run_path(run_id)}/{LAUNCH_STDERR_FILENAME}"
 
 
 def checkpoint_name(token: str) -> str:

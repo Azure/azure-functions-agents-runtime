@@ -8,10 +8,15 @@ import errno
 import os
 import shutil
 import signal
+import sys
 from pathlib import Path
 
 from ..execution.backend import RunError, RunResult
-from ..journal_paths import JOURNAL_ROOT_PATH, SANDBOX_APPLICATION_PATH
+from ..journal_paths import (
+    JOURNAL_ROOT_PATH,
+    SANDBOX_APPLICATION_PATH,
+)
+from ..journal_paths import LAUNCH_DIAGNOSTIC_PREFIX as _LAUNCH_DIAGNOSTIC_PREFIX
 from ..runner import run_agent_events
 from ..session_state import validate_run_id
 from . import _ensure_sandbox
@@ -29,6 +34,33 @@ from .watchdog import Watchdog, WatchdogTimeoutError
 _MAX_WORKING_FILE_BYTES = 4 * 1024 * 1024
 _MAX_WORKING_TREE_BYTES = 16 * 1024 * 1024
 _MAX_CONVERSATION_BYTES = 4 * 1024 * 1024
+
+
+def _emit_launch_diagnostic(message: str) -> None:
+    """Emit a short, greppable marker to stderr before returning without a journal.
+
+    Only a repo-authored, secret-free message is written here: never a traceback,
+    environment values, or envelope contents, since the controller captures this
+    stderr for operators.
+    """
+    try:
+        sys.stderr.write(f"{_LAUNCH_DIAGNOSTIC_PREFIX}{message}\n")
+        sys.stderr.flush()
+    except Exception:
+        return
+
+
+def _silence_launch_stderr() -> None:
+    """Detach fd 2 from the launch sidecar so post-acceptance stderr cannot grow it unbounded."""
+    try:
+        devnull = os.open(os.devnull, os.O_WRONLY)
+        try:
+            sys.stderr.flush()
+            os.dup2(devnull, 2)
+        finally:
+            os.close(devnull)
+    except Exception:
+        return
 
 
 class HarnessRunFailureError(Exception):
@@ -50,8 +82,12 @@ def main(argv: list[str] | None = None) -> int:
     try:
         return asyncio.run(_run(arguments.run_id, arguments.journal_root, arguments.app_root))
     except asyncio.CancelledError:
+        # Post-acceptance, controller-driven cancellation, not launch-failure evidence;
+        # recorded only so a human can see the reason in the captured stderr.
+        _emit_launch_diagnostic("harness canceled.")
         return 1
-    except HarnessJournalError:
+    except HarnessJournalError as exc:
+        _emit_launch_diagnostic(str(exc))
         return 1
 
 
@@ -85,6 +121,7 @@ async def _run_claimed(
         return 0
     writer.write_process_group(_process_group_id())
     writer.write_accepted()
+    _silence_launch_stderr()
     watchdog = Watchdog(writer.run_directory)
     watchdog.write_process_group(_process_group_id())
     checkpoint_store = AtomicCommitStore(journal_root / "session")

@@ -21,6 +21,18 @@ from pydantic import (
     model_validator,
 )
 
+from .._logger import logger
+from ..journal_paths import (
+    ALLOWED_LAUNCH_DIAGNOSTICS,
+    LAUNCH_DIAGNOSTIC_PREFIX,
+    LAUNCH_STDERR_FILENAME,
+    inbox_path,
+    launch_stderr_path,
+    process_path,
+    result_path,
+    run_path,
+    status_path,
+)
 from ..journal_paths import (
     INBOX_PATH as _INBOX_PATH,
 )
@@ -29,13 +41,6 @@ from ..journal_paths import (
 )
 from ..journal_paths import (
     RUNS_PATH as _RUNS_PATH,
-)
-from ..journal_paths import (
-    inbox_path,
-    process_path,
-    result_path,
-    run_path,
-    status_path,
 )
 from ..session_state import TERMINAL_RUN_STATUSES, validate_run_id, validate_session_id
 from ..strict_json import DuplicateJsonKeyError, decode_json_object
@@ -60,11 +65,13 @@ MAX_RUN_ENVELOPE_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_STATUS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_RESULT_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
 MAX_PROCESS_BYTES = MAX_JOURNAL_DOCUMENT_BYTES
+MAX_LAUNCH_STDERR_BYTES = 64 * 1024
 MAX_EVENT_SEGMENTS = 16
 MAX_EVENT_SEGMENT_BYTES = 1024 * 1024
 EVENT_POLL_INTERVAL_SECONDS = 1.0
 JOURNAL_VISIBILITY_TIMEOUT_SECONDS = 2.0
 CANCEL_CONFIRM_TIMEOUT_SECONDS = 5.0
+LAUNCH_STDERR_READ_TIMEOUT_SECONDS = 2.0
 
 _JOURNAL_ENTRYPOINT = "setsid nohup python -m azure_functions_agents.harness"
 
@@ -259,6 +266,16 @@ class SandboxRunControl:
                 ),
                 deadline,
             )
+            # Pre-create an empty launch-stderr sidecar so the shell's `2>` redirect has an
+            # existing target; the detached harness only creates the run directory lazily.
+            await self._with_deadline(
+                handle.write_file(
+                    _launch_stderr_path(normalized_run_id),
+                    b"",
+                    create_dirs=True,
+                ),
+                deadline,
+            )
             launch_timeout_seconds = _remaining_seconds(deadline)
         except Exception as exc:
             raise RunSubmissionDefinitiveFailureError(
@@ -277,6 +294,8 @@ class SandboxRunControl:
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but could not be confirmed."
             ) from exc
+        # Defense-in-depth: the backgrounded launch normally reports 0, so this rarely fires,
+        # but a non-zero exit still means the harness never started.
         if launch_result.exit_code != 0:
             raise RunSubmissionDefinitiveFailureError(
                 "Run launch failed before harness acceptance."
@@ -287,6 +306,15 @@ class SandboxRunControl:
         except RunJournalProtocolError:
             raise
         except Exception as exc:
+            launch_stderr = await self._read_launch_stderr(handle, normalized_run_id)
+            if launch_stderr:
+                # Untrusted sandbox stderr: only exact allow-listed marker lines are logged verbatim;
+                # all other content is reduced to metadata so secrets and forged records cannot leak.
+                logger.error(
+                    "Sandbox harness emitted launch stderr before acceptance for run %s: %s",
+                    normalized_run_id,
+                    _summarize_launch_stderr(launch_stderr),
+                )
             raise RunSubmissionIndeterminateError(
                 "Run launch may have started but journal acceptance was not confirmed."
             ) from exc
@@ -461,6 +489,36 @@ class SandboxRunControl:
             raise RunJournalProtocolError("Run journal status does not match the requested context.")
         return status
 
+    async def _read_launch_stderr(
+        self,
+        handle: SandboxSessionHandle,
+        run_id: str,
+    ) -> str:
+        """Best-effort, size-capped read of the untrusted per-run launch stderr.
+
+        The sidecar is untrusted sandbox text: stat-gated so an oversized file is never
+        downloaded, never JSON-decoded, bounded in time and size, and any read failure is
+        swallowed so it cannot mask the original error.
+        """
+        path = _launch_stderr_path(run_id)
+        try:
+            async with asyncio.timeout(LAUNCH_STDERR_READ_TIMEOUT_SECONDS):
+                stat = await handle.stat_file(path)
+                if stat.size is not None and stat.size > MAX_LAUNCH_STDERR_BYTES:
+                    logger.error(
+                        "Skipping oversized launch stderr sidecar for run %s: "
+                        "%d byte(s) exceeds the %d-byte cap.",
+                        run_id,
+                        stat.size,
+                        MAX_LAUNCH_STDERR_BYTES,
+                    )
+                    return ""
+                payload = await handle.read_file(path)
+        except Exception as exc:
+            logger.debug("Could not read launch stderr sidecar for run %s: %r", run_id, exc)
+            return ""
+        return payload[:MAX_LAUNCH_STDERR_BYTES].decode("utf-8", errors="replace")
+
     async def _read_result(
         self,
         handle: SandboxSessionHandle,
@@ -488,6 +546,7 @@ class SandboxRunControl:
             entry.path
             for entry in entries
             if not entry.is_directory
+            and entry.name != LAUNCH_STDERR_FILENAME
             and entry.name.startswith("events")
             and entry.name.endswith(".jsonl")
         )
@@ -569,8 +628,45 @@ def _process_path(run_id: str) -> str:
     return process_path(validate_run_id(run_id))
 
 
+def _launch_stderr_path(run_id: str) -> str:
+    return launch_stderr_path(validate_run_id(run_id))
+
+
+def _sanitize_log_line(text: str) -> str:
+    """Escape control characters so untrusted text cannot forge or split a log record."""
+    return "".join(char if char.isprintable() else f"\\x{ord(char):02x}" for char in text)
+
+
+def _is_allowed_launch_diagnostic(line: str) -> bool:
+    """Return whether a launch-stderr line is a repo-authored diagnostic safe to log verbatim.
+
+    The marker prefix is not an authorship check: the sidecar is untrusted, so a line counts
+    only when its marker-stripped remainder is an exact member of the closed allow-list.
+    """
+    if not line.startswith(LAUNCH_DIAGNOSTIC_PREFIX):
+        return False
+    return line.removeprefix(LAUNCH_DIAGNOSTIC_PREFIX).strip() in ALLOWED_LAUNCH_DIAGNOSTICS
+
+
+def _summarize_launch_stderr(text: str) -> str:
+    """Reduce untrusted launch stderr to safe metadata plus allow-listed marker lines."""
+    lines = text.splitlines()
+    markers = [
+        _sanitize_log_line(line) for line in lines if _is_allowed_launch_diagnostic(line)
+    ]
+    byte_count = len(text.encode("utf-8", errors="replace"))
+    summary = f"{len(lines)} line(s), {byte_count} byte(s)"
+    if markers:
+        return f"{summary}; harness markers: {' | '.join(markers)}"
+    return f"{summary}; no harness markers, content withheld"
+
+
 def _launch_command(run_id: str) -> str:
-    return f"{_JOURNAL_ENTRYPOINT} --run-id {validate_run_id(run_id)} >/dev/null 2>&1 &"
+    normalized_run_id = validate_run_id(run_id)
+    return (
+        f"{_JOURNAL_ENTRYPOINT} --run-id {normalized_run_id} "
+        f">/dev/null 2>{launch_stderr_path(normalized_run_id)} &"
+    )
 
 
 def _signal_process_group(process_group_id: int, *, force: bool) -> str:

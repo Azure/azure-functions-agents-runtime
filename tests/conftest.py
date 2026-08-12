@@ -5,12 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from azure_functions_agents.controller.package import CapturedContentPackage
-from tests.doubles.content_package import content_package
-
+# Must precede the first-party imports below: without it, running pytest from a
+# checkout that has not been installed cannot resolve azure_functions_agents.
 SRC_DIR = Path(__file__).resolve().parents[1] / "src"
 if str(SRC_DIR) not in sys.path:
     sys.path.insert(0, str(SRC_DIR))
+
+from azure_functions_agents.controller.package import CapturedContentPackage  # noqa: E402
+from tests.doubles.content_package import content_package  # noqa: E402
 
 
 @pytest.fixture
