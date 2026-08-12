@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import textwrap
 from pathlib import Path
@@ -15,8 +16,11 @@ from azure_functions_agents.config.schema import (
     GlobalConfig,
     SessionRuntimeConfig,
 )
+from azure_functions_agents.controller.readiness import SessionRuntimeBinding, StateStoreBinding
+from azure_functions_agents.controller.reconciler import ReconcileReport
 from azure_functions_agents.discovery.mcp import MCPDiscoveryResult, MCPServerDefinition
-from azure_functions_agents.session_state import AppIdentity
+from azure_functions_agents.session_state import AppIdentity, OwnerPartition
+from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
 
 # On-disk fixtures shared with test_config_fixtures.py's loader-level tests
 # (see FIXTURES_ROOT there). Used here for end-to-end create_function_app()
@@ -52,6 +56,215 @@ def _http_routes(functions: list[Any]) -> list[str]:
             if route is not None:
                 routes.append(route)
     return routes
+
+
+class _TimerPassRuntime:
+    def __init__(self) -> None:
+        self.state_store_calls = 0
+        self.provider_calls = 0
+
+    async def get_state_store(self) -> object:
+        self.state_store_calls += 1
+        return object()
+
+    async def get_provider(self) -> object:
+        self.provider_calls += 1
+        return object()
+
+
+class _BlockingProviderRuntime(_TimerPassRuntime):
+    def __init__(self) -> None:
+        super().__init__()
+        self.provider_started = asyncio.Event()
+        self.provider_cancelled = asyncio.Event()
+        self.provider_released = asyncio.Event()
+
+    async def get_provider(self) -> object:
+        self.provider_calls += 1
+        self.provider_started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.provider_cancelled.set()
+            raise
+        finally:
+            self.provider_released.set()
+
+
+class _SuccessfulReconciler:
+    async def run_once(self) -> ReconcileReport:
+        return ReconcileReport(deleted_sandboxes=1)
+
+
+class _CancellationSuppressingBlockingReconciler:
+    def __init__(self) -> None:
+        self.started = asyncio.Event()
+        self.cancelled = asyncio.Event()
+        self.finalized = asyncio.Event()
+
+    async def run_once(self) -> ReconcileReport:
+        self.started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            self.cancelled.set()
+            return ReconcileReport(deleted_sandboxes=1)
+        finally:
+            self.finalized.set()
+
+
+@pytest.mark.asyncio
+async def test_timer_reconciler_deadline_uses_fake_clock_before_provider_io(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = _TimerPassRuntime()
+    clock_values = iter((100.0, 101.0))
+
+    with (
+        caplog.at_level(logging.ERROR),
+        pytest.raises(app_module.ReconcilerTimerPassDeadlineExceededError),
+    ):
+        await app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
+            runtime,
+            cadence_seconds=3600,
+            terminal_bindings={},
+            timeout_seconds=1.0,
+            clock=lambda: next(clock_values),
+        )
+
+    assert runtime.state_store_calls == 0
+    assert runtime.provider_calls == 0
+    assert "deadline" in caplog.text
+    assert "session-" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timer_reconciler_deadline_cancels_blocked_provider_without_detaching_work(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = _BlockingProviderRuntime()
+
+    def should_not_build_reconciler(*_: object, **__: object) -> None:
+        pytest.fail("the timer deadline should cancel the blocked provider first")
+
+    monkeypatch.setattr(app_module, "_build_session_reconciler", should_not_build_reconciler)
+    task = asyncio.create_task(
+        app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
+            runtime,
+            cadence_seconds=3600,
+            terminal_bindings={},
+            timeout_seconds=0.01,
+        )
+    )
+
+    await asyncio.wait_for(runtime.provider_started.wait(), timeout=1.0)
+    with caplog.at_level(logging.ERROR), pytest.raises(app_module.ReconcilerTimerPassDeadlineExceededError):
+        await task
+
+    assert task.done()
+    assert runtime.provider_cancelled.is_set()
+    assert runtime.provider_released.is_set()
+    assert "next timer cadence will retry" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timer_reconciler_deadline_rejects_a_cancellation_suppressing_run_once(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = _TimerPassRuntime()
+    reconciler = _CancellationSuppressingBlockingReconciler()
+    monkeypatch.setattr(
+        app_module,
+        "_build_session_reconciler",
+        lambda *_args, **_kwargs: reconciler,
+    )
+    task = asyncio.create_task(
+        app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
+            runtime,
+            cadence_seconds=3600,
+            terminal_bindings={},
+            timeout_seconds=0.01,
+        )
+    )
+
+    await asyncio.wait_for(reconciler.started.wait(), timeout=1.0)
+    with caplog.at_level(logging.ERROR), pytest.raises(app_module.ReconcilerTimerPassDeadlineExceededError):
+        await task
+
+    assert task.done()
+    assert reconciler.cancelled.is_set()
+    assert reconciler.finalized.is_set()
+    assert "next timer cadence will retry" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_timer_reconciler_deadline_allows_a_successful_pass(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runtime = _TimerPassRuntime()
+
+    monkeypatch.setattr(
+        app_module,
+        "_build_session_reconciler",
+        lambda *_args, **_kwargs: _SuccessfulReconciler(),
+    )
+
+    report = await app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
+        runtime,
+        cadence_seconds=3600,
+        terminal_bindings={},
+        timeout_seconds=1.0,
+    )
+
+    assert report == ReconcileReport(deleted_sandboxes=1)
+    assert runtime.state_store_calls == 1
+    assert runtime.provider_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_targeted_reconciliation_does_not_use_timer_pass_deadline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[OwnerPartition, str]] = []
+    app_identity = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="agent-app",
+    )
+    partition = OwnerPartition.create(
+        "o1",
+        "a1-" + ("a" * 52),
+        "function_app",
+        "o1-" + ("b" * 52),
+    )
+
+    async def provider_factory() -> object:
+        pytest.fail("targeted reconciliation callback should supply its own provider")
+
+    async def state_store_factory() -> StateStoreBinding:
+        pytest.fail("targeted reconciliation callback should supply its own state store")
+
+    async def targeted_reconciler(target: OwnerPartition, session_id: str) -> None:
+        calls.append((target, session_id))
+
+    async def deadline_should_not_run(*_: object, **__: object) -> ReconcileReport:
+        pytest.fail("targeted reconciliation must not use the timer pass deadline")
+
+    monkeypatch.setattr(app_module, "_run_deployed_reconciler_timer_pass", deadline_should_not_run)
+    runtime = SessionRuntimeBinding.create(
+        app_identity=app_identity,
+        sandbox_group_resource_id=DEFAULT_GROUP_RESOURCE_ID,
+        script_root=tmp_path,
+        provider_factory=provider_factory,  # type: ignore[arg-type]
+        state_store_factory=state_store_factory,
+        targeted_reconciler=targeted_reconciler,
+    )
+
+    await runtime.reconcile_session(partition, "targeted-session")
+
+    assert calls == [(partition, "targeted-session")]
 
 
 def test_composition_builds_a_lazy_app_scoped_session_runtime_binding(

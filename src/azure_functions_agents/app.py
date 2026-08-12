@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
+import math
+import time
 from collections.abc import Awaitable, Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -35,6 +39,7 @@ from .controller.readiness import (
 )
 from .controller.reconciler import (
     ReconcilerConfig,
+    ReconcileReport,
     SessionReconciler,
     reconciler_ncrontab,
     resolve_reconciler_cadence,
@@ -76,6 +81,102 @@ from .transport.transport_models import (
     SandboxGroupBinding,
 )
 from .workflows import build_workflow_integration
+
+DEFAULT_RECONCILER_TIMER_PASS_TIMEOUT_SECONDS = 240.0
+
+
+class ReconcilerTimerPassDeadlineExceededError(TimeoutError):
+    """The app-level deadline elapsed while a deployed timer pass was running."""
+
+
+class _ReconcilerTimerPassDeadline:
+    """One app-level deadline for a complete deployed timer reconciliation pass."""
+
+    def __init__(self, *, deadline: float, clock: Callable[[], float]) -> None:
+        self._deadline = deadline
+        self._clock = clock
+
+    @classmethod
+    def start(
+        cls,
+        *,
+        timeout_seconds: float,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> _ReconcilerTimerPassDeadline:
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0:
+            raise ValueError("timer reconciliation pass timeout must be positive and finite")
+        return cls(deadline=clock() + timeout_seconds, clock=clock)
+
+    def remaining_seconds(self) -> float:
+        """Return the remaining pass time or fail before starting more I/O."""
+        remaining = self._deadline - self._clock()
+        if remaining <= 0:
+            raise ReconcilerTimerPassDeadlineExceededError(
+                "Timer reconciliation pass deadline exceeded."
+            )
+        return remaining
+
+    async def wait_for[T](self, operation: Awaitable[T]) -> T:
+        """Await the pass and let cancellation reach every awaited SDK operation."""
+        try:
+            remaining = self.remaining_seconds()
+        except ReconcilerTimerPassDeadlineExceededError:
+            if inspect.iscoroutine(operation):
+                operation.close()
+            raise
+
+        timeout = asyncio.timeout(remaining)
+        try:
+            async with timeout:
+                result = await operation
+        except TimeoutError:
+            if timeout.expired():
+                raise ReconcilerTimerPassDeadlineExceededError(
+                    "Timer reconciliation pass deadline exceeded."
+                ) from None
+            raise
+        if timeout.expired():
+            raise ReconcilerTimerPassDeadlineExceededError(
+                "Timer reconciliation pass deadline exceeded."
+            )
+        return result
+
+
+async def _run_deployed_reconciler_timer_pass(
+    session_runtime: SessionRuntimeBinding,
+    *,
+    cadence_seconds: int,
+    terminal_bindings: Mapping[str, AgentBinding],
+    timeout_seconds: float = DEFAULT_RECONCILER_TIMER_PASS_TIMEOUT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> ReconcileReport:
+    """Run the Azure-aware timer pass within its independent application deadline."""
+    deadline = _ReconcilerTimerPassDeadline.start(
+        timeout_seconds=timeout_seconds,
+        clock=clock,
+    )
+
+    async def reconcile() -> ReconcileReport:
+        state_binding = await session_runtime.get_state_store()
+        provider = await session_runtime.get_provider()
+        reconciler = _build_session_reconciler(
+            session_runtime,
+            state_binding,
+            provider,
+            cadence_seconds=cadence_seconds,
+            terminal_bindings=terminal_bindings,
+        )
+        return await reconciler.run_once()
+
+    try:
+        return await deadline.wait_for(reconcile())
+    except ReconcilerTimerPassDeadlineExceededError:
+        logger.error(
+            "Sandbox session reconciliation timer pass exceeded its %.0f-second application "
+            "deadline; the invocation stopped and the next timer cadence will retry.",
+            timeout_seconds,
+        )
+        raise
 
 
 def _tool_name(tool: object) -> str:
@@ -739,16 +840,11 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
         async def reconcile_sandbox_sessions(timer: func.TimerRequest) -> None:
             del timer
-            state_binding = await session_runtime.get_state_store()
-            provider = await session_runtime.get_provider()
-            reconciler = _build_session_reconciler(
+            await _run_deployed_reconciler_timer_pass(
                 session_runtime,
-                state_binding,
-                provider,
                 cadence_seconds=cadence,
                 terminal_bindings=terminal_bindings,
             )
-            await reconciler.run_once()
 
         reconciler_function = app.timer_trigger(
             schedule=reconciler_ncrontab(cadence),
