@@ -438,3 +438,6 @@ __azurite_*
 __blobstorage__/
 **/local.settings.json
 .tmp-validation/
+
+# MkDocs build output
+site/
