@@ -107,8 +107,8 @@ are built from `docs/` with [MkDocs](https://www.mkdocs.org/) and deployed by
 `.github/workflows/docs.yml` on every push to `main`. To preview changes locally:
 
 ```bash
-python -m pip install -r requirements-docs.txt
-python -m mkdocs serve
+uv sync --extra docs --no-install-project
+uv run mkdocs serve
 ```
 
 Open http://127.0.0.1:8000/. Pull requests run `mkdocs build --strict` as a CI check but do not
