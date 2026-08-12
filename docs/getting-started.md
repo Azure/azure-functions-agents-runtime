@@ -71,12 +71,12 @@ timeout: 900
 ### 5. Create `requirements.txt`
 
 ```
-azurefunctions-agents-runtime
+azurefunctions-agents-runtime[monitor]
 ```
 
-Connector-backed tools are exposed through MCP servers in `mcp.json`, and connector-triggered apps use the Azure Functions Connector Extension through the Functions extension bundle. No package extra is required.
+Connector-backed tools are exposed through MCP servers in `mcp.json`, and connector-triggered apps use the Azure Functions Connector Extension through the Functions extension bundle. No package extra is required for connectors.
 
-> Add `azurefunctions-agents-runtime[monitor]` instead if you want to export traces to Azure Monitor / Application Insights.
+> Use `azurefunctions-agents-runtime` (without the extra) instead if you don't want to export traces to Azure Monitor / Application Insights.
 
 ### 6. Set the model provider
 
