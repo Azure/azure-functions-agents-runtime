@@ -59,10 +59,13 @@ from ..transport.transport_models import (
 from .journal_integrity import handle_journal_corruption, journal_corruption_status
 from .readiness import DEFAULT_RECLAIM_IDLE_SECONDS, terminal_run
 
-_RECLAIMABLE_SESSION_STATUSES = frozenset({"creating", "ready", "quarantined"})
+_RECLAIMABLE_SESSION_STATUSES = frozenset(
+    {"creating", "ready", "suspended", "quarantined"}
+)
 _STATUSES_REQUIRING_BACKING = frozenset(
     {"ready", "running", "canceling", "suspended", "resuming", "quarantined"}
 )
+_PROVIDER_SUSPENDED_STATES = frozenset({"Stopped", "Suspended"})
 RECONCILER_CADENCE_SETTING = "AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS"
 
 type TerminalReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[RunStatus | None]]
@@ -1076,6 +1079,17 @@ class SessionReconciler:
             session.sandbox_id is None or session.sandbox_id not in inventory
         ):
             return await self._tombstone_missing_backing_if_unchanged(session, now, report)
+        summary = None if session.sandbox_id is None else inventory.get(session.sandbox_id)
+        if (
+            session.status == "ready"
+            and summary is not None
+            and summary.state in _PROVIDER_SUSPENDED_STATES
+            and _matches_reclaim_target_label(summary, session)
+        ):
+            suspended = await self._mark_suspended_if_unchanged(session, now)
+            if suspended is None:
+                return report
+            session = suspended
 
         for run in runs:
             if (
@@ -1098,6 +1112,27 @@ class SessionReconciler:
         if session.status in _RECLAIMABLE_SESSION_STATUSES and due:
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
         return report
+
+    async def _mark_suspended_if_unchanged(
+        self,
+        observed: DurableSessionRecord,
+        now: datetime,
+    ) -> DurableSessionRecord | None:
+        latest = await self._store.get_session(observed.owner_partition, observed.session_id)
+        if (
+            latest.record.status != "ready"
+            or latest.record.sandbox_id != observed.sandbox_id
+            or latest.record.generation != observed.generation
+            or latest.record.active_operation_id is not None
+        ):
+            return None
+        suspended = _with_status(latest, "suspended", now)
+        await self._store.update_session(
+            previous=latest.record,
+            updated=suspended,
+            etag=latest.etag,
+        )
+        return suspended
 
     async def _resume_detached_operation(
         self,

@@ -112,6 +112,24 @@ class SnapshotAlreadyDeletedProvider(InventoryProvider):
         raise SandboxProvisioningError("Snapshot delete found no target.")
 
 
+class OperationStartedDuringSuspensionProjectionStore(FakeSessionStateStore):
+    def __init__(self, session: DurableSessionRecord) -> None:
+        super().__init__(session)
+        self.session_reads = 0
+
+    async def get_session(self, partition, session_id):  # type: ignore[no-untyped-def]
+        self.session_reads += 1
+        if self.session_reads == 2:
+            assert self.session is not None
+            self.session = replace(
+                self.session,
+                active_operation_id="op-1",
+                operation_sequence=1,
+            )
+            self.etag = "etag-concurrent-operation"
+        return await super().get_session(partition, session_id)
+
+
 class FailOnceOperationStore(FakeSessionStateStore):
     def __init__(self, session: DurableSessionRecord) -> None:
         super().__init__(session)
@@ -532,6 +550,7 @@ def _sandbox(
     sandbox_id: str = "sandbox-1",
     *,
     session_id: str = "session-1",
+    state: str | None = None,
 ) -> SandboxSummary:
     partition = owner_partition(_owner())
     return SandboxSummary.create(
@@ -543,6 +562,7 @@ def _sandbox(
             "owner_hash": partition.owner_hash,
             "session_id": session_id,
         },
+        state=state,
         created_at=(now - timedelta(hours=1)).isoformat(),
     )
 
@@ -806,6 +826,93 @@ async def test_page_local_run_absence_does_not_reclaim_healthy_ready_session() -
     assert report.tombstoned_sessions == 0
     assert store.session is not None
     assert store.session.status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_state", ["Stopped", "Suspended"])
+async def test_reconciler_projects_stopped_backing_to_suspended_session(
+    provider_state: str,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now)
+    store = FakeSessionStateStore(session)
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(
+            sandboxes=(_sandbox(now, state=provider_state),)
+        ),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert store.session is not None
+    assert store.session.status == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_does_not_project_foreign_stopped_backing() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now)
+    store = FakeSessionStateStore(session)
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(
+            sandboxes=(_sandbox(now, session_id="other-session", state="Stopped"),)
+        ),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_does_not_overwrite_new_operation_with_suspended_state() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now)
+    store = OperationStartedDuringSuspensionProjectionStore(session)
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(
+            sandboxes=(_sandbox(now, state="Stopped"),)
+        ),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.active_operation_id == "op-1"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reclaims_suspended_session_after_idle_expiry() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(hours=1),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+    )
+    store = FakeSessionStateStore(session)
+    provider = InventoryProvider(
+        sandboxes=(_sandbox(now, state="Suspended"),)
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.tombstoned_sessions == 1
+    assert provider.deleted_sandboxes == ["sandbox-1"]
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
 
 
 @pytest.mark.asyncio
