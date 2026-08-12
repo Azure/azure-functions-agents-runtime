@@ -555,7 +555,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 - [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
-- [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow owners and one-command Storage/DTS verification
+- [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow owners and independent policies
 
 ## Deployment Notes
 

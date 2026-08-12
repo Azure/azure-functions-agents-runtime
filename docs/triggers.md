@@ -41,7 +41,7 @@ for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
 
 ### Starting Dynamic Workflows
 
-When any eligible agent sets `workflows.enabled: true`, each supported declared
+When an agent sets `workflows.enabled: true`, each supported declared
 trigger can initiate a Dynamic Workflow. Its handler receives the Durable client
 and uses that agent's slug and immutable owner policy. The runtime schedules the
 workflow asynchronously, and the trigger Function does not wait for it to finish.

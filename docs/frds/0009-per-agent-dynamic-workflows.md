@@ -18,7 +18,7 @@ branch: tsuyoshiushio-per-agent-dynamic-workflows
 
 ## 1. Summary
 
-Allow any eligible `*.agent.md` agent, rather than only `main.agent.md`, to own
+Allow any `*.agent.md` agent, rather than only `main.agent.md`, to own
 Dynamic Workflows independently. One Function App will register one Durable
 engine and complete workflow handler inventory, while every workflow-enabled
 agent receives an immutable owner-specific policy, prompt guidance, management
@@ -34,7 +34,9 @@ they cannot see or control each other's workflows through application surfaces.
 ## 2. Motivation / problem
 
 The runtime already supports Dynamic Workflow DAGs containing `tool`, `wait`,
-and stateless leaf `sub_agent` tasks. Workflow-enabled agents can start those
+and stateless leaf `sub_agent` tasks. `wait` is a built-in DAG node compiled to
+a Durable timer; it is not a discovered or system-injected tool.
+Workflow-enabled agents can start those
 plans from built-in chat, MCP, HTTP triggers, and non-interactive
 Markdown-declared triggers. The runtime also already has:
 
@@ -68,11 +70,11 @@ snippet.
 
 **Goals**
 
-- Honor `workflows.enabled: true` on every eligible discovered agent.
+- Honor `workflows.enabled: true` on every discovered agent.
 - Keep `main.agent.md` working as an ordinary owner with slug `main`.
 - Use `ResolvedAgent.slug` as the stable workflow owner identity on chat, MCP,
   HTTP trigger, and non-interactive trigger paths.
-- Create a `df.DFApp` when any eligible agent enables workflows.
+- Create a `df.DFApp` when any agent enables workflows.
 - Register the Durable orchestrator and Activities exactly once per Function App.
 - Register one complete, unfiltered workflow handler inventory so one owner's
   exclusions never unregister another owner's tools.
@@ -85,8 +87,8 @@ snippet.
   probe whether another owner has a workflow.
 - Preserve the asynchronous trigger starter contract: the initiating Function
   ends after the agent turn while Durable execution continues.
-- Add a runnable, one-command-verifiable sample with multiple non-main workflow
-  owners and no `main.agent.md`.
+- Add a runnable customer sample with multiple non-main workflow owners and no
+  `main.agent.md`, plus separate E2E automation.
 
 **Non-goals**
 
@@ -109,7 +111,7 @@ snippet.
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
 | discover | `discovery/tools.py` | No behavior change. Continue returning one app-wide inventory of explicit `@workflow_tool` declarations. Discovery remains read-only and applies no owner policy. |
-| translate | `config/schema.py`, `config/merge.py`, `config/validation.py`, `registration/capabilities.py` | Reuse `WorkflowConfig`, canonical `ResolvedAgent.slug`, validated Workflow Sub Agent references, and each agent's workflow tools after `workflows.exclude`. Validate that an enabled owner has a usable starter surface. No schema change is expected. |
+| translate | `config/schema.py`, `config/merge.py`, `config/validation.py`, `registration/capabilities.py` | Reuse `WorkflowConfig`, canonical `ResolvedAgent.slug`, validated Workflow Sub Agent references, and each agent's workflow tools after `workflows.exclude`. No schema change is expected. |
 | compose (pass 1) | `app.py`, `registration/catalog.py`, `workflows/integration.py` | After app-wide slug and reference validation, freeze the existing `AgentCatalog` and a new slug-keyed workflow owner-policy catalog. This pass remains side-effect-free and does not mutate a `FunctionApp`. |
 | register (pass 2) | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | Create a `DFApp` when the policy catalog is non-empty. Register the complete handler inventory and Durable blueprint once, then thread each owner's policy and channel addendum into only that owner's surfaces. |
 | execute | `runner.py`, `workflows/tools.py`, `workflows/context.py`, `workflows/engine.py`, `registration/_handlers.py` | Capture owner slug, session ID, Durable client, and explicit policy in workflow tool closures. Namespace management by owner plus session and reauthorize capability-bearing Activities before dispatch. |
@@ -117,7 +119,7 @@ snippet.
 This extends the existing two-pass composition model. Registration consumes
 typed, validated, immutable objects and does not re-parse frontmatter.
 
-### 4.2 Authoring and eligible starter surfaces
+### 4.2 Authoring and invocation surfaces
 
 No new authoring syntax is introduced. Any descriptively named agent can opt in:
 
@@ -138,21 +140,16 @@ workflows:
 ---
 ```
 
-An enabled owner must have at least one invocation channel that can run the
-plan-authoring agent with a Durable client:
+Any agent may become an owner by enabling workflows. How that agent is invoked
+remains an independent concern. Direct invocation can use:
 
 - built-in `chat_api`;
 - built-in MCP; or
 - any supported Markdown-declared trigger.
 
-`debug_chat_ui` alone is not a starter because it is only a page surface. A
-triggerless internal specialist referenced only through `subagents` or
-`workflows.subagents` also has no starter surface.
-
-The proposed behavior for `workflows.enabled: true` without a usable starter is
-to fail composition with an actionable error. Silently ignoring the setting or
-warning and disabling it would leave an apparently valid but inert owner. This
-choice remains an architecture-review/sign-off item.
+`debug_chat_ui` automatically enables its backing chat API. An internal agent
+without its own invocation surface may still enable workflows; it becomes
+directly usable if an invocation surface is added later.
 
 If one agent exposes multiple channels, every channel uses the same owner policy.
 Chat and MCP receive chat-specific guidance; Markdown-declared triggers receive
@@ -346,25 +343,22 @@ Add `samples/per-agent-workflows/` as a standalone Azure Functions app with no
 - `release_readiness.agent.md`, with chat endpoints and a different set of
   grants.
 
-The tools use deterministic synthetic data so verification requires no external
-service token. The sample includes:
+The tools use deterministic synthetic data so manual operation requires no
+external service token. The customer sample includes:
 
 - clear architecture and workflow-shape diagrams;
 - one manual prompt for each agent;
-- expected workflow outputs and polling routes;
-- Azure Storage and DTS local instructions; and
-- `scripts/verify.py`, which defaults to the Azure Storage backend with isolated
-  Azurite, supports `--backend dts` for a DTS run, starts the Functions host from
-  a temporary app copy, and performs end-to-end assertions.
+- expected workflow outputs; and
+- Azure Storage and DTS local instructions.
 
-The verifier deliberately uses the same `x-ms-session-id` for both agents. It
+Separate repository E2E automation in
+`eng/scripts/verify_per_agent_workflows.py` deliberately uses the same
+`x-ms-session-id` for both agents. It
 starts one workflow through each agent, verifies both reach a terminal state,
 checks that each used only its own capabilities, and verifies that each owner's
 status route returns 404 for the other owner's workflow ID. This makes the main
 behavioral and security property directly observable for the exercised owner
-pair. The README states the prerequisites explicitly: Docker (for isolated
-Azurite and optional DTS), Functions Core Tools, and model-provider
-authentication.
+pair. This keeps internal verification infrastructure out of the customer app.
 
 ## 5. Decisions log
 
@@ -386,15 +380,17 @@ authentication.
 | 14 | Existing exported compatibility helpers | Delete as production-dead / retain unchanged / isolate compatibility state | Retain the exported registry and one-shot integration helper to avoid an unrelated breaking change, but remove the registration token from production `WorkflowSessionContext` and keep it private to the compatibility registry | Agent | 2026-08-11 |
 | 15 | Trigger decorator resolution | New shared resolver / duplicate capability validation / retain registration-local fallback | Keep the existing registration-local `connector_trigger` → `generic_trigger` fallback; workflow eligibility uses documented `TRIGGER_TYPES`, avoiding a new helper and an unrelated hard failure for non-workflow agents | Agent | 2026-08-11 |
 | 16 | Activity failure propagation | Let Durable wrapper behavior surface / explicitly rethrow failed wave result | Explicitly rethrow a failed `task_all` result so owner-policy denials retain their original actionable error instead of becoming a secondary `TypeError` | Agent | 2026-08-11 |
+| 17 | Workflow owner eligibility | Require a dedicated starter / allow every enabled agent to own workflows | Treat every agent with `workflows.enabled: true` as an owner and keep invocation surfaces independent; this supersedes Decision #9 and removes raw-frontmatter starter metadata | Human | 2026-08-11 |
+| 18 | Customer sample boundary | Keep sender/verifier helpers in the sample / separate customer app from internal automation | Keep the sample directly runnable and documentation-led, remove the sender helper, and move E2E automation to `eng/scripts` | Human | 2026-08-11 |
 
 ## 6. Test plan
 
 - [x] Unit: composition and owner-policy catalog
-  - any eligible non-main agent can enable workflows;
+  - any non-main agent can enable workflows;
   - an app with only non-main workflow owners is a `df.DFApp`;
   - `main.agent.md` remains supported;
-  - `debug_chat_ui`-only and endpoint-less enabled owners follow the finalized
-    eligibility decision;
+  - an endpoint-less enabled owner referenced as a specialist composes without
+    special starter metadata;
   - distinct owners receive independent tool excludes, Sub Agent grants, and
     prompt guidance;
   - owner-policy mappings and values are immutable.
@@ -440,10 +436,9 @@ authentication.
 - [x] E2E: Azure Storage and DTS runs demonstrate concurrent owners, overlapping
   session IDs, distinct policies, status/control isolation, and execution after
   starter completion.
-- [x] Sample verifier: one command starts dependencies and proves both successful
-  workflows plus cross-owner denial. The script and its pure verification tests
-  are implemented; model-backed Storage/DTS execution remains covered by the
-  unchecked E2E item above.
+- [x] E2E verifier: repository automation starts dependencies and proves both
+  successful workflows plus cross-owner denial without adding internal helper
+  scripts to the customer sample.
 - [x] Canonical gate:
   - `python -m ruff check src tests`;
   - `python -m mypy src`;
@@ -455,13 +450,13 @@ authentication.
 - [x] `docs/architecture.md` — add the owner-policy catalog, one-time Durable
   registration, owner-scoped execution, and Activity reauthorization.
 - [x] `docs/front-matter-spec.md` — remove the `main.agent.md` restriction and
-  document eligible starter surfaces.
+  document that ownership and invocation surfaces are independent.
 - [x] `docs/workflows.md` — document multiple owners, identity, isolation,
   migration, trigger ownership, and operator guidance.
 - [x] `docs/triggers.md` — clarify that each workflow-enabled declared trigger
   uses its owning agent's policy and Durable client.
 - [x] `README.md` — link the per-agent workflow sample.
-- [x] `samples/README.md` — list the runnable sample and its one-command verifier.
+- [x] `samples/README.md` — list the runnable customer sample.
 - [x] `docs/front-matter-reference.md` — no change expected because no schema
   change is planned.
 

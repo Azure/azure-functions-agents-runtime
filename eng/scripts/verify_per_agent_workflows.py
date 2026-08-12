@@ -24,9 +24,9 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-SAMPLE_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SAMPLE_ROOT = REPO_ROOT / "samples" / "per-agent-workflows"
 SAMPLE_SRC = SAMPLE_ROOT / "src"
-REPO_ROOT = Path(__file__).resolve().parents[3]
 TASK_HUB = "engineeringopshub"
 SESSION_ID = "engineering-ops-shared-session"
 AZURITE_ACCOUNT = "devstoreaccount1"
@@ -402,7 +402,22 @@ def _provider_values() -> dict[str, str]:
         "azure_openai": bool(values.get("AZURE_OPENAI_ENDPOINT", "").strip()),
         "openai": bool(values.get("OPENAI_API_KEY", "").strip()),
     }
-    selected = [provider for provider, is_configured in configured.items() if is_configured]
+    requested_from_environment = (
+        os.environ.get("AZURE_FUNCTIONS_AGENTS_PROVIDER") or ""
+    ).strip()
+    requested = requested_from_environment or values.get(
+        "AZURE_FUNCTIONS_AGENTS_PROVIDER", ""
+    ).strip()
+    if requested and requested not in configured:
+        raise RuntimeError(
+            "AZURE_FUNCTIONS_AGENTS_PROVIDER must be foundry, azure_openai, or openai"
+        )
+    if requested_from_environment or (requested and configured[requested]):
+        selected = [requested]
+    else:
+        selected = [
+            provider for provider, is_configured in configured.items() if is_configured
+        ]
     if not selected:
         raise RuntimeError(
             "no model provider is configured; set Foundry, Azure OpenAI, or OpenAI "
@@ -416,12 +431,13 @@ def _provider_values() -> dict[str, str]:
 
     provider = selected[0]
     required = {
-        "foundry": ("FOUNDRY_MODEL",),
+        "foundry": ("FOUNDRY_PROJECT_ENDPOINT", "FOUNDRY_MODEL"),
         "azure_openai": (
+            "AZURE_OPENAI_ENDPOINT",
             "AZURE_OPENAI_DEPLOYMENT",
             "AZURE_OPENAI_API_VERSION",
         ),
-        "openai": ("OPENAI_CHAT_MODEL_ID",),
+        "openai": ("OPENAI_API_KEY", "OPENAI_CHAT_MODEL_ID"),
     }
     missing = [key for key in required[provider] if not values.get(key, "").strip()]
     if missing:
@@ -440,7 +456,6 @@ def build_host_environment() -> dict[str, str]:
     environment["PYTHONPATH"] = (
         f"{checkout_src}{os.pathsep}{existing}" if existing else checkout_src
     )
-    environment["AZURE_FUNCTIONS_AGENTS_EXPECTED_ROOT"] = checkout_src
     return environment
 
 
@@ -624,7 +639,10 @@ def _start_owner(host: _FunctionHost, owner: Owner, prompt: str, *, timeout: flo
     )
     if status != 200:
         raise RuntimeError(f"{owner} chat returned HTTP {status}: {payload!r}")
-    return extract_workflow_id(payload)
+    try:
+        return extract_workflow_id(payload)
+    except RuntimeError as exc:
+        raise RuntimeError(f"{owner} chat response had no workflow ID: {payload!r}") from exc
 
 
 def _poll_owner(
@@ -727,12 +745,17 @@ def verify(*, backend: str, timeout: float, keep_services: bool) -> None:
             print("Starting Functions host...")
             with _running_host(app_dir, timeout=timeout) as host:
                 print("Starting incident and release workflows with one shared session...")
-                incident_id = _start_owner(
-                    host, "incident_commander", INCIDENT_PROMPT, timeout=timeout
-                )
-                release_id = _start_owner(
-                    host, "release_manager", RELEASE_PROMPT, timeout=timeout
-                )
+                try:
+                    incident_id = _start_owner(
+                        host, "incident_commander", INCIDENT_PROMPT, timeout=timeout
+                    )
+                    release_id = _start_owner(
+                        host, "release_manager", RELEASE_PROMPT, timeout=timeout
+                    )
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        f"{exc}\nFunctions host output:\n{host.output_tail()[-4000:]}"
+                    ) from exc
 
                 incident = _poll_owner(
                     host, "incident_commander", incident_id, timeout=timeout

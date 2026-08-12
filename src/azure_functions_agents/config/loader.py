@@ -7,7 +7,7 @@ from typing import Any, cast
 
 import frontmatter
 import yaml  # type: ignore[import-untyped]
-from pydantic import TypeAdapter, ValidationError
+from pydantic import ValidationError
 
 from azure_functions_agents._logger import logger
 from azure_functions_agents._slug import _is_single_agent_file
@@ -19,9 +19,6 @@ from azure_functions_agents.config.env import (
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
 
 _FRONTMATTER_SCHEMA_LINK = "aka.ms/agents-front-matter-schema"
-_BOOL_ADAPTER = TypeAdapter(bool)
-
-
 _FRONTMATTER_ACTION_ITEMS = (
     "Fix YAML syntax between leading and trailing '---' delimiters.",
     f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",
@@ -154,20 +151,6 @@ def _load_agent_spec(source_file: Path) -> AgentSpec:
     normalized["instructions"] = instructions
     # Keep the real on-disk path so diagnostics reference the file the user can actually edit
     normalized["source_file"] = str(resolved_source)
-    raw_builtin_endpoints = normalized.get("builtin_endpoints")
-    raw_metadata = normalized.get("metadata")
-    if raw_metadata is None or isinstance(raw_metadata, dict):
-        internal_metadata = dict(raw_metadata or {})
-        explicit_chat_api = raw_builtin_endpoints is True
-        if isinstance(raw_builtin_endpoints, dict) and "chat_api" in raw_builtin_endpoints:
-            try:
-                explicit_chat_api = _BOOL_ADAPTER.validate_python(
-                    raw_builtin_endpoints["chat_api"]
-                )
-            except ValidationError:
-                explicit_chat_api = False
-        internal_metadata["_workflow_chat_api_starter"] = explicit_chat_api
-        normalized["metadata"] = internal_metadata
     # agent.md and CLAUDE.md (and their case variants) are aliases for main.agent.md;
     # check the normalized name to determine main-agent status
     normalized["is_main"] = normalized_file.name.lower() == "main.agent.md"

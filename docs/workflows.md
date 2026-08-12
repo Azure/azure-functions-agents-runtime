@@ -12,8 +12,6 @@
 > demonstrates workflow Sub Agents. The
 > [Engineering Operations Hub](../samples/per-agent-workflows/README.md)
 > demonstrates two non-main workflow owners with independent policies in one app.
-> Its [one-command verifier](../samples/per-agent-workflows/README.md#one-command-verification)
-> exercises same-session isolation with Azure Storage or DTS.
 > Larger features such as sub-orchestrations,
 > configurable retry policies, and MCP Tasks integration are tracked as v2
 > follow-up work.
@@ -47,7 +45,7 @@ They are **not** the right tool for:
 - hand-authored orchestration DSLs — plans are LLM-authored only, by
   design, so there is no YAML/markdown workflow template format;
 - cross-app coordination. v1 workflows live inside one Functions app; any
-  eligible agent in that app can own workflows and authorize leaf specialists.
+  agent in that app can own workflows and authorize leaf specialists.
 
 ## Why workflows (token, latency, context)
 
@@ -168,11 +166,10 @@ prefer `start_workflow` over direct tool calls. The agent author does
 not need to document the tools or the heuristics in their markdown — the
 agent markdown stays focused on the domain.
 
-> [!IMPORTANT]
-> A workflow owner must have an eligible **starter**: a supported declared
-> `trigger`, `builtin_endpoints.chat_api`, or `builtin_endpoints.mcp`. The debug
-> UI alone is insufficient because it calls the chat API; enable `chat_api` too.
-> Startup fails rather than silently accepting an enabled but inert owner.
+Any agent may become a workflow owner by setting `workflows.enabled: true`.
+Invocation remains independent: triggers and built-in endpoints determine how
+the owner can be reached, and `debug_chat_ui` automatically enables its backing
+chat API.
 
 File placement does not assign these roles. See
 [Agent roles and reachability](./front-matter-spec.md#agent-roles-and-reachability)
@@ -181,7 +178,7 @@ for how direct agents, workflow owners, and internal specialists are identified.
 ### App-wide engine, per-owner policy
 
 The app discovers complete, immutable catalogs of workflow handlers and agents.
-If at least one eligible workflow owner exists, startup creates one `DFApp` and
+If at least one workflow owner exists, startup creates one `DFApp` and
 registers one Durable orchestrator plus one copy of each Activity for the whole
 app. It does **not** register a separate engine per owner.
 
@@ -564,7 +561,7 @@ owner-wide throttle.
 v1 includes:
 
 - five built-in workflow tools;
-- any eligible agent may own workflows, with one app-wide engine and immutable
+- any agent may own workflows, with one app-wide engine and immutable
   per-owner policies;
 - DAG execution of `@workflow_tool` calls and wait tasks;
 - deny-by-default `workflows.subagents` grants and stateless `sub_agent` tasks;

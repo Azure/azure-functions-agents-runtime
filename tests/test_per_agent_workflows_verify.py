@@ -9,8 +9,8 @@ from types import ModuleType
 
 import pytest
 
-SAMPLE_ROOT = Path(__file__).resolve().parents[1] / "samples" / "per-agent-workflows"
-VERIFY_SCRIPT = SAMPLE_ROOT / "scripts" / "verify.py"
+REPO_ROOT = Path(__file__).resolve().parents[1]
+VERIFY_SCRIPT = REPO_ROOT / "eng" / "scripts" / "verify_per_agent_workflows.py"
 
 
 def _load_verify_module() -> ModuleType:
@@ -50,9 +50,6 @@ def test_host_environment_prepends_current_checkout_without_dropping_pythonpath(
     paths = environment["PYTHONPATH"].split(os.pathsep)
     assert Path(paths[0]).resolve() == (verify.REPO_ROOT / "src").resolve()
     assert paths[1:] == ["first-existing", "second-existing"]
-    assert Path(environment["AZURE_FUNCTIONS_AGENTS_EXPECTED_ROOT"]).resolve() == (
-        verify.REPO_ROOT / "src"
-    ).resolve()
 
 
 def _clear_provider_environment(
@@ -118,6 +115,24 @@ def test_provider_values_select_environment_provider_over_template_default(
     resolved = verify._provider_values()
 
     assert resolved["AZURE_FUNCTIONS_AGENTS_PROVIDER"] == provider
+
+
+def test_provider_values_honors_explicit_provider_when_multiple_are_configured(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    verify = _load_verify_module()
+    _clear_provider_environment(monkeypatch, verify)
+    _use_template_settings(monkeypatch, verify, tmp_path)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
+    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://example.test/foundry")
+    monkeypatch.setenv("FOUNDRY_MODEL", "foundry-model")
+    monkeypatch.setenv("OPENAI_API_KEY", "not-a-real-secret")
+    monkeypatch.setenv("OPENAI_CHAT_MODEL_ID", "openai-model")
+
+    resolved = verify._provider_values()
+
+    assert resolved["AZURE_FUNCTIONS_AGENTS_PROVIDER"] == "foundry"
 
 
 @pytest.mark.parametrize(

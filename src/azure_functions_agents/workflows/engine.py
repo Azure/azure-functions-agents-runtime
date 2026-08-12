@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, TypedDict
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -53,6 +53,25 @@ _ACTIVITY_NAME = "agents_workflow_run_tool"
 SUB_AGENT_ACTIVITY_NAME = "agents_workflow_run_sub_agent"
 
 WORKFLOW_SAFE_ECHO_TOOL = ECHO_TOOL_NAME
+
+
+class _ActivityInputBase(TypedDict):
+    id: str
+    owner_slug: str
+    workflow_id: str
+
+
+class _ToolActivityInput(_ActivityInputBase):
+    tool: str
+    args: dict[str, Any]
+
+
+class _SubAgentActivityInput(_ActivityInputBase):
+    agent: str
+    task: str
+
+
+type _ActivityInput = _ToolActivityInput | _SubAgentActivityInput
 
 
 def _run_echo(args: dict[str, Any]) -> dict[str, Any]:
@@ -116,28 +135,28 @@ def register_workflows(
     """
     bp = df.Blueprint()
 
-    def require_owner_policy(task: dict[str, Any]) -> tuple[str, WorkflowPlanPolicy]:
-        owner_slug = str(task.get("owner_slug") or "")
+    def require_owner_policy(task: _ActivityInput) -> tuple[str, WorkflowPlanPolicy]:
+        owner_slug = task["owner_slug"]
         policy = owner_policies.get(owner_slug) if owner_policies is not None else None
         if not owner_slug or policy is None:
             logger.error(
                 "workflow activity owner policy miss: workflow_id=%s node_id=%s owner=%s",
-                str(task.get("workflow_id") or ""),
-                str(task.get("id") or ""),
+                task["workflow_id"],
+                task["id"],
                 owner_slug or "<missing>",
             )
             raise RuntimeError(
-                f"task {str(task.get('id') or '')!r}: workflow owner policy is not available"
+                f"task {task['id']!r}: workflow owner policy is not available"
             )
         return owner_slug, policy
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
-    def agents_workflow_run_tool(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         task_id = task["id"]
         tool_name = task["tool"]
-        args = task.get("args") or {}
+        args = task["args"]
         owner_slug, policy = require_owner_policy(task)
-        workflow_id = str(task.get("workflow_id") or "")
+        workflow_id = task["workflow_id"]
         if tool_name not in policy.allowed_tools:
             logger.error(
                 "workflow tool authorization denied: workflow_id=%s node_id=%s owner=%s tool=%s",
@@ -187,10 +206,12 @@ def register_workflows(
         return {"id": task_id, "result": result}
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
-    async def agents_workflow_run_sub_agent(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
-        task_id = str(task["id"])
-        agent_slug = str(task["agent"])
-        workflow_id = str(task.get("workflow_id") or "")
+    async def agents_workflow_run_sub_agent(
+        task: _SubAgentActivityInput,
+    ) -> dict[str, Any]:
+        task_id = task["id"]
+        agent_slug = task["agent"]
+        workflow_id = task["workflow_id"]
         owner_slug, policy = require_owner_policy(task)
         if agent_slug not in policy.allowed_subagents:
             logger.error(
@@ -230,7 +251,7 @@ def register_workflows(
             text = await run_leaf_agent_task(
                 entry.resolved,
                 entry.capabilities,
-                str(task["task"]),
+                task["task"],
                 timeout=entry.resolved.timeout,
                 execution_role="workflow_subagent",
             )

@@ -57,10 +57,7 @@ workflows:
 
 
 @pytest.mark.parametrize("chat_api", ['"true"', "1"])
-def test_workflow_owner_accepts_coercible_explicit_chat_api(
-    tmp_path,
-    chat_api: str,
-) -> None:
+def test_workflow_owner_accepts_coercible_chat_api(tmp_path, chat_api: str) -> None:
     _write_agent(
         tmp_path,
         "incident.agent.md",
@@ -135,7 +132,7 @@ description: Analyze one bounded task.
     assert _function_names(app).count(engine.SUB_AGENT_ACTIVITY_NAME) == 1
 
 
-def test_mcp_only_workflow_owner_is_eligible(tmp_path) -> None:
+def test_mcp_only_workflow_owner_is_supported(tmp_path) -> None:
     _write_agent(
         tmp_path,
         "mcp_owner.agent.md",
@@ -175,6 +172,24 @@ workflows:
         create_function_app(tmp_path)
 
 
+def test_workflow_owner_preserves_actionable_trigger_alias_diagnostic(tmp_path) -> None:
+    _write_agent(
+        tmp_path,
+        "route.agent.md",
+        """
+name: Route Alias
+description: Uses the wrong trigger name.
+trigger:
+  type: route
+workflows:
+  enabled: true
+""",
+    )
+
+    with pytest.raises(ValueError, match=r"Use `http_trigger`"):
+        create_function_app(tmp_path)
+
+
 def test_callable_non_trigger_decorator_fails_workflow_owner_composition(tmp_path) -> None:
     _write_agent(
         tmp_path,
@@ -193,31 +208,34 @@ workflows:
         create_function_app(tmp_path)
 
 
-@pytest.mark.parametrize(
-    "starter",
-    [
-        "",
-        "builtin_endpoints:\n  debug_chat_ui: true",
-    ],
-)
-def test_enabled_workflow_owner_requires_eligible_starter(tmp_path, starter: str) -> None:
+def test_internal_agent_can_enable_workflows_when_referenced_as_subagent(tmp_path) -> None:
     _write_agent(
         tmp_path,
-        "inert.agent.md",
-        f"""
-name: Inert
-description: Has no workflow starter.
-{starter}
+        "coordinator.agent.md",
+        """
+name: Coordinator
+description: Invokes the internal owner.
+builtin_endpoints:
+  chat_api: true
+subagents:
+  - agent: internal
+""",
+    )
+    _write_agent(
+        tmp_path,
+        "internal.agent.md",
+        """
+name: Internal
+description: Owns workflows without a direct invocation surface.
 workflows:
   enabled: true
 """,
     )
 
-    with pytest.raises(
-        ValueError,
-        match=r"workflows\.enabled.*eligible workflow starter",
-    ):
-        create_function_app(tmp_path)
+    app = create_function_app(tmp_path)
+
+    assert isinstance(app, df.DFApp)
+    assert _function_names(app).count(engine.ORCHESTRATOR_NAME) == 1
 
 
 def _resolved(

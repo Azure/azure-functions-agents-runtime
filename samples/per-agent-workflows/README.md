@@ -74,7 +74,7 @@ blocking findings, passed gates, required actions, and specialist analysis.
 
 - Python 3.13 or 3.14 with this repository installed using `pip install -e .[dev]`
 - Azure Functions Core Tools v4 (`func`)
-- Docker (Azurite is always required; the DTS emulator is optional)
+- Azurite
 - One model provider:
   - Microsoft Foundry project endpoint and authenticated Azure identity;
   - Azure OpenAI endpoint, deployment, API version, and credential; or
@@ -82,11 +82,8 @@ blocking findings, passed gates, required actions, and specialist analysis.
 
 No model provider secret belongs in source control.
 
-For manual use, `src/requirements.txt` keeps the repository's standard
-`-e ../../..` editable reference, which resolves to this checkout from the
-committed sample directory. The verifier does not install requirements from its
-nested temporary copy; it authoritatively prepends this checkout's `src` to the
-Functions worker `PYTHONPATH` and fails startup if a different runtime is loaded.
+`src/requirements.txt` keeps the repository's standard `-e ../../..` editable
+reference, which resolves to this checkout from the committed sample directory.
 
 ## Configure and run manually
 
@@ -147,70 +144,10 @@ Expected terminal output: `runtime_status` is `Completed`; the
 `"decision": "NO_GO"` because the deterministic evidence includes an
 unexcepted critical vulnerability.
 
-### Optional: send the same prompts from a terminal
+## Optional DTS backend
 
-Keep `func start` running. In a second PowerShell terminal, move to the sample
-root and send either prompt:
-
-```powershell
-Set-Location samples\per-agent-workflows
-python scripts/send.py incident
-python scripts/send.py release
-```
-
-To start both owners with the same session ID and demonstrate owner isolation:
-
-```powershell
-python scripts/send.py both
-```
-
-This helper does not start Docker, emulators, or the Functions host and does not
-poll for completion. It prints the workflow ID and owner-specific status URL.
-Use `--base-url` for a non-default host and `--session-id` to choose the shared
-session.
-
-The equivalent APIs are `POST /agents/incident_commander/chat` and
-`POST /agents/release_manager/chat`. Workflow polling remains owner-specific:
-
-```text
-GET /agents/incident_commander/workflow-status?workflow_id=<id>
-GET /agents/incident_commander/workflows
-GET /agents/release_manager/workflow-status?workflow_id=<id>
-GET /agents/release_manager/workflows
-```
-
-## Optional automated E2E verification
-
-The verifier creates uniquely named Docker containers with ephemeral host
-ports, makes an isolated temporary app copy under this sample directory, writes
-temporary settings, starts `func` on an ephemeral port, and cleans everything up.
-It sends the SAME `x-ms-session-id` to both owner chat routes, starts both
-workflows before polling, validates their structured terminal results and
-capability sets, checks cross-owner status returns 404, and confirms list routes
-do not expose the other owner.
-
-```powershell
-python scripts/verify.py
-```
-
-The default `--backend storage` needs only Azurite. To keep containers after a
-failure, add `--keep-services`.
-
-## DTS instructions
-
-DTS still requires Azurite for the Functions host's own storage. The verifier
-starts both isolated containers, switches its temporary copy to
-`src/host.dts.json`, and configures the mapped DTS gRPC port:
-
-```powershell
-python scripts/verify.py --backend dts
-```
-
-The DTS container uses `DTS_TASK_HUB_NAMES=engineeringopshub`; its gRPC and
-dashboard container ports are 8080 and 8082, both mapped to ephemeral localhost
-ports. The verifier prints the mapped dashboard URL after success.
-
-For a manual DTS run, start the emulator with ports of your choice, copy
+DTS still requires Azurite for the Functions host's own storage. To use DTS,
+start the emulator with ports of your choice, copy
 `host.dts.json` over `host.json`, set
 `DURABLE_TASK_SCHEDULER_CONNECTION_STRING`, and restart the Functions host.
 Restore the default committed `host.json` to return to Azure Storage.
@@ -218,15 +155,13 @@ Restore the default committed `host.json` to return to Azure Storage.
 ## Troubleshooting
 
 - **`func` not found:** install Azure Functions Core Tools v4 and reopen the shell.
-- **Docker unavailable:** start Docker and verify `docker info` succeeds.
 - **No model provider configured:** create `src/local.settings.json` and fill in
-  one supported provider; blank template values intentionally fail the verifier.
+  one supported provider.
 - **Foundry authentication fails:** run `az login` or configure the intended
   workload identity. Never paste tokens into prompts or verifier output.
 - **Worker cannot import dependencies:** activate the same Python environment
   used for `pip install -e .[dev]` before launching `func`.
 - **DTS provider not found:** remove stale extension-bundle caches and restart;
   the DTS host variant requires extension bundle 4.32.0 or newer.
-- **A workflow times out:** rerun with `--timeout 600`; inspect the Functions
-  output and optional DTS dashboard. The verifier still removes containers
-  unless `--keep-services` is supplied.
+- **A workflow times out:** inspect the Functions output and optional DTS
+  dashboard.

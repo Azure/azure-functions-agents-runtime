@@ -33,7 +33,7 @@ from .workflows.integration import (
     build_workflow_handler_catalog,
     build_workflow_owner_policy_catalog,
     register_workflow_runtime,
-    validate_workflow_owner_starter,
+    validate_workflow_owner_trigger,
 )
 
 
@@ -178,18 +178,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     catalog_entries: dict[str, CatalogEntry] = {}
     for resolved in resolved_agents:
         # Validation is owned by the app factory; compose() stays a pure translation step.
-        # Preserve trigger diagnostics: validate an authored trigger before reporting that
-        # the workflow owner has no eligible starter.
-        if resolved.trigger is None:
-            validate_workflow_owner_starter(resolved)
         validate_resolved_agent(
             resolved,
             discovered_mcp_names=mcp_names,
             discovered_skills=skill_names,
             is_referenced_as_subagent=resolved.slug in referenced_slugs,
         )
-        if resolved.trigger is not None:
-            validate_workflow_owner_starter(resolved)
+        validate_workflow_owner_trigger(resolved)
         capabilities = build_capabilities(
             resolved,
             discovered_user_tools=user_tools,

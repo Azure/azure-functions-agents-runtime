@@ -203,8 +203,6 @@ def test_sample_runtime_files_and_readme_are_complete() -> None:
         "requirements.txt",
     ):
         assert (SAMPLE_SRC / name).is_file()
-    assert (SAMPLE_ROOT / "scripts" / "send.py").is_file()
-
     assert not (SAMPLE_SRC / "main.agent.md").exists()
     readme = (SAMPLE_ROOT / "README.md").read_text(encoding="utf-8")
     for required in (
@@ -212,11 +210,6 @@ def test_sample_runtime_files_and_readme_are_complete() -> None:
         "Architecture",
         "Incident workflow",
         "Release workflow",
-        "python scripts/verify.py",
-        "python scripts/send.py incident",
-        "python scripts/send.py release",
-        "--backend dts",
-        "x-ms-session-id",
         "INCIDENT_REPORT_READY",
         "RELEASE_DOSSIER_READY",
         "Troubleshooting",

@@ -24,7 +24,8 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any
+
+from azure.durable_functions import DurableOrchestrationClient
 
 OWNER_SESSION_PREFIX_LEN = 32
 # Compatibility alias retained for callers that imported the original constant.
@@ -75,7 +76,7 @@ class WorkflowSessionContext:
     owner_slug: str
     session_id: str
     agent_name: str
-    durable_client: Any  # azure.durable_functions.DurableOrchestrationClient
+    durable_client: DurableOrchestrationClient
 
 
 @dataclass(frozen=True)
@@ -92,7 +93,7 @@ def register_workflow_session(
     owner_slug: str,
     session_id: str,
     agent_name: str,
-    durable_client: Any,
+    durable_client: DurableOrchestrationClient,
 ) -> str:
     """Register the per-session context for the duration of a chat turn.
 

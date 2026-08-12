@@ -26,7 +26,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
-- Can enable Dynamic Workflows on any agent with an eligible starter
+- Can enable Dynamic Workflows on any agent
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
@@ -90,7 +90,7 @@ YAML front matter at the top of each agent file.
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
-- `workflows` — Object to enable Dynamic Workflows on an eligible agent
+- `workflows` — Object to enable Dynamic Workflows on an agent
 - `subagents` — Array of `{agent, when?}` references to specialist agents this agent may delegate to at chat time
 - `input_schema` — Object, JSON Schema for HTTP request validation
 - `response_schema` — Object, JSON Schema for response validation
@@ -127,7 +127,7 @@ Roles come from invocation surfaces and references, not file placement:
 | Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
 | Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
 | Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
-| Workflow owner | Sets `workflows.enabled: true` and has an eligible starter: a supported trigger, chat API, or MCP endpoint. |
+| Workflow owner | Sets `workflows.enabled: true`. |
 | Workflow Sub Agent | Is referenced by an owner's `workflows.subagents`. It does not need `workflows.enabled` and may omit its own trigger/endpoints when it is internal-only. |
 
 These roles can overlap. For example, an agent can have its own HTTP trigger and
@@ -590,7 +590,7 @@ tools: false
 
 #### `workflows`
 - **Type:** `object`
-- **Location:** Agent front matter (any agent with an eligible workflow starter)
+- **Location:** Agent front matter (any agent)
 - **Description:** Enables Dynamic Workflows, filters discovered workflow tools, and
   grants access to leaf specialists for workflow tasks.
 
@@ -622,10 +622,9 @@ Normal custom tools keep their existing behavior. Plain public functions and `@t
 not affect normal tools or another owner's workflow policy. Conversely,
 `tools.exclude` filters normal MAF tools and does not hide workflow tools.
 
-An enabled owner must expose at least one eligible starter: a supported declared
-`trigger`, `builtin_endpoints.chat_api`, or `builtin_endpoints.mcp`.
-`builtin_endpoints.debug_chat_ui` alone is insufficient because the UI depends
-on the chat API. An enabled owner without a starter fails startup.
+Any agent may enable workflows. Invocation remains governed independently by its
+configured trigger and built-in endpoints. `builtin_endpoints.debug_chat_ui`
+automatically enables its backing chat API.
 
 `workflows.subagents` is independent from top-level [`subagents`](#subagents).
 It is deny-by-default: only listed specialist slugs can appear in a workflow

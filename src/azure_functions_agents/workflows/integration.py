@@ -423,38 +423,20 @@ def _build_plan_policy(
     )
 
 
-def _has_eligible_starter(resolved: ResolvedAgent) -> bool:
+def validate_workflow_owner_trigger(resolved: ResolvedAgent) -> None:
+    """Reject unsupported declared triggers for a workflow-enabled owner."""
     if (
-        resolved.trigger is not None
-        and str(resolved.trigger.type or "").strip() in TRIGGER_TYPES
+        resolved.workflows is None
+        or not resolved.workflows.enabled
+        or resolved.trigger is None
     ):
-        return True
-    endpoints = resolved.builtin_endpoints
-    chat_api = resolved.metadata.get(
-        "_workflow_chat_api_starter",
-        endpoints.chat_api and not endpoints.debug_chat_ui,
-    )
-    return bool(chat_api or endpoints.mcp)
-
-
-def validate_workflow_owner_starter(resolved: ResolvedAgent) -> None:
-    """Reject an enabled owner that has no Durable-capable invocation surface."""
-    if resolved.workflows is None or not resolved.workflows.enabled:
         return
-    if resolved.trigger is not None:
-        trigger_type = str(resolved.trigger.type or "").strip()
-        if trigger_type not in TRIGGER_TYPES:
-            raise ValueError(
-                f"{resolved.source_file or '<unknown>'}: field `trigger.type`: "
-                "Unknown or unsupported "
-                f"trigger type `{trigger_type}`. See docs/front-matter-spec.md#trigger."
-            )
-    if not _has_eligible_starter(resolved):
+    trigger_type = str(resolved.trigger.type or "").strip()
+    if trigger_type not in TRIGGER_TYPES:
         raise ValueError(
-            f"Agent {resolved.slug!r} sets workflows.enabled=true but has no "
-            "eligible workflow starter. Configure a trigger, "
-            "builtin_endpoints.chat_api, or builtin_endpoints.mcp; "
-            "debug_chat_ui alone is not sufficient."
+            f"{resolved.source_file or '<unknown>'}: field `trigger.type`: "
+            f"Unknown or unsupported trigger type `{trigger_type}`. "
+            "See docs/front-matter-spec.md#trigger."
         )
 
 
@@ -462,13 +444,12 @@ def build_workflow_owner_policy_catalog(
     catalog: AgentCatalog,
     handler_catalog: registry.WorkflowHandlerCatalog,
 ) -> WorkflowOwnerPolicyCatalog:
-    """Freeze one independent workflow policy per enabled eligible owner."""
+    """Freeze one independent workflow policy per enabled owner."""
     policies: dict[str, WorkflowPlanPolicy] = {}
     for owner_slug, entry in catalog.items():
         resolved = entry.resolved
         if resolved.workflows is None or not resolved.workflows.enabled:
             continue
-        validate_workflow_owner_starter(resolved)
         allowed_tools = frozenset(
             tool.name
             for tool in entry.capabilities.filtered_workflow_tools
@@ -577,5 +558,5 @@ __all__ = [
     "build_workflow_integration",
     "build_workflow_owner_policy_catalog",
     "register_workflow_runtime",
-    "validate_workflow_owner_starter",
+    "validate_workflow_owner_trigger",
 ]
