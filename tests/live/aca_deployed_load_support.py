@@ -14,6 +14,10 @@ from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 _LOAD_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY"
 _MIN_CONCURRENCY = 1
 _MAX_CONCURRENCY = 100
+_PROVISION_CONCURRENCY_ENV = "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY"
+_DEFAULT_PROVISION_CONCURRENCY = 4
+_MIN_PROVISION_CONCURRENCY = 1
+_MAX_PROVISION_CONCURRENCY = 4
 
 
 class _PytestConfig(Protocol):
@@ -70,6 +74,31 @@ def require_load_concurrency(config: _PytestConfig) -> int:
             "qualification."
         )
     return concurrency
+
+
+def provision_concurrency_from_option_or_environment(config: _PytestConfig) -> int:
+    """Resolve the optional provisioning batch size, defaulting to the local-safe value."""
+    option_value = config.getoption("aca_provision_concurrency")
+    raw = option_value if isinstance(option_value, str) and option_value.strip() else None
+    source = "--aca-provision-concurrency"
+    if raw is None:
+        raw = os.environ.get(_PROVISION_CONCURRENCY_ENV)
+        source = _PROVISION_CONCURRENCY_ENV
+    if raw is None or not raw.strip():
+        return _DEFAULT_PROVISION_CONCURRENCY
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise AcaSmokeEnvironmentError(
+            f"{source} must be an integer between {_MIN_PROVISION_CONCURRENCY} and "
+            f"{_MAX_PROVISION_CONCURRENCY}."
+        ) from exc
+    if not _MIN_PROVISION_CONCURRENCY <= value <= _MAX_PROVISION_CONCURRENCY:
+        raise AcaSmokeEnvironmentError(
+            f"{source} must be between {_MIN_PROVISION_CONCURRENCY} and "
+            f"{_MAX_PROVISION_CONCURRENCY}."
+        )
+    return value
 
 
 def latency_metrics(

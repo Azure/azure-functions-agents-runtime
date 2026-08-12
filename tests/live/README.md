@@ -124,7 +124,8 @@ published package. Before publish,
 configure the Function App's protected application settings (for example via
 `az functionapp config appsettings set`): `AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai`,
 `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`,
-`AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK=python-3.13` (the public Python disk),
+`AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK=python-3.13` or `python-3.14` (the public
+Python disk matching that deployed app),
 `AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`, the Entra tenant,
 Easy Auth audience, the U3.TestInvoker client ID, and
 `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT=none` for the load-only agent.
@@ -149,15 +150,15 @@ python -m pytest -m live_aca tests/live/test_aca_deployed_agent_turn.py -v
 The test acquires its token only through
 `azure.identity.aio.DefaultAzureCredential`; it rejects a bearer-token
 environment variable. The protected `larohra-sandboxgroup-test` ADO service
-connection holds **U3.TestInvoker**. The `ACADeployedAgentTurn` job runs this
-qualification only for manually queued builds, never pull requests or schedules.
+connection holds **U3.TestInvoker**. The `ACADeployedAgentTurn` runs this qualification only for manually queued or
+scheduled builds, never pull requests. It remains nonblocking.
 Missing URL/configuration, token acquisition, or unavailable-app failures are
 reported as `ACA-SMOKE-ENV` pytest errors; public response and protocol
 assertions remain pytest failures. Never log prompt or model-result content.
 
-### Run the deployed cold-start qualification manually
+### Run the deployed cold-start qualification
 
-`tests/live/test_aca_deployed_cold_start.py` is a separate manual-only
+`tests/live/test_aca_deployed_cold_start.py` is a separate Manual/Scheduled
 customer-path performance qualification. It always targets the regular
 no-tools `deployed_turn` agent; it does not use `deployed_load`, its hold tool,
 or the N-load concurrency path. The default is exactly **three sequential fresh
@@ -206,10 +207,10 @@ exact-label owned backing and requires the deployed controller to tombstone it,
 then verifies zero owned backing and snapshots. Failure candidates are retained
 for that cleanup boundary.
 
-The separate manual-only `ACADeployedColdStart` job runs this test independently
+The separate nonblocking `ACADeployedColdStart` job runs this test independently
 of `ACADeployedAgentTurn` and its optional load concurrency. The load job keeps
 its 360-minute cap and remains the sole human N=100 path.
-`ACA_DEPLOYED_COLD_START_SAMPLES` is an optional, non-secret manual pipeline
+`ACA_DEPLOYED_COLD_START_SAMPLES` is an optional, non-secret Manual/Scheduled pipeline
 variable mapped only when provided; the default is three. The pipeline accepts
 only integer values **1..4**. Its enforced four-sample maximum is
 **4 x 465 + 60 final recovery + 4 x 240 cleanup = 2,880 seconds (48 minutes)**,
@@ -262,7 +263,7 @@ python -m pytest -m live_aca tests/live/test_aca_deployed_lifecycle.py -v \
 
 Expected duration is the two real public turns plus roughly 60 seconds for
 provider auto-suspend, 120 seconds of idle retention, 300 seconds of safety
-grace, and up to four 60-second controller windows. The manual-only
+grace, and up to four 60-second controller windows. The Manual/Scheduled
 `ACADeployedAgentTurn` ADO job runs
 this file alongside the existing deployed-turn test and additionally requires
 the protected non-secret variables `ACA_DEPLOYED_TABLE_SERVICE_URI`,
@@ -312,7 +313,8 @@ deployed-smoke opt-in is set.
 public orchestration, bounded common-active interval, replay/`409` behavior,
 and controller cleanup path; it is not a capacity or formal acceptance claim.
 Agents and CI must run only this diagnostic size, including the persistent
-pipeline default:
+pipeline default. Both Python runtime legs run in parallel for Manual/Scheduled
+diagnostics:
 
 ```bash
 export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
@@ -334,13 +336,17 @@ default):
 ```bash
 az pipelines run --id 1777 --branch larohra-u3-ga-gate \
   --organization https://dev.azure.com/azfunc --project internal \
-  --variables ACA_DEPLOYED_LOAD_CONCURRENCY=100
+  --parameters acaRuntimeTarget=python313 acaLoadConcurrency=100 acaProvisionConcurrency=4
 ```
 
-The `ACADeployedAgentTurn` ADO job remains manual plus `continueOnError`.
-For an ADO run, `ACA_DEPLOYED_LOAD_CONCURRENCY` is non-secret and
-allow-override remains enabled; when it is omitted the script does not map an
-unresolved `$(VAR)` token and the load test skips.
+The `ACADeployedAgentTurn` ADO job remains Manual/Scheduled plus
+`continueOnError`. The `acaLoadConcurrency` queue-time parameter defaults to
+`5` and accepts only `5` or `100`; an existing
+`ACA_DEPLOYED_LOAD_CONCURRENCY` pipeline variable does not control this job.
+The N=100 parameter value is human-only and requires
+`acaRuntimeTarget=python313` or `acaRuntimeTarget=python314`. The preflight
+rejects N=100 with the default `both` target before pytest starts, so no
+dual-runtime N=100 run is launched.
 
 This run can consume at least 500 sandbox-minutes at `N=100`, plus model and
 storage costs, and needs ACA and model quota for all sessions. The fixed
@@ -359,10 +365,10 @@ Phase A batches cap `N=100` provisioning at 275m. Do not add individual 540-seco
 setup is concurrent before its 300-second formal hold and 11-minute event
 bound. The load-only agent has a
 900-second authored timeout; plan for batch provisioning plus the hold, and use
-a CI-dedicated Sandbox Group. The manual ADO job has a 360-minute safety cap;
+a CI-dedicated Sandbox Group. The Manual/Scheduled ADO job has a 360-minute safety cap;
 the remaining 85m cover Phase B, the other deployed qualifications,
 bounded 900-second failure settlement, controller cleanup, and job overhead.
-Do not run it from PR, default, or scheduled jobs. `N=100` refers only to the
+Do not run N=100 from PR, default, or scheduled jobs. `N=100` refers only to the
 concurrent Phase B held runs, not the four-way Phase A provisioning rate. The
 redacted report separates prepared count, provisioning duration/attempts/retries,
 prepared suspension evidence, and formal held-run latency, overlap, race, and
@@ -375,6 +381,43 @@ identity deliberately lacks Function ARM Reader, so the pipeline does not
 attempt an ARM preflight. An operator must verify that deployment setting on
 the dedicated Function App before the live run; the exact public
 `tool_start`/`tool_end` evidence is the end-to-end functional proof.
+
+### Use the deployed Python runtime matrix
+
+`ACADeployedColdStart` is phase one of the deployed matrix and
+`ACADeployedAgentTurn` depends on it, so all selected cold-start legs complete
+before either deployed/load leg starts. Within each phase, `Python313` and
+`Python314` run in parallel (`maxParallel: 2`). `acaRuntimeTarget` accepts
+`both` (the default), `python313`, or `python314`; compile-time matrix inclusion
+creates two legs for `both` and one for either selected runtime. Both jobs run
+only for **Manual** and **Schedule** reasons, stay nonblocking with
+`continueOnError`, and are excluded from pull requests.
+
+The checked-in non-secret target variables are available to both scheduled
+pipelines through `eng/ci/variables/aca-deployed-runtime-targets.yml`:
+
+| Runtime target | Function URL input | Site-name input |
+| --- | --- | --- |
+| `python313` | `ACA_DEPLOYED_PY313_FUNCTION_BASE_URL` = `https://func-afar-u3q-6k9m2p7.azurewebsites.net/api` | `ACA_DEPLOYED_PY313_APP_SITE_NAME` = `func-afar-u3q-6k9m2p7` |
+| `python314` | `ACA_DEPLOYED_PY314_FUNCTION_BASE_URL` = `https://func-afar-u3q314-6k9m2p7.azurewebsites.net/api` | `ACA_DEPLOYED_PY314_APP_SITE_NAME` = `func-afar-u3q314-6k9m2p7` |
+
+Keep any branch-specific replacements in protected, non-secret pipeline
+configuration; do not place tokens, storage keys, or model credentials in these
+variables. The legs intentionally share the existing Easy Auth scope/audience,
+Table service/name, Sandbox Group, and `acaServiceConnection`. Existing
+`ACA_DEPLOYED_FUNCTION_BASE_URL` and `ACA_DEPLOYED_APP_SITE_NAME` pipeline
+variables remain harmless for callers that still define them, but the matrix
+uses the runtime-specific inputs above.
+
+`acaProvisionConcurrency` is a queue-time string parameter with values `1`,
+`2`, or `4`; it defaults to `2`. The matrix's default `both` target therefore
+provisions at most two sessions per runtime leg (four total), preserving the
+known safe shared Sandbox Group file-plane bound. The preflight rejects a
+`both` run above `2`. A human-selected single runtime may use `4`, including
+the N=100 formal path. Direct/local pytest accepts
+`--aca-provision-concurrency` or
+`AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY` in `1..4` and defaults to
+`4`.
 
 Phase A uses the no-tools readiness prompt and requires public SSE/status/result
 success plus a read-only durable idle projection; it fails if a
@@ -429,9 +472,9 @@ while the public result is HTTP 410 (`result_unavailable` or `session_gone`).
 Status error metadata is optional; if present it must be the typed
 `session_tombstoned` or `run_abandoned` error.
 
-Run it with the same manual deployed lifecycle settings; it does **not**
+Run it with the same deployed lifecycle settings; it does **not**
 require `AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY`, so omitting that value
-skips only the N-load test. The manual `ACADeployedAgentTurn` job runs this
+skips only the N-load test. The Manual/Scheduled `ACADeployedAgentTurn` job runs this
 single-loss proof independently of load size. It polls at most once per second
 for the operation lease plus bounded controller-cadence window. Unit doubles
 cover the selector and public-response contracts only; they cannot certify

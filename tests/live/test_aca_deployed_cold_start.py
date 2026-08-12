@@ -1,4 +1,4 @@
-"""Manual-only deployed cold-start qualification through the real customer path."""
+"""Manual/Scheduled deployed cold-start qualification through the real customer path."""
 
 from __future__ import annotations
 

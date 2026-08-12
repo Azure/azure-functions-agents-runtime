@@ -1,4 +1,4 @@
-"""Manual-only real ACA load qualification through the deployed Function endpoint."""
+"""Manual/Scheduled real ACA load qualification through the deployed Function endpoint."""
 
 from __future__ import annotations
 
@@ -44,6 +44,7 @@ from tests.live.aca_deployed_lifecycle_support import (
 from tests.live.aca_deployed_load_support import (
     CommonActiveInterval,
     latency_metrics,
+    provision_concurrency_from_option_or_environment,
     render_load_report,
     require_load_concurrency,
     utc_now,
@@ -78,7 +79,6 @@ _OVERLAP_BUDGET_MARGIN_SECONDS = 15.0
 _SETTLEMENT_TIMEOUT_SECONDS = 900.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
-_PROVISION_CONCURRENCY = 4
 _FORMAL_LOAD_CONCURRENCY = 100
 _PREPARED_SUSPENSION_TIMEOUT_SECONDS = 120.0
 _LOAD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
@@ -182,6 +182,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
 ) -> None:
     """Qualify N real held model turns with public races and read-only durable evidence."""
     concurrency = require_load_concurrency(request.config)
+    provision_concurrency = provision_concurrency_from_option_or_environment(request.config)
     config = _load_config(deployed_aca_lifecycle_config_from_environment())
     authorization_evidence = await acquire_default_authorization_evidence(config.deployed.token_scope)
     partition_key = owner_partition(
@@ -242,6 +243,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
                         partition_key,
                         authorization,
                         attempted_idempotency_keys,
+                        provision_concurrency=provision_concurrency,
                     )
                 except _AdmissionFailureError as exc:
                     provisioning_retry_count += exc.retries
@@ -382,7 +384,7 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
             render_load_report(
                 concurrency=concurrency,
                 prepared_count=len(prepared),
-                provision_concurrency=_PROVISION_CONCURRENCY,
+                provision_concurrency=provision_concurrency,
                 provisioning_duration_seconds=provisioning_duration_seconds,
                 provisioning_attempt_count=provisioning_attempt_count,
                 provisioning_retry_count=provisioning_retry_count,
@@ -442,14 +444,16 @@ async def _prepare_sessions(
     partition_key: str,
     authorization: str,
     attempted_idempotency_keys: list[str],
+    *,
+    provision_concurrency: int = 4,
 ) -> _AdmissionSummary:
-    """Create and prove idle each four-session batch before posting the next batch."""
+    """Create and prove idle each configured provisioning batch before the next batch."""
     retries = 0
     throttles = 0
     unresolved = 0
-    for start in range(0, concurrency, _PROVISION_CONCURRENCY):
+    for start in range(0, concurrency, provision_concurrency):
         before_batch = len(prepared)
-        batch_size = min(_PROVISION_CONCURRENCY, concurrency - start)
+        batch_size = min(provision_concurrency, concurrency - start)
         try:
             async with asyncio.timeout(_PROVISION_BATCH_TIMEOUT_SECONDS):
                 admission = await _submit_session_batch(

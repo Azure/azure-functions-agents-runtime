@@ -434,7 +434,7 @@ def test_timeout_budget_and_manual_job_cap_are_aligned() -> None:
     assert "watchdog\nlonger than 65 minutes" in runbook
 
 
-def test_cold_start_manual_job_and_boundaries_are_explicit() -> None:
+def test_cold_start_runtime_matrix_and_boundaries_are_explicit() -> None:
     root = Path(__file__).parent.parent
     source = (root / "tests" / "live" / "test_aca_deployed_cold_start.py").read_text()
     pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
@@ -454,7 +454,10 @@ def test_cold_start_manual_job_and_boundaries_are_explicit() -> None:
     assert "tests/live/test_aca_deployed_cold_start.py" not in load_job
     assert "tests/live/test_aca_deployed_load.py" in load_job
     assert "timeoutInMinutes: 60" in cold_job
-    assert "condition: eq(variables['Build.Reason'], 'Manual')" in cold_job
+    assert "in(variables['Build.Reason'], 'Manual', 'Schedule')" in cold_job
+    assert "maxParallel: 2" in cold_job
+    assert "Python313:" in cold_job
+    assert "Python314:" in cold_job
     assert "ACA_DEPLOYED_COLD_START_SAMPLES" in cold_job
     assert "ACA_DEPLOYED_LOAD_CONCURRENCY" not in cold_job
     assert "tests/live/test_aca_deployed_cold_start.py" in cold_job

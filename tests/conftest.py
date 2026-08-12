@@ -30,6 +30,13 @@ def pytest_addoption(parser: pytest.Parser) -> None:
         metavar="N",
         help="Run the manual deployed ACA load qualification with N concurrent sessions (1..100).",
     )
+    parser.addoption(
+        "--aca-provision-concurrency",
+        action="store",
+        default=None,
+        metavar="N",
+        help="Use N concurrent sessions per deployed ACA load provisioning batch (1..4).",
+    )
 
 
 @pytest.fixture

@@ -46,6 +46,22 @@ def test_load_concurrency_rejects_invalid_environment(monkeypatch: pytest.Monkey
         support.load_concurrency_from_option_or_environment(_config(None))
 
 
+def test_provision_concurrency_cli_wins_and_local_default_is_four(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY", "2")
+
+    assert support.provision_concurrency_from_option_or_environment(_config("4")) == 4
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY")
+    assert support.provision_concurrency_from_option_or_environment(_config(None)) == 4
+
+
+@pytest.mark.parametrize("value", ["0", "5", "three", "2.5"])
+def test_provision_concurrency_rejects_unsafe_values(value: str) -> None:
+    with pytest.raises(AcaSmokeEnvironmentError, match="provision-concurrency"):
+        support.provision_concurrency_from_option_or_environment(_config(value))
+
+
 def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only() -> None:
     root = Path(__file__).parent.parent
     runbook = (root / "tests" / "live" / "README.md").read_text()
@@ -53,10 +69,12 @@ def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only
 
     assert "`N=5` is the sole agent/CI diagnostic validation size." in runbook
     assert "`N=100` is formal Decision #29 acceptance and is **human-only**" in runbook
-    assert "ACA_DEPLOYED_LOAD_CONCURRENCY=100" in runbook
+    assert "acaLoadConcurrency=100" in runbook
+    assert "ACA_DEPLOYED_LOAD_CONCURRENCY` pipeline variable does not control this job" in runbook
     assert "N=10/25/50/100" not in runbook
     assert 'ACA_DEPLOYED_LOAD_CONCURRENCY="100"' not in pipeline
-    assert "ACA_DEPLOYED_LOAD_CONCURRENCY=100" not in pipeline
+    assert "ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY: ${{ parameters.acaLoadConcurrency }}" in pipeline
+    assert "acaLoadConcurrency=100 requires acaRuntimeTarget" in pipeline
 
 
 def test_load_orchestration_preserves_public_and_read_only_boundaries() -> None:
@@ -312,7 +330,9 @@ async def test_provisioning_batches_wait_for_prepared_idle_before_next_posts(
         nonlocal maximum_inflight, sequence
         assert kwargs["prompt"] == module._READINESS_PROMPT  # type: ignore[attr-defined]
         assert kwargs["session_id"] is None
-        if sequence >= 4:
+        if sequence == 2:
+            assert completed_idle == {"session-1", "session-2"}
+        if sequence == 4:
             assert completed_idle == {"session-1", "session-2", "session-3", "session-4"}
         await module.asyncio.sleep(0)  # type: ignore[attr-defined]
         sequence += 1
@@ -337,7 +357,7 @@ async def test_provisioning_batches_wait_for_prepared_idle_before_next_posts(
         prepared = args[5]
         assert isinstance(prepared, list)
         session_ids = {item.accepted.session_id for item in prepared}
-        assert len(session_ids) <= 4
+        assert len(session_ids) <= 2
         assert session_ids <= server_inflight
         completed_idle.update(session_ids)
         server_inflight.difference_update(session_ids)
@@ -356,9 +376,10 @@ async def test_provisioning_batches_wait_for_prepared_idle_before_next_posts(
         "partition",
         "redacted",
         [],
+        provision_concurrency=2,
     )
 
-    assert maximum_inflight == 4
+    assert maximum_inflight == 2
     assert completed_idle == {f"session-{index}" for index in range(1, 7)}
 
 
@@ -1606,14 +1627,19 @@ def test_hold_constant_and_sse_continuation_guard(load_module: object) -> None:
         append_contiguous_sse_events(initial, [SseEvent(3, {"type": "done"})])
 
 
-def test_manual_job_reads_optional_load_variable_from_the_script_environment() -> None:
+def test_deployed_job_uses_queue_parameters_for_n5_n100_and_provisioning() -> None:
     source = (
         Path(__file__).parents[1] / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml"
     ).read_text()
 
-    assert 'ACA_DEPLOYED_LOAD_CONCURRENCY:-' in source
+    assert 'ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY:-' in source
     assert "$(ACA_DEPLOYED_LOAD_CONCURRENCY)" not in source
-    assert "auto-injects non-secret pipeline variables" in source
+    assert "sole automated N=5 diagnostic" in source
+    assert "ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY: ${{ parameters.acaLoadConcurrency }}" in source
+    assert "ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY: ${{ parameters.acaProvisionConcurrency }}" in source
+    assert "acaLoadConcurrency=100 requires acaRuntimeTarget=python313 or python314." in source
+    assert "acaProvisionConcurrency above 2 requires acaRuntimeTarget=python313 or python314." in source
+    assert "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY" in source
     assert 'job: "ACADeployedAgentTurn"' in source
     assert "timeoutInMinutes: 360" in source
     assert "continueOnError: true" in source
