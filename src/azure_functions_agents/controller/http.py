@@ -305,7 +305,7 @@ def _setup_timeout_response() -> ControllerResponse:
             "reason": "setup_deadline_exceeded",
             "retry_with": "respond-async",
         },
-        headers={"x-ms-retry-with": "respond-async"},
+        headers={"x-ms-retry-with": "respond-async", "Retry-After": "60"},
     )
 
 

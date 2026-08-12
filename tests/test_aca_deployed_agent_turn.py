@@ -33,6 +33,23 @@ _DEPLOYABLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "live_aca_d
 _NOW = datetime(2026, 8, 12, tzinfo=UTC)
 
 
+@pytest.mark.parametrize(
+    ("headers", "expected"),
+    [
+        ({"Retry-After": "60"}, 60.0),
+        ({"retry-after": "1"}, 1.0),
+        ({}, 60.0),
+        ({"Retry-After": "0"}, 60.0),
+        ({"Retry-After": "61"}, 60.0),
+        ({"Retry-After": "invalid"}, 60.0),
+    ],
+)
+def test_setup_retry_after_uses_only_a_bounded_lease_delay(
+    headers: dict[str, str], expected: float
+) -> None:
+    assert support.setup_retry_after_seconds(headers) == expected
+
+
 def _set_deployed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL",
@@ -110,7 +127,7 @@ def test_deployable_fixture_has_persistent_entra_no_tools_aca_configuration(
     assert regular.model == "deployed-model"
     assert regular.timeout == 120
     assert regular.tools_disabled
-    assert load.timeout == 480
+    assert load.timeout == 900
     assert not load.tools_disabled
     assert regular.builtin_endpoints.http_auth.mode == "entra"
     clear_tool_discovery_cache()

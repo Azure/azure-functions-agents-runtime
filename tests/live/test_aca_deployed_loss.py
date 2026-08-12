@@ -17,6 +17,7 @@ from tests.live.aca_deployed_agent_support import (
     json_request,
     parse_accepted_run,
     read_sse_until_matching_event,
+    setup_retry_after_seconds,
     submission_payload,
 )
 from tests.live.aca_deployed_lifecycle_support import (
@@ -49,8 +50,7 @@ from azure_functions_agents.transport.transport_models import SandboxSummary, Sa
 
 _LOAD_AGENT_SLUG = "deployed_load"
 _HOLD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
-_SETUP_RETRY_ATTEMPTS = 4
-_SETUP_RETRY_SECONDS = 5.0
+_SETUP_RETRY_ATTEMPTS = 6
 _RECOVERY_ATTEMPTS = 5
 _POLL_SECONDS = 1.0
 _CONTROLLER_WAIT_SECONDS = 300.0
@@ -223,7 +223,7 @@ async def _submit_held_run(
 ) -> AcceptedRun:
     for attempt in range(_SETUP_RETRY_ATTEMPTS):
         try:
-            status, payload, _ = await json_request(
+            status, payload, response_headers = await json_request(
                 client,
                 "POST",
                 config.deployed.chat_url,
@@ -247,7 +247,7 @@ async def _submit_held_run(
             and payload.get("error") == "setup_deadline_exceeded"
             and attempt + 1 < _SETUP_RETRY_ATTEMPTS
         ):
-            await asyncio.sleep(_SETUP_RETRY_SECONDS)
+            await asyncio.sleep(setup_retry_after_seconds(response_headers))
             continue
         recovered = await _recover_candidate(
             resources,

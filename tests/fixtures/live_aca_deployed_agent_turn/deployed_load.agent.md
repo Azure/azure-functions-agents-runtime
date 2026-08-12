@@ -13,7 +13,7 @@ builtin_endpoints:
       allowed_client_ids:
         - $AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TEST_INVOKER_CLIENT_ID
 model: $AZURE_OPENAI_DEPLOYMENT
-timeout: 480
+timeout: 900
 mcp: false
 skills: false
 tools: true

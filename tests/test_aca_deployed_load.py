@@ -183,8 +183,10 @@ async def test_final_setup_deadline_recovers_cleanup_candidate(
     async def recovered(*_: object, **__: object) -> SimpleNamespace:
         return SimpleNamespace(session_id="session-recovered", run_id="run-recovered")
 
-    async def no_sleep(_: float) -> None:
-        return None
+    retry_delays: list[float] = []
+
+    async def no_sleep(delay: float) -> None:
+        retry_delays.append(delay)
 
     monkeypatch.setattr(module, "json_request", json_504)
     monkeypatch.setattr(module, "read_owner_idempotency", recovered)
@@ -199,6 +201,51 @@ async def test_final_setup_deadline_recovers_cleanup_candidate(
     assert outcome.submitted.accepted.session_id == "session-recovered"
     assert not outcome.unresolved_idempotency
     assert len(keys) == 1
+    assert retry_delays == [60.0] * 5
+
+
+@pytest.mark.asyncio
+async def test_load_submission_retries_five_setup_leases_with_the_same_key(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    deployed = SimpleNamespace(chat_url="https://example.test/chat")
+    responses = iter(
+        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 5
+        + [(202, {"session_id": "session-accepted", "run_id": "run-accepted"}, {})]
+    )
+    headers_seen: list[dict[str, str]] = []
+    retry_delays: list[float] = []
+    accepted = SimpleNamespace(session_id="session-accepted", run_id="run-accepted")
+
+    async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        headers_seen.append(dict(kwargs["headers"]))  # type: ignore[arg-type,index]
+        return next(responses)
+
+    async def no_sleep(delay: float) -> None:
+        retry_delays.append(delay)
+
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module, "parse_accepted_run", lambda *_: accepted)
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+
+    keys: list[str] = []
+    outcome = await module._submit_one(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=deployed),
+        {},
+        object(),
+        "partition",
+        keys,
+    )
+
+    assert outcome.submitted is not None
+    assert outcome.submitted.accepted is accepted
+    assert outcome.retries == 5
+    assert len(headers_seen) == 6
+    assert {headers["Idempotency-Key"] for headers in headers_seen} == {keys[0]}
+    assert retry_delays == [60.0] * 5
 
 
 @pytest.mark.asyncio

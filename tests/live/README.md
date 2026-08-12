@@ -253,7 +253,11 @@ when it is omitted the script does not map an unresolved `$(VAR)` token and the
 load test skips.
 
 This run can consume at least 500 sandbox-minutes at `N=100`, plus model and
-storage costs, and needs ACA and model quota for all sessions. Use a
+storage costs, and needs ACA and model quota for all sessions. The load-only
+agent has a 900-second authored timeout so six bounded same-key setup attempts
+can cover the create, lifecycle, content, manifest, and journal/launch phases
+(about 480 seconds in the worst case) through 60-second provision leases before
+the five-minute hold; plan for that additional wall-clock time. Use a
 CI-dedicated Sandbox Group and do not run it from PR, default, or scheduled
 jobs. The report intentionally contains only `N`, a timestamped common-active
 interval, completion counts, p50/p95/p99 submit/first-event/terminal latency,
@@ -280,15 +284,17 @@ Before that proof, the runner requires the observed admission spread to leave
 more than the 120-second proof timeout plus a 15-second margin inside the
 five-minute hold. This rejects an over-spread batch instead of assuming it can
 meet the common-active requirement. Ambiguous, malformed, and final
-setup-deadline admissions are resolved read-only through their owner-scoped
-idempotency reservations for cleanup; unresolved reservations are reported and
+setup-deadline admissions wait for the bounded public `Retry-After` lease
+hint (falling back to 60 seconds), then reuse the same key and resolve
+read-only through their owner-scoped idempotency reservations for cleanup;
+unresolved reservations are reported and
 keep cleanup incomplete. After the fixed hold releases, every admitted run must expose ordered public
 SSE ending in `done`, a successful status/result, a terminally consistent
 read-only Table projection, terminal latency of at least 299 seconds for the
 300-second hold, and no owned sandbox or snapshot leak after controller-observed
 cleanup.
 If another qualification assertion fails before the hold completes, the runner
-first waits (for up to the load agent's 480-second authored budget) for
+first waits (for up to the load agent's 900-second authored budget) for
 provisioning to reach `running` or terminal, publicly cancels nonterminal
 running work, and requires the read-only durable projection to become terminal
 and idle before controller cleanup. If that settlement fails, exact-label

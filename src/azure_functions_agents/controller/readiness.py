@@ -1261,7 +1261,9 @@ async def provision_new_session_submit(
             setup_deadline,
         )
         if fence is None:
-            return ProvisionedSubmission(outcome=outcome, activated=None)
+            raise SessionActivationSetupTimeoutError(
+                "A live provision operation still holds the session setup lease."
+            )
         activated = await _provision_reserved_session(
             runtime,
             state_binding,

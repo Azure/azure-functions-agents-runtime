@@ -107,6 +107,27 @@ def _owner() -> FunctionAppOwnerContext:
     return FunctionAppOwnerContext.create(app, "main")
 
 
+def _expire_provision_lease(store: FakeSessionStateStore, operation: DurableSessionOperation) -> None:
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+
+def _complete_provisioning(store: FakeSessionStateStore, operation: DurableSessionOperation) -> None:
+    assert store.session is not None
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        state="completed",
+        finished_at=datetime.now(UTC),
+    )
+    store.session = replace(
+        store.session,
+        status="running",
+        active_operation_id=None,
+    )
+
+
 def _binding() -> AgentBinding:
     return AgentBinding(agent_name="main")
 
@@ -505,6 +526,7 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
     with pytest.raises(SandboxFileOperationError):
         await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="retryable"))
 
+    _expire_provision_lease(store, next(iter(store.durable_operations.values())))
     recovered = await backend.start_run(
         StartRunRequest(prompt="hello", idempotency_key="retryable")
     )
@@ -683,6 +705,7 @@ async def test_provision_content_failure_leaves_a_resumable_operation(
     assert store.session.active_operation_id == operation.operation_id
     assert operation.phase == "provision_content"
 
+    _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
     assert recovered.state == "accepted"
@@ -736,6 +759,7 @@ async def test_provision_lifecycle_failure_leaves_a_resumable_operation(
     assert store.session is not None
     assert store.session.active_operation_id == operation.operation_id
 
+    _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
     assert recovered.state == "accepted"
@@ -794,6 +818,7 @@ async def test_provision_manifest_failure_leaves_a_resumable_operation(
     operation = next(iter(store.durable_operations.values()))
     assert operation.phase == "provision_manifest"
 
+    _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
     assert recovered.state == "accepted"
@@ -1851,6 +1876,7 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
     winner = await backend.start_run(
         StartRunRequest(prompt="hello", idempotency_key="caller-key")
     )
+    _complete_provisioning(store, next(iter(store.durable_operations.values())))
     replay = await backend.start_run(
         StartRunRequest(prompt="hello", idempotency_key="caller-key")
     )
@@ -1909,19 +1935,91 @@ async def test_live_same_key_provision_replay_does_not_take_over_or_double_creat
     await asyncio.wait_for(provider.create_started.wait(), timeout=1.0)
     [operation_before] = store.durable_operations.values()
 
-    replay = await backend.start_run(request)
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
 
     assert provider.create_attempts == 1
-    assert replay.run_id == operation_before.target.run_id
     assert store.durable_operations[operation_before.operation_id].token == operation_before.token
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
     provider.release_create.set()
     winner = await first
+    _complete_provisioning(store, store.durable_operations[operation_before.operation_id])
     observed = await backend.start_run(request)
 
-    assert winner.run_id == replay.run_id == observed.run_id
+    assert winner.run_id == observed.run_id
     assert provider.create_attempts == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_canceled_provision_replay_waits_for_lease_then_resumes_same_run(
+    tmp_path: Path,
+) -> None:
+    class _BlockingProvider(FakeSandboxSessionProvider):
+        def __init__(self, handle: FakeSandboxSessionHandle) -> None:
+            super().__init__(handle)
+            self.create_started = asyncio.Event()
+            self.release_create = asyncio.Event()
+            self.create_attempts = 0
+
+        async def create(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> FakeSandboxSessionHandle:
+            self.create_attempts += 1
+            created = await super().create(*args, **kwargs)
+            self.create_started.set()
+            await self.release_create.wait()
+            return created
+
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle()
+    provider = _BlockingProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=next(iter(store.runs.values())).session_id),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="canceled-provision-key")
+
+    first = asyncio.create_task(backend.start_run(request))
+    await asyncio.wait_for(provider.create_started.wait(), timeout=1.0)
+    [operation] = store.durable_operations.values()
+    assert len(provider.create_calls) == 1
+    assert handle.labels["operation_label"] == operation.correlation_label
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+    assert provider.create_attempts == 1
+    assert store.durable_operations[operation.operation_id].token == operation.token
+
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    provider.release_create.set()
+    resumed = await backend.start_run(request)
+
+    assert resumed.session_id == operation.target.session_id
+    assert resumed.run_id == operation.target.run_id
+    assert provider.create_attempts == 2
+    assert len(provider.create_calls) == 1
+    assert handle.labels["operation_label"] == operation.correlation_label
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
 
 

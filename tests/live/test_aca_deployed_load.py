@@ -22,6 +22,7 @@ from tests.live.aca_deployed_agent_support import (
     json_request,
     parse_accepted_run,
     read_sse_events_with_first_event_time,
+    setup_retry_after_seconds,
     submission_payload,
 )
 from tests.live.aca_deployed_lifecycle_support import (
@@ -64,12 +65,11 @@ _ACTIVE_PROOF_TIMEOUT_SECONDS = 120.0
 _EVENT_STREAM_GRACE_SECONDS = 360.0
 _HOLD_SECONDS = 300.0
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
-_SETUP_DEADLINE_ATTEMPTS = 4
-_SETUP_DEADLINE_RETRY_SECONDS = 5.0
+_SETUP_DEADLINE_ATTEMPTS = 6
 _RECOVERY_ATTEMPTS = 5
 _RECOVERY_POLL_SECONDS = 1.0
 _OVERLAP_BUDGET_MARGIN_SECONDS = 15.0
-_SETTLEMENT_TIMEOUT_SECONDS = 480.0
+_SETTLEMENT_TIMEOUT_SECONDS = 900.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
 _LOAD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
@@ -407,7 +407,7 @@ async def _submit_one(
     retries = 0
     for attempt in range(_SETUP_DEADLINE_ATTEMPTS):
         try:
-            status, payload, _ = await json_request(
+            status, payload, response_headers = await json_request(
                 client,
                 "POST",
                 config.deployed.chat_url,
@@ -472,7 +472,7 @@ async def _submit_one(
         if status == 504 and payload.get("error") == "setup_deadline_exceeded":
             if attempt + 1 < _SETUP_DEADLINE_ATTEMPTS:
                 retries += 1
-                await asyncio.sleep(_SETUP_DEADLINE_RETRY_SECONDS)
+                await asyncio.sleep(setup_retry_after_seconds(response_headers))
                 continue
             recovered = await _recover_submitted_run(
                 resources,

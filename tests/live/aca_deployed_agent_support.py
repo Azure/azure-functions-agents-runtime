@@ -29,10 +29,32 @@ _AUDIENCE_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE"
 _TIMEOUT_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS"
 _BEARER_TOKEN_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_BEARER_TOKEN"
 _SLUG_PATTERN = re.compile(r"^[a-z0-9][a-z0-9_-]{0,62}$")
+_SETUP_RETRY_AFTER_SECONDS = 60.0
 
 
 class _TokenCredential(Protocol):
     async def get_token(self, *scopes: str) -> object: ...
+
+
+def setup_retry_after_seconds(headers: Mapping[str, str]) -> float:
+    """Read the bounded setup-lease retry delay without retaining response headers."""
+    value = next(
+        (
+            candidate
+            for key, candidate in headers.items()
+            if key.casefold() == "retry-after" and isinstance(candidate, str)
+        ),
+        None,
+    )
+    if value is None:
+        return _SETUP_RETRY_AFTER_SECONDS
+    try:
+        retry_after = int(value.strip())
+    except ValueError:
+        return _SETUP_RETRY_AFTER_SECONDS
+    if not 1 <= retry_after <= _SETUP_RETRY_AFTER_SECONDS:
+        return _SETUP_RETRY_AFTER_SECONDS
+    return float(retry_after)
 
 
 @dataclass(frozen=True, slots=True)

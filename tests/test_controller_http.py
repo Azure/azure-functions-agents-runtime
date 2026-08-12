@@ -13,7 +13,10 @@ from azure_functions_agents.controller.http import (
     submit_run,
 )
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
-from azure_functions_agents.controller.readiness import SessionActivationNotFoundError
+from azure_functions_agents.controller.readiness import (
+    SessionActivationNotFoundError,
+    SessionActivationSetupTimeoutError,
+)
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     RunContext,
@@ -285,7 +288,29 @@ async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
 
     assert not backend.started
     assert response.status_code == 504
-    assert response.headers["x-ms-retry-with"] == "respond-async"
+    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "60"}
+
+
+@pytest.mark.asyncio
+async def test_live_provision_lease_returns_the_same_setup_retry_hint() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationSetupTimeoutError("provision lease is live")
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 504
+    assert response.body == {
+        "error": "setup_deadline_exceeded",
+        "reason": "setup_deadline_exceeded",
+        "retry_with": "respond-async",
+    }
+    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "60"}
 
 
 @pytest.mark.asyncio
