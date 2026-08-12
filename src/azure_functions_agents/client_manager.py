@@ -25,7 +25,6 @@ ABC surface
 
 from __future__ import annotations
 
-import asyncio
 import os
 import threading
 from abc import ABC, abstractmethod
@@ -54,6 +53,10 @@ class InferenceTarget:
 class _ClientCacheKey:
     provider: str
     model: str
+
+
+@dataclass(frozen=True)
+class _ProviderConfig:
     endpoint: str = ""
     api_version: str = ""
     auth_mode: str = ""
@@ -118,10 +121,10 @@ class MAFClientManager(ClientManager):
 
     def __init__(self) -> None:
         self._clients: dict[_ClientCacheKey, Any] = {}
+        self._provider_configs: dict[str, _ProviderConfig] = {}
         self._async_credential: Any | None = None
         self._lock = threading.RLock()
         self._closed = False
-        self._close_task: asyncio.Task[None] | None = None
 
     def resolve_model(self, requested: str | None) -> str:
         """Resolve model as requested > provider-specific env > runtime env > default."""
@@ -160,15 +163,25 @@ class MAFClientManager(ClientManager):
     ) -> tuple[Any, InferenceTarget]:
         provider = self._provider()
         resolved = self._resolve_model(model, provider)
-        cache_key = self._client_cache_key(provider, resolved)
-        logger.info("MAF provider=%s model=%s", provider, resolved)
+        cache_key = _ClientCacheKey(provider, resolved)
         with self._lock:
             if self._closed:
                 raise RuntimeError("MAFClientManager is closed and cannot build new clients.")
+            provider_config = self._provider_config(provider)
+            previous_config = self._provider_configs.get(provider)
+            if previous_config is not None and previous_config != provider_config:
+                raise RuntimeError(
+                    f"{provider} provider configuration changed during this worker lifetime; "
+                    "restart the worker to apply updated settings"
+                )
             client = self._clients.get(cache_key)
             if client is None:
                 client = self._build_provider_client(provider, resolved)
+                self._provider_configs[provider] = provider_config
                 self._clients[cache_key] = client
+                logger.info("Created MAF provider client: provider=%s model=%s", provider, resolved)
+            else:
+                logger.debug("Reusing MAF provider client: provider=%s model=%s", provider, resolved)
         return client, InferenceTarget(
             provider=provider,
             model=resolved,
@@ -191,31 +204,25 @@ class MAFClientManager(ClientManager):
         )
 
     @classmethod
-    def _client_cache_key(cls, provider: str, model: str) -> _ClientCacheKey:
+    def _provider_config(cls, provider: str) -> _ProviderConfig:
         if provider == "openai":
-            return _ClientCacheKey(
-                provider,
-                model,
+            return _ProviderConfig(
                 endpoint=cls._env("OPENAI_BASE_URL"),
                 auth_mode="api_key",
                 organization=cls._env("OPENAI_ORG_ID"),
             )
         if provider == "azure_openai":
-            return _ClientCacheKey(
-                provider,
-                model,
+            return _ProviderConfig(
                 endpoint=cls._env("AZURE_OPENAI_ENDPOINT"),
                 api_version=cls._env("AZURE_OPENAI_API_VERSION"),
                 auth_mode="api_key" if cls._env("AZURE_OPENAI_API_KEY") else "credential",
             )
         if provider == "foundry":
-            return _ClientCacheKey(
-                provider,
-                model,
+            return _ProviderConfig(
                 endpoint=cls._env("FOUNDRY_PROJECT_ENDPOINT"),
                 auth_mode="credential",
             )
-        return _ClientCacheKey(provider, model)
+        return _ProviderConfig()
 
     @staticmethod
     def _env(name: str) -> str:
@@ -308,24 +315,15 @@ class MAFClientManager(ClientManager):
     async def close(self) -> None:
         """Close all provider transports and the shared credential exactly once."""
         with self._lock:
-            close_task = self._close_task
-            if close_task is None:
-                self._closed = True
-                cached_clients = list(self._clients.items())
-                self._clients.clear()
-                credential = self._async_credential
-                self._async_credential = None
-                close_task = asyncio.create_task(
-                    self._close_detached_resources(cached_clients, credential)
-                )
-                self._close_task = close_task
-        await asyncio.shield(close_task)
+            if self._closed:
+                return
+            self._closed = True
+            cached_clients = list(self._clients.items())
+            self._clients.clear()
+            self._provider_configs.clear()
+            credential = self._async_credential
+            self._async_credential = None
 
-    async def _close_detached_resources(
-        self,
-        cached_clients: list[tuple[_ClientCacheKey, Any]],
-        credential: Any,
-    ) -> None:
         errors: list[Exception] = []
         closed_resource_ids: set[int] = set()
         for key, chat_client in cached_clients:
@@ -351,22 +349,6 @@ class MAFClientManager(ClientManager):
         )
         if errors:
             raise ExceptionGroup("Failed to close one or more MAF client resources.", errors)
-
-    def _has_owned_resources(self) -> bool:
-        with self._lock:
-            return bool(
-                self._clients
-                or self._async_credential is not None
-                or (self._close_task is not None and not self._close_task.done())
-            )
-
-    def _retire_if_unused(self) -> bool:
-        """Atomically prevent future builds when no owned resource exists."""
-        with self._lock:
-            if self._has_owned_resources():
-                return False
-            self._closed = True
-            return True
 
     @staticmethod
     async def _close_owned_resource(
@@ -406,7 +388,8 @@ class MAFClientManager(ClientManager):
 # Process-wide singleton selection
 # ---------------------------------------------------------------------------
 
-_INSTANCE: ClientManager | None = None
+_SHUTTING_DOWN = object()
+_INSTANCE: ClientManager | object | None = None
 _INSTANCE_LOCK = threading.Lock()
 
 
@@ -419,9 +402,12 @@ def get_client_manager() -> ClientManager:
     """
     global _INSTANCE
     with _INSTANCE_LOCK:
+        if _INSTANCE is _SHUTTING_DOWN:
+            raise RuntimeError("Client manager shutdown is in progress")
         if _INSTANCE is None:
             _INSTANCE = MAFClientManager()
             logger.info("ClientManager initialized: %s", _INSTANCE.name)
+        assert isinstance(_INSTANCE, ClientManager)
         return _INSTANCE
 
 
@@ -429,28 +415,38 @@ def set_client_manager(manager: ClientManager) -> None:
     """Override the process-wide :class:`ClientManager`.
 
     Intended for tests and for advanced apps that want to plug in a custom
-    backend. Replacing the default manager retires it atomically when unused.
-    Once it owns provider resources, callers must await
-    :func:`shutdown_client_manager` before installing a replacement.
+    backend. Call and await :func:`shutdown_client_manager` before replacing
+    any active manager, including a custom implementation.
     """
     global _INSTANCE
     with _INSTANCE_LOCK:
+        if _INSTANCE is _SHUTTING_DOWN:
+            raise RuntimeError("Client manager shutdown is in progress")
         current = _INSTANCE
         if current is manager:
             return
-        if isinstance(current, MAFClientManager) and not current._retire_if_unused():
+        if current is not None:
             raise RuntimeError(
-                "The active MAFClientManager owns provider resources. "
+                "Cannot replace the active ClientManager. "
                 "Await shutdown_client_manager() before replacing it."
             )
         _INSTANCE = manager
 
 
 async def shutdown_client_manager() -> None:
-    """Close the active manager (if any). Idempotent."""
+    """Close the active manager; sequential calls are safe, concurrent calls are rejected."""
     global _INSTANCE
     with _INSTANCE_LOCK:
         manager = _INSTANCE
-        _INSTANCE = None
-    if manager is not None:
+        if manager is _SHUTTING_DOWN:
+            raise RuntimeError("Client manager shutdown is already in progress")
+        if manager is None:
+            return
+        _INSTANCE = _SHUTTING_DOWN
+    assert isinstance(manager, ClientManager)
+    try:
         await manager.close()
+    finally:
+        with _INSTANCE_LOCK:
+            if _INSTANCE is _SHUTTING_DOWN:
+                _INSTANCE = None

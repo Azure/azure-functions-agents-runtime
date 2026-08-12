@@ -32,6 +32,7 @@ from types import SimpleNamespace
 from typing import Any, ClassVar
 
 import pytest
+import pytest_asyncio
 from agent_framework import MCPStreamableHTTPTool, tool
 
 import azure_functions_agents._observability as obs
@@ -39,9 +40,9 @@ import azure_functions_agents.runner as runner
 from azure_functions_agents.client_manager import (
     ClientManager,
     InferenceTarget,
-    MAFClientManager,
     get_client_manager,
     set_client_manager,
+    shutdown_client_manager,
 )
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
@@ -159,17 +160,17 @@ class _RunnableFakeClientManager(ClientManager):
         return _RunnableFakeChatClient()
 
 
-@pytest.fixture(autouse=True)
-def _restore_client_manager() -> Any:
-    """Snapshot/restore the process-wide ``ClientManager`` singleton around every test.
+@pytest_asyncio.fixture(autouse=True)
+async def _restore_client_manager() -> Any:
+    """Deterministically clean the process-wide manager around every test.
 
     ``_build_delegated_agent`` calls ``get_client_manager().build_chat_client(...)``;
     tests that exercise it install ``_FakeClientManager`` and must not leak that
     substitution into unrelated tests/modules.
     """
-    get_client_manager()
+    await shutdown_client_manager()
     yield
-    set_client_manager(MAFClientManager())
+    await shutdown_client_manager()
 
 
 class _RecordingSpan:

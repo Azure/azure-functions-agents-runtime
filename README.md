@@ -42,6 +42,47 @@ If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first pr
 
 Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
 
+### Provider client lifetime
+
+The runtime reuses provider SDK clients and their HTTP connection pools for the
+life of each Python worker process. This applies uniformly to built-in chat
+endpoints, non-HTTP triggers, delegated agents, and workflow sub-agent
+activities. MAF `Agent` objects are still created per invocation because they
+carry mutable request state.
+
+Keep provider endpoint, API-version, organization, and authentication settings
+stable for a worker lifetime. If one changes, the runtime rejects the next
+client request; restart the Functions worker to apply the new configuration.
+
+### Plugging in a custom client manager
+
+Implement `ClientManager` and install it once, before the default manager is
+first requested:
+
+```python
+from azure_functions_agents import ClientManager, set_client_manager
+
+
+class MyClientManager(ClientManager):
+    def resolve_model(self, requested: str | None) -> str:
+        return requested or "my-default-model"
+
+    def build_chat_client(self, model: str | None):
+        return build_my_chat_client(self.resolve_model(model))
+
+
+set_client_manager(MyClientManager())
+```
+
+The active manager cannot be replaced synchronously, whether it is the default
+or a custom implementation. Tests and embedding hosts that own an async
+lifecycle must first `await shutdown_client_manager()`, then call
+`set_client_manager(...)`. Azure Functions does not currently expose a supported
+async worker-shutdown hook, so the runtime keeps its default clients for the
+worker lifetime rather than attempting cleanup from `atexit` or a signal handler;
+the host gap is tracked in
+[azure-functions-python-worker#1904](https://github.com/Azure/azure-functions-python-worker/issues/1904).
+
 ## Quick Start
 
 ### 1. Create the agent file
