@@ -21,7 +21,7 @@ export default function LoginPage() {
     <div className="login">
       <div className="login-card">
         <div className="login-mark">⚡</div>
-        <h1>Serverless Agent Portal</h1>
+        <h1>AI Apps</h1>
         <p>Sign in with your Microsoft account to discover serverless agents in your subscriptions.</p>
         <button className="btn primary" onClick={onSignIn} disabled={busy}>
           {busy ? 'Signing in…' : 'Sign in'}

@@ -1202,9 +1202,9 @@ app.post(
         base,
         head,
         files,
-        message: `Update agent "${appName}" (via Serverless Agent Portal)`,
-        title: `Agent "${appName}" via Serverless Agent Portal`,
-        body: `Opened by the Serverless Agent Portal on behalf of @${entry.login}.\n\nAdds/updates the source for agent app \`${appName}\` on branch \`${head}\`. Edits roll into this PR until it's merged.`,
+        message: `Update agent "${appName}" (via AI Apps)`,
+        title: `Agent "${appName}" via AI Apps`,
+        body: `Opened by AI Apps on behalf of @${entry.login}.\n\nAdds/updates the source for agent app \`${appName}\` on branch \`${head}\`. Edits roll into this PR until it's merged.`,
       })
 
       // Persist the connection as app-setting metadata (the reliable store that
@@ -1306,7 +1306,7 @@ app.post(
           name,
           '.github/workflows/deploy.yml',
           Buffer.from(workflow, 'utf-8'),
-          'Add Azure Functions deploy workflow (Serverless Agent Portal)',
+          'Add Azure Functions deploy workflow (AI Apps)',
           branch,
         )
       } catch (e) {
