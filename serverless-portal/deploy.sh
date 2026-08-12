@@ -12,8 +12,8 @@ set -euo pipefail
 
 ENV_NAME="${ENV_NAME:-serverless-portal}"
 LOCATION="${LOCATION:-eastus2}"
-SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-1a839f1f-10b2-4613-95ad-0800a22abbf2}"
-MSAL_CLIENT_ID="${MSAL_CLIENT_ID:-0ceccceb-9c05-4953-9193-d94f9daa18d3}"
+SUBSCRIPTION_ID="${SUBSCRIPTION_ID:-0b894477-1614-4c8d-8a9b-a697a24596b8}"
+MSAL_CLIENT_ID="${MSAL_CLIENT_ID:-e5b70676-8224-4421-ad61-d1926b5c0952}"
 MSAL_AUTHORITY="${MSAL_AUTHORITY:-https://login.microsoftonline.com/organizations}"
 
 cd "$(dirname "$0")"

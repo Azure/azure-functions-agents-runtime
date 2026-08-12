@@ -229,7 +229,7 @@ export async function createRepo(token, { name, private: priv = true, org = '' }
       // PR against it — the portal always contributes via a PR, never a direct
       // push to the default branch.
       auto_init: true,
-      description: 'Serverless agent app — managed by the Serverless Agent Portal',
+      description: 'Serverless agent app — managed by AI Apps',
     },
   })
   return {
@@ -440,7 +440,7 @@ export async function openPullRequest(token, { owner, repo, base, head, files, m
       method: 'PUT',
       body: {
         message: 'Initial commit',
-        content: Buffer.from(`# ${repo}\n\nManaged by the Serverless Agent Portal.\n`, 'utf-8').toString(
+        content: Buffer.from(`# ${repo}\n\nManaged by AI Apps.\n`, 'utf-8').toString(
           'base64',
         ),
         branch: base,

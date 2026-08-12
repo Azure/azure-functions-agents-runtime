@@ -42,10 +42,10 @@ var tags = { 'azd-env-name': environmentName }
 
 // Empty overrides (azd substitutes '' for unset env vars) fall back to defaults.
 var effectivePortalSubscriptionId = empty(portalSubscriptionId)
-  ? '1a839f1f-10b2-4613-95ad-0800a22abbf2'
+  ? '0b894477-1614-4c8d-8a9b-a697a24596b8'
   : portalSubscriptionId
 var effectiveMsalClientId = empty(msalClientId)
-  ? '0ceccceb-9c05-4953-9193-d94f9daa18d3'
+  ? 'e5b70676-8224-4421-ad61-d1926b5c0952'
   : msalClientId
 var effectiveMsalAuthority = empty(msalAuthority)
   ? 'https://login.microsoftonline.com/organizations'

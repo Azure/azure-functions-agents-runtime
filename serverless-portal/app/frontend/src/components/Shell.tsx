@@ -48,9 +48,9 @@ export default function Shell({ children }: { children: ReactNode }) {
         >
           ☰
         </button>
-        <Link to="/agents" className="brand" title="Serverless Agent Portal">
+        <Link to="/agents" className="brand" title="AI Apps">
           <span className="brand-mark">⚡</span>
-          <span className="brand-name">Serverless Agent Portal</span>
+          <span className="brand-name">AI Apps</span>
         </Link>
 
         <div className="appbar-spacer" />

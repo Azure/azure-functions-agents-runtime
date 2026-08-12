@@ -12,8 +12,8 @@
 param(
     [string]$EnvName = 'serverless-portal',
     [string]$Location = 'eastus2',
-    [string]$SubscriptionId = '1a839f1f-10b2-4613-95ad-0800a22abbf2',
-    [string]$MsalClientId = '0ceccceb-9c05-4953-9193-d94f9daa18d3',
+    [string]$SubscriptionId = '0b894477-1614-4c8d-8a9b-a697a24596b8',
+    [string]$MsalClientId = 'e5b70676-8224-4421-ad61-d1926b5c0952',
     [string]$MsalAuthority = 'https://login.microsoftonline.com/organizations'
 )
 
