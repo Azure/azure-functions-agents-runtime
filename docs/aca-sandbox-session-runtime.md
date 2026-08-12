@@ -143,7 +143,7 @@ status; subsequent unavailable result or session behavior is `410 Gone`. Only
 the destructive real-Azure loss-to-`410` acceptance test and sign-off remain
 deferred. Content, egress, credential, and disk changes require a replacement
 session. The committed live qualification path in
-[testing/live-aca.md](testing/live-aca.md) covers adapter create, delivery,
+[the live ACA test guide](../tests/live/README.md) covers adapter create, delivery,
 lower-level model turn, public Easy Auth turn, and lifecycle; its staged
 N=10/25/50/100 load run is still in progress. For detailed internal
 state-machine behavior, use the architecture and FRD references above.

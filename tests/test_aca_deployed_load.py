@@ -1490,7 +1490,7 @@ def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
     load_source = (root / "tests" / "live" / "test_aca_deployed_load.py").read_text()
     loss_source = (root / "tests" / "live" / "test_aca_deployed_loss.py").read_text()
     job = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
-    runbook = (root / "docs" / "testing" / "live-aca.md").read_text()
+    runbook = (root / "tests" / "live" / "README.md").read_text()
 
     assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in load_source
     assert "_SETUP_DEADLINE_ATTEMPTS = 12" in load_source
