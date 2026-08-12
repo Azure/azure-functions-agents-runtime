@@ -311,8 +311,12 @@ def _raise_unavailable_response(url: str, status: int) -> None:
 
 async def _json_body(response: ClientResponse) -> dict[str, object]:
     if response.status in {401, 403}:
-        await response.read()
-        return {}
+        try:
+            payload = await response.json(content_type=None)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            await response.read()
+            return {}
+        return payload if isinstance(payload, dict) else {}
     try:
         payload = await response.json(content_type=None)
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:

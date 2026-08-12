@@ -67,9 +67,16 @@ async def test_deployed_aca_agent_turn_uses_only_public_authenticated_routes(
             payload=submission_payload(prompt),
         )
         if accepted_status in {401, 403, 404}:
+            error_detail = accepted.get("error")
+            suffix = (
+                f" ({redact_deployed_aca_evidence(error_detail)})"
+                if isinstance(error_detail, str) and error_detail
+                else ""
+            )
             raise AcaSmokeEnvironmentError(
                 "The protected deployed chat route rejected the app-only token or is missing: "
-                f"{redact_deployed_aca_evidence(config.chat_url)} (HTTP {accepted_status})."
+                f"{redact_deployed_aca_evidence(config.chat_url)} "
+                f"(HTTP {accepted_status}){suffix}."
             )
         assert accepted_status == 202
         accepted_run = parse_accepted_run(accepted, config)

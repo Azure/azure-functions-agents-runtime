@@ -213,6 +213,6 @@ async def test_unauthorized_response_body_is_ignored() -> None:
 
         async def json(self, *, content_type: object = None) -> object:
             del content_type
-            raise AssertionError("Unauthorized bodies must not be parsed.")
+            return ["platform-specific", "error"]
 
     assert await support._json_body(UnauthorizedResponse()) == {}  # type: ignore[arg-type]
