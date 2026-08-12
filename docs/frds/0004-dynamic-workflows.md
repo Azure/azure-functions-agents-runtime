@@ -4,16 +4,12 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-07-24
+updated: 2026-08-11
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151]
 ---
 
 # FRD 0004 — Dynamic workflows
-
-> **Superseded scope note:** FRD 0009 extends this historical main-agent-only
-> design to [eligible per-agent workflow owners](0009-per-agent-dynamic-workflows.md).
-> The original decisions below remain the record of the initial v1 design.
 
 ## 1. Summary
 
@@ -27,6 +23,22 @@ decorator; normal plain-function tool discovery remains backward compatible.
 Workflow-enabled main agents can also start the same Durable workflows from any
 supported Markdown-declared trigger; the trigger starts the workflow
 asynchronously and does not wait for it to finish.
+
+## Evolution: multi-owner workflow ownership and isolation
+
+This FRD records the initial Dynamic Workflows v1 design, which assumed one
+`main.agent.md` workflow owner and session-only workflow identity. FRD 0009,
+[Multi-owner Dynamic Workflow Ownership and
+Isolation](0009-per-agent-dynamic-workflows.md), extends that foundation so
+multiple agents can own workflows independently.
+
+The follow-up is maintained as a separate FRD because it changes more than owner
+eligibility: it introduces an app-wide execution catalog, immutable per-owner
+authorization policies, Activity-time reauthorization, `(owner_slug,
+session_id)` management isolation, and a breaking workflow-ID migration. Keeping
+its Decisions log separate preserves this document as the historical record of
+the original v1 requirements while making this section the entry point to the
+current multi-owner design.
 
 ## 2. Motivation / problem
 

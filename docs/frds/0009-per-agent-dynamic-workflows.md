@@ -1,6 +1,6 @@
 ---
 frd: 0009
-title: Per-agent Dynamic Workflows
+title: Multi-owner Dynamic Workflow Ownership and Isolation
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-08-10
@@ -14,7 +14,7 @@ pull_requests:
 branch: tsuyoshiushio-per-agent-dynamic-workflows
 ---
 
-# FRD 0009 — Per-agent Dynamic Workflows
+# FRD 0009 — Multi-owner Dynamic Workflow Ownership and Isolation
 
 ## 1. Summary
 
