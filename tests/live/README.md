@@ -105,10 +105,11 @@ qualification adds one, it must set
 ## Run the deployed Function GA qualification manually
 
 `tests/fixtures/live_aca_deployed_agent_turn/` is the minimal deployable
-package for this test. It contains one no-tools HTTP agent, a persistent ACA
-session runtime, Easy Auth allow-lists, and no web, MCP, or user tools. It does
-not contain dependencies or secrets. Build the package from this checkout, not
-from a published runtime release:
+package for this test. It contains the regular no-tools HTTP agent and a
+load-only hold-tool agent, a persistent ACA session runtime, Easy Auth
+allow-lists, and no web or MCP tools. It does not contain dependencies or
+secrets. Build the package from this checkout, not from a published runtime
+release:
 
 ```bash
 cd tests/fixtures/live_aca_deployed_agent_turn
@@ -125,7 +126,9 @@ configure the Function App's protected application settings (for example via
 `AZURE_OPENAI_ENDPOINT`, `AZURE_OPENAI_DEPLOYMENT`,
 `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK=python-3.13` (the public Python disk),
 `AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID`, the Entra tenant,
-Easy Auth audience, and the U3.TestInvoker client ID. `AzureWebJobsStorage`
+Easy Auth audience, the U3.TestInvoker client ID, and
+`AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT=none` for the load-only agent.
+`AzureWebJobsStorage`
 must be configured for the runtime's persistent session state. Keep the Azure
 OpenAI endpoint and Function App on managed identity; do not put model keys,
 storage keys, or bearer tokens in the fixture or test environment.
@@ -213,6 +216,77 @@ through its Sandbox Group Data Owner role, then must observe the deployed
 controller timer's tombstone; inability to confirm it is an `ACA-SMOKE-ENV`
 error that names the exact selector. It does **not** certify external sandbox
 loss, cursor replay, cancel, chaos, or load behavior.
+
+### Run the deployed persistent-session load qualification manually
+
+The deployable fixture keeps the no-tools `deployed_turn` agent for turn and
+lifecycle qualification and adds the separate load-only `deployed_load` agent.
+Only the load agent exposes the fixture-only `qualification_hold` tool. A real
+model is asked to call it once, holding each admitted run for five minutes
+before it returns its minimal acknowledgement. Tool selection is model-mediated,
+not deterministic: the test verifies exactly one public `tool_start` and
+`tool_end` for `qualification_hold` per run and fails if the model does not
+cooperate. The five-minute hold is credential-free; no test or sandbox writes Table state,
+and the controller remains the sole durable-state writer. The test submits all
+sessions concurrently through the Easy-Auth-protected public chat endpoint.
+
+Use the same deployed settings as the lifecycle test, then supply the load
+concurrency explicitly. Omission intentionally skips this test even when the
+deployed-smoke opt-in is set:
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY=100
+python -m pytest -m live_aca tests/live/test_aca_deployed_load.py -v \
+  -o log_cli=true -o log_cli_level=INFO
+
+# Equivalent explicit CLI input; this wins over the environment fallback.
+python -m pytest -m live_aca tests/live/test_aca_deployed_load.py \
+  --aca-load-concurrency 100 -v -o log_cli=true -o log_cli_level=INFO
+```
+
+`N=100` is the formal U3 acceptance run. Values from 1 through 99 are
+diagnostics only; values outside 1..100 are rejected. This is manual-only and
+the `ACADeployedAgentTurn` ADO job remains `Manual` plus `continueOnError`.
+For an ADO run, define the non-secret `ACA_DEPLOYED_LOAD_CONCURRENCY` variable;
+when it is omitted the script does not map an unresolved `$(VAR)` token and the
+load test skips.
+
+This run can consume at least 500 sandbox-minutes at `N=100`, plus model and
+storage costs, and needs ACA and model quota for all sessions. Use a
+CI-dedicated Sandbox Group and do not run it from PR, default, or scheduled
+jobs. The report intentionally contains only `N`, a timestamped common-active
+interval, completion counts, p50/p95/p99 submit/first-event/terminal latency,
+bounded retry/throttle counts, idempotency and active-run conflict counts, and
+cleanup status. It never prints prompts, model output, headers, tokens, or
+resource IDs.
+
+The deployed Function's protected settings must set
+`AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT=none` for this load agent. The ADO
+identity deliberately lacks Function ARM Reader, so the pipeline does not
+attempt an ARM preflight. An operator must verify that deployment setting on
+the dedicated Function App before the live run; the exact public
+`tool_start`/`tool_end` evidence is the end-to-end functional proof.
+
+The formal assertion uses conservative overlapping observations rather than
+claiming an atomic Table snapshot: each owned row is read twice no faster than
+one second apart, and the common interval is bounded by the latest first-read
+completion and earliest second-read start. Every distinct durable run must be
+`accepted` or `running`, every session identifies that run as active, and any
+active operation must target that run and generation. During that proven common
+interval, a bounded sample repeats each original idempotency key (same run) and
+submits a different key to the same session (`409 active_run_exists`).
+Before that proof, the runner requires the observed admission spread to leave
+more than the 120-second proof timeout plus a 15-second margin inside the
+five-minute hold. This rejects an over-spread batch instead of assuming it can
+meet the common-active requirement. Ambiguous, malformed, and final
+setup-deadline admissions are resolved read-only through their owner-scoped
+idempotency reservations for cleanup; unresolved reservations are reported and
+keep cleanup incomplete. After the fixed hold releases, every admitted run must expose ordered public
+SSE ending in `done`, a successful status/result, a terminally consistent
+read-only Table projection, terminal latency of at least 299 seconds for the
+300-second hold, and no owned sandbox or snapshot leak after controller-observed
+cleanup.
 
 ### Host ABI prerequisite
 

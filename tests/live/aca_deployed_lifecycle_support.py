@@ -21,9 +21,14 @@ from tests.live.aca_deployed_agent_support import (
 from azure_functions_agents.sandbox_runtime_limits import RECLAIM_SAFETY_GRACE_SECONDS
 from azure_functions_agents.session_state import (
     AppIdentity,
+    DurableOwnerIdempotencyRecord,
+    DurableRunRecord,
+    DurableSessionOperation,
     DurableSessionRecord,
+    OwnerIdempotencyRowKey,
     SessionStateContractError,
     compute_app_hash,
+    hash_idempotency_key,
 )
 from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 from azure_functions_agents.transport.transport_models import (
@@ -138,13 +143,99 @@ async def read_authoritative_session(
     resources: DeployedAcaLifecycleResources,
     *,
     session_id: str,
+    partition_key: str | None = None,
 ) -> DurableSessionRecord:
-    """Read exactly one session row by row key; this helper never writes Table state."""
+    """Read exactly one session row; this helper never writes Table state."""
+    entity = await _read_exact_entity(resources, f"session:{session_id}", partition_key)
+    try:
+        return DurableSessionRecord.from_table_entity(entity)
+    except SessionStateContractError as exc:
+        raise AssertionError("The authoritative session row violates the durable contract.") from exc
 
+
+async def read_authoritative_run(
+    resources: DeployedAcaLifecycleResources,
+    *,
+    session_id: str,
+    run_id: str,
+    partition_key: str | None = None,
+) -> DurableRunRecord:
+    """Read exactly one durable run row without modifying Table state."""
+    entity = await _read_exact_entity(resources, f"run:{session_id}:{run_id}", partition_key)
+    try:
+        return DurableRunRecord.from_table_entity(entity)
+    except SessionStateContractError as exc:
+        raise AssertionError("The authoritative run row violates the durable contract.") from exc
+
+
+async def read_owner_idempotency(
+    resources: DeployedAcaLifecycleResources,
+    *,
+    partition_key: str,
+    idempotency_key: str,
+) -> DurableOwnerIdempotencyRecord | None:
+    """Read one owner-scoped idempotency reservation without modifying Table state."""
+    row_key = str(OwnerIdempotencyRowKey.create(hash_idempotency_key(idempotency_key)))
+    entity = await _read_optional_exact_entity(resources, row_key, partition_key)
+    if entity is None:
+        return None
+    try:
+        return DurableOwnerIdempotencyRecord.from_table_entity(entity)
+    except SessionStateContractError as exc:
+        raise AssertionError(
+            "The authoritative owner idempotency row violates the durable contract."
+        ) from exc
+
+
+async def read_session_operations(
+    resources: DeployedAcaLifecycleResources,
+    *,
+    session_id: str,
+    partition_key: str | None = None,
+) -> tuple[DurableSessionOperation, ...]:
+    """Read the known session's operation rows without modifying Table state."""
+    prefix = f"operation:{session_id}:"
+    upper_bound = f"{prefix}~"
+    try:
+        partition_filter = (
+            ""
+            if partition_key is None
+            else f"PartitionKey eq '{_escape_odata_literal(partition_key)}' and "
+        )
+        entities = [
+            entity
+            async for entity in resources.table_client.query_entities(
+                query_filter=(
+                    f"{partition_filter}RowKey ge '{_escape_odata_literal(prefix)}' and "
+                    f"RowKey lt '{_escape_odata_literal(upper_bound)}'"
+                ),
+                results_per_page=128,
+            )
+        ]
+    except AzureError as exc:
+        raise AcaSmokeEnvironmentError(
+            "The load qualification could not read the configured operation Table rows."
+        ) from exc
+    try:
+        return tuple(DurableSessionOperation.from_table_entity(entity) for entity in entities)
+    except SessionStateContractError as exc:
+        raise AssertionError("The authoritative operation row violates the durable contract.") from exc
+
+
+async def _read_exact_entity(
+    resources: DeployedAcaLifecycleResources,
+    row_key: str,
+    partition_key: str | None = None,
+) -> dict[str, object]:
     try:
         entities = []
+        partition_filter = (
+            ""
+            if partition_key is None
+            else f"PartitionKey eq '{_escape_odata_literal(partition_key)}' and "
+        )
         async for entity in resources.table_client.query_entities(
-            query_filter=f"RowKey eq 'session:{_escape_odata_literal(session_id)}'",
+            query_filter=f"{partition_filter}RowKey eq '{_escape_odata_literal(row_key)}'",
             results_per_page=2,
         ):
             entities.append(entity)
@@ -155,11 +246,33 @@ async def read_authoritative_session(
             "The lifecycle qualification could not read the configured session Table."
         ) from exc
     if len(entities) != 1:
-        raise AssertionError("The authoritative Table must contain exactly one session row.")
+        raise AssertionError("The authoritative Table must contain exactly one requested row.")
+    return entities[0]
+
+
+async def _read_optional_exact_entity(
+    resources: DeployedAcaLifecycleResources,
+    row_key: str,
+    partition_key: str,
+) -> dict[str, object] | None:
     try:
-        return DurableSessionRecord.from_table_entity(entities[0])
-    except SessionStateContractError as exc:
-        raise AssertionError("The authoritative session row violates the durable contract.") from exc
+        entities = [
+            entity
+            async for entity in resources.table_client.query_entities(
+                query_filter=(
+                    f"PartitionKey eq '{_escape_odata_literal(partition_key)}' and "
+                    f"RowKey eq '{_escape_odata_literal(row_key)}'"
+                ),
+                results_per_page=2,
+            )
+        ]
+    except AzureError as exc:
+        raise AcaSmokeEnvironmentError(
+            "The lifecycle qualification could not read the configured owner idempotency row."
+        ) from exc
+    if len(entities) > 1:
+        raise AssertionError("The authoritative Table returned duplicate owner idempotency rows.")
+    return entities[0] if entities else None
 
 
 def assert_session_belongs_to_deployment(
@@ -279,11 +392,16 @@ async def wait_for_reclaimed_session(
     *,
     session_id: str,
     timeout_seconds: float = LIFECYCLE_RECLAIM_CONTROLLER_WAIT_SECONDS,
+    partition_key: str | None = None,
 ) -> DurableSessionRecord:
     """Observe the deployed timer's durable reclaim result over bounded cadence windows."""
 
     async def condition() -> DurableSessionRecord | None:
-        session = await read_authoritative_session(resources, session_id=session_id)
+        session = await read_authoritative_session(
+            resources,
+            session_id=session_id,
+            partition_key=partition_key,
+        )
         if (
             session.status == "tombstoned"
             and session.tombstone_reason == "reclaimed_idle_session"
@@ -306,6 +424,7 @@ async def cleanup_owned_lifecycle_session(
     *,
     session: DurableSessionRecord,
     config: DeployedAcaLifecycleConfig,
+    partition_key: str | None = None,
 ) -> None:
     """Delete only exact-label backing, then require the deployed controller's tombstone."""
 
@@ -315,7 +434,11 @@ async def cleanup_owned_lifecycle_session(
         sandbox = await owned_sandbox(resources, session)
         if sandbox is not None:
             await resources.adapter.delete_sandbox(sandbox.sandbox_id)
-        await wait_for_reclaimed_session(resources, session_id=session.session_id)
+        await wait_for_reclaimed_session(
+            resources,
+            session_id=session.session_id,
+            partition_key=partition_key,
+        )
     except (AcaSmokeEnvironmentError, AssertionError, SandboxTransportError) as exc:
         raise AcaSmokeEnvironmentError(
             "ACA-SMOKE-ENV cleanup could not confirm the deployed controller tombstone for "

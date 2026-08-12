@@ -15,6 +15,16 @@ from azure_functions_agents.controller.package import CapturedContentPackage  # 
 from tests.doubles.content_package import content_package  # noqa: E402
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--aca-load-concurrency",
+        action="store",
+        default=None,
+        metavar="N",
+        help="Run the manual deployed ACA load qualification with N concurrent sessions (1..100).",
+    )
+
+
 @pytest.fixture
 def deterministic_content_package(
     monkeypatch: pytest.MonkeyPatch,

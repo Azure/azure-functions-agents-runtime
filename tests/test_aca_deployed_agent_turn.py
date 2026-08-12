@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import base64
 import inspect
+import json
+import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -11,10 +14,14 @@ import pytest
 
 from azure_functions_agents.config.loader import load_agent_specs, load_global_config
 from azure_functions_agents.config.merge import compose
+from azure_functions_agents.discovery.tools import clear_tool_discovery_cache, discover_user_tools
 from azure_functions_agents.session_state import (
     AppIdentity,
+    DurableOwnerIdempotencyRecord,
     DurableSessionRecord,
+    EntraUserOwnerContext,
     FunctionAppOwnerContext,
+    hash_idempotency_key,
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import SandboxSummary
@@ -85,8 +92,12 @@ def test_deployable_fixture_has_persistent_entra_no_tools_aca_configuration(
     _set_deployable_fixture_environment(monkeypatch)
 
     global_config = load_global_config(_DEPLOYABLE_FIXTURE)
-    [spec] = load_agent_specs(_DEPLOYABLE_FIXTURE, strict=True)
-    resolved = compose(spec, global_config)
+    specs = {
+        Path(spec.source_file).stem.removesuffix(".agent"): spec
+        for spec in load_agent_specs(_DEPLOYABLE_FIXTURE, strict=True)
+    }
+    regular = compose(specs["deployed_turn"], global_config)
+    load = compose(specs["deployed_load"], global_config)
 
     assert (_DEPLOYABLE_FIXTURE / "function_app.py").is_file()
     assert (_DEPLOYABLE_FIXTURE / "host.json").is_file()
@@ -96,11 +107,17 @@ def test_deployable_fixture_has_persistent_entra_no_tools_aca_configuration(
     assert global_config.session_runtime.aca_sandbox.retention is not None
     assert global_config.session_runtime.aca_sandbox.retention.auto_suspend_idle == 60
     assert global_config.session_runtime.aca_sandbox.retention.reclaim_idle == 120
-    assert resolved.model == "deployed-model"
-    assert resolved.builtin_endpoints.http_auth.mode == "entra"
-    assert resolved.tools_disabled is True
-    assert resolved.mcp_disabled is True
-    assert resolved.web_request_config is None
+    assert regular.model == "deployed-model"
+    assert regular.timeout == 120
+    assert regular.tools_disabled
+    assert load.timeout == 480
+    assert not load.tools_disabled
+    assert regular.builtin_endpoints.http_auth.mode == "entra"
+    clear_tool_discovery_cache()
+    discovered = discover_user_tools(_DEPLOYABLE_FIXTURE)
+    assert [tool.name for tool in discovered.tools] == ["qualification_hold"]
+    assert regular.mcp_disabled is True
+    assert regular.web_request_config is None
 
 
 def test_deployed_config_reads_only_safe_url_and_route_contract(
@@ -117,6 +134,44 @@ def test_deployed_config_reads_only_safe_url_and_route_contract(
         "events_url": "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/sessions/session-1/runs/run-1/events",
         "cancel_url": "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/sessions/session-1/runs/run-1/cancel",
     }
+
+
+@pytest.mark.asyncio
+async def test_authorization_owner_claims_are_validated_and_redacted() -> None:
+    tenant_id = "11111111-2222-3333-4444-555555555555"
+    object_id = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"tid": tenant_id, "oid": object_id}).encode()
+    ).decode().rstrip("=")
+    token = f"header.{payload}.signature"
+
+    class Credential:
+        async def get_token(self, scope: str) -> object:
+            assert scope == "api://deployed-aca/.default"
+            return SimpleNamespace(token=token)
+
+    evidence = await support.acquire_authorization_evidence(
+        Credential(),
+        "api://deployed-aca/.default",
+    )
+    app = AppIdentity.create(
+        subscription_id="11111111-2222-3333-4444-555555555555",
+        site_name="deployed-aca",
+    )
+    selected = owner_partition(
+        EntraUserOwnerContext.create(app, "deployed_load", evidence.tenant_id, evidence.object_id)
+    )
+    durable = replace(_lifecycle_session(), owner_partition=selected)
+
+    assert (evidence.tenant_id, evidence.object_id) == (tenant_id, object_id)
+    assert durable.owner_partition == selected
+    assert token not in repr(evidence)
+    assert tenant_id not in repr(evidence)
+
+
+def test_authorization_owner_claims_reject_invalid_jwt_identity() -> None:
+    with pytest.raises(AcaSmokeEnvironmentError, match="valid tid and oid"):
+        support._validated_token_owner("header.eyJ0aWQiOiJub3QtYS1ndWlkIn0.signature")
 
 
 def test_deployed_lifecycle_config_reads_real_resource_observation_contract(
@@ -184,6 +239,56 @@ async def test_reclaim_observation_polls_authoritative_table_until_controller_to
         )
         for call in table.calls
     )
+
+
+@pytest.mark.asyncio
+async def test_authoritative_reads_can_require_an_exact_owner_partition() -> None:
+    session = _lifecycle_session()
+    table = _ReadOnlyTable([session.to_table_entity()])
+    resources = _lifecycle_resources(table_client=table, adapter=SimpleNamespace())
+
+    observed = await lifecycle_support.read_authoritative_session(
+        resources,
+        session_id=session.session_id,
+        partition_key=session.owner_partition.partition_key,
+    )
+
+    assert observed == session
+    assert table.calls == [
+        (
+            f"PartitionKey eq '{session.owner_partition.partition_key}' and "
+            "RowKey eq 'session:session-lifecycle'",
+            2,
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_owner_idempotency_read_hashes_the_raw_key_inside_exact_partition() -> None:
+    session = _lifecycle_session()
+    raw_key = "raw-idempotency-key"
+    record = DurableOwnerIdempotencyRecord.create(
+        owner_partition=session.owner_partition,
+        idempotency_hash=hash_idempotency_key(raw_key),
+        request_hash="a" * 64,
+        session_id=session.session_id,
+        run_id="run-lifecycle",
+        expires_at=_NOW + timedelta(seconds=120),
+        created_at=_NOW,
+    )
+    table = _ReadOnlyTable([record.to_table_entity()])
+    resources = _lifecycle_resources(table_client=table, adapter=SimpleNamespace())
+
+    observed = await lifecycle_support.read_owner_idempotency(
+        resources,
+        partition_key=session.owner_partition.partition_key,
+        idempotency_key=raw_key,
+    )
+
+    assert observed == record
+    assert raw_key not in table.calls[0][0]
+    assert "RowKey eq 'owner-idem:" in table.calls[0][0]
+    assert f"PartitionKey eq '{session.owner_partition.partition_key}'" in table.calls[0][0]
 
 
 @pytest.mark.asyncio
@@ -392,6 +497,100 @@ def test_sse_parser_reads_controller_event_shape_and_rejects_malformed_frames() 
     ]
     with pytest.raises(ValueError, match="include id and data"):
         support.parse_sse_frames(['data: {"type":"done"}'])
+
+
+@pytest.mark.asyncio
+async def test_public_sse_reconnects_after_a_lease_ended_partial_stream() -> None:
+    class Content:
+        def __init__(self, chunks: list[bytes]) -> None:
+            self._chunks = iter(chunks)
+
+        def __aiter__(self) -> Content:
+            return self
+
+        async def __anext__(self) -> bytes:
+            try:
+                return next(self._chunks)
+            except StopIteration as exc:
+                raise StopAsyncIteration from exc
+
+    class Response:
+        status = 200
+
+        def __init__(self, chunks: list[bytes]) -> None:
+            self.headers: dict[str, str] = {}
+            self.content = Content(chunks)
+
+        async def __aenter__(self) -> Response:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class Session:
+        def __init__(self) -> None:
+            self.requests: list[dict[str, str]] = []
+            self.responses = [
+                Response([b'id: 1\ndata: {"type":"session"}\n\n']),
+                Response([b'id: 2\ndata: {"type":"done"}\n\n']),
+            ]
+
+        def get(self, _: str, *, headers: dict[str, str]) -> Response:
+            self.requests.append(headers)
+            return self.responses.pop(0)
+
+    session = Session()
+    status, events, _, first_event_at = await support.read_sse_events_with_first_event_time(
+        session,  # type: ignore[arg-type]
+        "https://example.test/events",
+        headers={"Authorization": "******"},
+        overall_timeout_seconds=1,
+    )
+
+    assert status == 200
+    assert [event.sequence for event in events] == [1, 2]
+    assert events[-1].payload["type"] == "done"
+    assert first_event_at is not None
+    assert session.requests[1]["Last-Event-ID"] == "1"
+
+
+@pytest.mark.asyncio
+async def test_public_sse_overall_deadline_cancels_a_blocking_response() -> None:
+    class BlockingContent:
+        def __aiter__(self) -> BlockingContent:
+            return self
+
+        async def __anext__(self) -> bytes:
+            await __import__("asyncio").sleep(10)
+            raise StopAsyncIteration
+
+    class Response:
+        status = 200
+
+        def __init__(self) -> None:
+            self.headers: dict[str, str] = {}
+            self.content = BlockingContent()
+
+        async def __aenter__(self) -> Response:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class Session:
+        def get(self, *_: object, **__: object) -> Response:
+            return Response()
+
+    started = time.perf_counter()
+    with pytest.raises(AcaSmokeEnvironmentError, match="overall deadline"):
+        await support.read_sse_events_with_first_event_time(
+            Session(),  # type: ignore[arg-type]
+            "https://example.test/events",
+            headers={"Authorization": "******"},
+            overall_timeout_seconds=0.01,
+        )
+
+    assert time.perf_counter() - started < 1
 
 
 def test_submission_and_accepted_payloads_follow_the_public_controller_contract(

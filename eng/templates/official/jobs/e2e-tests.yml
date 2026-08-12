@@ -233,6 +233,14 @@ jobs:
               fi
             done
             az account show --query '{subscription:name, subscriptionId:id, user:user.name}' --output json
+            # Azure DevOps auto-injects non-secret pipeline variables into script
+            # environments. Read it directly rather than through token expansion:
+            # an omitted manual
+            # variable must leave the load test skipped rather than pass an
+            # unresolved token into pytest.
+            if [ -n "${ACA_DEPLOYED_LOAD_CONCURRENCY:-}" ]; then
+              export AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY="${ACA_DEPLOYED_LOAD_CONCURRENCY}"
+            fi
             python - <<'PY'
             import asyncio
             import base64
@@ -266,7 +274,8 @@ jobs:
             PY
             python -m pytest -m live_aca \
               tests/live/test_aca_deployed_agent_turn.py \
-              tests/live/test_aca_deployed_lifecycle.py -v \
+              tests/live/test_aca_deployed_lifecycle.py \
+              tests/live/test_aca_deployed_load.py -v \
               -o log_cli=true -o log_cli_level=INFO
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'

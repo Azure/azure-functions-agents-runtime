@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import asyncio
+import base64
 import json
 import os
 import re
+import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Protocol
+from typing import NoReturn, Protocol
 from urllib.parse import urlsplit, urlunsplit
 
 from aiohttp import ClientResponse, ClientSession, ClientTimeout
@@ -16,6 +19,7 @@ from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 
 from azure_functions_agents.controller.http import management_urls
 from azure_functions_agents.execution.backend import RunContext
+from azure_functions_agents.session_state import EntraPrincipal, SessionStateContractError
 
 _LIVE_GATE_ENV = "AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE"
 _BASE_URL_ENV = "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL"
@@ -71,6 +75,18 @@ class AcceptedRun:
     session_id: str
     run_id: str
     management_urls: Mapping[str, str]
+
+
+@dataclass(frozen=True, slots=True, repr=False)
+class AuthorizationEvidence:
+    """Validated app-only authorization material without a printable token representation."""
+
+    authorization_header: str
+    tenant_id: str
+    object_id: str
+
+    def __repr__(self) -> str:
+        return "AuthorizationEvidence(<redacted>)"
 
 
 def deployed_aca_smoke_enabled() -> bool:
@@ -145,17 +161,7 @@ async def acquire_authorization_header(credential: _TokenCredential, scope: str)
     does not prove Entra authentication or Azure authorization.
     """
 
-    try:
-        token = await credential.get_token(scope)
-    except Exception as exc:
-        raise AcaSmokeEnvironmentError(
-            f"DefaultAzureCredential could not acquire the Easy Auth app-only token: "
-            f"{redact_deployed_aca_evidence(str(exc))}"
-        ) from exc
-    value = getattr(token, "token", None)
-    if not isinstance(value, str) or not value.strip():
-        raise AcaSmokeEnvironmentError("DefaultAzureCredential returned an empty Easy Auth token.")
-    return f"Bearer {value}"
+    return f"Bearer {await _acquire_token_value(credential, scope)}"
 
 
 async def acquire_default_authorization_header(scope: str) -> str:
@@ -166,6 +172,70 @@ async def acquire_default_authorization_header(scope: str) -> str:
         return await acquire_authorization_header(credential, scope)
     finally:
         await credential.close()
+
+
+async def acquire_default_authorization_evidence(scope: str) -> AuthorizationEvidence:
+    """Acquire the request token and validate its owner claims only for local correlation."""
+    credential = DefaultAzureCredential()
+    try:
+        return await acquire_authorization_evidence(credential, scope)
+    finally:
+        await credential.close()
+
+
+async def acquire_authorization_evidence(
+    credential: _TokenCredential,
+    scope: str,
+) -> AuthorizationEvidence:
+    """Acquire and locally validate the same token that is sent to Easy Auth."""
+    token = await _acquire_token_value(credential, scope)
+    tenant_id, object_id = _validated_token_owner(token)
+    return AuthorizationEvidence(
+        authorization_header=f"Bearer {token}",
+        tenant_id=tenant_id,
+        object_id=object_id,
+    )
+
+
+async def _acquire_token_value(credential: _TokenCredential, scope: str) -> str:
+    try:
+        token = await credential.get_token(scope)
+    except Exception as exc:
+        raise AcaSmokeEnvironmentError(
+            f"DefaultAzureCredential could not acquire the Easy Auth app-only token: "
+            f"{redact_deployed_aca_evidence(str(exc))}"
+        ) from exc
+    value = getattr(token, "token", None)
+    if not isinstance(value, str) or not value.strip():
+        raise AcaSmokeEnvironmentError("DefaultAzureCredential returned an empty Easy Auth token.")
+    return value
+
+
+def _validated_token_owner(token: str) -> tuple[str, str]:
+    """Extract only validated tenant/object IDs from a JWT payload without emitting it."""
+    try:
+        _, payload_segment, _ = token.split(".")
+        payload_segment += "=" * (-len(payload_segment) % 4)
+        payload = json.loads(base64.urlsafe_b64decode(payload_segment))
+        if not isinstance(payload, dict):
+            _invalid_token_owner()
+        tenant_id = payload.get("tid")
+        object_id = payload.get("oid")
+        if not isinstance(tenant_id, str) or not isinstance(object_id, str):
+            _invalid_token_owner()
+        principal = EntraPrincipal.create(
+            tenant_id=tenant_id,
+            object_id=object_id,
+        )
+    except (ValueError, TypeError, json.JSONDecodeError, SessionStateContractError) as exc:
+        raise AcaSmokeEnvironmentError(
+            "DefaultAzureCredential returned a token without valid tid and oid ownership claims."
+        ) from exc
+    return principal.tenant_id, principal.object_id
+
+
+def _invalid_token_owner() -> NoReturn:
+    raise ValueError("token ownership claims are invalid")
 
 
 async def json_request(
@@ -195,7 +265,67 @@ async def read_sse_events(
     headers: Mapping[str, str],
 ) -> tuple[int, list[SseEvent], Mapping[str, str]]:
     """Read a bounded public SSE response using the controller's emitted frame shape."""
+    status, events, response_headers, _ = await read_sse_events_with_first_event_time(
+        session,
+        url,
+        headers=headers,
+    )
+    return status, events, response_headers
 
+
+async def read_sse_events_with_first_event_time(
+    session: ClientSession,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    overall_timeout_seconds: float = 240.0,
+) -> tuple[int, list[SseEvent], Mapping[str, str], float | None]:
+    """Reconnect public SSE with ``Last-Event-ID`` until the terminal ``done`` event."""
+    deadline = time.perf_counter() + overall_timeout_seconds
+    events: list[SseEvent] = []
+    first_event_at: float | None = None
+    response_headers: Mapping[str, str] = {}
+    while True:
+        remaining = deadline - time.perf_counter()
+        if remaining <= 0:
+            raise AcaSmokeEnvironmentError(
+                "Function App SSE stream did not reach done before the overall deadline."
+            )
+        request_headers = dict(headers)
+        if events:
+            request_headers["Last-Event-ID"] = str(events[-1].sequence)
+        try:
+            async with asyncio.timeout(remaining):
+                status, segment, response_headers, segment_first_event_at = await _read_sse_response(
+                    session,
+                    url,
+                    headers=request_headers,
+                )
+        except TimeoutError as exc:
+            raise AcaSmokeEnvironmentError(
+                "Function App SSE stream did not reach done before the overall deadline."
+            ) from exc
+        if status != 200:
+            return status, events, response_headers, first_event_at
+        events = append_contiguous_sse_events(events, segment)
+        if first_event_at is None and segment_first_event_at is not None:
+            first_event_at = segment_first_event_at
+        if events and events[-1].payload.get("type") == "done":
+            return status, events, response_headers, first_event_at
+        if time.perf_counter() >= deadline:
+            raise AcaSmokeEnvironmentError(
+                "Function App SSE stream did not reach done before the overall deadline."
+            )
+        await asyncio.sleep(0.1)
+
+
+async def _read_sse_response(
+    session: ClientSession,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+) -> tuple[int, list[SseEvent], Mapping[str, str], float | None]:
+    """Read one public SSE response, which may end at the server lease boundary."""
     try:
         async with session.get(url, headers=headers) as response:
             status = response.status
@@ -203,10 +333,18 @@ async def read_sse_events(
             if status >= 502:
                 _raise_unavailable_response(url, status)
             chunks: list[str] = []
+            first_event_at: float | None = None
+            pending = ""
             async for chunk in response.content:
-                chunks.append(chunk.decode("utf-8"))
+                decoded = chunk.decode("utf-8")
+                chunks.append(decoded)
+                pending += decoded.replace("\r\n", "\n")
+                frames = pending.split("\n\n")
+                pending = frames.pop()
+                if first_event_at is None and parse_sse_frames(frames):
+                    first_event_at = time.perf_counter()
             body = "".join(chunks).replace("\r\n", "\n")
-            return status, parse_sse_frames(body.split("\n\n")), response_headers
+            return status, parse_sse_frames(body.split("\n\n")), response_headers, first_event_at
     except AcaSmokeEnvironmentError:
         raise
     except (TimeoutError, OSError, UnicodeDecodeError) as exc:
@@ -214,6 +352,21 @@ async def read_sse_events(
             f"Function App SSE endpoint was unavailable at {redact_deployed_aca_evidence(url)}: "
             f"{type(exc).__name__}"
         ) from exc
+
+
+def append_contiguous_sse_events(
+    prior: list[SseEvent],
+    segment: list[SseEvent],
+) -> list[SseEvent]:
+    """Append a replay segment while rejecting duplicate, skipped, or reordered event IDs."""
+    if not segment:
+        return prior
+    expected_sequence = prior[-1].sequence + 1 if prior else 1
+    if [event.sequence for event in segment] != list(
+        range(expected_sequence, expected_sequence + len(segment))
+    ):
+        raise AssertionError("Public SSE replay did not preserve strictly contiguous event IDs.")
+    return [*prior, *segment]
 
 
 def parse_sse_frames(frames: list[str]) -> list[SseEvent]:
@@ -240,7 +393,6 @@ def parse_sse_frames(frames: list[str]) -> list[SseEvent]:
             raise ValueError("SSE event payload must be a JSON object.")
         events.append(SseEvent(sequence=sequence, payload=decoded, event_name=fields.get("event")))
     return events
-
 
 def redact_deployed_aca_evidence(value: str) -> str:
     """Remove URL queries, credentials, and bearer values from operator diagnostics."""
