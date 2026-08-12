@@ -155,6 +155,78 @@ Missing URL/configuration, token acquisition, or unavailable-app failures are
 reported as `ACA-SMOKE-ENV` pytest errors; public response and protocol
 assertions remain pytest failures. Never log prompt or model-result content.
 
+### Run the deployed cold-start qualification manually
+
+`tests/live/test_aca_deployed_cold_start.py` is a separate manual-only
+customer-path performance qualification. It always targets the regular
+no-tools `deployed_turn` agent; it does not use `deployed_load`, its hold tool,
+or the N-load concurrency path. The default is exactly **three sequential fresh
+sessions**. This avoids bursts and file-plane contention and is intentionally
+not an N=100 test.
+
+Run it with the lifecycle settings so the test can make read-only Table
+observations and use exact-label ACA cleanup. The sample count may be explicitly
+set to **1..5** by `--aca-cold-start-samples` or
+`AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES`; the CLI value wins. Do not
+increase this bound.
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net/api"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG="deployed_turn"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE="api://<app-client-id>/.default"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE="<app-client-id>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS=180
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI="https://<storage-account>.table.core.windows.net"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME="AzureFunctionsAgentsSessions"
+export AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.App/sandboxGroups/<group>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID="<function-app-subscription-id>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME="<function-app-site-name>"
+python -m pytest -m live_aca tests/live/test_aca_deployed_cold_start.py -v \
+  -o log_cli=true -o log_cli_level=INFO
+```
+
+The test acquires app-only Easy Auth evidence, records monotonic POST start,
+first response, first SSE event, and terminal `done`, then verifies public
+terminal status and result availability for every fresh session. It retries
+only typed `504 setup_deadline_exceeded` responses, honors `Retry-After`, and
+reuses the same idempotency key. A first attempt passes only when it returns
+`202` in at most **35 seconds** (the 30-second setup contract plus a 5-second
+network allowance); a typed first-attempt `504` is a cold-start SLO failure
+even if a later retry succeeds. Model terminal latency has no new threshold:
+the existing authored timeout remains the bound and terminal latency is
+reported only.
+
+Operator output contains only aggregate sample count, retries, p50/p95/max
+first-attempt acceptance, total acceptance, first event, terminal latency, and
+cleanup status. It never prints IDs, prompts, model output, tokens, headers,
+or resource IDs. Ambiguous submissions are recovered by owner idempotency
+reservation only. The test never writes Table state: cleanup deletes only
+exact-label owned backing and requires the deployed controller to tombstone it,
+then verifies zero owned backing and snapshots. Failure candidates are retained
+for that cleanup boundary.
+
+The separate manual-only `ACADeployedColdStart` job runs this test independently
+of `ACADeployedAgentTurn` and its optional load concurrency. The load job keeps
+its 360-minute cap and remains the sole human N=100 path.
+`ACA_DEPLOYED_COLD_START_SAMPLES` is an optional, non-secret manual pipeline
+variable mapped only when provided; the default is three. The pipeline accepts
+only integer values **1..4**. Its enforced four-sample maximum is
+**4 x 465 + 60 final recovery + 4 x 240 cleanup = 2,880 seconds (48 minutes)**,
+leaving exactly **12 minutes** of the 60-minute cap for job overhead. All job
+setup must fit within that allowance. The test still allows **1..5** for direct
+local/manual pytest:
+five samples are not pipeline-supported and require a caller-provided watchdog
+longer than 65 minutes.
+
+Each sample allows 180 seconds of admission (at most three 45-second attempts
+and retry waits), 240 seconds of SSE terminal observation, and 45 seconds of
+public terminal reads. The shared final recovery window polls once per second;
+every attempted key must resolve for cleanup or the report marks cleanup
+incomplete. Unit doubles validate orchestration and report contracts; they do
+not prove real Azure cold-start latency. No live result is implied until an
+authorized manual run passes.
+
 ### Run the deployed lifecycle qualification manually
 
 The deployed fixture intentionally uses the shortest supported ACA

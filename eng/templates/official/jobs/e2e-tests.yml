@@ -292,3 +292,102 @@ jobs:
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_DEPLOYED_APP_SUBSCRIPTION_ID)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: $(ACA_DEPLOYED_APP_SITE_NAME)
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+
+  - job: "ACADeployedColdStart"
+    displayName: 'Run deployed ACA cold-start qualification'
+    condition: eq(variables['Build.Reason'], 'Manual')
+    continueOnError: true
+    timeoutInMinutes: 60
+
+    pool:
+      name: ${{ parameters.PoolName }}
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    steps:
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+      - bash: |
+          python -m pip install --upgrade pip
+          python -m pip install -U -e ".[dev,aca_sandbox]"
+        displayName: 'Install deployed ACA cold-start dependencies'
+
+      - task: AzureCLI@2
+        displayName: 'Run deployed ACA cold-start qualification'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            for name in AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME; do
+              eval "value=\${${name}:-}"
+              if [ -z "${value}" ] || case "${value}" in '$('*')') true;; *) false;; esac; then
+                echo "Required deployed ACA environment ${name} is not set." >&2
+                exit 1
+              fi
+            done
+            echo "Azure service connection authenticated"
+            if [ -n "${ACA_DEPLOYED_COLD_START_SAMPLES:-}" ]; then
+              case "${ACA_DEPLOYED_COLD_START_SAMPLES}" in
+                [1-4]) ;;
+                *)
+                  echo "ACA_DEPLOYED_COLD_START_SAMPLES must be an integer from 1 through 4 in ACADeployedColdStart. For 5 samples, run direct pytest with a caller-provided watchdog longer than 65 minutes." >&2
+                  exit 1
+                  ;;
+              esac
+              export AZURE_FUNCTIONS_AGENTS_ACA_COLD_START_SAMPLES="${ACA_DEPLOYED_COLD_START_SAMPLES}"
+            fi
+            python - <<'PY'
+            import asyncio
+            import os
+
+            from azure.identity.aio import DefaultAzureCredential
+
+
+            async def main() -> None:
+                credential = DefaultAzureCredential()
+                try:
+                    token = await credential.get_token(
+                        os.environ[
+                            "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE"
+                        ]
+                    )
+                finally:
+                    await credential.close()
+                if not token.token:
+                    raise RuntimeError("Easy Auth token acquisition returned an empty token")
+                print("Easy Auth token acquired")
+
+
+            asyncio.run(main())
+            PY
+            python -m pytest -m live_aca \
+              tests/live/test_aca_deployed_cold_start.py -v \
+              -o log_cli=true -o log_cli_level=INFO
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE: '1'
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL: $(ACA_DEPLOYED_FUNCTION_BASE_URL)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG: $(ACA_DEPLOYED_AGENT_SLUG)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_DEPLOYED_EASY_AUTH_AUDIENCE)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS: $(ACA_DEPLOYED_TIMEOUT_SECONDS)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI: $(ACA_DEPLOYED_TABLE_SERVICE_URI)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME: $(ACA_DEPLOYED_TABLE_NAME)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_DEPLOYED_APP_SUBSCRIPTION_ID)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: $(ACA_DEPLOYED_APP_SITE_NAME)
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

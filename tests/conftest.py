@@ -17,6 +17,13 @@ from tests.doubles.content_package import content_package  # noqa: E402
 
 def pytest_addoption(parser: pytest.Parser) -> None:
     parser.addoption(
+        "--aca-cold-start-samples",
+        action="store",
+        default=None,
+        metavar="N",
+        help="Run the manual deployed ACA cold-start qualification with 1..5 sequential samples.",
+    )
+    parser.addoption(
         "--aca-load-concurrency",
         action="store",
         default=None,
