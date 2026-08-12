@@ -190,6 +190,7 @@ jobs:
     displayName: 'Run deployed ACA agent-turn, lifecycle, and backing-loss qualification'
     condition: eq(variables['Build.Reason'], 'Manual')
     continueOnError: true
+    timeoutInMinutes: 360
 
     pool:
       name: ${{ parameters.PoolName }}

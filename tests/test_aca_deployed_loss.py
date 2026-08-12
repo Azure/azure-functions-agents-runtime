@@ -110,6 +110,12 @@ def test_loss_public_contract_maps_terminal_status_to_200_and_result_to_410() ->
         result_code=410,
         result={"error": "session_gone"},
     )
+    support.assert_public_backing_loss_contract(
+        status_code=200,
+        status={"state": "abandoned", "error": {"code": "run_abandoned"}},
+        result_code=410,
+        result={"error": "result_unavailable"},
+    )
     with pytest.raises(AssertionError):
         support.assert_public_backing_loss_contract(
             status_code=200,
@@ -227,6 +233,38 @@ async def test_loss_submission_recovers_a_candidate_after_transport_error(
 
     assert actual is accepted
     assert recovered_keys == ["recoverable-key"]
+
+
+@pytest.mark.asyncio
+async def test_loss_submission_timeout_recovers_a_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    loss_module: object,
+) -> None:
+    module = loss_module
+    accepted = SimpleNamespace(session_id="session-1", run_id="run-1")
+    never = module.asyncio.Event()  # type: ignore[attr-defined]
+
+    async def blocking_request(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        await never.wait()
+        raise AssertionError("unreachable")
+
+    async def recover(*_: object) -> object:
+        return accepted
+
+    monkeypatch.setattr(module, "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "json_request", blocking_request)
+    monkeypatch.setattr(module, "_recover_candidate", recover)
+
+    actual = await module._submit_held_run(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        {"Authorization": "redacted", "Content-Type": "application/json"},
+        "partition",
+        "timeout-key",
+    )
+
+    assert actual is accepted
 
 
 @pytest.mark.asyncio

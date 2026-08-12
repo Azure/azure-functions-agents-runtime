@@ -68,16 +68,24 @@ _EVENT_STREAM_GRACE_SECONDS = 360.0
 _HOLD_SECONDS = 300.0
 _MINIMUM_HOLD_TERMINAL_SECONDS = _HOLD_SECONDS - 1.0
 _SETUP_DEADLINE_ATTEMPTS = 6
+_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0
+_PROVISION_BATCH_TIMEOUT_SECONDS = 660.0
 _RECOVERY_ATTEMPTS = 5
 _RECOVERY_POLL_SECONDS = 1.0
+_FINAL_RECOVERY_TIMEOUT_SECONDS = 60.0
 _OVERLAP_BUDGET_MARGIN_SECONDS = 15.0
 _SETTLEMENT_TIMEOUT_SECONDS = 900.0
 _RACE_SAMPLE_LIMIT = 5
 _CONNECTION_HEADROOM = 10
+_PROVISION_CONCURRENCY = 4
+_FORMAL_LOAD_CONCURRENCY = 100
+_PREPARED_SUSPENSION_TIMEOUT_SECONDS = 120.0
 _LOAD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
+_READINESS_PROMPT = "Return a brief readiness acknowledgement without tools."
 _SAFE_ADMISSION_FAILURE_CATEGORY = re.compile(
     r"^(?:"
     r"setup_deadline_exceeded|"
+    r"phase_b_session_mismatch|"
     r"public_admission_request_ambiguous|"
     r"public_admission_response_invalid|"
     r"public_admission_http_(?:400|401|403|404)|"
@@ -99,6 +107,7 @@ class _SubmittedRun:
     idempotency_key: str
     submitted_at: float
     accepted_at: float
+    session_id_header: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -131,6 +140,7 @@ class _AdmissionSummary:
     unclassified_service_throttles: int
     unresolved_idempotencies: int
     attempted_idempotency_keys: tuple[str, ...]
+    attempt_count: int
 
 
 class _AdmissionFailureError(AcaSmokeEnvironmentError):
@@ -145,6 +155,7 @@ class _AdmissionFailureError(AcaSmokeEnvironmentError):
         unresolved_idempotencies: int,
         attempted_idempotency_keys: tuple[str, ...],
         failure_categories: tuple[tuple[str, int], ...],
+        attempt_count: int,
     ) -> None:
         category_text = ",".join(
             f"{category}={count}" for category, count in failure_categories
@@ -160,6 +171,7 @@ class _AdmissionFailureError(AcaSmokeEnvironmentError):
         self.unresolved_idempotencies = unresolved_idempotencies
         self.attempted_idempotency_keys = attempted_idempotency_keys
         self.failure_categories = failure_categories
+        self.attempt_count = attempt_count
 
 
 @pytest.mark.live_aca
@@ -180,7 +192,10 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
         )
     ).partition_key
     resources: DeployedAcaLifecycleResources | None = None
-    submitted: list[_SubmittedRun] = []
+    prepared: list[_SubmittedRun] = []
+    held: list[_SubmittedRun] = []
+    recovered_cleanup_candidates: list[_SubmittedRun] = []
+    attempted_idempotency_keys: list[str] = []
     event_tasks: list[asyncio.Task[_EventEvidence]] = []
     common_interval: CommonActiveInterval | None = None
     succeeded_count = 0
@@ -190,6 +205,10 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
     unclassified_service_throttle_count = 0
     unresolved_idempotency_count = 0
     admission_failure_categories: tuple[tuple[str, int], ...] = ()
+    provisioning_duration_seconds: float | None = None
+    provisioning_attempt_count = 0
+    provisioning_retry_count = 0
+    suspended_prepared_count = 0
     cleanup_complete = False
     settlement_complete = True
     metrics = None
@@ -209,15 +228,52 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
             ClientSession(timeout=timeout, connector=TCPConnector(limit=connector_limit)) as events,
         ):
             try:
+                provisioning_started = time.perf_counter()
                 try:
-                    admission = await _submit_distinct_sessions(
+                    provisioning = await _prepare_sessions(
                         control,
+                        events,
                         config,
                         headers,
                         concurrency,
-                        submitted,
+                        prepared,
                         resources,
                         partition_key,
+                        authorization,
+                        attempted_idempotency_keys,
+                    )
+                except _AdmissionFailureError as exc:
+                    provisioning_retry_count += exc.retries
+                    provisioning_attempt_count += exc.attempt_count
+                    unclassified_service_throttle_count += exc.throttles
+                    unresolved_idempotency_count += exc.unresolved_idempotencies
+                    admission_failure_categories = exc.failure_categories
+                    raise
+                else:
+                    provisioning_attempt_count = provisioning.attempt_count
+                    provisioning_retry_count += provisioning.retries
+                    unclassified_service_throttle_count += provisioning.unclassified_service_throttles
+                    unresolved_idempotency_count += provisioning.unresolved_idempotencies
+                    _assert_distinct_admissions(prepared, concurrency)
+                    if _requires_prepared_suspension(concurrency):
+                        suspended_prepared_count = await _wait_for_suspended_prepared_backing(
+                            resources,
+                            config,
+                            partition_key,
+                            prepared,
+                        )
+                finally:
+                    provisioning_duration_seconds = time.perf_counter() - provisioning_started
+                try:
+                    admission = await _submit_existing_sessions(
+                        control,
+                        config,
+                        headers,
+                        prepared,
+                        held,
+                        resources,
+                        partition_key,
+                        attempted_idempotency_keys,
                     )
                 except _AdmissionFailureError as exc:
                     retry_count += exc.retries
@@ -228,35 +284,35 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
                 retry_count += admission.retries
                 unclassified_service_throttle_count += admission.unclassified_service_throttles
                 unresolved_idempotency_count += admission.unresolved_idempotencies
-                _assert_distinct_admissions(submitted, concurrency)
-                _assert_remaining_hold_budget(submitted)
+                _assert_distinct_admissions(held, concurrency)
+                _assert_remaining_hold_budget(held)
                 event_tasks = [
-                    asyncio.create_task(_read_events(events, item, authorization)) for item in submitted
+                    asyncio.create_task(_read_events(events, item, authorization)) for item in held
                 ]
                 common_interval, replay_count, active_run_conflict_count = (
                     await _establish_common_active_interval(
                         resources,
                         config,
                         partition_key,
-                        submitted,
+                        held,
                         control,
                         headers,
                     )
                 )
                 event_evidence = await asyncio.gather(*event_tasks)
-                _assert_hold_duration(submitted, event_evidence)
-                await _assert_terminal_public_results(control, submitted, authorization)
-                await _assert_terminal_durable_state(resources, config, partition_key, submitted)
-                succeeded_count = len(submitted)
+                _assert_hold_duration(held, event_evidence)
+                await _assert_terminal_public_results(control, held, authorization)
+                await _assert_terminal_durable_state(resources, config, partition_key, held)
+                succeeded_count = len(held)
                 metrics = latency_metrics(
-                    [item.accepted_at - item.submitted_at for item in submitted],
+                    [item.accepted_at - item.submitted_at for item in held],
                     [
                         event.first_event_at - item.submitted_at
-                        for item, event in zip(submitted, event_evidence, strict=True)
+                        for item, event in zip(held, event_evidence, strict=True)
                     ],
                     [
                         event.terminal_at - item.submitted_at
-                        for item, event in zip(submitted, event_evidence, strict=True)
+                        for item, event in zip(held, event_evidence, strict=True)
                     ],
                 )
             finally:
@@ -266,13 +322,35 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
                         task.cancel()
                 if event_tasks:
                     await asyncio.gather(*event_tasks, return_exceptions=True)
-                if inner_primary_error is not None and submitted:
+                try:
+                    recovered, unresolved = await _recover_final_cleanup_candidates(
+                        resources,
+                        config,
+                        partition_key,
+                        attempted_idempotency_keys,
+                        [*prepared, *held],
+                    )
+                    recovered_cleanup_candidates.extend(recovered)
+                    unresolved_idempotency_count = unresolved
+                    if unresolved and inner_primary_error is not None:
+                        inner_primary_error.add_note(
+                            "ACA load cleanup has unresolved owner-idempotency reservations."
+                        )
+                except AcaSmokeEnvironmentError:
+                    unresolved_idempotency_count = len(set(attempted_idempotency_keys))
+                    if inner_primary_error is not None:
+                        inner_primary_error.add_note(
+                            "ACA load cleanup could not recover all owner-idempotency reservations."
+                        )
+                    else:
+                        raise
+                if inner_primary_error is not None and (prepared or held or recovered_cleanup_candidates):
                     try:
                         await _settle_failed_runs(
                             resources,
                             config,
                             partition_key,
-                            submitted,
+                            [*prepared, *held, *recovered_cleanup_candidates],
                             control,
                             authorization,
                         )
@@ -282,13 +360,14 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
     finally:
         primary_error = sys.exception()
         try:
-            if resources is not None and submitted:
+            tracked = [*prepared, *held, *recovered_cleanup_candidates]
+            if resources is not None and tracked:
                 if settlement_complete:
                     cleanup_complete = await _cleanup_load_sessions(
-                        resources, config, partition_key, submitted
+                        resources, config, partition_key, tracked
                     )
                 else:
-                    await _provider_cleanup_last_resort(resources, config, partition_key, submitted)
+                    await _provider_cleanup_last_resort(resources, config, partition_key, tracked)
                     cleanup_complete = False
             if unresolved_idempotency_count:
                 cleanup_complete = False
@@ -301,8 +380,14 @@ async def test_deployed_aca_load_has_a_common_durable_active_interval(
             "%s",
             render_load_report(
                 concurrency=concurrency,
+                prepared_count=len(prepared),
+                provision_concurrency=_PROVISION_CONCURRENCY,
+                provisioning_duration_seconds=provisioning_duration_seconds,
+                provisioning_attempt_count=provisioning_attempt_count,
+                provisioning_retry_count=provisioning_retry_count,
+                suspended_prepared_count=suspended_prepared_count,
                 common_interval=common_interval,
-                admitted_count=len(submitted),
+                admitted_count=len(held),
                 succeeded_count=succeeded_count,
                 metrics=metrics,
                 replay_count=replay_count,
@@ -324,6 +409,10 @@ def _load_config(config: DeployedAcaLifecycleConfig) -> DeployedAcaLifecycleConf
     return replace(config, deployed=replace(config.deployed, agent_slug=_LOAD_AGENT_SLUG))
 
 
+def _requires_prepared_suspension(concurrency: int) -> bool:
+    return concurrency == _FORMAL_LOAD_CONCURRENCY
+
+
 def _raise_or_note_cleanup_failure(
     primary_error: BaseException | None,
     cleanup_error: BaseException,
@@ -341,35 +430,218 @@ def _note_settlement_failure(primary_error: BaseException) -> None:
     primary_error.add_note("ACA load durable settlement also failed before provider cleanup.")
 
 
-async def _submit_distinct_sessions(
+async def _prepare_sessions(
     client: ClientSession,
+    events: ClientSession,
     config: DeployedAcaLifecycleConfig,
     headers: dict[str, str],
     concurrency: int,
-    submitted: list[_SubmittedRun],
+    prepared: list[_SubmittedRun],
     resources: DeployedAcaLifecycleResources,
     partition_key: str,
+    authorization: str,
+    attempted_idempotency_keys: list[str],
 ) -> _AdmissionSummary:
-    attempted_idempotency_keys: list[str] = []
-    results = await asyncio.gather(
+    """Create and prove idle each four-session batch before posting the next batch."""
+    retries = 0
+    throttles = 0
+    unresolved = 0
+    for start in range(0, concurrency, _PROVISION_CONCURRENCY):
+        before_batch = len(prepared)
+        batch_size = min(_PROVISION_CONCURRENCY, concurrency - start)
+        try:
+            async with asyncio.timeout(_PROVISION_BATCH_TIMEOUT_SECONDS):
+                admission = await _submit_session_batch(
+                    client,
+                    config,
+                    headers,
+                    resources,
+                    partition_key,
+                    session_ids=[None] * batch_size,
+                    prompt=_READINESS_PROMPT,
+                    submitted=prepared,
+                    attempted_idempotency_keys=attempted_idempotency_keys,
+                )
+                batch = prepared[before_batch:]
+                _assert_distinct_admissions(batch, batch_size)
+                await _assert_prepared_sessions(
+                    events,
+                    client,
+                    resources,
+                    config,
+                    partition_key,
+                    batch,
+                    authorization,
+                )
+        except TimeoutError as exc:
+            raise AcaSmokeEnvironmentError(
+                "A Phase A provisioning batch did not reach public terminal durable idle state "
+                "within its bounded deadline."
+            ) from exc
+        retries += admission.retries
+        throttles += admission.unclassified_service_throttles
+        unresolved += admission.unresolved_idempotencies
+    return _AdmissionSummary(
+        retries=retries,
+        unclassified_service_throttles=throttles,
+        unresolved_idempotencies=unresolved,
+        attempted_idempotency_keys=tuple(attempted_idempotency_keys),
+        attempt_count=concurrency + retries,
+    )
+
+
+async def _submit_existing_sessions(
+    client: ClientSession,
+    config: DeployedAcaLifecycleConfig,
+    headers: dict[str, str],
+    prepared: list[_SubmittedRun],
+    held: list[_SubmittedRun],
+    resources: DeployedAcaLifecycleResources,
+    partition_key: str,
+    attempted_idempotency_keys: list[str],
+) -> _AdmissionSummary:
+    """Launch the formal held turns concurrently against the already prepared sessions."""
+    admission = await _submit_session_batch(
+        client,
+        config,
+        headers,
+        resources,
+        partition_key,
+        session_ids=[item.accepted.session_id for item in prepared],
+        prompt=_LOAD_PROMPT,
+        submitted=held,
+        attempted_idempotency_keys=attempted_idempotency_keys,
+    )
+    _assert_phase_b_session_identity(prepared, held)
+    return admission
+
+
+async def _assert_prepared_sessions(
+    events: ClientSession,
+    control: ClientSession,
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    prepared: list[_SubmittedRun],
+    authorization: str,
+) -> None:
+    """Require public terminal readiness and a durable idle slot before the held-run phase."""
+    await asyncio.gather(
         *(
-            _submit_one(
-                client,
-                config,
-                headers,
+            _assert_prepared_session(
+                events,
+                control,
                 resources,
+                config,
                 partition_key,
-                attempted_idempotency_keys,
+                item,
+                authorization,
             )
-            for _ in range(concurrency)
-        ),
+            for item in prepared
+        )
+    )
+
+
+async def _assert_prepared_session(
+    events: ClientSession,
+    control: ClientSession,
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    prepared: _SubmittedRun,
+    authorization: str,
+) -> None:
+    status, stream, _, _ = await read_sse_events_with_first_event_time(
+        events,
+        prepared.accepted.management_urls["events_url"],
+        headers={"Authorization": authorization},
+        overall_timeout_seconds=config.deployed.timeout_seconds + _EVENT_STREAM_GRACE_SECONDS,
+    )
+    assert status == 200
+    assert stream
+    assert [event.sequence for event in stream] == list(range(1, len(stream) + 1))
+    assert stream[-1].payload.get("type") == "done"
+    _assert_no_public_hold_events(stream)
+    assert await _read_terminal_result(control, prepared, authorization)
+    assert await _read_prepared_idle_observation(resources, config, partition_key, prepared)
+
+
+async def _wait_for_suspended_prepared_backing(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    prepared: list[_SubmittedRun],
+) -> int:
+    """Observe one exact-label prepared backing stopped or suspended before the N=100 phase."""
+    deadline = time.perf_counter() + _PREPARED_SUSPENSION_TIMEOUT_SECONDS
+    while True:
+        sessions = await asyncio.gather(
+            *(
+                read_authoritative_session(
+                    resources,
+                    session_id=item.accepted.session_id,
+                    partition_key=partition_key,
+                )
+                for item in prepared
+            )
+        )
+        for session in sessions:
+            assert_session_belongs_to_deployment(session, config)
+        sandboxes = await asyncio.gather(
+            *(owned_sandbox(resources, session) for session in sessions)
+        )
+        suspended_count = sum(
+            sandbox is not None and sandbox.state in {"Stopped", "Suspended"}
+            for sandbox in sandboxes
+        )
+        if suspended_count:
+            return suspended_count
+        if time.perf_counter() >= deadline:
+            raise AssertionError(
+                "No prepared session's exact-label ACA backing reached Stopped or Suspended "
+                "before the formal N=100 held-run phase."
+            )
+        await asyncio.sleep(_POLL_SECONDS)
+
+
+async def _submit_session_batch(
+    client: ClientSession,
+    config: DeployedAcaLifecycleConfig,
+    headers: dict[str, str],
+    resources: DeployedAcaLifecycleResources,
+    partition_key: str,
+    *,
+    session_ids: list[str | None],
+    prompt: str,
+    submitted: list[_SubmittedRun],
+    attempted_idempotency_keys: list[str],
+) -> _AdmissionSummary:
+    first_key_index = len(attempted_idempotency_keys)
+
+    async def submit(session_id: str | None) -> _AdmissionOutcome:
+        outcome = await _submit_one(
+            client,
+            config,
+            headers,
+            resources,
+            partition_key,
+            attempted_idempotency_keys,
+            prompt=prompt,
+            session_id=session_id,
+        )
+        if outcome.submitted is not None:
+            submitted.append(outcome.submitted)
+        return outcome
+
+    results = await asyncio.gather(
+        *(submit(session_id) for session_id in session_ids),
         return_exceptions=True,
     )
     outcomes = [result for result in results if isinstance(result, _AdmissionOutcome)]
-    submitted.extend(outcome.submitted for outcome in outcomes if outcome.submitted is not None)
     retries = sum(outcome.retries for outcome in outcomes)
     throttles = sum(outcome.unclassified_service_throttles for outcome in outcomes)
     unresolved = sum(outcome.unresolved_idempotency for outcome in outcomes)
+    attempt_count = len(outcomes) + retries
     failures = [outcome.failure for outcome in outcomes if outcome.failure is not None]
     unexpected = [
         result
@@ -387,7 +659,7 @@ async def _submit_distinct_sessions(
     failure_categories = _admission_failure_categories(
         [*failures, *(["other_admission_failure"] * len(exceptions))]
     )
-    retained_keys = tuple(attempted_idempotency_keys) or tuple(
+    retained_keys = tuple(attempted_idempotency_keys[first_key_index:]) or tuple(
         outcome.idempotency_key for outcome in outcomes
     )
     if failures or exceptions:
@@ -399,6 +671,7 @@ async def _submit_distinct_sessions(
             unresolved_idempotencies=unresolved,
             attempted_idempotency_keys=retained_keys,
             failure_categories=failure_categories,
+            attempt_count=attempt_count,
         )
         if cause is not None:
             raise error from cause
@@ -409,12 +682,14 @@ async def _submit_distinct_sessions(
             unresolved_idempotencies=unresolved,
             attempted_idempotency_keys=retained_keys,
             failure_categories=failure_categories,
+            attempt_count=attempt_count,
         )
     return _AdmissionSummary(
         retries=retries,
         unclassified_service_throttles=throttles,
         unresolved_idempotencies=unresolved,
         attempted_idempotency_keys=retained_keys,
+        attempt_count=attempt_count,
     )
 
 
@@ -429,6 +704,32 @@ def _admission_failure_categories(
     return tuple(sorted(categories.items()))
 
 
+def _recovered_admission_outcome(
+    *,
+    idempotency_key: str,
+    recovered: _SubmittedRun | None,
+    retries: int,
+    unclassified_service_throttles: int,
+    failure: str,
+    session_id_header: str | None,
+) -> _AdmissionOutcome:
+    """Retain a recovered candidate even when an existing-session identity is unsafe."""
+    if (
+        recovered is not None
+        and session_id_header is not None
+        and recovered.accepted.session_id != session_id_header
+    ):
+        failure = "phase_b_session_mismatch"
+    return _AdmissionOutcome(
+        idempotency_key,
+        recovered,
+        retries,
+        unclassified_service_throttles,
+        failure,
+        recovered is None,
+    )
+
+
 async def _submit_one(
     client: ClientSession,
     config: DeployedAcaLifecycleConfig,
@@ -436,6 +737,9 @@ async def _submit_one(
     resources: DeployedAcaLifecycleResources,
     partition_key: str,
     attempted_idempotency_keys: list[str],
+    *,
+    prompt: str = _LOAD_PROMPT,
+    session_id: str | None = None,
 ) -> _AdmissionOutcome:
     idempotency_key = uuid.uuid4().hex
     attempted_idempotency_keys.append(idempotency_key)
@@ -443,28 +747,33 @@ async def _submit_one(
     retries = 0
     for attempt in range(_SETUP_DEADLINE_ATTEMPTS):
         try:
-            status, payload, response_headers = await json_request(
-                client,
-                "POST",
-                config.deployed.chat_url,
-                headers={**headers, "Idempotency-Key": idempotency_key},
-                payload=submission_payload(_LOAD_PROMPT),
-            )
-        except AcaSmokeEnvironmentError:
+            request_headers = {**headers, "Idempotency-Key": idempotency_key}
+            if session_id is not None:
+                request_headers["x-ms-session-id"] = session_id
+            async with asyncio.timeout(_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS):
+                status, payload, response_headers = await json_request(
+                    client,
+                    "POST",
+                    config.deployed.chat_url,
+                    headers=request_headers,
+                    payload=submission_payload(prompt),
+                )
+        except (AcaSmokeEnvironmentError, TimeoutError):
             recovered = await _recover_submitted_run(
                 resources,
                 config,
                 partition_key,
                 idempotency_key,
                 submitted_at,
+                session_id_header=session_id,
             )
-            return _AdmissionOutcome(
-                idempotency_key,
-                recovered,
-                retries,
-                0,
-                "public_admission_request_ambiguous",
-                recovered is None,
+            return _recovered_admission_outcome(
+                idempotency_key=idempotency_key,
+                recovered=recovered,
+                retries=retries,
+                unclassified_service_throttles=0,
+                failure="public_admission_request_ambiguous",
+                session_id_header=session_id,
             )
         accepted_at = time.perf_counter()
         if status == 202:
@@ -477,18 +786,35 @@ async def _submit_one(
                     partition_key,
                     idempotency_key,
                     submitted_at,
+                    session_id_header=session_id,
                 )
+                return _recovered_admission_outcome(
+                    idempotency_key=idempotency_key,
+                    recovered=recovered,
+                    retries=retries,
+                    unclassified_service_throttles=0,
+                    failure="public_admission_response_invalid",
+                    session_id_header=session_id,
+                )
+            submitted = _SubmittedRun(
+                accepted,
+                idempotency_key,
+                submitted_at,
+                accepted_at,
+                session_id,
+            )
+            if session_id is not None and accepted.session_id != session_id:
                 return _AdmissionOutcome(
                     idempotency_key,
-                    recovered,
+                    submitted,
                     retries,
                     0,
-                    "public_admission_response_invalid",
-                    recovered is None,
+                    "phase_b_session_mismatch",
+                    False,
                 )
             return _AdmissionOutcome(
                 idempotency_key,
-                _SubmittedRun(accepted, idempotency_key, submitted_at, accepted_at),
+                submitted,
                 retries,
                 0,
                 None,
@@ -503,6 +829,7 @@ async def _submit_one(
                 submitted_at,
                 retries,
                 status,
+                session_id_header=session_id,
                 unclassified_service_throttles=1,
             )
         if status == 504 and payload.get("error") == "setup_deadline_exceeded":
@@ -516,14 +843,15 @@ async def _submit_one(
                 partition_key,
                 idempotency_key,
                 submitted_at,
+                session_id_header=session_id,
             )
-            return _AdmissionOutcome(
-                idempotency_key,
-                recovered,
-                retries,
-                0,
-                "setup_deadline_exceeded",
-                recovered is None,
+            return _recovered_admission_outcome(
+                idempotency_key=idempotency_key,
+                recovered=recovered,
+                retries=retries,
+                unclassified_service_throttles=0,
+                failure="setup_deadline_exceeded",
+                session_id_header=session_id,
             )
         if status in {400, 401, 403, 404}:
             return _AdmissionOutcome(
@@ -537,6 +865,7 @@ async def _submit_one(
             submitted_at,
             retries,
             status,
+            session_id_header=session_id,
             unclassified_service_throttles=0,
         )
     raise AssertionError("setup-deadline admission loop must return an outcome")
@@ -548,6 +877,8 @@ async def _recover_submitted_run(
     partition_key: str,
     idempotency_key: str,
     submitted_at: float,
+    *,
+    session_id_header: str | None = None,
 ) -> _SubmittedRun | None:
     """Find an ambiguous admission through its owner-scoped durable reservation."""
     for attempt in range(_RECOVERY_ATTEMPTS):
@@ -570,10 +901,73 @@ async def _recover_submitted_run(
                 idempotency_key=idempotency_key,
                 submitted_at=submitted_at,
                 accepted_at=time.perf_counter(),
+                session_id_header=session_id_header,
             )
         if attempt + 1 < _RECOVERY_ATTEMPTS:
             await asyncio.sleep(_RECOVERY_POLL_SECONDS)
     return None
+
+
+async def _recover_final_cleanup_candidates(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    attempted_idempotency_keys: list[str],
+    retained: list[_SubmittedRun],
+) -> tuple[list[_SubmittedRun], int]:
+    """Recover every unrepresented reservation before durable settlement and cleanup."""
+    represented = {item.idempotency_key for item in retained}
+    missing_keys = [
+        key for key in dict.fromkeys(attempted_idempotency_keys) if key not in represented
+    ]
+    recovered = await asyncio.gather(
+        *(
+            _recover_cleanup_candidate(resources, config, partition_key, idempotency_key)
+            for idempotency_key in missing_keys
+        )
+    )
+    candidates = _unique_run_submissions(
+        [candidate for candidate in recovered if candidate is not None]
+    )
+    return candidates, sum(candidate is None for candidate in recovered)
+
+
+async def _recover_cleanup_candidate(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    idempotency_key: str,
+) -> _SubmittedRun | None:
+    deadline = time.perf_counter() + _FINAL_RECOVERY_TIMEOUT_SECONDS
+    while True:
+        try:
+            record = await read_owner_idempotency(
+                resources,
+                partition_key=partition_key,
+                idempotency_key=idempotency_key,
+            )
+        except AcaSmokeEnvironmentError:
+            return None
+        if record is not None:
+            accepted = AcceptedRun(
+                session_id=record.session_id,
+                run_id=record.run_id,
+                management_urls=config.deployed.management_urls(
+                    session_id=record.session_id,
+                    run_id=record.run_id,
+                ),
+            )
+            now = time.perf_counter()
+            return _SubmittedRun(accepted, idempotency_key, now, now)
+        if time.perf_counter() >= deadline:
+            return None
+        await asyncio.sleep(_POLL_SECONDS)
+
+
+def _unique_run_submissions(submitted: list[_SubmittedRun]) -> list[_SubmittedRun]:
+    return list(
+        {(item.accepted.session_id, item.accepted.run_id): item for item in submitted}.values()
+    )
 
 
 async def _recover_ambiguous_http_outcome(
@@ -586,6 +980,7 @@ async def _recover_ambiguous_http_outcome(
     status: int,
     *,
     unclassified_service_throttles: int,
+    session_id_header: str | None = None,
 ) -> _AdmissionOutcome:
     recovered = await _recover_submitted_run(
         resources,
@@ -593,14 +988,15 @@ async def _recover_ambiguous_http_outcome(
         partition_key,
         idempotency_key,
         submitted_at,
+        session_id_header=session_id_header,
     )
-    return _AdmissionOutcome(
-        idempotency_key,
-        recovered,
-        retries,
-        unclassified_service_throttles,
-        f"ambiguous_public_admission_http_{status}",
-        recovered is None,
+    return _recovered_admission_outcome(
+        idempotency_key=idempotency_key,
+        recovered=recovered,
+        retries=retries,
+        unclassified_service_throttles=unclassified_service_throttles,
+        failure=f"ambiguous_public_admission_http_{status}",
+        session_id_header=session_id_header,
     )
 
 
@@ -621,6 +1017,14 @@ def _assert_distinct_admissions(submitted: list[_SubmittedRun], concurrency: int
     assert len({item.accepted.session_id for item in submitted}) == concurrency
     assert len({item.accepted.run_id for item in submitted}) == concurrency
     assert len({item.idempotency_key for item in submitted}) == concurrency
+
+
+def _assert_phase_b_session_identity(
+    prepared: list[_SubmittedRun], held: list[_SubmittedRun]
+) -> None:
+    assert {item.accepted.session_id for item in held} == {
+        item.accepted.session_id for item in prepared
+    }, "Phase B admissions did not preserve the prepared session set."
 
 
 async def _establish_common_active_interval(
@@ -752,6 +1156,7 @@ async def _exercise_one_active_race(
     submitted: _SubmittedRun,
 ) -> tuple[int, int]:
     accepted = submitted.accepted
+    assert submitted.session_id_header == accepted.session_id
     replay_status, replay_payload, _ = await json_request(
         client,
         "POST",
@@ -759,6 +1164,7 @@ async def _exercise_one_active_race(
         headers={
             **headers,
             "Idempotency-Key": submitted.idempotency_key,
+            "x-ms-session-id": submitted.session_id_header,
         },
         payload=submission_payload(_LOAD_PROMPT),
     )
@@ -810,6 +1216,14 @@ def _assert_public_hold_events(events: list[SseEvent]) -> None:
         if event.payload.get("tool_name") == "qualification_hold"
     ]
     assert [event.get("type") for event in tool_events] == ["tool_start", "tool_end"]
+
+
+def _assert_no_public_hold_events(events: list[SseEvent]) -> None:
+    assert not [
+        event
+        for event in events
+        if event.payload.get("tool_name") == "qualification_hold"
+    ]
 
 
 def _assert_hold_duration(
@@ -885,6 +1299,38 @@ async def _read_terminal_observation(
         ),
     )
     assert_session_belongs_to_deployment(session, config)
+    assert run.status == "succeeded"
+    assert run.result_available
+    assert session.active_run_id is None
+    assert session.active_operation_id is None
+    assert not [operation for operation in operations if operation.state == "active"]
+    return True
+
+
+async def _read_prepared_idle_observation(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    prepared: _SubmittedRun,
+) -> bool:
+    accepted = prepared.accepted
+    session, run, operations = await asyncio.gather(
+        read_authoritative_session(
+            resources, session_id=accepted.session_id, partition_key=partition_key
+        ),
+        read_authoritative_run(
+            resources,
+            session_id=accepted.session_id,
+            run_id=accepted.run_id,
+            partition_key=partition_key,
+        ),
+        read_session_operations(
+            resources, session_id=accepted.session_id, partition_key=partition_key
+        ),
+    )
+    assert_session_belongs_to_deployment(session, config)
+    assert session.status in {"ready", "suspended"}
+    assert session.idle_policy_armed
     assert run.status == "succeeded"
     assert run.result_available
     assert session.active_run_id is None
@@ -991,6 +1437,7 @@ async def _provider_cleanup_last_resort(
     submitted: list[_SubmittedRun],
 ) -> None:
     """Remove only exact-label provider backing after a failed durable settlement."""
+    submitted = _unique_session_submissions(submitted)
     sessions = await asyncio.gather(
         *(
             read_authoritative_session(
@@ -1032,6 +1479,7 @@ async def _cleanup_load_sessions(
     partition_key: str,
     submitted: list[_SubmittedRun],
 ) -> bool:
+    submitted = _unique_session_submissions(submitted)
     sessions = await asyncio.gather(
         *(
             read_authoritative_session(
@@ -1078,3 +1526,8 @@ async def _cleanup_load_sessions(
             "Exact-label ACA sandbox or snapshot cleanup left owned resources behind."
         )
     return True
+
+
+def _unique_session_submissions(submitted: list[_SubmittedRun]) -> list[_SubmittedRun]:
+    """Keep one cleanup descriptor per session while retaining every run for settlement."""
+    return list({item.accepted.session_id: item for item in submitted}.values())

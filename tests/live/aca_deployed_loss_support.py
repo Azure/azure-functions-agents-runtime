@@ -103,6 +103,6 @@ def assert_public_backing_loss_contract(
     error = status.get("error")
     if error is not None:
         assert isinstance(error, dict)
-        assert error.get("code") == "session_tombstoned"
+        assert error.get("code") in {"session_tombstoned", "run_abandoned"}
     assert result_code == 410
     assert result.get("error") in {"result_unavailable", "session_gone"}

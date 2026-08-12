@@ -98,6 +98,12 @@ def _percentiles(values: list[float]) -> tuple[float, float, float]:
 def render_load_report(
     *,
     concurrency: int,
+    prepared_count: int,
+    provision_concurrency: int,
+    provisioning_duration_seconds: float | None,
+    provisioning_attempt_count: int,
+    provisioning_retry_count: int,
+    suspended_prepared_count: int,
     common_interval: CommonActiveInterval | None,
     admitted_count: int,
     succeeded_count: int,
@@ -128,9 +134,20 @@ def render_load_report(
         if admission_failure_categories
         else "none"
     )
+    provisioning_duration = (
+        f"{provisioning_duration_seconds:.1f}s"
+        if provisioning_duration_seconds is not None
+        else "not-available"
+    )
     return (
         "ACA deployed load qualification: "
-        f"N={concurrency} common_active_interval={interval} "
+        f"N={concurrency} prepared={prepared_count} "
+        f"provision_concurrency={provision_concurrency} "
+        f"provisioning_duration={provisioning_duration} "
+        f"provisioning_attempts={provisioning_attempt_count} "
+        f"provisioning_retries={provisioning_retry_count} "
+        f"suspended_prepared={suspended_prepared_count} "
+        f"common_active_interval={interval} "
         f"admitted={admitted_count} succeeded={succeeded_count} {metric_text} "
         f"idempotent_replays={replay_count} active_run_conflicts={active_run_conflict_count} "
         f"retries={retry_count} "

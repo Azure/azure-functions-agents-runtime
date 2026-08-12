@@ -51,6 +51,7 @@ from azure_functions_agents.transport.transport_models import SandboxSummary, Sa
 _LOAD_AGENT_SLUG = "deployed_load"
 _HOLD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
 _SETUP_RETRY_ATTEMPTS = 6
+_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0
 _RECOVERY_ATTEMPTS = 5
 _POLL_SECONDS = 1.0
 _CONTROLLER_WAIT_SECONDS = 300.0
@@ -223,14 +224,15 @@ async def _submit_held_run(
 ) -> AcceptedRun:
     for attempt in range(_SETUP_RETRY_ATTEMPTS):
         try:
-            status, payload, response_headers = await json_request(
-                client,
-                "POST",
-                config.deployed.chat_url,
-                headers={**headers, "Idempotency-Key": idempotency_key},
-                payload=submission_payload(_HOLD_PROMPT),
-            )
-        except AcaSmokeEnvironmentError:
+            async with asyncio.timeout(_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS):
+                status, payload, response_headers = await json_request(
+                    client,
+                    "POST",
+                    config.deployed.chat_url,
+                    headers={**headers, "Idempotency-Key": idempotency_key},
+                    payload=submission_payload(_HOLD_PROMPT),
+                )
+        except (AcaSmokeEnvironmentError, TimeoutError) as exc:
             recovered = await _recover_candidate(
                 resources,
                 config,
@@ -239,6 +241,10 @@ async def _submit_held_run(
             )
             if recovered is not None:
                 return recovered
+            if isinstance(exc, TimeoutError):
+                raise AcaSmokeEnvironmentError(
+                    "The backing-loss public setup request exceeded its bounded attempt timeout."
+                ) from exc
             raise
         if status == 202:
             return parse_accepted_run(payload, config.deployed)

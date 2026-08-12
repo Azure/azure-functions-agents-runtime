@@ -63,6 +63,12 @@ def test_load_percentiles_and_report_are_aggregate_and_redacted() -> None:
     metrics = support.latency_metrics([1, 2, 3, 4], [2, 3, 4, 5], [3, 4, 5, 6])
     report = support.render_load_report(
         concurrency=4,
+        prepared_count=4,
+        provision_concurrency=4,
+        provisioning_duration_seconds=12.5,
+        provisioning_attempt_count=5,
+        provisioning_retry_count=1,
+        suspended_prepared_count=2,
         common_interval=support.CommonActiveInterval(
             started_at=support.utc_now(),
             ended_at=support.utc_now(),
@@ -81,6 +87,10 @@ def test_load_percentiles_and_report_are_aggregate_and_redacted() -> None:
 
     assert metrics.submission_ms == (2000, 4000, 4000)
     assert "N=4" in report
+    assert "prepared=4" in report
+    assert "provision_concurrency=4" in report
+    assert "provisioning_attempts=5" in report
+    assert "suspended_prepared=2" in report
     assert "p50=2000.0" in report
     assert "session" not in report
     assert "run_id" not in report
@@ -134,7 +144,7 @@ def load_module(monkeypatch: pytest.MonkeyPatch) -> object:
 
 
 @pytest.mark.asyncio
-async def test_admission_aggregate_preserves_mixed_candidates(
+async def test_phase_a_batch_preserves_prepared_candidates_before_aggregate_failure(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
 ) -> None:
@@ -152,14 +162,22 @@ async def test_admission_aggregate_preserves_mixed_candidates(
         ]
     )
 
-    async def submit_one(*_: object) -> object:
+    async def submit_one(*_: object, **__: object) -> object:
         return next(outcomes)
 
     monkeypatch.setattr(module, "_submit_one", submit_one)
     submitted: list[object] = []
     with pytest.raises(module._AdmissionFailureError) as failure:  # type: ignore[attr-defined]
-        await module._submit_distinct_sessions(  # type: ignore[attr-defined]
-            object(), SimpleNamespace(), {}, 2, submitted, object(), "partition"
+        await module._submit_session_batch(  # type: ignore[attr-defined]
+            object(),
+            SimpleNamespace(),
+            {},
+            object(),
+            "partition",
+            session_ids=[None, None],
+            prompt="readiness",
+            submitted=submitted,
+            attempted_idempotency_keys=[],
         )
 
     assert submitted == [candidate]
@@ -167,6 +185,505 @@ async def test_admission_aggregate_preserves_mixed_candidates(
     assert failure.value.unresolved_idempotencies == 1
     assert failure.value.attempted_idempotency_keys == ("a", "b")
     assert failure.value.failure_categories == (("setup_deadline_exceeded", 1),)
+
+
+@pytest.mark.asyncio
+async def test_batch_cancellation_retains_completed_candidate_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    candidate = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+        idempotency_key="accepted-key",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+    blocked = module.asyncio.Event()  # type: ignore[attr-defined]
+    calls = 0
+
+    async def submit_one(*_: object, **__: object) -> object:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return module._AdmissionOutcome(  # type: ignore[attr-defined]
+                "accepted-key", candidate, 0, 0, None, False
+            )
+        await blocked.wait()
+        raise AssertionError("unreachable")
+
+    monkeypatch.setattr(module, "_submit_one", submit_one)
+    retained: list[object] = []
+    task = module.asyncio.create_task(  # type: ignore[attr-defined]
+        module._submit_session_batch(
+            object(),
+            SimpleNamespace(),
+            {},
+            object(),
+            "partition",
+            session_ids=[None, None],
+            prompt="readiness",
+            submitted=retained,
+            attempted_idempotency_keys=[],
+        )
+    )
+    for _ in range(10):
+        if retained:
+            break
+        await module.asyncio.sleep(0)  # type: ignore[attr-defined]
+    task.cancel()
+    with pytest.raises(module.asyncio.CancelledError):  # type: ignore[attr-defined]
+        await task
+
+    assert retained == [candidate]
+
+
+@pytest.mark.asyncio
+async def test_phase_a_batch_deadline_retains_candidates_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    candidate = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+        idempotency_key="accepted-key",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+    never = module.asyncio.Event()  # type: ignore[attr-defined]
+
+    async def submit_one(*_: object, **__: object) -> object:
+        return module._AdmissionOutcome(  # type: ignore[attr-defined]
+            "accepted-key", candidate, 0, 0, None, False
+        )
+
+    async def wait_forever(*_: object) -> None:
+        await never.wait()
+
+    monkeypatch.setattr(module, "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_PROVISION_BATCH_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "_submit_one", submit_one)
+    monkeypatch.setattr(module, "_assert_prepared_sessions", wait_forever)
+    retained: list[object] = []
+
+    with pytest.raises(module.AcaSmokeEnvironmentError, match="Phase A provisioning batch"):  # type: ignore[attr-defined]
+        await module._prepare_sessions(  # type: ignore[attr-defined]
+            object(),
+            object(),
+            SimpleNamespace(),
+            {},
+            1,
+            retained,
+            object(),
+            "partition",
+            "redacted",
+            [],
+        )
+
+    assert retained == [candidate]
+
+
+@pytest.mark.asyncio
+async def test_provisioning_batches_wait_for_prepared_idle_before_next_posts(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    server_inflight: set[str] = set()
+    completed_idle: set[str] = set()
+    maximum_inflight = 0
+    sequence = 0
+
+    async def submit_one(*_: object, **kwargs: object) -> object:
+        nonlocal maximum_inflight, sequence
+        assert kwargs["prompt"] == module._READINESS_PROMPT  # type: ignore[attr-defined]
+        assert kwargs["session_id"] is None
+        if sequence >= 4:
+            assert completed_idle == {"session-1", "session-2", "session-3", "session-4"}
+        await module.asyncio.sleep(0)  # type: ignore[attr-defined]
+        sequence += 1
+        session_id = f"session-{sequence}"
+        server_inflight.add(session_id)
+        maximum_inflight = max(maximum_inflight, len(server_inflight))
+        return module._AdmissionOutcome(  # type: ignore[attr-defined]
+            f"key-{sequence}",
+            module._SubmittedRun(  # type: ignore[attr-defined]
+                accepted=SimpleNamespace(session_id=session_id, run_id=f"run-{sequence}"),
+                idempotency_key=f"key-{sequence}",
+                submitted_at=1.0,
+                accepted_at=2.0,
+            ),
+            0,
+            0,
+            None,
+            False,
+        )
+
+    async def prepared_idle(*args: object) -> None:
+        prepared = args[5]
+        assert isinstance(prepared, list)
+        session_ids = {item.accepted.session_id for item in prepared}
+        assert len(session_ids) <= 4
+        assert session_ids <= server_inflight
+        completed_idle.update(session_ids)
+        server_inflight.difference_update(session_ids)
+
+    monkeypatch.setattr(module, "_submit_one", submit_one)
+    monkeypatch.setattr(module, "_assert_prepared_sessions", prepared_idle)
+    submitted: list[object] = []
+    await module._prepare_sessions(  # type: ignore[attr-defined]
+        object(),
+        object(),
+        SimpleNamespace(),
+        {},
+        6,
+        submitted,
+        object(),
+        "partition",
+        "redacted",
+        [],
+    )
+
+    assert maximum_inflight == 4
+    assert completed_idle == {f"session-{index}" for index in range(1, 7)}
+
+
+@pytest.mark.asyncio
+async def test_existing_session_phase_submits_each_held_run_with_its_session_header(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    observed: list[tuple[str, str]] = []
+    active = 0
+    maximum_active = 0
+
+    async def submit_one(*_: object, **kwargs: object) -> object:
+        nonlocal active, maximum_active
+        session_id = kwargs["session_id"]
+        prompt = kwargs["prompt"]
+        assert isinstance(session_id, str)
+        assert prompt == module._LOAD_PROMPT  # type: ignore[attr-defined]
+        observed.append((session_id, prompt))
+        active += 1
+        maximum_active = max(maximum_active, active)
+        await module.asyncio.sleep(0)  # type: ignore[attr-defined]
+        active -= 1
+        return module._AdmissionOutcome(  # type: ignore[attr-defined]
+            session_id,
+            module._SubmittedRun(  # type: ignore[attr-defined]
+                accepted=SimpleNamespace(session_id=session_id, run_id=f"run-{session_id}"),
+                idempotency_key=f"key-{session_id}",
+                submitted_at=1.0,
+                accepted_at=2.0,
+                session_id_header=session_id,
+            ),
+            0,
+            0,
+            None,
+            False,
+        )
+
+    monkeypatch.setattr(module, "_submit_one", submit_one)
+    prepared = [
+        module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id=session_id, run_id=f"prepared-{session_id}"),
+            idempotency_key=f"prepared-{session_id}",
+            submitted_at=1.0,
+            accepted_at=2.0,
+        )
+        for session_id in ("one", "two", "three")
+    ]
+    held: list[object] = []
+    await module._submit_existing_sessions(  # type: ignore[attr-defined]
+        object(), SimpleNamespace(), {}, prepared, held, object(), "partition", []
+    )
+
+    assert {session_id for session_id, _ in observed} == {"one", "two", "three"}
+    assert len(held) == 3
+    assert maximum_active == 3
+
+
+@pytest.mark.asyncio
+async def test_existing_session_response_retains_a_different_session_identity_as_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    accepted = SimpleNamespace(session_id="different-session", run_id="run-a")
+
+    async def accepted_response(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        return 202, {"session_id": "different-session", "run_id": "run-a"}, {}
+
+    monkeypatch.setattr(module, "json_request", accepted_response)
+    monkeypatch.setattr(module, "parse_accepted_run", lambda *_: accepted)
+
+    outcome = await module._submit_one(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+        {},
+        object(),
+        "partition",
+        [],
+        session_id="prepared-session",
+    )
+
+    assert outcome.failure == "phase_b_session_mismatch"
+    assert outcome.submitted is not None
+    assert outcome.submitted.accepted is accepted
+
+
+def test_phase_b_session_set_must_exactly_match_prepared_sessions(load_module: object) -> None:
+    module = load_module
+
+    def submitted(session_id: str) -> object:
+        return module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id=session_id, run_id=f"run-{session_id}"),
+            idempotency_key=f"key-{session_id}",
+            submitted_at=1.0,
+            accepted_at=2.0,
+            session_id_header=session_id,
+        )
+
+    module._assert_phase_b_session_identity([submitted("one"), submitted("two")], [submitted("two"), submitted("one")])  # type: ignore[attr-defined]
+    with pytest.raises(AssertionError, match="prepared session set"):
+        module._assert_phase_b_session_identity([submitted("one"), submitted("two")], [submitted("one"), submitted("other")])  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_phase_b_mismatch_is_retained_and_aggregated_for_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    candidate = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(session_id="unexpected", run_id="run-unexpected"),
+        idempotency_key="key",
+        submitted_at=1.0,
+        accepted_at=2.0,
+        session_id_header="requested",
+    )
+
+    async def mismatch(*_: object, **__: object) -> object:
+        return module._AdmissionOutcome(  # type: ignore[attr-defined]
+            "key", candidate, 0, 0, "phase_b_session_mismatch", False
+        )
+
+    monkeypatch.setattr(module, "_submit_one", mismatch)
+    retained: list[object] = []
+    with pytest.raises(module._AdmissionFailureError) as failure:  # type: ignore[attr-defined]
+        await module._submit_session_batch(  # type: ignore[attr-defined]
+            object(),
+            SimpleNamespace(),
+            {},
+            object(),
+            "partition",
+            session_ids=["requested"],
+            prompt="held",
+            submitted=retained,
+            attempted_idempotency_keys=[],
+        )
+
+    assert retained == [candidate]
+    assert failure.value.failure_categories == (("phase_b_session_mismatch", 1),)
+    assert "phase_b_session_mismatch=1" in str(failure.value)
+    assert "unexpected" not in str(failure.value)
+
+
+@pytest.mark.asyncio
+async def test_swapped_owner_idempotency_recovery_retains_candidate_as_phase_b_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    deployed = SimpleNamespace(
+        chat_url="https://example.test/chat",
+        management_urls=lambda *, session_id, run_id: {"events_url": f"/{session_id}/{run_id}"},
+    )
+
+    async def service_error(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        return 503, {}, {}
+
+    async def swapped_record(*_: object, **__: object) -> SimpleNamespace:
+        return SimpleNamespace(session_id="swapped-session", run_id="swapped-run")
+
+    monkeypatch.setattr(module, "json_request", service_error)
+    monkeypatch.setattr(module, "read_owner_idempotency", swapped_record)
+
+    outcome = await module._submit_one(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=deployed),
+        {},
+        object(),
+        "partition",
+        [],
+        session_id="requested-session",
+    )
+
+    assert outcome.failure == "phase_b_session_mismatch"
+    assert outcome.submitted is not None
+    assert outcome.submitted.accepted.session_id == "swapped-session"
+    assert not outcome.unresolved_idempotency
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", ["running", "suspending", "resuming", "canceling"])
+async def test_prepared_idle_observation_rejects_running_and_transitional_sessions(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+    status: str,
+) -> None:
+    module = load_module
+    prepared = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+        idempotency_key="key-a",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace(
+            status=status,
+            idle_policy_armed=True,
+            active_run_id=None,
+            active_operation_id=None,
+        )
+
+    async def read_run(*_: object, **__: object) -> object:
+        return SimpleNamespace(status="succeeded", result_available=True)
+
+    async def read_operations(*_: object, **__: object) -> tuple[()]:
+        return ()
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+    monkeypatch.setattr(module, "read_session_operations", read_operations)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+
+    with pytest.raises(AssertionError):
+        await module._read_prepared_idle_observation(  # type: ignore[attr-defined]
+            object(), object(), "partition", prepared
+        )
+
+
+@pytest.mark.asyncio
+async def test_prepared_idle_observation_requires_an_armed_idle_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    prepared = module._SubmittedRun(  # type: ignore[attr-defined]
+        accepted=SimpleNamespace(session_id="session-a", run_id="run-a"),
+        idempotency_key="key-a",
+        submitted_at=1.0,
+        accepted_at=2.0,
+    )
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace(
+            status="ready",
+            idle_policy_armed=False,
+            active_run_id=None,
+            active_operation_id=None,
+        )
+
+    async def read_run(*_: object, **__: object) -> object:
+        return SimpleNamespace(status="succeeded", result_available=True)
+
+    async def read_operations(*_: object, **__: object) -> tuple[()]:
+        return ()
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "read_authoritative_run", read_run)
+    monkeypatch.setattr(module, "read_session_operations", read_operations)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+
+    with pytest.raises(AssertionError):
+        await module._read_prepared_idle_observation(  # type: ignore[attr-defined]
+            object(), object(), "partition", prepared
+        )
+
+
+@pytest.mark.asyncio
+async def test_setup_request_timeout_recovers_an_ambiguous_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    deployed = SimpleNamespace(
+        chat_url="https://example.test/chat",
+        management_urls=lambda *, session_id, run_id: {"events_url": f"/{session_id}/{run_id}"},
+    )
+    never = module.asyncio.Event()  # type: ignore[attr-defined]
+
+    async def blocking_request(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        await never.wait()
+        raise AssertionError("unreachable")
+
+    async def recovered(*_: object, **__: object) -> SimpleNamespace:
+        return SimpleNamespace(session_id="recovered-session", run_id="recovered-run")
+
+    monkeypatch.setattr(module, "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS", 0.01)
+    monkeypatch.setattr(module, "json_request", blocking_request)
+    monkeypatch.setattr(module, "read_owner_idempotency", recovered)
+
+    outcome = await module._submit_one(  # type: ignore[attr-defined]
+        object(), SimpleNamespace(deployed=deployed), {}, object(), "partition", []
+    )
+
+    assert outcome.failure == "public_admission_request_ambiguous"
+    assert outcome.submitted is not None
+    assert outcome.submitted.accepted.session_id == "recovered-session"
+
+
+@pytest.mark.asyncio
+async def test_n100_suspension_evidence_waits_at_one_hz_for_exact_label_backing(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    prepared = [
+        module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id="prepared-session", run_id="prepared-run"),
+            idempotency_key="prepared-key",
+            submitted_at=1.0,
+            accepted_at=2.0,
+        )
+    ]
+    states = iter(("Running", "Stopped"))
+    delays: list[float] = []
+
+    async def read_session(*_: object, **__: object) -> object:
+        return SimpleNamespace()
+
+    async def sandbox(*_: object, **__: object) -> object:
+        return SimpleNamespace(state=next(states))
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(module, "read_authoritative_session", read_session)
+    monkeypatch.setattr(module, "owned_sandbox", sandbox)
+    monkeypatch.setattr(module, "assert_session_belongs_to_deployment", lambda *_: None)
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)
+
+    assert module._requires_prepared_suspension(100)  # type: ignore[attr-defined]
+    assert not module._requires_prepared_suspension(10)  # type: ignore[attr-defined]
+    assert await module._wait_for_suspended_prepared_backing(  # type: ignore[attr-defined]
+        object(), object(), "partition", prepared
+    ) == 1
+    assert delays == [1.0]
+
+
+def test_readiness_events_reject_the_hold_tool(load_module: object) -> None:
+    from tests.live.aca_deployed_agent_support import SseEvent
+
+    module = load_module
+    module._assert_no_public_hold_events([SseEvent(1, {"type": "done"})])  # type: ignore[attr-defined]
+    with pytest.raises(AssertionError):
+        module._assert_no_public_hold_events(  # type: ignore[attr-defined]
+            [SseEvent(1, {"type": "tool_start", "tool_name": "qualification_hold"})]
+        )
 
 
 def test_admission_failure_categories_are_aggregated_and_redacted(load_module: object) -> None:
@@ -185,6 +702,7 @@ def test_admission_failure_categories_are_aggregated_and_redacted(load_module: o
         unresolved_idempotencies=0,
         attempted_idempotency_keys=(),
         failure_categories=categories,
+        attempt_count=3,
     )
 
     assert categories == (
@@ -246,11 +764,13 @@ async def test_load_submission_retries_five_setup_leases_with_the_same_key(
         + [(202, {"session_id": "session-accepted", "run_id": "run-accepted"}, {})]
     )
     headers_seen: list[dict[str, str]] = []
+    payloads_seen: list[dict[str, object]] = []
     retry_delays: list[float] = []
     accepted = SimpleNamespace(session_id="session-accepted", run_id="run-accepted")
 
     async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, str], dict[str, str]]:
         headers_seen.append(dict(kwargs["headers"]))  # type: ignore[arg-type,index]
+        payloads_seen.append(dict(kwargs["payload"]))  # type: ignore[arg-type,index]
         return next(responses)
 
     async def no_sleep(delay: float) -> None:
@@ -268,6 +788,7 @@ async def test_load_submission_retries_five_setup_leases_with_the_same_key(
         object(),
         "partition",
         keys,
+        prompt=module._READINESS_PROMPT,  # type: ignore[attr-defined]
     )
 
     assert outcome.submitted is not None
@@ -275,6 +796,8 @@ async def test_load_submission_retries_five_setup_leases_with_the_same_key(
     assert outcome.retries == 5
     assert len(headers_seen) == 6
     assert {headers["Idempotency-Key"] for headers in headers_seen} == {keys[0]}
+    assert all("x-ms-session-id" not in headers for headers in headers_seen)
+    assert payloads_seen == [{"prompt": module._READINESS_PROMPT}] * 6  # type: ignore[attr-defined]
     assert retry_delays == [60.0] * 5
 
 
@@ -302,6 +825,93 @@ async def test_unresolved_ambiguous_admission_is_counted(
     )
 
     assert recovered is None
+
+
+@pytest.mark.asyncio
+async def test_final_recovery_retains_late_owner_idempotency_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    deployed = SimpleNamespace(
+        management_urls=lambda *, session_id, run_id: {"events_url": f"/{session_id}/{run_id}"}
+    )
+    reads = 0
+    delays: list[float] = []
+
+    async def read_record(*_: object, **__: object) -> object:
+        nonlocal reads
+        reads += 1
+        return None if reads == 1 else SimpleNamespace(session_id="late-session", run_id="late-run")
+
+    async def sleep(delay: float) -> None:
+        delays.append(delay)
+
+    monkeypatch.setattr(module, "read_owner_idempotency", read_record)
+    monkeypatch.setattr(module.asyncio, "sleep", sleep)
+    recovered, unresolved = await module._recover_final_cleanup_candidates(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=deployed),
+        "partition",
+        ["late-key"],
+        [],
+    )
+
+    assert unresolved == 0
+    assert len(recovered) == 1
+    assert recovered[0].accepted.session_id == "late-session"
+    assert delays == [1.0]
+
+
+@pytest.mark.asyncio
+async def test_final_recovery_deduplicates_candidates_and_counts_unresolved(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+    deployed = SimpleNamespace(
+        management_urls=lambda *, session_id, run_id: {"events_url": f"/{session_id}/{run_id}"}
+    )
+
+    async def read_record(*_: object, **kwargs: object) -> object:
+        key = kwargs["idempotency_key"]
+        if key in {"first-key", "second-key"}:
+            return SimpleNamespace(session_id="same-session", run_id="same-run")
+        return None
+
+    async def no_sleep(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(module, "_FINAL_RECOVERY_TIMEOUT_SECONDS", 0.0)
+    monkeypatch.setattr(module, "read_owner_idempotency", read_record)
+    monkeypatch.setattr(module.asyncio, "sleep", no_sleep)
+    recovered, unresolved = await module._recover_final_cleanup_candidates(  # type: ignore[attr-defined]
+        object(),
+        SimpleNamespace(deployed=deployed),
+        "partition",
+        ["first-key", "second-key", "missing-key", "first-key"],
+        [],
+    )
+
+    assert len(recovered) == 1
+    assert unresolved == 1
+
+
+def test_admission_errors_and_reports_never_render_attempted_idempotency_keys(
+    load_module: object,
+) -> None:
+    module = load_module
+    error = module._AdmissionFailureError(  # type: ignore[attr-defined]
+        failures=1,
+        retries=0,
+        throttles=0,
+        unresolved_idempotencies=1,
+        attempted_idempotency_keys=("sensitive-attempted-key",),
+        failure_categories=(("setup_deadline_exceeded", 1),),
+        attempt_count=1,
+    )
+
+    assert "sensitive-attempted-key" not in str(error)
 
 
 @pytest.mark.asyncio
@@ -369,14 +979,24 @@ async def test_cleanup_accepts_empty_snapshot_tuple_and_propagates_errors(
             idempotency_key="a",
             submitted_at=1.0,
             accepted_at=2.0,
-        )
+        ),
+        module._SubmittedRun(  # type: ignore[attr-defined]
+            accepted=SimpleNamespace(session_id="session-a", run_id="run-b"),
+            idempotency_key="b",
+            submitted_at=1.0,
+            accepted_at=2.0,
+            session_id_header="session-a",
+        ),
     ]
     session = SimpleNamespace()
+    cleanup_calls = 0
 
     async def read_session(*_: object, **__: object) -> object:
         return session
 
     async def clean(*_: object, **__: object) -> None:
+        nonlocal cleanup_calls
+        cleanup_calls += 1
         return None
 
     async def no_sandbox(*_: object, **__: object) -> None:
@@ -392,6 +1012,7 @@ async def test_cleanup_accepts_empty_snapshot_tuple_and_propagates_errors(
     assert await module._cleanup_load_sessions(  # type: ignore[attr-defined]
         object(), object(), "partition", submitted
     )
+    assert cleanup_calls == 1
 
     async def cleanup_failure(*_: object, **__: object) -> None:
         raise AcaSmokeEnvironmentError("tombstone failed")
@@ -439,7 +1060,7 @@ async def test_creating_session_is_not_an_active_observation(
 
 
 @pytest.mark.asyncio
-async def test_active_race_replay_omits_session_header_and_conflict_includes_it(
+async def test_active_race_replay_and_conflict_both_preserve_existing_session_header(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
 ) -> None:
@@ -450,6 +1071,7 @@ async def test_active_race_replay_omits_session_header_and_conflict_includes_it(
         idempotency_key="original-key",
         submitted_at=1.0,
         accepted_at=2.0,
+        session_id_header="session-a",
     )
     captured_headers: list[dict[str, str]] = []
 
@@ -469,7 +1091,7 @@ async def test_active_race_replay_omits_session_header_and_conflict_includes_it(
         submitted,
     ) == (1, 1)
     assert captured_headers[0]["Idempotency-Key"] == "original-key"
-    assert "x-ms-session-id" not in captured_headers[0]
+    assert captured_headers[0]["x-ms-session-id"] == "session-a"
     assert captured_headers[1]["x-ms-session-id"] == "session-a"
     assert captured_headers[1]["Idempotency-Key"] != "original-key"
 
@@ -804,3 +1426,24 @@ def test_manual_job_reads_optional_load_variable_from_the_script_environment() -
     assert 'ACA_DEPLOYED_LOAD_CONCURRENCY:-' in source
     assert "$(ACA_DEPLOYED_LOAD_CONCURRENCY)" not in source
     assert "auto-injects non-secret pipeline variables" in source
+    assert 'job: "ACADeployedAgentTurn"' in source
+    assert "timeoutInMinutes: 360" in source
+    assert "continueOnError: true" in source
+
+
+def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
+    root = Path(__file__).parents[1]
+    load_source = (root / "tests" / "live" / "test_aca_deployed_load.py").read_text()
+    loss_source = (root / "tests" / "live" / "test_aca_deployed_loss.py").read_text()
+    job = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    runbook = (root / "docs" / "testing" / "live-aca.md").read_text()
+
+    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in load_source
+    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in loss_source
+    assert "_PROVISION_BATCH_TIMEOUT_SECONDS = 660.0" in load_source
+    assert "timeoutInMinutes: 360" in job
+    assert "570 seconds" in runbook
+    assert "11m" in runbook
+    assert "275m" in runbook
+    assert "85m" in runbook
+    assert "360-minute safety cap" in runbook

@@ -227,8 +227,10 @@ before it returns its minimal acknowledgement. Tool selection is model-mediated,
 not deterministic: the test verifies exactly one public `tool_start` and
 `tool_end` for `qualification_hold` per run and fails if the model does not
 cooperate. The five-minute hold is credential-free; no test or sandbox writes Table state,
-and the controller remains the sole durable-state writer. The test submits all
-sessions concurrently through the Easy-Auth-protected public chat endpoint.
+and the controller remains the sole durable-state writer. The runner first
+provisions sessions through the Easy-Auth-protected public endpoint at a fixed
+concurrency of four, then submits the held runs concurrently only after every
+prepared session is public-terminal and durably idle.
 
 Use the same deployed settings as the lifecycle test, then supply the load
 concurrency explicitly. Omission intentionally skips this test even when the
@@ -245,24 +247,37 @@ python -m pytest -m live_aca tests/live/test_aca_deployed_load.py \
   --aca-load-concurrency 100 -v -o log_cli=true -o log_cli_level=INFO
 ```
 
-`N=100` is the formal U3 acceptance run. Values from 1 through 99 are
-diagnostics only; values outside 1..100 are rejected. This is manual-only and
+`N=100` is the target formal U3 acceptance run, not a claimed pass until a
+live execution produces its evidence. Values from 1 through 99 are diagnostics
+only; values outside 1..100 are rejected. This is manual-only and
 the `ACADeployedAgentTurn` ADO job remains `Manual` plus `continueOnError`.
 For an ADO run, define the non-secret `ACA_DEPLOYED_LOAD_CONCURRENCY` variable;
 when it is omitted the script does not map an unresolved `$(VAR)` token and the
 load test skips.
 
 This run can consume at least 500 sandbox-minutes at `N=100`, plus model and
-storage costs, and needs ACA and model quota for all sessions. The load-only
-agent has a 900-second authored timeout so six bounded same-key setup attempts
-can cover the create, lifecycle, content, manifest, and journal/launch phases
-(about 480 seconds in the worst case) through 60-second provision leases before
-the five-minute hold; plan for that additional wall-clock time. Use a
-CI-dedicated Sandbox Group and do not run it from PR, default, or scheduled
-jobs. The report intentionally contains only `N`, a timestamped common-active
-interval, completion counts, p50/p95/p99 submit/first-event/terminal latency,
-bounded retry/throttle counts, idempotency and active-run conflict counts, and
-cleanup status. It never prints prompts, model output, headers, tokens, or
+storage costs, and needs ACA and model quota for all sessions. The fixed
+four-session provisioning batches deliberately avoid treating simultaneous
+content/package delivery saturation as evidence about concurrent runs: each
+batch reaches public-terminal, durable ready/suspended idle before the next
+batch posts. Every public setup POST has an enforced 45-second attempt bound,
+and each complete Phase A batch has an outermost 660-second (11m)
+deadline covering submission, retry waits, public terminal evidence, and
+durable idle validation. Six attempts plus five bounded 60-second lease waits
+cap one session at 570 seconds; 25 enforced 11m Phase A batches cap
+`N=100` provisioning at 275m. Do not add individual 540-second
+`ClientSession` values to that bound: the batch deadline is outermost. Phase B
+setup is concurrent and has the same 9.5-minute per-run bound before its
+300-second formal hold and 11-minute event bound. The load-only agent has a
+900-second authored timeout; plan for batch provisioning plus the hold, and use
+a CI-dedicated Sandbox Group. The manual ADO job has a 360-minute safety cap;
+the remaining 85m cover Phase B, the other deployed qualifications,
+bounded 900-second failure settlement, controller cleanup, and job overhead.
+Do not run it from PR, default, or scheduled jobs. `N=100` refers only to the
+concurrent Phase B held runs, not the four-way Phase A provisioning rate. The
+redacted report separates prepared count, provisioning duration/attempts/retries,
+prepared suspension evidence, and formal held-run latency, overlap, race, and
+cleanup evidence; it never prints prompts, model output, headers, tokens, or
 resource IDs.
 
 The deployed Function's protected settings must set
@@ -272,7 +287,17 @@ attempt an ARM preflight. An operator must verify that deployment setting on
 the dedicated Function App before the live run; the exact public
 `tool_start`/`tool_end` evidence is the end-to-end functional proof.
 
-The formal assertion uses conservative overlapping observations rather than
+Phase A uses the no-tools readiness prompt and requires public SSE/status/result
+success plus a read-only durable idle projection; it fails if a
+`qualification_hold` tool event appears. Prepared sessions may suspend before
+Phase B, which is expected. For the formal `N=100` run, the runner reads only
+each prepared session's exact-label backing at most once per second and requires
+at least one aggregate provider observation in `Stopped` or `Suspended` before
+Phase B. Every existing-session Phase B response must preserve its requested
+prepared session ID, and the final held-session set must exactly equal the
+prepared-session set; the subsequent running common-active proof therefore
+demonstrates activation of that same set. Lower-N diagnostics do not require
+the suspension observation. The formal assertion uses conservative overlapping observations rather than
 claiming an atomic Table snapshot: each owned row is read twice no faster than
 one second apart, and the common interval is bounded by the latest first-read
 completion and earliest second-read start. Every distinct durable run must be
@@ -313,7 +338,7 @@ complete the durable operation, and leave no exact-label sandbox or snapshot.
 It also proves the public status remains an `abandoned` HTTP 200 projection
 while the public result is HTTP 410 (`result_unavailable` or `session_gone`).
 Status error metadata is optional; if present it must be the typed
-`session_tombstoned` error.
+`session_tombstoned` or `run_abandoned` error.
 
 Run it with the same manual deployed lifecycle settings; it does **not**
 require `AZURE_FUNCTIONS_AGENTS_ACA_LOAD_CONCURRENCY`, so omitting that value
