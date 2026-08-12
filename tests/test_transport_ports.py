@@ -68,7 +68,13 @@ def test_aca_adapter_and_handle_satisfy_session_protocols() -> None:
     adapter = AcaSandboxAdapter(
         group=group,
         credential=credential,
-        group_client=environment.make_group_client("endpoint", credential),
+        group_client=environment.make_group_client(
+            "endpoint",
+            credential,
+            subscription_id="sub",
+            resource_group="rg",
+            sandbox_group="group",
+        ),
         factories=environment.factories(),
     )
     handle = AcaSandboxHandle(

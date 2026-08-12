@@ -1124,18 +1124,18 @@ def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> No
         SandboxProvisioningLabels.create(**values)
 
 
-def test_file_projections_accept_live_numeric_posix_mode() -> None:
+def test_file_projections_preserve_sdk_string_mode() -> None:
     file_info = FakeSdkFileInfo(
         name="file.bin",
         path="/tmp/file.bin",
         size=7,
         is_directory=False,
         modified_at=None,
-        mode=0o644,
+        mode="0644",
     )
 
     entry = aca_sdk._project_file_entry(file_info)
     stat = aca_sdk._project_file_stat(file_info)
 
-    assert entry.mode == 0o644
-    assert stat.mode == 0o644
+    assert entry.mode == "0644"
+    assert stat.mode == "0644"
