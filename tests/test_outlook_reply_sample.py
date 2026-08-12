@@ -14,3 +14,4 @@ def test_outlook_reply_sample_uses_supported_connector_trigger() -> None:
     assert agent.trigger is not None
     assert agent.trigger.type == "connector_trigger"
     assert agent.trigger.type in TRIGGER_TYPES
+    assert agent.trigger.args == {}

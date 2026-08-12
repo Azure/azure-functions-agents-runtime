@@ -72,7 +72,7 @@ blocking findings, passed gates, required actions, and specialist analysis.
 
 ## Prerequisites
 
-- Python 3.13 or 3.14 with this repository installed using `pip install -e .[dev]`
+- Python 3.13+ with this repository installed using `pip install -e .[dev]`
 - Azure Functions Core Tools v4 (`func`)
 - Azurite
 - One model provider:

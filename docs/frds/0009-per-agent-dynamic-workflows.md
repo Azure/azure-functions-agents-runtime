@@ -284,12 +284,22 @@ payload. It performs no mutable policy lookup during replay. `wait` tasks have n
 capability dispatch and retain their existing validated bounds.
 
 Activity checks intentionally use policy from the currently deployed app. If a
-deployment removes an owner, disables workflows, or tightens a grant, a pending
-node using the removed capability fails closed. Persisting an old policy snapshot
-as indefinitely authoritative would make policy revocation ineffective.
+deployment removes an owner while at least one owner remains, or tightens a
+grant, a pending node using the removed capability fails closed. Persisting an
+old policy snapshot as indefinitely authoritative would make policy revocation
+ineffective.
 
-This reauthorization and fail-closed revocation behavior is provisional while
-the FRD is `Draft`; implementation must not begin until Decision #8 is ratified.
+Removing or disabling the final owner is a distinct lifecycle transition:
+without an owner policy, the default app would no longer register the Durable
+runtime, so pending instances could be stranded before reaching Activity
+reauthorization. Operators must first set
+`AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE=true`. Drain mode omits
+`start_workflow` from owner tool sets, rejects direct application-level start
+calls defensively, and retains the `DFApp`, orchestrator, and Activities even
+when the current owner-policy catalog is empty. Removed owners then fail closed
+against that empty catalog. After Durable/DTS tooling reports no non-terminal
+instances, operators remove the drain setting to return an app with no owners to
+a plain `FunctionApp`. Invalid drain-mode values fail startup.
 
 Direct Durable orchestration starts remain privileged control-plane operations.
 The application-level owner boundary protects starts and management through
@@ -382,6 +392,7 @@ pair. This keeps internal verification infrastructure out of the customer app.
 | 16 | Activity failure propagation | Let Durable wrapper behavior surface / explicitly rethrow failed wave result | Explicitly rethrow a failed `task_all` result so owner-policy denials retain their original actionable error instead of becoming a secondary `TypeError` | Agent | 2026-08-11 |
 | 17 | Workflow owner eligibility | Require a dedicated starter / allow every enabled agent to own workflows | Treat every agent with `workflows.enabled: true` as an owner and keep invocation surfaces independent; this supersedes Decision #9 and removes raw-frontmatter starter metadata | Human | 2026-08-11 |
 | 18 | Customer sample boundary | Keep sender/verifier helpers in the sample / separate customer app from internal automation | Keep the sample directly runnable and documentation-led, remove the sender helper, and move E2E automation to `eng/scripts` | Human | 2026-08-11 |
+| 19 | Final-owner removal | Always register Durable runtime / documentation-only drain requirement / explicit runtime-retention drain mode | Add `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE`: reject new application starts and retain Durable registration with an empty policy catalog until operators confirm the Task Hub has no non-terminal instances; ordinary non-workflow apps remain plain `FunctionApp` | Human | 2026-08-12 |
 
 ## 6. Test plan
 
@@ -400,6 +411,10 @@ pair. This keeps internal verification infrastructure out of the customer app.
   - complete workflow handler and Agent catalogs remain available;
   - excluding a handler for one owner does not unregister it for another;
   - production execution does not authorize from the singleton app allowlist.
+  - a normal app with no owners remains a plain `FunctionApp`;
+  - drain mode with no owners retains one Durable runtime with an empty policy
+    catalog;
+  - invalid drain-mode values fail startup.
 - [x] Unit: owner-scoped context and management
   - the same session ID under two owner slugs generates different prefixes;
   - active limits, list, status, cancel, and terminate require both owner and
@@ -415,7 +430,9 @@ pair. This keeps internal verification infrastructure out of the customer app.
   - restrictive policy changes reject a pending disallowed node;
   - every capability-bearing Activity payload contains `owner_slug`;
   - failed Activity waves preserve the original authorization/execution error;
-  - `wait` tasks retain existing behavior.
+  - `wait` tasks retain existing behavior;
+  - drain mode rejects new application-level workflow starts before Durable
+    scheduling.
 - [x] Integration: invocation channels
   - multiple workflow-enabled agents register distinct chat, streaming, MCP,
     HTTP trigger, and non-HTTP trigger surfaces as configured;
@@ -452,7 +469,7 @@ pair. This keeps internal verification infrastructure out of the customer app.
 - [x] `docs/front-matter-spec.md` — remove the `main.agent.md` restriction and
   document that ownership and invocation surfaces are independent.
 - [x] `docs/workflows.md` — document multiple owners, identity, isolation,
-  migration, trigger ownership, and operator guidance.
+  migration, trigger ownership, final-owner drain mode, and operator guidance.
 - [x] `docs/triggers.md` — clarify that each workflow-enabled declared trigger
   uses its owning agent's policy and Durable client.
 - [x] `README.md` — link the per-agent workflow sample.

@@ -215,6 +215,10 @@ def test_sample_runtime_files_and_readme_are_complete() -> None:
         "Troubleshooting",
     ):
         assert required in readme
+    assert "Python 3.13+" in readme
+
+    requirements = (SAMPLE_SRC / "requirements.txt").read_text(encoding="utf-8")
+    assert requirements.strip() == "-e ../../..[monitor]"
 
     settings = json.loads(
         (SAMPLE_SRC / "local.settings.template.json").read_text(encoding="utf-8")

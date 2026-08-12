@@ -35,6 +35,7 @@ from .workflows.integration import (
     register_workflow_runtime,
     validate_workflow_owner_trigger,
 )
+from .workflows.settings import workflow_drain_mode_enabled
 
 
 def _tool_name(tool: object) -> str:
@@ -197,23 +198,32 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
 
     catalog: AgentCatalog = build_catalog(catalog_entries)
     workflow_handler_catalog = build_workflow_handler_catalog(workflow_tools)
+    workflow_drain_mode = workflow_drain_mode_enabled()
     workflow_owner_policies = build_workflow_owner_policy_catalog(
         catalog,
         workflow_handler_catalog,
+        starts_allowed=not workflow_drain_mode,
     )
+    workflow_runtime_required = bool(workflow_owner_policies) or workflow_drain_mode
     app: func.FunctionApp = (
         df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
-        if workflow_owner_policies
+        if workflow_runtime_required
         else func.FunctionApp(http_auth_level=func.AuthLevel.FUNCTION)
     )
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
-    if workflow_owner_policies:
+    if workflow_runtime_required:
         register_workflow_runtime(
             app,
             handler_catalog=workflow_handler_catalog,
             catalog=catalog,
             owner_policies=workflow_owner_policies,
+        )
+    if workflow_drain_mode:
+        logger.warning(
+            "workflow drain mode active: new application-level workflow starts "
+            "are disabled; owner_policy_count=%d",
+            len(workflow_owner_policies),
         )
 
     for resolved in resolved_agents:
@@ -308,6 +318,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         "agent_count": len(agent_specs),
         "agents": agents_summary,
         "system_tools": list(system_tools_used),
+        "workflow_drain_mode": workflow_drain_mode,
         "discovered_capabilities": {
             "mcp_servers": len(mcp_names),
             "skills": len(skill_names),

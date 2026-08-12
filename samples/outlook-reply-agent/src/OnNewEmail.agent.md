@@ -4,8 +4,6 @@ description: Drafts a reply when new Office 365 Outlook email comes from the wat
 
 trigger:
   type: connector_trigger
-  args:
-    type: connectorTrigger
 ---
 
 You are an Outlook reply drafting assistant.

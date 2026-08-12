@@ -60,6 +60,7 @@ class WorkflowPlanPolicy:
     allowed_tools: frozenset[str]
     allowed_subagents: frozenset[str]
     subagent_guidance: tuple[tuple[str, str], ...] = ()
+    starts_allowed: bool = True
 
 
 class WorkflowTask(BaseModel):

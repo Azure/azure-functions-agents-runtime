@@ -352,6 +352,10 @@ async def start_workflow(
 ) -> str:
     if session is None:
         return _error(_NO_CLIENT_MESSAGE)
+    if policy is not None and not policy.starts_allowed:
+        return _error(
+            "workflow drain mode is active; new workflows cannot be started"
+        )
 
     allowed_tools = registry.get_app_config() if policy is None else None
     if policy is None and allowed_tools is None:
@@ -650,13 +654,15 @@ def build_workflow_tools(
     async def _terminate_workflow(params: TerminateWorkflowParams) -> str:
         return await terminate_workflow(params, session)
 
-    return [
-        _start_workflow,
+    workflow_tools = [
         _get_workflow_status,
         _list_workflows,
         _cancel_workflow,
         _terminate_workflow,
     ]
+    if policy is None or policy.starts_allowed:
+        workflow_tools.insert(0, _start_workflow)
+    return workflow_tools
 
 
 __all__ = [

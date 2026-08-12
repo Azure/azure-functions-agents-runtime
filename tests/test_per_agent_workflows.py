@@ -4,6 +4,7 @@ from types import MappingProxyType
 from typing import Any
 
 import azure.durable_functions as df
+import azure.functions as func
 import pytest
 
 from azure_functions_agents._function_tool import WorkflowTool
@@ -32,6 +33,14 @@ def _function_names(app: Any) -> list[str]:
     return [function.get_function_name() for function in app.get_functions()]
 
 
+def _registered_function(app: Any, name: str) -> Any:
+    for builder in app._function_builders:
+        function = builder._function
+        if function._name == name:
+            return function._func
+    raise AssertionError(f"function {name!r} was not registered")
+
+
 def test_non_main_workflow_owner_without_main_creates_dfapp(tmp_path) -> None:
     _write_agent(
         tmp_path,
@@ -54,6 +63,142 @@ workflows:
     assert names.count("agents_workflow_run_tool") == 1
     assert names.count(engine.SUB_AGENT_ACTIVITY_NAME) == 1
     assert "agent_incident_builtin_chat" in names
+
+
+def test_non_workflow_app_remains_plain_function_app(tmp_path) -> None:
+    _write_agent(
+        tmp_path,
+        "assistant.agent.md",
+        """
+name: Assistant
+description: Handles chat without workflows.
+builtin_endpoints:
+  chat_api: true
+""",
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert isinstance(app, func.FunctionApp)
+    assert not isinstance(app, df.DFApp)
+    assert engine.ORCHESTRATOR_NAME not in _function_names(app)
+
+
+def test_drain_mode_retains_runtime_with_no_workflow_owners(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE", "true")
+    caplog.set_level("INFO", logger="azure.functions.AgentRuntime")
+    _write_agent(
+        tmp_path,
+        "assistant.agent.md",
+        """
+name: Assistant
+description: Handles chat after the final workflow owner was removed.
+builtin_endpoints:
+  chat_api: true
+""",
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert isinstance(app, df.DFApp)
+    names = _function_names(app)
+    assert names.count(engine.ORCHESTRATOR_NAME) == 1
+    assert names.count("agents_workflow_run_tool") == 1
+    assert names.count(engine.SUB_AGENT_ACTIVITY_NAME) == 1
+    activity = _registered_function(app, "agents_workflow_run_tool")
+    with pytest.raises(RuntimeError, match="owner policy"):
+        activity(
+            {
+                "id": "pending",
+                "tool": "removed_tool",
+                "args": {},
+                "owner_slug": "removed_owner",
+                "workflow_id": "workflow-1",
+            }
+        )
+    assert "workflow drain mode active" in caplog.text
+    assert '"workflow_drain_mode": true' in caplog.text
+
+
+def test_drain_mode_disables_starts_for_existing_owner(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE", "true")
+    captured: dict[str, schema.WorkflowPlanPolicy] = {}
+    original_builder = integration.build_workflow_owner_policy_catalog
+
+    def capture_policies(catalog, handler_catalog, *, starts_allowed=True):
+        policies = original_builder(
+            catalog,
+            handler_catalog,
+            starts_allowed=starts_allowed,
+        )
+        captured.update(policies)
+        return policies
+
+    monkeypatch.setattr(
+        "azure_functions_agents.app.build_workflow_owner_policy_catalog",
+        capture_policies,
+    )
+    _write_agent(
+        tmp_path,
+        "incident.agent.md",
+        """
+name: Incident
+description: Triage incidents while existing workflows drain.
+builtin_endpoints:
+  chat_api: true
+workflows:
+  enabled: true
+""",
+    )
+
+    app = create_function_app(tmp_path)
+
+    assert isinstance(app, df.DFApp)
+    assert "agent_incident_builtin_chat" in _function_names(app)
+    policy = captured["incident"]
+    assert not policy.starts_allowed
+    owner_integration = integration.build_owner_workflow_integration(
+        policy,
+        MappingProxyType({}),
+    )
+    assert {tool.name for tool in owner_integration.workflow_tools} == {
+        "get_workflow_status",
+        "list_workflows",
+        "cancel_workflow",
+        "terminate_workflow",
+    }
+    assert "Workflow drain mode" in owner_integration.chat_system_addendum
+    assert "<workflow-notification>" in owner_integration.chat_system_addendum
+
+
+def test_invalid_drain_mode_fails_startup(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE", "sometimes")
+    _write_agent(
+        tmp_path,
+        "assistant.agent.md",
+        """
+name: Assistant
+description: Handles chat without workflows.
+builtin_endpoints:
+  chat_api: true
+""",
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE",
+    ):
+        create_function_app(tmp_path)
 
 
 @pytest.mark.parametrize("chat_api", ['"true"', "1"])
