@@ -492,6 +492,7 @@ class AcaSandboxAdapter:
                 SandboxSummary.create(
                     sandbox_id=sandbox.id,
                     labels=dict(sandbox.labels),
+                    state=sandbox.state,
                     created_at=_sdk_timestamp(sandbox.created_at),
                     modified_at=None,
                 )

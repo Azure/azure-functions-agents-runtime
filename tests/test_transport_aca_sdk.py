@@ -720,6 +720,7 @@ async def test_adapter_projects_group_inventory_and_snapshot_deletion(
     await adapter.delete_sandbox(handle.identity.sandbox_id)
 
     assert inventory[0].sandbox_id == handle.identity.sandbox_id
+    assert inventory[0].state == "Running"
     assert snapshots[0].snapshot_id == "snapshot-1"
     assert environment.group_client.deleted_snapshot_ids == ["snapshot-1"]
     assert environment.group_client.deleted_sandbox_ids == [handle.identity.sandbox_id]

@@ -9,6 +9,7 @@ from azure_functions_agents.config.loader import load_agent_specs, load_global_c
 from azure_functions_agents.config.merge import compose
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
 from tests.live import aca_deployed_agent_support as support
+from tests.live import aca_deployed_lifecycle_support as lifecycle_support
 
 _DEPLOYABLE_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "live_aca_deployed_agent_turn"
 
@@ -28,6 +29,25 @@ def _set_deployed_environment(monkeypatch: pytest.MonkeyPatch) -> None:
         "deployed-aca",
     )
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS", "180")
+
+
+def _set_deployed_lifecycle_environment(monkeypatch: pytest.MonkeyPatch) -> None:
+    _set_deployed_environment(monkeypatch)
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI",
+        "https://deployedacatable.table.core.windows.net",
+    )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME", "AzureFunctionsAgentsSessions")
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
+        "/subscriptions/00000000-0000-0000-0000-000000000000/"
+        "resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group",
+    )
+    monkeypatch.setenv(
+        "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID",
+        "00000000-0000-0000-0000-000000000000",
+    )
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME", "deployed-aca")
 
 
 def _set_deployable_fixture_environment(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -62,8 +82,8 @@ def test_deployable_fixture_has_persistent_entra_no_tools_aca_configuration(
     assert global_config.session_runtime is not None
     assert global_config.session_runtime.aca_sandbox is not None
     assert global_config.session_runtime.aca_sandbox.retention is not None
-    assert global_config.session_runtime.aca_sandbox.retention.auto_suspend_idle == 300
-    assert global_config.session_runtime.aca_sandbox.retention.reclaim_idle == 900
+    assert global_config.session_runtime.aca_sandbox.retention.auto_suspend_idle == 60
+    assert global_config.session_runtime.aca_sandbox.retention.reclaim_idle == 120
     assert resolved.model == "deployed-model"
     assert resolved.builtin_endpoints.http_auth.mode == "entra"
     assert resolved.tools_disabled is True
@@ -85,6 +105,21 @@ def test_deployed_config_reads_only_safe_url_and_route_contract(
         "events_url": "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/sessions/session-1/runs/run-1/events",
         "cancel_url": "https://deployed-aca.azurewebsites.net/api/agents/deployed_turn/sessions/session-1/runs/run-1/cancel",
     }
+
+
+def test_deployed_lifecycle_config_reads_real_resource_observation_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_deployed_lifecycle_environment(monkeypatch)
+
+    config = lifecycle_support.deployed_aca_lifecycle_config_from_environment()
+
+    assert config.table_service_uri == "https://deployedacatable.table.core.windows.net"
+    assert config.table_name == "AzureFunctionsAgentsSessions"
+    assert config.app_identity.site_name == "deployed-aca"
+    assert config.app_hash.startswith("a1-")
+    assert lifecycle_support.LIFECYCLE_AUTO_SUSPEND_SECONDS == 60
+    assert lifecycle_support.LIFECYCLE_RECLAIM_IDLE_SECONDS == 120
 
 
 @pytest.mark.parametrize(

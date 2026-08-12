@@ -187,7 +187,7 @@ jobs:
           AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
 
   - job: "ACADeployedAgentTurn"
-    displayName: 'Run deployed ACA agent-turn qualification'
+    displayName: 'Run deployed ACA agent-turn and lifecycle qualification'
     condition: eq(variables['Build.Reason'], 'Manual')
     continueOnError: true
 
@@ -210,7 +210,7 @@ jobs:
         displayName: 'Install deployed ACA test dependencies'
 
       - task: AzureCLI@2
-        displayName: 'Run deployed ACA agent-turn qualification'
+        displayName: 'Run deployed ACA agent-turn and lifecycle qualification'
         inputs:
           azureSubscription: ${{ parameters.acaServiceConnection }}
           scriptType: bash
@@ -221,7 +221,11 @@ jobs:
               AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG \
               AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE \
               AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE \
-              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS; do
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID \
+              AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME; do
               eval "value=\${${name}:-}"
               if [ -z "${value}" ] || case "${value}" in '$('*')') true;; *) false;; esac; then
                 echo "Required deployed ACA environment ${name} is not set." >&2
@@ -260,7 +264,9 @@ jobs:
 
             asyncio.run(main())
             PY
-            python -m pytest -m live_aca tests/live/test_aca_deployed_agent_turn.py -v \
+            python -m pytest -m live_aca \
+              tests/live/test_aca_deployed_agent_turn.py \
+              tests/live/test_aca_deployed_lifecycle.py -v \
               -o log_cli=true -o log_cli_level=INFO
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
@@ -270,3 +276,8 @@ jobs:
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_DEPLOYED_EASY_AUTH_AUDIENCE)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS: $(ACA_DEPLOYED_TIMEOUT_SECONDS)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI: $(ACA_DEPLOYED_TABLE_SERVICE_URI)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME: $(ACA_DEPLOYED_TABLE_NAME)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_DEPLOYED_APP_SUBSCRIPTION_ID)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: $(ACA_DEPLOYED_APP_SITE_NAME)
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

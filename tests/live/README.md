@@ -24,6 +24,12 @@ evidence. None provisions infrastructure from CI.
   through only a deployed, Easy-Auth-protected Azure Function's public routes.
   It submits a run, reads journal SSE, status, and result; it never calls ACA,
   the harness, or Table storage directly.
+- **GA deployed persistent-session lifecycle qualification**:
+  `tests/live/test_aca_deployed_lifecycle.py` creates and resumes turns only
+  through that same protected public route. It uses an authorized, read-only
+  Table observation and ACA inventory to establish lifecycle evidence, then
+  invokes the production `SessionReconciler` against the same real Table store
+  and `AcaSandboxAdapter` for reclaim rather than waiting for the hourly timer.
 
 Shared provisioning, dependency-closure delivery, and cleanup live in
 `tests/live/aca_smoke_support.py`.
@@ -146,6 +152,56 @@ qualification only for manually queued builds, never pull requests or schedules.
 Missing URL/configuration, token acquisition, or unavailable-app failures are
 reported as `ACA-SMOKE-ENV` pytest errors; public response and protocol
 assertions remain pytest failures. Never log prompt or model-result content.
+
+### Run the deployed lifecycle qualification manually
+
+The deployed fixture intentionally uses the shortest supported ACA
+`auto_suspend_idle` value, **60 seconds**, and a **120-second**
+`reclaim_idle`. The configuration contract accepts `reclaim_idle` values that
+are positive and strictly greater than the selected auto-suspend value; 120
+leaves a full minute to observe suspension and submit the resumed public turn.
+The runtime's reclamation eligibility includes its 300-second safety grace, so
+the reclaim phase begins about seven minutes after the resumed terminal turn.
+The test invokes the real reconciler at that eligibility point rather than
+waiting for the normal 3600-second deployed timer cadence.
+
+Republish the fixture after changing retention, then run the lifecycle file
+with the same public endpoint settings plus the non-secret state and app
+identity settings:
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net/api"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG="deployed_turn"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE="api://<app-client-id>/.default"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE="<app-client-id>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS=180
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI="https://<storage-account>.table.core.windows.net"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME="AzureFunctionsAgentsSessions"
+export AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="/subscriptions/<subscription>/resourceGroups/<resource-group>/providers/Microsoft.App/sandboxGroups/<group>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID="<function-app-subscription-id>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME="<function-app-site-name>"
+python -m pytest -m live_aca tests/live/test_aca_deployed_lifecycle.py -v \
+  -o log_cli=true -o log_cli_level=INFO
+```
+
+Expected duration is the two real public turns plus roughly 60 seconds for
+provider auto-suspend and roughly 420 seconds for reclaim eligibility
+(`120 + 300` safety grace). The manual `ACADeployedAgentTurn` ADO job runs
+this file alongside the existing deployed-turn test and additionally requires
+the protected non-secret variables `ACA_DEPLOYED_TABLE_SERVICE_URI`,
+`ACA_DEPLOYED_TABLE_NAME`, `ACA_DEPLOYED_APP_SUBSCRIPTION_ID`, and
+`ACA_DEPLOYED_APP_SITE_NAME`.
+
+The qualification proves only normal lifecycle behavior: ACA reports the
+owned sandbox `Stopped` or `Suspended`; a second public turn resumes the same
+sandbox ID and generation; and the real reconciler deletes the owned backing
+sandbox and snapshots before writing the documented `reclaimed_idle_session`
+tombstone. It confirms terminal status remains readable and result retrieval
+returns `410`. On a failure, cleanup uses the complete immutable ownership
+label selector before running the same reconciler to avoid leaking the owned
+session. It does **not** certify external sandbox loss, cursor replay,
+cancel, chaos, or load behavior.
 
 ### Host ABI prerequisite
 

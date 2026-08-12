@@ -117,6 +117,7 @@ class SandboxSummary:
 
     sandbox_id: str
     labels: Mapping[str, str]
+    state: str | None = None
     created_at: str | None = None
     modified_at: str | None = None
 
@@ -126,12 +127,14 @@ class SandboxSummary:
         *,
         sandbox_id: str,
         labels: Mapping[str, str],
+        state: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
     ) -> SandboxSummary:
         return cls(
             sandbox_id=_require_nonempty_string(sandbox_id, "sandbox_id"),
             labels=MappingProxyType(_validate_labels(labels)),
+            state=_optional_bounded_text(state, "state", max_bytes=32),
             created_at=_optional_timestamp(created_at, "created_at"),
             modified_at=_optional_timestamp(modified_at, "modified_at"),
         )
@@ -808,3 +811,12 @@ def _optional_timestamp(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
     return _require_nonempty_string(value, field_name)
+
+
+def _optional_bounded_text(value: str | None, field_name: str, *, max_bytes: int) -> str | None:
+    if value is None:
+        return None
+    normalized = _require_nonempty_string(value, field_name)
+    if len(normalized.encode("utf-8")) > max_bytes:
+        raise SandboxProvisioningError(f"{field_name} exceeds {max_bytes} UTF-8 bytes.")
+    return normalized

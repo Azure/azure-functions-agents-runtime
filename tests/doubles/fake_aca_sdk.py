@@ -149,6 +149,7 @@ class FakeSdkSandboxSummary:
     """Mirrors the subset of the preview SDK's ``Sandbox`` response used here."""
 
     id: str = ""
+    state: str | None = "Running"
     labels: dict[str, str] = field(default_factory=dict)
     created_at: str | None = None
     modified_at: str | None = None
@@ -342,7 +343,11 @@ class FakeSdkGroupClient:
             for sandbox in tuple(self.sandboxes.values()):
                 if labels and any(sandbox.labels.get(key) != value for key, value in labels.items()):
                     continue
-                yield FakeSdkSandboxSummary(id=sandbox.sandbox_id, labels=sandbox.labels)
+                yield FakeSdkSandboxSummary(
+                    id=sandbox.sandbox_id,
+                    state="Running",
+                    labels=sandbox.labels,
+                )
 
         return iterate()
 

@@ -12,5 +12,5 @@ session_runtime:
   aca_sandbox:
     sandbox_group_resource_id: $AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID
     retention:
-      auto_suspend_idle: 300
-      reclaim_idle: 900
+      auto_suspend_idle: 60
+      reclaim_idle: 120
