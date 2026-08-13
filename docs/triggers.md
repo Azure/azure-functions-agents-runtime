@@ -52,7 +52,7 @@ startup warning.
 
 See [Trigger-started workflows](./workflows.md#trigger-started-workflows) for
 HTTP and non-HTTP completion behavior, and the
-[queue workflow sample](../samples/workflow-queue-p0-report/README.md) for a
+[queue workflow sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-queue-p0-report/README.md) for a
 runnable example.
 
 ## Supported Trigger Types

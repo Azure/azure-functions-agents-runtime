@@ -4,6 +4,8 @@
 
 A markdown-first programming model for building AI agents on Azure Functions, powered by the [Microsoft Agent Framework (MAF)](https://github.com/microsoft/agent-framework).
 
+📖 **Full documentation:** [azure.github.io/azure-functions-agents-runtime](https://azure.github.io/azure-functions-agents-runtime/)
+
 - **Build agents with markdown** — write instructions, configure triggers, and bind tools in `.agent.md` files
 - **Run on any Azure Functions trigger** — trigger agents on timer, queue, blob, HTTP, Event Hub, Service Bus, Cosmos DB, and more
 - **Connect to 1,400+ services** — use connector-backed MCP servers to let agents act through Office 365, Teams, SQL, Salesforce, SAP, and hundreds of other connectors
