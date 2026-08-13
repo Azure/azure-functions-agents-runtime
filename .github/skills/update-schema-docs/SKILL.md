@@ -1,15 +1,17 @@
 ---
 name: update-schema-docs
-description: "Detect schema.py changes and update front-matter-spec.md and architecture.md with examples and documentation. Use when schema.py has been modified as part of a feature to ensure documentation stays synchronized with the schema source of truth. Automatically generates usage examples, updates field descriptions, and flags architecture changes that need manual review. Trigger on schema changes during feature development, or when asked to 'update docs for schema changes', 'sync schema documentation', or 'add examples for new config fields'."
+description: "Detect schema.py changes and update front-matter-spec.md, architecture.md, and the public docs site (docs/index.md, docs/getting-started.md) with examples and documentation. Use when schema.py has been modified as part of a feature to ensure documentation stays synchronized with the schema source of truth. Automatically generates usage examples, updates field descriptions, flags architecture changes that need manual review, and flags docs-site landing/onboarding copy that should mention new user-facing capabilities. Trigger on schema changes during feature development, or when asked to 'update docs for schema changes', 'sync schema documentation', 'add examples for new config fields', or 'update the docs site for this feature'."
 ---
 
 # update-schema-docs — Schema-driven documentation synchronization
 
-This skill ensures `docs/front-matter-spec.md` and `docs/architecture.md` stay
-synchronized when `src/azure_functions_agents/config/schema.py` changes.
+This skill ensures `docs/front-matter-spec.md`, `docs/architecture.md`, and the
+public docs site's landing/onboarding pages (`docs/index.md`,
+`docs/getting-started.md`) stay synchronized when
+`src/azure_functions_agents/config/schema.py` changes.
 `docs/front-matter-reference.md` is already auto-generated (via
-`eng/scripts/generate_config_reference.py`), but spec and architecture docs
-require intelligent example generation and contextual updates.
+`eng/scripts/generate_config_reference.py`), but spec, architecture, and
+docs-site pages require intelligent example generation and contextual updates.
 
 ## When to use
 
@@ -32,7 +34,14 @@ Use this skill during **Phase 5 (Docs)** of the medium+ feature pipeline when:
    - Flag if new models suggest pipeline stage changes
    - Check if module map needs updates
    - Verify configuration precedence rules still hold
-4. **Generate PR checklist:** List all doc changes made + items needing human review
+4. **Sync the docs site landing pages:**
+   - If the change introduces a new **user-facing capability** (new trigger
+     type, new frontmatter field a typical user would reach for, new model
+     provider), check whether `docs/index.md`'s feature bullet list or
+     `docs/getting-started.md`'s walkthrough should mention it
+   - Skip this step for internal-only or low-level schema changes (e.g.
+     tightened validation, refactors) that don't change what a new user sees
+5. **Generate PR checklist:** List all doc changes made + items needing human review
 
 ## Prerequisites
 
@@ -97,12 +106,34 @@ For each new or changed field:
    - If new global/agent/env interactions exist, update §4 precedence rules
    - Ensure the precedence diagram (if present) is still accurate
 
-### Step 4: Generate PR checklist
+### Step 4: Sync docs-site landing pages
+
+1. **Decide if this change is docs-site-worthy:**
+   - New trigger type, new top-level frontmatter field, new model provider,
+     or any change that adds a bullet-worthy capability → yes
+   - Internal refactors, stricter validation, or field renames with no new
+     capability → no, skip
+
+2. **Update `docs/index.md`** (if worthy):
+   - Add a concise bullet to the feature list matching the existing bullet
+     style (bold lead-in, em dash, one sentence)
+
+3. **Update `docs/getting-started.md`** (if worthy and walkthrough-relevant):
+   - Only touch the quickstart steps if the new capability changes the
+     minimal path to a working agent (e.g. a new required config file, a new
+     provider env var). Don't pad the walkthrough with optional features.
+
+4. **Cross-check `README.md`:** the docs site and README duplicate the same
+   feature bullet list — if you update one, flag (or update) the other so
+   they don't drift.
+
+### Step 5: Generate PR checklist
 
 Create a checklist of:
 - [ ] front-matter-reference.md updated (auto-generated via script)
 - [ ] front-matter-spec.md examples added for: `<list new fields>`
 - [ ] architecture.md module map verified
+- [ ] docs/index.md and docs/getting-started.md checked (updated / not applicable)
 - [ ] Human review needed for: `<list architectural concerns>`
 - [ ] Validation examples added for: `<list complex validators>`
 
@@ -139,6 +170,7 @@ Create a checklist of:
    - [x] front-matter-reference.md updated
    - [x] front-matter-spec.md: added retry_policy example under Agent Front Matter
    - [x] architecture.md: verified runner stage mentions retry (update if not)
+   - [x] docs/index.md, docs/getting-started.md: not applicable (advanced/optional field, not quickstart-worthy)
    - [ ] Human review: decide if retry belongs in runner or client_manager
 
 ## Example: Adding a new trigger type
@@ -178,6 +210,7 @@ Create a checklist of:
    - [x] front-matter-spec.md: added cosmosdb_trigger example
    - [x] docs/triggers.md: added detailed CosmosDB section
    - [x] architecture.md: verified trigger registration flow
+   - [x] docs/index.md: added "Cosmos DB change feed" to trigger bullet examples; docs/getting-started.md: not applicable (not part of minimal quickstart path)
    - [ ] Human review: binding extension dependency (needs host.json update?)
 
 ## Output format
@@ -194,6 +227,7 @@ When this skill completes, provide:
    - front-matter-spec.md: Added retry_policy example (line 245)
    - front-matter-spec.md: Updated timeout example to show string format (line 89)
    - architecture.md: Verified runner stage docs (no changes needed)
+   - docs/index.md, docs/getting-started.md: not applicable (advanced field, not quickstart-relevant)
    ```
 
 2. **PR checklist** (markdown, ready to paste):
@@ -204,6 +238,7 @@ When this skill completes, provide:
    - [x] `front-matter-spec.md` examples added for: `retry_policy`
    - [x] `front-matter-spec.md` timeout example updated to show string support
    - [x] `architecture.md` module map verified (no changes needed)
+   - [x] `docs/index.md` / `docs/getting-started.md` checked (not applicable)
    - [ ] **Human review:** Retry logic placement (runner vs client_manager?)
    ```
 
@@ -233,7 +268,9 @@ This skill is invoked during **Phase 5 (Docs)** of the medium+ pipeline, after
 `eng/scripts/generate_config_reference.py` has been run. The workflow becomes:
 
 1. Run `generate_config_reference.py` → updates `front-matter-reference.md`
-2. Run **this skill** → updates `front-matter-spec.md` examples + reviews `architecture.md`
+2. Run **this skill** → updates `front-matter-spec.md` examples, reviews
+   `architecture.md`, and syncs `docs/index.md` / `docs/getting-started.md`
+   when the change adds a new user-facing capability
 3. Human reviews the PR checklist and architectural concerns
 4. Commit documentation updates alongside implementation
 
@@ -247,6 +284,8 @@ This skill is invoked during **Phase 5 (Docs)** of the medium+ pipeline, after
 - **Output (write):**
   - `docs/front-matter-spec.md` (add/update examples)
   - `docs/triggers.md` (if trigger surface changed)
+  - `docs/index.md` (if a new user-facing capability warrants a feature bullet)
+  - `docs/getting-started.md` (if the new capability changes the minimal quickstart path)
 
 - **Output (review/flag):**
   - `docs/architecture.md` (flag inconsistencies, suggest updates)
@@ -257,5 +296,7 @@ This skill is invoked during **Phase 5 (Docs)** of the medium+ pipeline, after
 - Every new field in schema.py has at least one usage example in front-matter-spec.md
 - Existing examples updated if field semantics changed
 - Architecture.md module map matches reality
+- docs/index.md and docs/getting-started.md checked for every schema change that
+  adds a new user-facing capability (bullet added or explicitly deemed not applicable)
 - Clear PR checklist with human review items flagged
 - No "orphaned" documentation (examples for removed fields)

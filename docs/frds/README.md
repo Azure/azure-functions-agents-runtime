@@ -4,9 +4,9 @@ FRDs are lightweight, committed design records for **medium+ features** in this
 repo — think "ADR + requirements." They capture the problem, the proposed
 design, and an append-only **Decisions log** that records who decided what.
 
-The full lifecycle that produces an FRD lives in [`../../AGENTS.md`](../../AGENTS.md)
+The full lifecycle that produces an FRD lives in [`AGENTS.md`](https://github.com/Azure/azure-functions-agents-runtime/blob/main/AGENTS.md)
 §1 and is automated by the `add-feature` skill
-([`.github/skills/add-feature/SKILL.md`](../../.github/skills/add-feature/SKILL.md)).
+([`.github/skills/add-feature/SKILL.md`](https://github.com/Azure/azure-functions-agents-runtime/blob/main/.github/skills/add-feature/SKILL.md)).
 
 ## When do I need one?
 
