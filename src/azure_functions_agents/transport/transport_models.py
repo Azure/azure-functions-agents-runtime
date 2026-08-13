@@ -9,6 +9,11 @@ from types import MappingProxyType
 from typing import Literal, get_args
 
 _MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
+SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE = "sandbox_group_authorization_failed"
+SANDBOX_GROUP_AUTHORIZATION_MESSAGE = (
+    "Sandbox Group data-plane authorization failed. Grant the controller identity "
+    "'Container Apps SandboxGroup Data Owner' on the configured Sandbox Group."
+)
 
 
 class SandboxTransportError(Exception):
@@ -21,6 +26,13 @@ class SandboxProvisioningError(SandboxTransportError):
 
 class SandboxCapacityError(SandboxProvisioningError):
     """Raised when the Sandbox Group cannot currently admit another sandbox."""
+
+
+class SandboxGroupAuthorizationError(SandboxProvisioningError):
+    """Raised when the controller lacks Sandbox Group data-plane authorization."""
+
+    def __init__(self) -> None:
+        super().__init__(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
 
 
 class SandboxGroupBindingError(SandboxTransportError):

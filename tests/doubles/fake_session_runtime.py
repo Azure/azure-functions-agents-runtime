@@ -706,6 +706,8 @@ class FakeSessionStateStore:
             phase=state,
             state=state,
             error_code=error_code,
+            lease_expires_at=None,
+            next_attempt_at=None,
             updated_at=updated_at,
             finished_at=updated_at,
         )

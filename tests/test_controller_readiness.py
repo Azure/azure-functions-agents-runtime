@@ -16,6 +16,7 @@ from azure_functions_agents.controller.readiness import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
     ActivatedSession,
+    SessionActivationAuthorizationError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
@@ -51,7 +52,11 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.manifest import SandboxManifestMismatchError
-from azure_functions_agents.transport.transport_models import DiskSource, SandboxFileOperationError
+from azure_functions_agents.transport.transport_models import (
+    DiskSource,
+    SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
+)
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
 from tests.doubles.fake_session_runtime import FakeSandboxSessionHandle as _FakeHandle
@@ -219,6 +224,37 @@ async def test_reserved_provision_keeps_successful_created_handle_open(tmp_path:
     assert provisioned.activated is not None
     assert provisioned.activated.handle is handle
     assert handle.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_authorization_failure_terminalizes_durable_state(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SandboxGroupAuthorizationError())
+    store = _FakeStore()
+
+    with pytest.raises(SessionActivationAuthorizationError):
+        await provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert store.session is not None
+    assert store.session.status == "deleting"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    assert store.runs["run-1"].status == "failed"
+    assert store.runs["run-1"].status_reason == "sandbox_group_authorization_failed"
+    [operation] = store.durable_operations.values()
+    assert operation.state == "completed"
+    assert operation.lease_expires_at is None
 
 
 @pytest.mark.asyncio

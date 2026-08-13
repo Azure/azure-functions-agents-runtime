@@ -87,6 +87,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxCapacityError,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
@@ -1991,6 +1992,65 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
         await backend.start_run(
             StartRunRequest(prompt="different", idempotency_key="caller-key")
         )
+
+
+@pytest.mark.asyncio
+async def test_new_session_authorization_failure_replays_same_terminal_response(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    provider.create_errors.append(SandboxGroupAuthorizationError())
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(
+        prompt="hello",
+        idempotency_key="authorization-failure-key",
+    )
+
+    first = await submit_run(
+        backend,
+        request,
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+    replay = await submit_run(
+        backend,
+        request,
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    expected_body = {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert first.status_code == 503
+    assert first.body == expected_body
+    assert replay.status_code == 503
+    assert replay.body == expected_body
+    assert len(provider.create_calls) == 1
+    assert store.session is not None
+    assert store.session.status == "deleting"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    [run] = store.runs.values()
+    assert run.status == "failed"
+    assert run.status_reason == "sandbox_group_authorization_failed"
+    [operation] = store.durable_operations.values()
+    assert operation.state == "completed"
 
 
 @pytest.mark.asyncio

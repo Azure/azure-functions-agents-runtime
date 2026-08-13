@@ -134,6 +134,28 @@ must be configured for the runtime's persistent session state. Keep the Azure
 OpenAI endpoint and Function App on managed identity; do not put model keys,
 storage keys, or bearer tokens in the fixture or test environment.
 
+The Function **controller** managed identity—not only the pipeline service
+connection—must hold `Container Apps SandboxGroup Data Owner` (role id
+`c24cf47c-5077-412d-a19c-45202126392c`) on the exact configured Sandbox Group.
+`Container Apps SandboxGroup Contributor` is insufficient. Verify the assignment
+before publishing or running E2E:
+
+```bash
+GROUP_ID="/subscriptions/<subscription>/resourceGroups/<group-rg>/providers/Microsoft.App/sandboxGroups/<group>"
+CONTROLLER_PRINCIPAL_ID="<function-controller-managed-identity-principal-id>"
+test "$(az role assignment list \
+  --assignee-object-id "${CONTROLLER_PRINCIPAL_ID}" \
+  --scope "${GROUP_ID}" \
+  --query "[?roleDefinitionName=='Container Apps SandboxGroup Data Owner'] | length(@)" \
+  --output tsv)" -ge 1
+```
+
+The low-level CI preflight proves the pipeline service connection can reach its
+group; it does not prove the deployed Function's controller identity assignment.
+The deployed runtime now reports a redacted
+`sandbox_group_authorization_failed` HTTP `503` immediately if its own
+data-plane list/create/attach call returns `401` or `403`.
+
 After the app package, Easy Auth policy, U3.TestInvoker role assignment, ACA
 Sandbox Group access, and Azure OpenAI access are ready, run this manually:
 
@@ -531,8 +553,9 @@ Four things must be supplied before the job can pass:
 The connection name is the `acaServiceConnection` **runtime parameter**, exposed
 in the Run pipeline dialog as "ACA smoke: Azure service connection". Set it at
 queue time to point at a connection whose identity holds the role in item 3 —
-no YAML edit is needed to change it. The `saf-foundry-connection` default only
-exists so the template compiles and is unlikely to hold that role.
+no YAML edit is needed to change it. The checked-in U3 default is
+`larohra-sandboxgroup-test`; another environment must select its own authorized
+connection.
 
 The preflight step `Verify ACA sandbox group is reachable` runs before any test
 and prints the signed-in identity, then rejects a missing variable, an

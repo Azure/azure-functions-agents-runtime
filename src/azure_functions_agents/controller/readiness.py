@@ -30,6 +30,7 @@ from ..journal_paths import (
 )
 from ..sandbox_runtime_limits import lifecycle_auto_delete_seconds
 from ..session_state import (
+    TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
     AppIdentity,
     ConcurrencyConflictError,
@@ -50,6 +51,7 @@ from ..session_state import (
     SessionRead,
     SessionStateContractError,
     SessionStateStore,
+    SessionStateStoreError,
     StaleOperationTokenError,
     operation_correlation_label,
     operation_id_for_sequence,
@@ -66,12 +68,15 @@ from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.manifest import ExpectedSandboxManifestBinding, SandboxManifestMismatchError
 from ..transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from ..transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     PersistedSandboxBinding,
     SandboxCapacityError,
     SandboxCreateRequest,
     SandboxCreateSource,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
@@ -138,6 +143,10 @@ class SessionActivationGoneError(SessionActivationError):
 
 class SessionActivationSetupTimeoutError(SessionActivationError):
     """The setup deadline elapsed before a sandbox was ready to receive a run."""
+
+
+class SessionActivationAuthorizationError(SessionActivationError):
+    """The controller lacks required Sandbox Group data-plane authorization."""
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -507,6 +516,11 @@ async def activate_session(
             ),
             setup_deadline,
         )
+    except SandboxGroupAuthorizationError:
+        if handle is not None:
+            with suppress(Exception):
+                await handle.close()
+        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -1237,6 +1251,13 @@ async def provision_new_session_submit(
         setup_deadline,
     )
     if outcome.replayed:
+        if (
+            outcome.run.status in TERMINAL_RUN_STATUSES
+            and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
+        ):
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+            )
         existing_session = await _within_setup_budget(
             state_binding.store.get_session(partition, outcome.run.session_id),
             setup_deadline,
@@ -1317,6 +1338,15 @@ async def _provision_reserved_session(
             package,
             setup_deadline,
         )
+    except SandboxGroupAuthorizationError:
+        try:
+            await _fail_reserved_provision_authorization(
+                state_binding.store,
+                fence,
+            )
+        except (SessionStateContractError, SessionStateStoreError) as cleanup_error:
+            raise cleanup_error from None
+        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
     except SandboxFileNotFoundError as exc:
         raise SessionActivationSetupTimeoutError(
             "Sandbox file-plane provisioning artifact is temporarily unavailable."
@@ -1327,6 +1357,59 @@ async def _provision_reserved_session(
                 "Sandbox file-plane provisioning is temporarily unavailable."
             ) from exc
         raise
+
+
+async def _fail_reserved_provision_authorization(
+    store: SessionStateStore,
+    fence: SessionOperationFence,
+) -> None:
+    """Atomically terminalize a provision blocked by deterministic group authorization."""
+
+    if fence.target.run_id is None:
+        raise SessionActivationError("Provision-submit operation has no target run.")
+    current = await store.get_session(fence.owner_partition, fence.session_id)
+    run = await store.get_run(
+        fence.owner_partition,
+        fence.session_id,
+        fence.target.run_id,
+    )
+    updated_at = datetime.now(UTC)
+    failed_run = terminal_run(
+        run.record,
+        status="failed",
+        result_available=False,
+        reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        updated_at=updated_at,
+    )
+    deleting = DurableSessionRecord.create(
+        owner_partition=current.record.owner_partition,
+        session_id=current.record.session_id,
+        sandbox_id=current.record.sandbox_id,
+        generation=current.record.generation,
+        digest_kind=current.record.digest_kind,
+        digest=current.record.digest,
+        protocol=current.record.protocol,
+        status="deleting",
+        last_activity_at=current.record.last_activity_at,
+        expires_at=current.record.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=current.record.snapshot_ids,
+        region=current.record.region,
+        state_store_fingerprint=current.record.state_store_fingerprint,
+        quarantine_reason=current.record.quarantine_reason,
+        tombstone_reason=current.record.tombstone_reason,
+        created_at=current.record.created_at,
+        updated_at=updated_at,
+        active_operation_id=None,
+        operation_sequence=current.record.operation_sequence,
+    )
+    await store.complete_operation(
+        fence=fence,
+        updated_session=deleting,
+        terminal_run=failed_run,
+        updated_at=updated_at,
+    )
 
 
 async def _provision_reserved_session_inner(

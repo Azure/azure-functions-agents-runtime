@@ -36,6 +36,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxEgressSecretRef,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxLifecyclePolicy,
@@ -553,6 +554,67 @@ async def test_create_preserves_definitive_request_rejection_without_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_stable_create_translates_initial_list_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+
+    def forbidden_list(**_: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", forbidden_list)
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert environment.group_client.create_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_translates_begin_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 401
+
+    async def forbidden_create(**_: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(environment.group_client, "begin_create_sandbox", forbidden_create)
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.create(_request(), persisted_group=_binding())
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_create_preserves_original_error_when_cleanup_confirms_nothing_was_created(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -581,6 +643,42 @@ async def test_create_preserves_original_error_when_cleanup_confirms_nothing_was
         await adapter.create(_request(), persisted_group=_binding())
 
     assert environment.sandboxes == {}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_attach_translates_manifest_read_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+
+    async def forbidden_read(*_: object, **__: object) -> bytes:
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "read_file", forbidden_read)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.attach(
+            PersistedSandboxBinding.create(
+                sandbox_id=sandbox.sandbox_id,
+                group=_binding(),
+            ),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
     await adapter.close()
 
 

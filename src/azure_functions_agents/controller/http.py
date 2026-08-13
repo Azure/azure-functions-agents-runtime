@@ -25,9 +25,14 @@ from ..session_state import (
     RunRowNotFoundError,
     SessionRowNotFoundError,
 )
+from ..transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+)
 from .budget import RequestBudget, RunDeadlineExceededError
 from .idempotency import IdempotencyResultUnavailableError
 from .readiness import (
+    SessionActivationAuthorizationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
@@ -108,6 +113,8 @@ async def submit_run(
         handle = await backend.start_run(request)
     except (SetupBudgetExpiredError, SessionActivationSetupTimeoutError):
         return _setup_timeout_response()
+    except SessionActivationAuthorizationError:
+        return _sandbox_group_authorization_response()
     except ActiveRunConflictError as exc:
         return _active_run_response(exc.active_run_id)
     except IdempotencyConflictError as exc:
@@ -306,6 +313,17 @@ def _setup_timeout_response() -> ControllerResponse:
             "retry_with": "respond-async",
         },
         headers={"x-ms-retry-with": "respond-async", "Retry-After": "60"},
+    )
+
+
+def _sandbox_group_authorization_response() -> ControllerResponse:
+    return ControllerResponse(
+        status_code=503,
+        body={
+            "error": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+            "reason": SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+            "message": SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+        },
     )
 
 

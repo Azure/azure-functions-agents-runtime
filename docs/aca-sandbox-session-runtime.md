@@ -99,6 +99,13 @@ authorized workload calls. The U3 qualification grants the group identity model
 inference only, with no MCP or state-store permissions. OBO is reserved and
 inert: do not expect user-token forwarding.
 
+The Function controller identity separately requires `Container Apps
+SandboxGroup Data Owner` on the configured Sandbox Group. `Container Apps
+SandboxGroup Contributor` is control-plane access and is insufficient for
+listing, creating, or attaching data-plane sandboxes. Missing data-plane access
+fails fast with HTTP `503` and `sandbox_group_authorization_failed`; it is not a
+retryable setup timeout. Grant the role at the individual Sandbox Group scope.
+
 ## Egress and credentials
 
 Every sandbox is created with `default_action="Deny"` and

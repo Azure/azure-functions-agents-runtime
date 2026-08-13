@@ -14,6 +14,7 @@ from azure_functions_agents.controller.http import (
 )
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
 from azure_functions_agents.controller.readiness import (
+    SessionActivationAuthorizationError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
 )
@@ -311,6 +312,34 @@ async def test_live_provision_lease_returns_the_same_setup_retry_hint() -> None:
         "retry_with": "respond-async",
     }
     assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "60"}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_group_authorization_failure_returns_actionable_nonretryable_response() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationAuthorizationError(
+        "Sandbox Group data-plane authorization failed."
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert response.headers == {}
 
 
 @pytest.mark.asyncio
