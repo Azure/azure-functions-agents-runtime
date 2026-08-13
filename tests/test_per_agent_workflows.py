@@ -41,7 +41,7 @@ def _registered_function(app: Any, name: str) -> Any:
     raise AssertionError(f"function {name!r} was not registered")
 
 
-def test_non_main_workflow_owner_without_main_creates_dfapp(tmp_path) -> None:
+def test_non_main_workflow_agent_without_main_creates_dfapp(tmp_path) -> None:
     _write_agent(
         tmp_path,
         "incident.agent.md",
@@ -84,7 +84,7 @@ builtin_endpoints:
     assert engine.ORCHESTRATOR_NAME not in _function_names(app)
 
 
-def test_drain_mode_retains_runtime_with_no_workflow_owners(
+def test_drain_mode_retains_runtime_with_no_workflow_agents(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
@@ -96,7 +96,7 @@ def test_drain_mode_retains_runtime_with_no_workflow_owners(
         "assistant.agent.md",
         """
 name: Assistant
-description: Handles chat after the final workflow owner was removed.
+description: Handles chat after the final workflow-enabled agent was removed.
 builtin_endpoints:
   chat_api: true
 """,
@@ -110,13 +110,13 @@ builtin_endpoints:
     assert names.count("agents_workflow_run_tool") == 1
     assert names.count(engine.SUB_AGENT_ACTIVITY_NAME) == 1
     activity = _registered_function(app, "agents_workflow_run_tool")
-    with pytest.raises(RuntimeError, match="owner policy"):
+    with pytest.raises(RuntimeError, match="agent policy"):
         activity(
             {
                 "id": "pending",
                 "tool": "removed_tool",
                 "args": {},
-                "owner_slug": "removed_owner",
+                "workflow_agent_slug": "removed_agent",
                 "workflow_id": "workflow-1",
             }
         )
@@ -130,7 +130,7 @@ def test_drain_mode_disables_starts_for_existing_owner(
 ) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE", "true")
     captured: dict[str, schema.WorkflowPlanPolicy] = {}
-    original_builder = integration.build_workflow_owner_policy_catalog
+    original_builder = integration.build_workflow_agent_policy_catalog
 
     def capture_policies(catalog, handler_catalog, *, starts_allowed=True):
         policies = original_builder(
@@ -142,7 +142,7 @@ def test_drain_mode_disables_starts_for_existing_owner(
         return policies
 
     monkeypatch.setattr(
-        "azure_functions_agents.app.build_workflow_owner_policy_catalog",
+        "azure_functions_agents.app.build_workflow_agent_policy_catalog",
         capture_policies,
     )
     _write_agent(
@@ -164,18 +164,18 @@ workflows:
     assert "agent_incident_builtin_chat" in _function_names(app)
     policy = captured["incident"]
     assert not policy.starts_allowed
-    owner_integration = integration.build_owner_workflow_integration(
+    agent_integration = integration.build_workflow_agent_integration(
         policy,
         MappingProxyType({}),
     )
-    assert {tool.name for tool in owner_integration.workflow_tools} == {
+    assert {tool.name for tool in agent_integration.workflow_tools} == {
         "get_workflow_status",
         "list_workflows",
         "cancel_workflow",
         "terminate_workflow",
     }
-    assert "Workflow drain mode" in owner_integration.chat_system_addendum
-    assert "<workflow-notification>" in owner_integration.chat_system_addendum
+    assert "Workflow drain mode" in agent_integration.chat_system_addendum
+    assert "<workflow-notification>" in agent_integration.chat_system_addendum
 
 
 def test_invalid_drain_mode_fails_startup(
@@ -202,7 +202,7 @@ builtin_endpoints:
 
 
 @pytest.mark.parametrize("chat_api", ['"true"', "1"])
-def test_workflow_owner_accepts_coercible_chat_api(tmp_path, chat_api: str) -> None:
+def test_workflow_agent_accepts_coercible_chat_api(tmp_path, chat_api: str) -> None:
     _write_agent(
         tmp_path,
         "incident.agent.md",
@@ -222,7 +222,7 @@ workflows:
     assert "agent_incident_builtin_chat" in _function_names(app)
 
 
-def test_multiple_workflow_owners_register_one_durable_blueprint(tmp_path) -> None:
+def test_multiple_workflow_agents_register_one_durable_blueprint(tmp_path) -> None:
     for slug in ("incident", "release"):
         _write_agent(
             tmp_path,
@@ -277,7 +277,7 @@ description: Analyze one bounded task.
     assert _function_names(app).count(engine.SUB_AGENT_ACTIVITY_NAME) == 1
 
 
-def test_mcp_only_workflow_owner_is_supported(tmp_path) -> None:
+def test_mcp_only_workflow_agent_is_supported(tmp_path) -> None:
     _write_agent(
         tmp_path,
         "mcp_owner.agent.md",
@@ -299,13 +299,13 @@ workflows:
     assert names.count(engine.ORCHESTRATOR_NAME) == 1
 
 
-def test_unknown_trigger_workflow_owner_fails_composition(tmp_path) -> None:
+def test_unknown_trigger_workflow_agent_fails_composition(tmp_path) -> None:
     _write_agent(
         tmp_path,
         "unknown.agent.md",
         """
 name: Unknown Trigger
-description: Must not create an inert workflow owner.
+description: Must not create an inert workflow-enabled agent.
 trigger:
   type: imaginary_trigger
 workflows:
@@ -317,7 +317,7 @@ workflows:
         create_function_app(tmp_path)
 
 
-def test_workflow_owner_preserves_actionable_trigger_alias_diagnostic(tmp_path) -> None:
+def test_workflow_agent_preserves_actionable_trigger_alias_diagnostic(tmp_path) -> None:
     _write_agent(
         tmp_path,
         "route.agent.md",
@@ -335,7 +335,7 @@ workflows:
         create_function_app(tmp_path)
 
 
-def test_callable_non_trigger_decorator_fails_workflow_owner_composition(tmp_path) -> None:
+def test_callable_non_trigger_decorator_fails_workflow_agent_composition(tmp_path) -> None:
     _write_agent(
         tmp_path,
         "binding.agent.md",
@@ -359,7 +359,7 @@ def test_internal_agent_can_enable_workflows_when_referenced_as_subagent(tmp_pat
         "coordinator.agent.md",
         """
 name: Coordinator
-description: Invokes the internal owner.
+description: Invokes the internal workflow agent.
 builtin_endpoints:
   chat_api: true
 subagents:
@@ -419,13 +419,13 @@ def _resolved(
     return resolved, AgentCapabilities(filtered_workflow_tools=workflow_tools)
 
 
-def test_owner_policy_catalog_is_immutable_and_keeps_owner_grants_independent() -> None:
+def test_agent_policy_catalog_is_immutable_and_keeps_agent_grants_independent() -> None:
     owner_a, capabilities_a = _resolved(
-        "owner_a",
+        "agent_a",
         tools_enabled=("shared",),
         subagents=("specialist_a",),
     )
-    owner_b, capabilities_b = _resolved(
+    agent_b, capabilities_b = _resolved(
         "owner_b",
         tools_enabled=("shared", "only_b"),
         subagents=("specialist_b",),
@@ -437,7 +437,7 @@ def test_owner_policy_catalog_is_immutable_and_keeps_owner_grants_independent() 
     catalog = build_catalog(
         {
             "owner_a": CatalogEntry(owner_a, capabilities_a),
-            "owner_b": CatalogEntry(owner_b, capabilities_b),
+            "owner_b": CatalogEntry(            agent_b, capabilities_b),
             "specialist_a": CatalogEntry(specialist_a, specialist_capabilities_a),
             "specialist_b": CatalogEntry(specialist_b, specialist_capabilities_b),
         }
@@ -449,7 +449,7 @@ def test_owner_policy_catalog_is_immutable_and_keeps_owner_grants_independent() 
         ]
     )
 
-    policies = integration.build_workflow_owner_policy_catalog(catalog, handlers)
+    policies = integration.build_workflow_agent_policy_catalog(catalog, handlers)
 
     assert isinstance(policies, MappingProxyType)
     assert policies["owner_a"].allowed_tools == frozenset({"shared"})
@@ -495,20 +495,20 @@ def test_owner_addenda_render_only_owner_specific_tools_and_subagents() -> None:
             WorkflowTool("tool_b", "Tool B", lambda args: args),
         ]
     )
-    policies = integration.build_workflow_owner_policy_catalog(catalog, handlers)
+    policies = integration.build_workflow_agent_policy_catalog(catalog, handlers)
 
-    owner_a_integration = integration.build_owner_workflow_integration(
+    agent_a_integration = integration.build_workflow_agent_integration(
         policies["owner_a"],
         handlers,
     )
-    owner_b_integration = integration.build_owner_workflow_integration(
+    agent_b_integration = integration.build_workflow_agent_integration(
         policies["owner_b"],
         handlers,
     )
 
     for addendum in (
-        owner_a_integration.chat_system_addendum,
-        owner_a_integration.trigger_system_addendum,
+        agent_a_integration.chat_system_addendum,
+        agent_a_integration.trigger_system_addendum,
     ):
         assert addendum is not None
         assert "`tool_a`" in addendum
@@ -516,8 +516,8 @@ def test_owner_addenda_render_only_owner_specific_tools_and_subagents() -> None:
         assert "`tool_b`" not in addendum
         assert "`specialist_b`" not in addendum
     for addendum in (
-        owner_b_integration.chat_system_addendum,
-        owner_b_integration.trigger_system_addendum,
+        agent_b_integration.chat_system_addendum,
+        agent_b_integration.trigger_system_addendum,
     ):
         assert addendum is not None
         assert "`tool_b`" in addendum
@@ -526,9 +526,9 @@ def test_owner_addenda_render_only_owner_specific_tools_and_subagents() -> None:
         assert "`specialist_a`" not in addendum
 
 
-def test_owner_and_session_identity_uses_distinct_128_bit_prefixes() -> None:
-    first = context.new_workflow_instance_id("owner_a", "same-session")
-    second = context.new_workflow_instance_id("owner_b", "same-session")
+def test_agent_and_session_identity_uses_distinct_128_bit_prefixes() -> None:
+    first = context.new_workflow_instance_id("agent_a", "same-session")
+    second = context.new_workflow_instance_id("agent_b", "same-session")
 
     first_prefix = first.split("-", 1)[0]
     second_prefix = second.split("-", 1)[0]
@@ -538,9 +538,9 @@ def test_owner_and_session_identity_uses_distinct_128_bit_prefixes() -> None:
     assert context.session_instance_prefix("a", "bc") != context.session_instance_prefix(
         "ab", "c"
     )
-    assert context.session_owns_workflow("owner_a", "same-session", first)
-    assert not context.session_owns_workflow("owner_b", "same-session", first)
-    assert not context.session_owns_workflow(
+    assert context.workflow_matches_agent_session("agent_a", "same-session", first)
+    assert not context.workflow_matches_agent_session("agent_b", "same-session", first)
+    assert not context.workflow_matches_agent_session(
         "owner_a",
         "same-session",
         "0123456789ab-00000000000000000000000000000000",
@@ -578,31 +578,31 @@ class _Status:
 
 
 @pytest.mark.asyncio
-async def test_same_session_cross_owner_management_is_not_found() -> None:
-    workflow_id = context.new_workflow_instance_id("owner_a", "same-session")
+async def test_same_session_cross_agent_management_is_not_found() -> None:
+    workflow_id = context.new_workflow_instance_id("agent_a", "same-session")
     client = _StatusClient([_Status(workflow_id)])
-    owner_b = context.WorkflowSessionContext(
-        owner_slug="owner_b",
+    agent_b = context.WorkflowSessionContext(
+        workflow_agent_slug="agent_b",
         session_id="same-session",
-        agent_name="Owner B",
+        agent_name="Agent B",
         durable_client=client,
     )
 
-    assert await tools.fetch_session_workflows(client, "owner_b", "same-session") == []
+    assert await tools.fetch_session_workflows(client, "agent_b", "same-session") == []
     assert (
         await tools.fetch_session_workflow_status(
-            client, "owner_b", "same-session", workflow_id
+            client, "agent_b", "same-session", workflow_id
         )
         is None
     )
     status = await tools.get_workflow_status(
-        tools.GetWorkflowStatusParams(workflow_id=workflow_id), owner_b
+        tools.GetWorkflowStatusParams(workflow_id=workflow_id), agent_b
     )
     cancel = await tools.cancel_workflow(
-        tools.CancelWorkflowParams(workflow_id=workflow_id), owner_b
+        tools.CancelWorkflowParams(workflow_id=workflow_id), agent_b
     )
     terminate = await tools.terminate_workflow(
-        tools.TerminateWorkflowParams(workflow_id=workflow_id), owner_b
+        tools.TerminateWorkflowParams(workflow_id=workflow_id), agent_b
     )
 
     assert '"status": 404' in status
@@ -613,15 +613,15 @@ async def test_same_session_cross_owner_management_is_not_found() -> None:
 
 
 @pytest.mark.asyncio
-async def test_active_count_is_isolated_by_owner_under_shared_session() -> None:
+async def test_active_count_is_isolated_by_agent_under_shared_session() -> None:
     client = _StatusClient(
-        [_Status(context.new_workflow_instance_id("owner_a", "same-session"))]
+        [_Status(context.new_workflow_instance_id("agent_a", "same-session"))]
     )
 
     assert (
         await tools.count_active_session_workflows(
             client,
-            "owner_a",
+            "agent_a",
             "same-session",
         )
         == 1
@@ -629,7 +629,7 @@ async def test_active_count_is_isolated_by_owner_under_shared_session() -> None:
     assert (
         await tools.count_active_session_workflows(
             client,
-            "owner_b",
+            "agent_b",
             "same-session",
         )
         == 0

@@ -9,8 +9,9 @@ describe short-lived starter behavior and terminal result sinks. Both cover
 when to reach for a workflow and which tools the workflow can call.
 
 The app factory builds one complete handler catalog and one immutable
-owner-policy catalog, registers the Durable engine once, then builds each
-owner's tools and addenda without mutating the app. ``build_workflow_integration``
+workflow-agent-policy catalog, registers the Durable engine once, then builds each
+workflow-enabled agent's tools and addenda without mutating the app.
+``build_workflow_integration``
 retains the original direct-helper behavior for compatibility tests and callers.
 """
 
@@ -37,7 +38,7 @@ from .engine import register_workflows
 from .schema import WorkflowPlanPolicy
 from .tools import build_workflow_tools
 
-type WorkflowOwnerPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
+type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
 # other key is rejected at app start so typos (``enabld``, ``allow_tools``)
@@ -446,8 +447,8 @@ def _build_plan_policy(
     )
 
 
-def validate_workflow_owner_trigger(resolved: ResolvedAgent) -> None:
-    """Reject unsupported declared triggers for a workflow-enabled owner."""
+def validate_workflow_agent_trigger(resolved: ResolvedAgent) -> None:
+    """Reject unsupported declared triggers for a workflow-enabled agent."""
     if (
         resolved.workflows is None
         or not resolved.workflows.enabled
@@ -463,15 +464,15 @@ def validate_workflow_owner_trigger(resolved: ResolvedAgent) -> None:
         )
 
 
-def build_workflow_owner_policy_catalog(
+def build_workflow_agent_policy_catalog(
     catalog: AgentCatalog,
     handler_catalog: registry.WorkflowHandlerCatalog,
     *,
     starts_allowed: bool = True,
-) -> WorkflowOwnerPolicyCatalog:
-    """Freeze one independent workflow policy per enabled owner."""
+) -> WorkflowAgentPolicyCatalog:
+    """Freeze one independent workflow policy per workflow-enabled agent."""
     policies: dict[str, WorkflowPlanPolicy] = {}
-    for owner_slug, entry in catalog.items():
+    for workflow_agent_slug, entry in catalog.items():
         resolved = entry.resolved
         if resolved.workflows is None or not resolved.workflows.enabled:
             continue
@@ -483,7 +484,7 @@ def build_workflow_owner_policy_catalog(
                 and handler.public
             )
         )
-        policies[owner_slug] = _build_plan_policy(
+        policies[workflow_agent_slug] = _build_plan_policy(
             allowed_tools,
             resolved.workflows.subagents,
             catalog,
@@ -492,11 +493,11 @@ def build_workflow_owner_policy_catalog(
     return MappingProxyType(policies)
 
 
-def build_owner_workflow_integration(
+def build_workflow_agent_integration(
     policy: WorkflowPlanPolicy,
     handler_catalog: registry.WorkflowHandlerCatalog,
 ) -> WorkflowIntegrationResult:
-    """Build one owner's tools and prompt guidance without app mutation."""
+    """Build one workflow-enabled agent's tools and prompt guidance without app mutation."""
     return WorkflowIntegrationResult(
         workflow_tools=build_workflow_tools(policy=policy),
         chat_system_addendum=_build_addendum(
@@ -518,14 +519,14 @@ def register_workflow_runtime(
     *,
     handler_catalog: registry.WorkflowHandlerCatalog,
     catalog: AgentCatalog,
-    owner_policies: WorkflowOwnerPolicyCatalog,
+    workflow_agent_policies: WorkflowAgentPolicyCatalog,
 ) -> None:
     """Register the app-wide Durable engine exactly once."""
     register_workflows(
         app,
         catalog=catalog,
         handler_catalog=handler_catalog,
-        owner_policies=owner_policies,
+        workflow_agent_policies=workflow_agent_policies,
     )
 
 
@@ -537,7 +538,7 @@ def build_workflow_integration(
     workflow_subagents: Sequence[WorkflowSubagentRef] = (),
     catalog: AgentCatalog | None = None,
 ) -> WorkflowIntegrationResult:
-    """Compatibility helper that enables one owner's workflows on ``app``.
+    """Compatibility helper that enables one agent's workflows on ``app``.
 
     Returns a :class:`WorkflowIntegrationResult` containing management tools
     plus chat and declared-trigger system addenda. The tools are empty and both
@@ -564,7 +565,7 @@ def build_workflow_integration(
         app,
         catalog=catalog,
         handler_catalog=handler_catalog,
-        owner_policies=MappingProxyType({"main": policy}),
+        workflow_agent_policies=MappingProxyType({"main": policy}),
     )
     registry.set_app_config(effective)
     logger.info(
@@ -573,16 +574,16 @@ def build_workflow_integration(
         len(policy.allowed_subagents),
         ", ".join(sorted(effective)) or "<none>",
     )
-    return build_owner_workflow_integration(policy, handler_catalog)
+    return build_workflow_agent_integration(policy, handler_catalog)
 
 
 __all__ = [
+    "WorkflowAgentPolicyCatalog",
     "WorkflowIntegrationResult",
-    "WorkflowOwnerPolicyCatalog",
-    "build_owner_workflow_integration",
+    "build_workflow_agent_integration",
+    "build_workflow_agent_policy_catalog",
     "build_workflow_handler_catalog",
     "build_workflow_integration",
-    "build_workflow_owner_policy_catalog",
     "register_workflow_runtime",
-    "validate_workflow_owner_trigger",
+    "validate_workflow_agent_trigger",
 ]

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 from types import ModuleType
@@ -346,7 +347,7 @@ def test_validate_terminal_result_rejects_release_evidence_identity_mismatch(
         verify.validate_terminal_result("release_manager", envelope)
 
 
-def test_validate_owner_list_rejects_cross_owner_exposure() -> None:
+def test_validate_workflow_agent_list_rejects_cross_agent_exposure() -> None:
     verify = _load_verify_module()
     incident_id = (
         "0123456789abcdef0123456789abcdef-12345678123412341234123456789abc"
@@ -355,10 +356,36 @@ def test_validate_owner_list_rejects_cross_owner_exposure() -> None:
         "fedcba9876543210fedcba9876543210-12345678123412341234123456789abc"
     )
 
-    verify.validate_owner_list({"workflows": [{"workflow_id": incident_id}]}, incident_id, release_id)
-    with pytest.raises(RuntimeError, match="exposed the other owner"):
-        verify.validate_owner_list(
+    verify.validate_workflow_agent_list(
+        {"workflows": [{"workflow_id": incident_id}]},
+        incident_id,
+        release_id,
+    )
+    with pytest.raises(RuntimeError, match="exposed another agent"):
+        verify.validate_workflow_agent_list(
             {"workflows": [{"workflow_id": incident_id}, {"workflow_id": release_id}]},
             incident_id,
             release_id,
         )
+
+
+def test_prepare_host_config_removes_local_dts_provider_for_storage(tmp_path) -> None:
+    verify = _load_verify_module()
+    host_config = {
+        "version": "2.0",
+        "extensions": {
+            "durableTask": {
+                "hubName": "%TASKHUB_NAME%",
+                "storageProvider": {
+                    "type": "azureManaged",
+                    "connectionStringName": "DURABLE_TASK_SCHEDULER_CONNECTION_STRING",
+                },
+            }
+        },
+    }
+    (tmp_path / "host.json").write_text(json.dumps(host_config), encoding="utf-8")
+
+    verify.prepare_host_config(tmp_path, "storage")
+
+    prepared = json.loads((tmp_path / "host.json").read_text(encoding="utf-8"))
+    assert "storageProvider" not in prepared["extensions"]["durableTask"]

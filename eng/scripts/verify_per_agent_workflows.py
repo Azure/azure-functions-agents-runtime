@@ -1,4 +1,4 @@
-"""Verify both Engineering Operations Hub workflow owners end to end."""
+"""Verify both Engineering Operations Hub workflow-enabled agents end to end."""
 
 from __future__ import annotations
 
@@ -86,7 +86,7 @@ RELEASE_PROMPT = (
     "results, and the whole specialist result. Return the workflow ID without polling."
 )
 
-Owner = Literal["incident_commander", "release_manager"]
+WorkflowAgent = Literal["incident_commander", "release_manager"]
 
 
 class EmulatorCommands(NamedTuple):
@@ -94,7 +94,7 @@ class EmulatorCommands(NamedTuple):
     dts: list[str] | None
 
 
-OWNER_EXPECTATIONS: dict[str, dict[str, object]] = {
+WORKFLOW_AGENT_EXPECTATIONS: dict[str, dict[str, object]] = {
     "incident_commander": {
         "marker": "INCIDENT_REPORT_READY",
         "report_type": "incident",
@@ -236,19 +236,22 @@ def _walk_values(value: object) -> Iterator[tuple[str, object]]:
             yield from _walk_values(item)
 
 
-def validate_terminal_result(owner: Owner, envelope: Mapping[str, object]) -> None:
-    """Validate terminal success, deterministic output, and owner capabilities."""
+def validate_terminal_result(
+    workflow_agent: WorkflowAgent,
+    envelope: Mapping[str, object],
+) -> None:
+    """Validate terminal success, deterministic output, and agent capabilities."""
     if envelope.get("runtime_status") != "Completed":
         raise RuntimeError(
-            f"{owner} workflow ended as {envelope.get('runtime_status')!r}: "
+            f"{workflow_agent} workflow ended as {envelope.get('runtime_status')!r}: "
             f"{envelope.get('output')!r}"
         )
     output = envelope.get("output")
     results = output.get("results") if isinstance(output, Mapping) else None
     if not isinstance(results, Mapping):
-        raise RuntimeError(f"{owner} workflow output has no results object")
+        raise RuntimeError(f"{workflow_agent} workflow output has no results object")
 
-    expected = OWNER_EXPECTATIONS[owner]
+    expected = WORKFLOW_AGENT_EXPECTATIONS[workflow_agent]
     marker = expected["marker"]
     report = next(
         (
@@ -259,7 +262,9 @@ def validate_terminal_result(owner: Owner, envelope: Mapping[str, object]) -> No
         None,
     )
     if not isinstance(report, Mapping):
-        raise RuntimeError(f"{owner} output is missing terminal marker {marker}")
+        raise RuntimeError(
+            f"{workflow_agent} output is missing terminal marker {marker}"
+        )
     for key, value in (
         ("report_type", expected["report_type"]),
         (str(expected["identity_key"]), expected["identity"]),
@@ -267,10 +272,15 @@ def validate_terminal_result(owner: Owner, envelope: Mapping[str, object]) -> No
         ("decision", expected["decision"]),
     ):
         if report.get(key) != value:
-            raise RuntimeError(f"{owner} terminal report has invalid {key!r}")
+            raise RuntimeError(
+                f"{workflow_agent} terminal report has invalid {key!r}"
+            )
 
     known = set().union(
-        *(set(item["allowed"]) for item in OWNER_EXPECTATIONS.values())  # type: ignore[arg-type]
+        *(
+            set(item["allowed"])
+            for item in WORKFLOW_AGENT_EXPECTATIONS.values()
+        )  # type: ignore[arg-type]
     )
     used = {
         value
@@ -281,11 +291,14 @@ def validate_terminal_result(owner: Owner, envelope: Mapping[str, object]) -> No
     unauthorized = used - allowed
     if unauthorized:
         raise RuntimeError(
-            f"{owner} used unauthorized capabilities: {sorted(unauthorized)!r}"
+            f"{workflow_agent} used unauthorized capabilities: "
+            f"{sorted(unauthorized)!r}"
         )
     missing = set(expected["required"]) - used  # type: ignore[arg-type]
     if missing:
-        raise RuntimeError(f"{owner} did not use required capabilities: {sorted(missing)!r}")
+        raise RuntimeError(
+            f"{workflow_agent} did not use required capabilities: {sorted(missing)!r}"
+        )
 
     identity_key = str(expected["identity_key"])
     expected_identity = expected["identity"]
@@ -301,11 +314,12 @@ def validate_terminal_result(owner: Owner, envelope: Mapping[str, object]) -> No
             or result.get("service") != "checkout-api"
         ):
             raise RuntimeError(
-                f"{owner} evidence {capability!r} has an invalid identity or service"
+                f"{workflow_agent} evidence {capability!r} has an invalid "
+                "identity or service"
             )
 
 
-def validate_owner_list(
+def validate_workflow_agent_list(
     payload: Mapping[str, object],
     own_workflow_id: str,
     other_workflow_id: str,
@@ -319,9 +333,11 @@ def validate_owner_list(
         if isinstance(item, Mapping) and isinstance(item.get("workflow_id"), str)
     }
     if other_workflow_id in ids:
-        raise RuntimeError("owner list exposed the other owner's workflow")
+        raise RuntimeError(
+            "workflow-agent list exposed another agent's workflow"
+        )
     if own_workflow_id not in ids:
-        raise RuntimeError("owner list did not include its own workflow")
+        raise RuntimeError("workflow-agent list did not include its own workflow")
 
 
 def _run(
@@ -459,6 +475,24 @@ def build_host_environment() -> dict[str, str]:
     return environment
 
 
+def prepare_host_config(app_dir: Path, backend: str) -> None:
+    """Select the requested backend without depending on local sample edits."""
+    host_path = app_dir / "host.json"
+    if backend == "dts":
+        shutil.copyfile(app_dir / "host.dts.json", host_path)
+        return
+
+    host_config = json.loads(host_path.read_text(encoding="utf-8"))
+    extensions = host_config.get("extensions")
+    durable_task = extensions.get("durableTask") if isinstance(extensions, dict) else None
+    if isinstance(durable_task, dict):
+        durable_task.pop("storageProvider", None)
+    host_path.write_text(
+        json.dumps(host_config, indent=2) + "\n",
+        encoding="utf-8",
+    )
+
+
 @contextlib.contextmanager
 def _temporary_app(
     *,
@@ -473,8 +507,7 @@ def _temporary_app(
             app_dir,
             ignore=shutil.ignore_patterns(".venv", "local.settings.json", "__pycache__"),
         )
-        if backend == "dts":
-            shutil.copyfile(app_dir / "host.dts.json", app_dir / "host.json")
+        prepare_host_config(app_dir, backend)
         values = _provider_values()
         values.update({
             "FUNCTIONS_WORKER_RUNTIME": "python",
@@ -630,31 +663,41 @@ def _request_json(
     return status, decoded
 
 
-def _start_owner(host: _FunctionHost, owner: Owner, prompt: str, *, timeout: float) -> str:
+def _start_workflow_agent(
+    host: _FunctionHost,
+    workflow_agent: WorkflowAgent,
+    prompt: str,
+    *,
+    timeout: float,
+) -> str:
     status, payload = _request_json(
         "POST",
-        f"{host.base_url}/agents/{owner}/chat",
+        f"{host.base_url}/agents/{workflow_agent}/chat",
         payload={"prompt": prompt},
         timeout=timeout,
     )
     if status != 200:
-        raise RuntimeError(f"{owner} chat returned HTTP {status}: {payload!r}")
+        raise RuntimeError(
+            f"{workflow_agent} chat returned HTTP {status}: {payload!r}"
+        )
     try:
         return extract_workflow_id(payload)
     except RuntimeError as exc:
-        raise RuntimeError(f"{owner} chat response had no workflow ID: {payload!r}") from exc
+        raise RuntimeError(
+            f"{workflow_agent} chat response had no workflow ID: {payload!r}"
+        ) from exc
 
 
-def _poll_owner(
+def _poll_workflow_agent(
     host: _FunctionHost,
-    owner: Owner,
+    workflow_agent: WorkflowAgent,
     workflow_id: str,
     *,
     timeout: float,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + timeout
     url = (
-        f"{host.base_url}/agents/{owner}/workflow-status?"
+        f"{host.base_url}/agents/{workflow_agent}/workflow-status?"
         f"{urlencode({'workflow_id': workflow_id})}"
     )
     last_status = "not observed"
@@ -665,43 +708,47 @@ def _poll_owner(
             if last_status in TERMINAL_STATUSES:
                 return payload
         elif status != 404:
-            raise RuntimeError(f"{owner} status route returned HTTP {status}: {payload!r}")
+            raise RuntimeError(
+                f"{workflow_agent} status route returned HTTP {status}: {payload!r}"
+            )
         time.sleep(2)
     raise RuntimeError(
-        f"{owner} workflow {workflow_id} did not finish within {timeout:.0f}s "
+        f"{workflow_agent} workflow {workflow_id} did not finish within {timeout:.0f}s "
         f"(last status: {last_status})"
     )
 
 
 def _assert_http_isolation(
     host: _FunctionHost,
-    owner: Owner,
+    workflow_agent: WorkflowAgent,
     own_id: str,
     other_id: str,
     *,
     timeout: float,
 ) -> None:
     status_url = (
-        f"{host.base_url}/agents/{owner}/workflow-status?"
+        f"{host.base_url}/agents/{workflow_agent}/workflow-status?"
         f"{urlencode({'workflow_id': other_id})}"
     )
     status, _ = _request_json("GET", status_url, timeout=timeout)
     if status != 404:
         raise RuntimeError(
-            f"{owner} status route exposed the other owner with HTTP {status}"
+            f"{workflow_agent} status route exposed another agent with HTTP {status}"
         )
     status, payload = _request_json(
         "GET",
-        f"{host.base_url}/agents/{owner}/workflows",
+        f"{host.base_url}/agents/{workflow_agent}/workflows",
         timeout=timeout,
     )
     if status != 200:
-        raise RuntimeError(f"{owner} list route returned HTTP {status}: {payload!r}")
-    validate_owner_list(payload, own_id, other_id)
+        raise RuntimeError(
+            f"{workflow_agent} list route returned HTTP {status}: {payload!r}"
+        )
+    validate_workflow_agent_list(payload, own_id, other_id)
 
 
 def verify(*, backend: str, timeout: float, keep_services: bool) -> None:
-    """Run both owners with one session and prove result and route isolation."""
+    """Run both workflow agents with one session and prove result and route isolation."""
     if shutil.which("docker") is None:
         raise RuntimeError("required executable 'docker' was not found on PATH")
     if shutil.which("func") is None:
@@ -746,10 +793,10 @@ def verify(*, backend: str, timeout: float, keep_services: bool) -> None:
             with _running_host(app_dir, timeout=timeout) as host:
                 print("Starting incident and release workflows with one shared session...")
                 try:
-                    incident_id = _start_owner(
+                    incident_id = _start_workflow_agent(
                         host, "incident_commander", INCIDENT_PROMPT, timeout=timeout
                     )
-                    release_id = _start_owner(
+                    release_id = _start_workflow_agent(
                         host, "release_manager", RELEASE_PROMPT, timeout=timeout
                     )
                 except RuntimeError as exc:
@@ -757,10 +804,10 @@ def verify(*, backend: str, timeout: float, keep_services: bool) -> None:
                         f"{exc}\nFunctions host output:\n{host.output_tail()[-4000:]}"
                     ) from exc
 
-                incident = _poll_owner(
+                incident = _poll_workflow_agent(
                     host, "incident_commander", incident_id, timeout=timeout
                 )
-                release = _poll_owner(
+                release = _poll_workflow_agent(
                     host, "release_manager", release_id, timeout=timeout
                 )
                 validate_terminal_result("incident_commander", incident)
@@ -791,8 +838,8 @@ def verify(*, backend: str, timeout: float, keep_services: bool) -> None:
             else ""
         )
         print(
-            "PASS: both owner workflows completed with isolated capabilities, "
-            "cross-owner status returned 404, and lists remained private."
+            "PASS: both workflow-agent workflows completed with isolated "
+            "capabilities, cross-agent status returned 404, and lists remained private."
             f"{dashboard}"
         )
     finally:

@@ -29,11 +29,11 @@ from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import register_builtin_endpoints
 from .registration.triggers import register_agent
 from .workflows.integration import (
-    build_owner_workflow_integration,
+    build_workflow_agent_integration,
+    build_workflow_agent_policy_catalog,
     build_workflow_handler_catalog,
-    build_workflow_owner_policy_catalog,
     register_workflow_runtime,
-    validate_workflow_owner_trigger,
+    validate_workflow_agent_trigger,
 )
 from .workflows.settings import workflow_drain_mode_enabled
 
@@ -185,7 +185,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             discovered_skills=skill_names,
             is_referenced_as_subagent=resolved.slug in referenced_slugs,
         )
-        validate_workflow_owner_trigger(resolved)
+        validate_workflow_agent_trigger(resolved)
         capabilities = build_capabilities(
             resolved,
             discovered_user_tools=user_tools,
@@ -199,12 +199,12 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     catalog: AgentCatalog = build_catalog(catalog_entries)
     workflow_handler_catalog = build_workflow_handler_catalog(workflow_tools)
     workflow_drain_mode = workflow_drain_mode_enabled()
-    workflow_owner_policies = build_workflow_owner_policy_catalog(
+    workflow_agent_policies = build_workflow_agent_policy_catalog(
         catalog,
         workflow_handler_catalog,
         starts_allowed=not workflow_drain_mode,
     )
-    workflow_runtime_required = bool(workflow_owner_policies) or workflow_drain_mode
+    workflow_runtime_required = bool(workflow_agent_policies) or workflow_drain_mode
     app: func.FunctionApp = (
         df.DFApp(http_auth_level=func.AuthLevel.FUNCTION)
         if workflow_runtime_required
@@ -217,13 +217,13 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
             app,
             handler_catalog=workflow_handler_catalog,
             catalog=catalog,
-            owner_policies=workflow_owner_policies,
+            workflow_agent_policies=workflow_agent_policies,
         )
     if workflow_drain_mode:
         logger.warning(
             "workflow drain mode active: new application-level workflow starts "
-            "are disabled; owner_policy_count=%d",
-            len(workflow_owner_policies),
+            "are disabled; workflow_agent_policy_count=%d",
+            len(workflow_agent_policies),
         )
 
     for resolved in resolved_agents:
@@ -232,9 +232,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         workflows_enabled = False
         workflow_system_addendum: str | None = None
         trigger_workflow_system_addendum: str | None = None
-        workflow_policy = workflow_owner_policies.get(resolved.slug)
+        workflow_policy = workflow_agent_policies.get(resolved.slug)
         if workflow_policy is not None:
-            workflow_integration = build_owner_workflow_integration(
+            workflow_integration = build_workflow_agent_integration(
                 workflow_policy,
                 workflow_handler_catalog,
             )

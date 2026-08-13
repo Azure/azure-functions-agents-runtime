@@ -14,7 +14,7 @@ Three concepts kept distinct:
   Internal helpers like ``__echo`` are registered with ``public=False`` so
   they don't leak into agent-visible plans by accident.
 - **Effective allowlist**: retained only as a compatibility fallback for direct
-  helper callers. Production app construction passes an explicit owner policy.
+  helper callers. Production app construction passes an explicit agent policy.
 
 Reserved names (the LLM-facing workflow-management tools themselves)
 can never be registered — workflow nodes must never reach back into

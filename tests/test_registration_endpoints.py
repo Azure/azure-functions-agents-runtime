@@ -315,7 +315,7 @@ def test_run_builtin_agent_generates_session_id_before_building_sandbox_tools(
     # 0007 §4.3) -- matches round 2's B2 fix for delegated specialists.
     assert calls["run_agent"]["agent_name"] == resolved.slug
     assert calls["run_agent"]["agent_name"] != resolved.name
-    assert calls["run_agent"]["workflow_owner_slug"] == resolved.slug
+    assert calls["run_agent"]["workflow_agent_slug"] == resolved.slug
 
 
 def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_tools(
@@ -362,7 +362,7 @@ def test_run_builtin_agent_stream_generates_session_id_before_building_sandbox_t
     assert result == "stream"
     # S1: same contract as the non-streaming builtin-agent test above.
     assert calls["run_agent_stream"]["agent_name"] == resolved.slug
-    assert calls["run_agent_stream"]["workflow_owner_slug"] == resolved.slug
+    assert calls["run_agent_stream"]["workflow_agent_slug"] == resolved.slug
     assert calls["run_agent_stream"]["agent_name"] != resolved.name
 
 
@@ -1338,7 +1338,7 @@ def test_workflow_list_endpoint_hides_same_session_other_owner(
     assert json.loads(response.body) == {"workflows": []}
 
 
-def test_workflow_list_endpoint_uses_resolved_owner_slug_not_route_slug(
+def test_workflow_list_endpoint_uses_resolved_workflow_agent_slug_not_route_slug(
     tmp_path: Path,
 ) -> None:
     class _Client:

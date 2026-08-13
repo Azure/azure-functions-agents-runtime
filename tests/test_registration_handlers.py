@@ -619,7 +619,9 @@ def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
     assert captured["agent_name"] != resolved.name
 
 
-def test_non_http_workflow_handler_threads_owner_slug(monkeypatch: Any) -> None:
+def test_non_http_workflow_handler_threads_workflow_agent_slug(
+    monkeypatch: Any,
+) -> None:
     captured: dict[str, Any] = {}
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -645,7 +647,7 @@ def test_non_http_workflow_handler_threads_owner_slug(monkeypatch: Any) -> None:
 
     asyncio.run(handler({"message": "hello"}, client=durable_client))
 
-    assert captured["workflow_owner_slug"] == "queue-owner"
+    assert captured["workflow_agent_slug"] == "queue-owner"
     assert captured["workflow_durable_client"] is durable_client
 
 
@@ -673,7 +675,9 @@ def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
     assert captured["agent_name"] != resolved.name
 
 
-def test_http_workflow_handler_threads_owner_slug(monkeypatch: Any) -> None:
+def test_http_workflow_handler_threads_workflow_agent_slug(
+    monkeypatch: Any,
+) -> None:
     captured: dict[str, Any] = {}
 
     async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
@@ -700,7 +704,7 @@ def test_http_workflow_handler_threads_owner_slug(monkeypatch: Any) -> None:
     )
 
     assert response.status_code == 200
-    assert captured["workflow_owner_slug"] == "http-owner"
+    assert captured["workflow_agent_slug"] == "http-owner"
     assert captured["workflow_durable_client"] is durable_client
 
 

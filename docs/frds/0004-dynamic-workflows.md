@@ -31,7 +31,7 @@ design assumed one workflow-enabled `main.agent.md` and session-only workflow
 identity. PR #112 added Markdown-declared trigger starters, PR #117 added
 Workflow Sub Agents, and PR #151 extends the same feature to every
 workflow-enabled agent with agent/session isolation. The
-[multi-agent addendum](#multi-agent-ownership-and-isolation-addendum-pr-151)
+[multi-agent addendum](#multi-agent-workflow-isolation-addendum-pr-151)
 records only that extension's behavioral and architectural delta instead of
 repeating the base workflow design.
 
@@ -100,7 +100,7 @@ explicitly opt a function into the Durable Activity execution path.
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `_function_tool.py` | Load `tools/*.py` once, preserving normal `FunctionTool` discovery while also discovering explicit workflow tool declarations. Add a public `workflow_tool` decorator that records workflow metadata without making the function a normal MAF tool by itself. |
-| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled`, optional `exclude`, and independent `subagents`) and compute concrete capabilities without hard-coding the v1 owner. Unknown workflow excludes warn, mirroring `tools.exclude`. |
+| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled`, optional `exclude`, and independent `subagents`) and compute concrete capabilities without hard-coding the v1 workflow agent. Unknown workflow excludes warn, mirroring `tools.exclude`. |
 | register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | The app composition root freezes one immutable policy per workflow-enabled agent, registers one app-wide Durable blueprint and complete execution catalogs, then threads the matching policy and Durable client through each agent's endpoints and declared triggers. |
 | execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Runtime validation uses the same agent policy that generated prompt guidance. Durable Activities reauthorize against the currently deployed policy before invoking registered workflow tools or fresh stateless leaf specialists. UI polls workflow status and injects terminal notifications. |
 
@@ -127,7 +127,7 @@ workflows:
   names out of the effective workflow tool set.
 - Durable backend and task hub configuration stay in `host.json` and app
   settings, not frontmatter.
-- No separate owner, role, or starter field is required. Invocation remains
+- No separate workflow-agent, role, or starter field is required. Invocation remains
   controlled independently by the agent's trigger and built-in endpoints.
 
 #### Markdown-declared trigger starters
@@ -317,7 +317,7 @@ The static grant and every runtime plan are enforced independently. Before a
 plan starts, each `sub_agent.agent` must be present in the owning agent's
 `workflows.subagents` grant. An unauthorized or unknown slug rejects the plan;
 the Activity also fails closed if its catalog lookup cannot resolve the
-already-authorized slug. The immutable owner-specific policy used for prompt
+already-authorized slug. The immutable agent-specific policy used for prompt
 guidance is the same policy used for plan validation. Composition constructs one
 independent immutable policy per workflow-enabled agent without changing the
 node or Activity contract.
@@ -416,7 +416,7 @@ This syntax is illustrative only and is not accepted as part of the Workflow Sub
 Agent contract in this draft. Review should decide whether positive allowlists
 are a prerequisite, a parallel feature, or a later hardening step.
 
-### Multi-agent ownership and isolation addendum (PR #151)
+### Multi-agent workflow isolation addendum (PR #151)
 
 This addendum supersedes the original `main.agent.md`-only assumption. It does
 not introduce new frontmatter or DAG syntax: every agent with
@@ -424,9 +424,9 @@ not introduce new frontmatter or DAG syntax: every agent with
 workflows through whichever triggers or built-in endpoints it independently
 exposes.
 
-The implementation calls such an agent a workflow *owner* internally because its
-slug defines an authorization namespace. Customer documentation uses
-*workflow-enabled agent*; `owner_slug` is not an authoring keyword.
+The implementation calls such an agent a *workflow-enabled agent*. Its
+`workflow_agent_slug` defines the authorization namespace but is not an
+authoring keyword.
 
 #### App-wide execution and per-agent authorization
 
@@ -447,7 +447,7 @@ unregister a handler another agent may use.
 
 `ResolvedAgent.slug` is the stable agent identity on chat, MCP, HTTP-trigger, and
 non-HTTP-trigger paths. Workflow management is scoped by
-`(owner_slug, session_id)` internally. Durable instance IDs begin with a
+`(workflow_agent_slug, session_id)` internally. Durable instance IDs begin with a
 32-hex-character (128-bit) truncated SHA-256 digest over an unambiguous
 length-delimited encoding of both values, followed by the existing random UUID
 suffix. Raw slugs and session IDs are not exposed in instance IDs.
@@ -464,7 +464,7 @@ Durable Functions or DTS tooling before upgrading.
 
 #### Activity-time reauthorization
 
-Capability-bearing Activities carry `owner_slug` and check the currently
+Capability-bearing Activities carry `workflow_agent_slug` and check the currently
 deployed policy immediately before shared-catalog dispatch:
 
 - tool Activities require the task tool in `policy.allowed_tools`;
@@ -501,7 +501,7 @@ sequenceDiagram
 ```
 
 This differs from ordinary policy revocation: the work item cannot reach
-`require_owner_policy()` and fail because the Function that executes that check
+`require_workflow_agent_policy()` and fail because the Function that executes that check
 is absent. `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE=true` retains the
 `DFApp`, orchestrator, and Activities while allowing the current policy catalog
 to be empty. It also omits `start_workflow` from agent tool sets and defensively
@@ -564,8 +564,8 @@ that cross-agent status access returns 404.
 | 22 | Documentation audiences | Explain internals in every document / separate maintainer and customer surfaces | Keep decisions and Durable internals in the FRD/architecture; make samples and authoring docs independently understandable to customers | Human + Chris Gillum | 2026-07-24 |
 | 23 | Sub Agent failure diagnostics | Expose provider errors / one generic message / bounded error code plus correlated logs | Keep provider details out of Durable history, expose a stable non-sensitive error code, and correlate detailed logs by Workflow ID, node ID, and specialist slug | Human + Laveesh Rohra | 2026-08-03 |
 | 24 | Record multi-agent support | Create FRD 0009 / evolve this FRD | Keep the change as an addendum to FRD 0004 because it extends the existing experimental feature without adding a new authoring contract | Human + Laveesh Rohra | 2026-08-12 |
-| 25 | Workflow agent identity | Display name / source path / endpoint-specific name / canonical slug | Use app-wide unique `ResolvedAgent.slug` on every channel; call it `owner_slug` only inside the authorization implementation | Agent | 2026-08-10 |
-| 26 | Workflow isolation scope | Session only / agent only / agent plus session | Scope application management by `(owner_slug, session_id)` so equal session IDs across agents remain isolated | Human | 2026-08-10 |
+| 25 | Workflow agent identity | Display name / source path / endpoint-specific name / canonical slug | Use app-wide unique `ResolvedAgent.slug` on every channel as `workflow_agent_slug` inside the authorization implementation | Agent | 2026-08-10 |
+| 26 | Workflow isolation scope | Session only / agent only / agent plus session | Scope application management by `(workflow_agent_slug, session_id)` so equal session IDs across agents remain isolated | Human | 2026-08-10 |
 | 27 | Existing workflow IDs | Dual-format fallback / migration map / no application fallback | Accept the experimental ID change, preserve Durable/DTS operator access, and require upgrade drain guidance | Human | 2026-08-10 |
 | 28 | Durable registration lifetime | Once per agent / once per app | Register the Durable engine and complete execution catalogs exactly once per app | Agent | 2026-08-10 |
 | 29 | Per-agent policy | Mutable process global / request-time reconstruction / immutable slug-keyed catalog | Freeze one independent `WorkflowPlanPolicy` per workflow-enabled agent during composition | Agent | 2026-08-10 |
@@ -579,6 +579,7 @@ that cross-agent status access returns 404.
 | 37 | Exported compatibility helpers | Remove production-dead helpers / retain shared state / isolate compatibility state | Retain exported registry and one-shot integration helpers without an unrelated breaking change, but keep their registration token out of production `WorkflowSessionContext` and never authorize production execution from the singleton fallback | Agent | 2026-08-11 |
 | 38 | Trigger decorator resolution | Add a shared resolver / duplicate capability validation / retain registration-local fallback | Keep the registration-local `connector_trigger` to `generic_trigger` fallback and avoid an unrelated hard failure for non-workflow agents | Agent | 2026-08-11 |
 | 39 | Activity-wave failure propagation | Rely on Durable wrapper behavior / explicitly rethrow the failed wave result | Explicitly rethrow failed `task_all` results so policy denials retain their actionable error instead of degrading to a secondary `TypeError` | Agent | 2026-08-11 |
+| 40 | Internal workflow-agent terminology | `owner_slug` / `agent_slug` / `workflow_agent_slug` | Use `workflow_agent_slug` throughout workflow plumbing and persisted payloads: it identifies the top-level agent that starts, authorizes, and namespaces the workflow without colliding conceptually with a delegated Sub Agent | Human | 2026-08-12 |
 
 ## 6. Test plan
 
@@ -690,7 +691,7 @@ that cross-agent status access returns 404.
   authorization enforcement, explicit at-least-once semantics, and an
   Activity-owned timeout boundary; those findings are incorporated above.
 - **Workflow Sub Agent human sign-off:** TsuyoshiUshio, 2026-07-24. Approved
-  Activity-only execution, `{agent, text}` results, main-only v1 ownership, and
+  Activity-only execution, `{agent, text}` results, main-only v1 scope, and
   implementation using TDD followed by sample E2E validation.
 - **Multi-agent workflow sign-off:** TsuyoshiUshio, 2026-08-10. Approved
   app-wide Durable registration, immutable per-agent policies, agent/session

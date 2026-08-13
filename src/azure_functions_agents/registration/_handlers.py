@@ -288,7 +288,7 @@ def make_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
-                    workflow_owner_slug=resolved.slug,
+                    workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
                 )
@@ -430,7 +430,7 @@ def make_http_agent_handler(
                     system_addendum=workflow_system_addendum,
                     workflow_enabled=workflows_enabled,
                     workflow_durable_client=durable_client,
-                    workflow_owner_slug=resolved.slug,
+                    workflow_agent_slug=resolved.slug,
                     workflow_policy=workflow_policy,
                     agent_name=resolved.slug,
                 )

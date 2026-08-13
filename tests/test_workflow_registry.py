@@ -112,10 +112,12 @@ def failing_workflow_session():
 def _registered_blueprint_function(
     name,
     *,
-    owner_policies=None,
+    workflow_agent_policies=None,
 ):
     app = _FakeApp()
-    engine.register_workflows(app, owner_policies=owner_policies)
+    engine.register_workflows(
+        app, workflow_agent_policies=workflow_agent_policies
+    )
     [blueprint] = app.blueprints
     for builder in blueprint._function_builders:
         function = builder._function
@@ -137,28 +139,28 @@ def test_compatibility_session_registry_does_not_expose_or_confuse_registration_
     first_client = object()
     second_client = object()
     first_token = context.register_workflow_session(
-        "owner",
+        "workflow-agent",
         "session",
-        "Owner",
+        "Workflow Agent",
         first_client,
     )
     second_token = context.register_workflow_session(
-        "owner",
+        "workflow-agent",
         "session",
-        "Owner",
+        "Workflow Agent",
         second_client,
     )
 
-    registered = context.get_workflow_session("owner", "session")
+    registered = context.get_workflow_session("workflow-agent", "session")
     assert registered is not None
     assert registered.durable_client is second_client
     assert not hasattr(registered, "token")
 
-    context.unregister_workflow_session("owner", "session", first_token)
-    assert context.get_workflow_session("owner", "session") is registered
+    context.unregister_workflow_session("workflow-agent", "session", first_token)
+    assert context.get_workflow_session("workflow-agent", "session") is registered
 
-    context.unregister_workflow_session("owner", "session", second_token)
-    assert context.get_workflow_session("owner", "session") is None
+    context.unregister_workflow_session("workflow-agent", "session", second_token)
+    assert context.get_workflow_session("workflow-agent", "session") is None
 
 
 def test_register_workflow_tool_rejects_reserved_name():
@@ -577,7 +579,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
     registry.register_workflow_tool("exploding", "Always fails.", exploding_tool)
     activity = _registered_blueprint_function(
         "agents_workflow_run_tool",
-        owner_policies={
+        workflow_agent_policies={
             "test-agent": schema.WorkflowPlanPolicy(
                 allowed_tools=frozenset({"exploding"}),
                 allowed_subagents=frozenset(),
@@ -591,7 +593,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
                 "id": "explode",
                 "tool": "exploding",
                 "args": {},
-                "owner_slug": "test-agent",
+                "workflow_agent_slug": "test-agent",
                 "workflow_id": "workflow-1",
             }
         )
@@ -602,7 +604,7 @@ def test_workflow_activity_logs_tool_exceptions_without_raising_raw_details(capl
         record.message
         == (
             "workflow activity failed: workflow_id=workflow-1 "
-            "owner=test-agent id=explode tool=exploding"
+            "workflow_agent=test-agent id=explode tool=exploding"
         )
         and record.exc_info
         and secret_message in str(record.exc_info[1])
@@ -670,7 +672,7 @@ async def test_workflow_tools_log_durable_exceptions_without_returning_details(
         failing_workflow_session,
     )
     session = context.WorkflowSessionContext(
-        owner_slug="test-agent",
+        workflow_agent_slug="test-agent",
         session_id=failing_workflow_session,
         agent_name="test-agent",
         durable_client=_FailingDurableClient(),
@@ -701,7 +703,7 @@ async def test_start_workflow_rejects_new_workflow_when_session_active_cap_reach
     ]
     client = _CappedDurableClient(statuses)
     session = context.WorkflowSessionContext(
-        owner_slug="test-agent",
+        workflow_agent_slug="test-agent",
         session_id=session_id,
         agent_name="test-agent",
         durable_client=client,
@@ -729,7 +731,7 @@ async def test_start_workflow_uses_passed_policy_for_sub_agent_authorization() -
             raise AssertionError("authorization must fail before Durable scheduling")
 
     session = context.WorkflowSessionContext(
-        owner_slug="coordinator",
+        workflow_agent_slug="coordinator",
         session_id="session-1",
         agent_name="coordinator",
         durable_client=_UnexpectedClient(),
@@ -762,7 +764,7 @@ async def test_start_workflow_rejects_new_instances_in_drain_mode(
             raise AssertionError("drain mode must reject before Durable scheduling")
 
     session = context.WorkflowSessionContext(
-        owner_slug="incident",
+        workflow_agent_slug="incident",
         session_id="session-1",
         agent_name="Incident",
         durable_client=_UnexpectedClient(),
@@ -786,10 +788,10 @@ async def test_start_workflow_rejects_new_instances_in_drain_mode(
 
 
 @pytest.mark.asyncio
-async def test_start_workflow_threads_owner_slug_into_durable_input() -> None:
+async def test_start_workflow_threads_workflow_agent_slug_into_durable_input() -> None:
     client = _CappedDurableClient([])
     session = context.WorkflowSessionContext(
-        owner_slug="incident",
+        workflow_agent_slug="incident",
         session_id="session-1",
         agent_name="Incident",
         durable_client=client,
@@ -808,9 +810,9 @@ async def test_start_workflow_threads_owner_slug_into_durable_input() -> None:
     )
 
     assert "workflow_id" in json.loads(result)
-    assert client.start_kwargs["client_input"]["owner_slug"] == "incident"
-    assert client.start_kwargs["client_input"]["owner"] == {
-        "owner_slug": "incident",
+    assert client.start_kwargs["client_input"]["workflow_agent_slug"] == "incident"
+    assert client.start_kwargs["client_input"]["workflow_agent"] == {
+        "workflow_agent_slug": "incident",
         "session_id": "session-1",
         "agent_name": "Incident",
     }

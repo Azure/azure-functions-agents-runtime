@@ -762,7 +762,7 @@ def test_dynamic_workflow_subagents_fixture() -> None:
 
 
 # ---------------------------------------------------------------------------
-# 18 — multiple workflow owners with distinct policies
+# 18 — multiple workflow-enabled agents with distinct policies
 # ---------------------------------------------------------------------------
 
 

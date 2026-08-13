@@ -40,7 +40,7 @@ def _workflow_tools() -> dict[str, Any]:
     }
 
 
-def test_sample_has_two_non_main_workflow_owners_with_distinct_policies() -> None:
+def test_sample_has_two_non_main_workflow_agents_with_distinct_policies() -> None:
     specs = load_agent_specs(SAMPLE_SRC, strict=True)
     by_slug = {Path(spec.source_file).name.removesuffix(".agent.md"): spec for spec in specs}
 

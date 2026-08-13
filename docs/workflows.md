@@ -498,7 +498,7 @@ returns after the initial model turn; orchestration continues asynchronously.
 
 Each workflow is isolated by the workflow-enabled agent's canonical slug and the
 invocation `session_id`. Internally, Durable payloads call this pair
-`(owner_slug, session_id)`; `owner_slug` is not a frontmatter field. The instance
+`(workflow_agent_slug, session_id)`; `workflow_agent_slug` is not a frontmatter field. The instance
 ID begins with a 32-hex-character (128-bit) truncated SHA-256 digest over an
 unambiguous length-delimited encoding of that pair; neither raw value appears in
 the ID. `get_workflow_status`,
@@ -570,7 +570,7 @@ the retained runtime no longer polls.
 This experimental feature intentionally changes IDs from a session-only 48-bit
 prefix to the agent-and-session 128-bit prefix. New agent tools and polling
 routes cannot list, inspect, cancel, or terminate pre-upgrade IDs. In addition,
-legacy orchestration inputs contain no `owner_slug`, so an in-flight legacy
+legacy orchestration inputs contain no `workflow_agent_slug`, so an in-flight legacy
 workflow fails closed when it next dispatches a `tool` or `sub_agent` Activity;
 pure `wait` nodes do not require agent authorization. Drain or terminate active
 workflows before upgrading. Use Durable Functions or DTS tooling to inspect or
@@ -580,7 +580,7 @@ control any legacy instances that remain.
 
 Each worker reconstructs the immutable agent-policy and handler catalogs from
 the same deployed agent project during app startup. Orchestrators persist
-`owner_slug` in their input and pass it to Activities, so an Activity may safely
+`workflow_agent_slug` in their input and pass it to Activities, so an Activity may safely
 run on a different worker. Do not share a Task Hub between applications or
 deployments with different agent definitions. During a rolling deployment,
 old and new workers may briefly enforce different policy versions; restrictive

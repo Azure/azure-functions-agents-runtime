@@ -55,7 +55,7 @@ SUPPORTED_TASK_TYPES: frozenset[str] = frozenset({
 
 @dataclass(frozen=True)
 class WorkflowPlanPolicy:
-    """Immutable owner-specific authorization boundary for workflow plans."""
+    """Immutable per-agent authorization boundary for workflow plans."""
 
     allowed_tools: frozenset[str]
     allowed_subagents: frozenset[str]
@@ -119,7 +119,7 @@ def validate_plan(
 ) -> WorkflowPlan:
     """Validate and normalize a plan dict.
 
-    ``policy`` is the immutable owner-specific authorization boundary used
+    ``policy`` is the immutable agent-specific authorization boundary used
     by both prompt guidance and runtime validation. ``allowed_tools`` remains
     as a compatibility-only input for callers predating sub-agent nodes.
 
