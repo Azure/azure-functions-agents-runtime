@@ -29,12 +29,17 @@ import os
 import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from inspect import isawaitable
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ._credential import build_async_credential
 from ._logger import logger
 from .config.env import runtime_env_value
+
+if TYPE_CHECKING:
+    from agent_framework import BaseChatClient
+    from agent_framework.foundry import FoundryChatClient
+    from agent_framework.openai import OpenAIChatClient
+    from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -55,12 +60,36 @@ class _ClientCacheKey:
     model: str
 
 
+class _AsyncCloseable(Protocol):
+    async def close(self) -> None: ...
+
+
 @dataclass(frozen=True)
-class _ProviderConfig:
-    endpoint: str = ""
-    api_version: str = ""
-    auth_mode: str = ""
-    organization: str = ""
+class _OwnedResource:
+    value: _AsyncCloseable
+    label: str
+
+
+@dataclass(frozen=True)
+class _ManagedChatClient:
+    client: BaseChatClient[Any]
+    resources: tuple[_OwnedResource, ...]
+
+    async def close(self) -> list[Exception]:
+        return await _close_owned_resources(self.resources)
+
+
+async def _close_owned_resources(
+    resources: tuple[_OwnedResource, ...],
+) -> list[Exception]:
+    errors: list[Exception] = []
+    for resource in resources:
+        try:
+            await resource.value.close()
+        except Exception as exc:
+            logger.error("Failed to close %s: %s", resource.label, exc)
+            errors.append(exc)
+    return errors
 
 
 class ClientManager(ABC):
@@ -120,9 +149,8 @@ class MAFClientManager(ClientManager):
     name = "maf"
 
     def __init__(self) -> None:
-        self._clients: dict[_ClientCacheKey, Any] = {}
-        self._provider_configs: dict[str, _ProviderConfig] = {}
-        self._async_credential: Any | None = None
+        self._clients: dict[_ClientCacheKey, _ManagedChatClient] = {}
+        self._async_credential: AsyncDefaultAzureCredential | None = None
         self._lock = threading.RLock()
         self._closed = False
 
@@ -165,24 +193,15 @@ class MAFClientManager(ClientManager):
         resolved = self._resolve_model(model, provider)
         cache_key = _ClientCacheKey(provider, resolved)
         with self._lock:
-            if self._closed:
-                raise RuntimeError("MAFClientManager is closed and cannot build new clients.")
-            provider_config = self._provider_config(provider)
-            previous_config = self._provider_configs.get(provider)
-            if previous_config is not None and previous_config != provider_config:
-                raise RuntimeError(
-                    f"{provider} provider configuration changed during this worker lifetime; "
-                    "restart the worker to apply updated settings"
-                )
-            client = self._clients.get(cache_key)
-            if client is None:
-                client = self._build_provider_client(provider, resolved)
-                self._provider_configs[provider] = provider_config
-                self._clients[cache_key] = client
+            self._ensure_open()
+            managed = self._clients.get(cache_key)
+            if managed is None:
+                managed = self._build_provider_client(provider, resolved)
+                self._clients[cache_key] = managed
                 logger.info("Created MAF provider client: provider=%s model=%s", provider, resolved)
             else:
                 logger.debug("Reusing MAF provider client: provider=%s model=%s", provider, resolved)
-        return client, InferenceTarget(
+        return managed.client, InferenceTarget(
             provider=provider,
             model=resolved,
         )
@@ -191,38 +210,35 @@ class MAFClientManager(ClientManager):
     # Internals
     # ------------------------------------------------------------------
 
-    def _build_provider_client(self, provider: str, model: str) -> Any:
+    def _build_provider_client(self, provider: str, model: str) -> _ManagedChatClient:
         if provider == "openai":
-            return self._build_openai(model)
+            client = self._build_openai(model)
+            return _ManagedChatClient(
+                client,
+                (_OwnedResource(client.client, "OpenAI AsyncOpenAI transport"),),
+            )
         if provider == "azure_openai":
-            return self._build_azure_openai(model)
+            client = self._build_azure_openai(model)
+            return _ManagedChatClient(
+                client,
+                (_OwnedResource(client.client, "Azure OpenAI AsyncOpenAI transport"),),
+            )
         if provider == "foundry":
-            return self._build_foundry(model)
+            client = self._build_foundry(model)
+            return _ManagedChatClient(
+                client,
+                (
+                    _OwnedResource(client.client, "Foundry AsyncOpenAI transport"),
+                    _OwnedResource(
+                        client.project_client,
+                        "Foundry AIProjectClient transport",
+                    ),
+                ),
+            )
         raise RuntimeError(
             f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
             "Use one of: openai, azure_openai, foundry."
         )
-
-    @classmethod
-    def _provider_config(cls, provider: str) -> _ProviderConfig:
-        if provider == "openai":
-            return _ProviderConfig(
-                endpoint=cls._env("OPENAI_BASE_URL"),
-                auth_mode="api_key",
-                organization=cls._env("OPENAI_ORG_ID"),
-            )
-        if provider == "azure_openai":
-            return _ProviderConfig(
-                endpoint=cls._env("AZURE_OPENAI_ENDPOINT"),
-                api_version=cls._env("AZURE_OPENAI_API_VERSION"),
-                auth_mode="api_key" if cls._env("AZURE_OPENAI_API_KEY") else "credential",
-            )
-        if provider == "foundry":
-            return _ProviderConfig(
-                endpoint=cls._env("FOUNDRY_PROJECT_ENDPOINT"),
-                auth_mode="credential",
-            )
-        return _ProviderConfig()
 
     @staticmethod
     def _env(name: str) -> str:
@@ -255,7 +271,7 @@ class MAFClientManager(ClientManager):
         )
 
     @classmethod
-    def _build_openai(cls, model: str) -> Any:
+    def _build_openai(cls, model: str) -> OpenAIChatClient:
         from agent_framework.openai import OpenAIChatClient
 
         return OpenAIChatClient(
@@ -263,7 +279,7 @@ class MAFClientManager(ClientManager):
             api_key=cls._env("OPENAI_API_KEY") or None,
         )
 
-    def _build_azure_openai(self, model: str) -> Any:
+    def _build_azure_openai(self, model: str) -> OpenAIChatClient:
         from agent_framework.openai import OpenAIChatClient
 
         endpoint = self._env("AZURE_OPENAI_ENDPOINT")
@@ -289,7 +305,7 @@ class MAFClientManager(ClientManager):
             kwargs["credential"] = self._get_async_credential()
         return OpenAIChatClient(**kwargs)
 
-    def _build_foundry(self, model: str) -> Any:
+    def _build_foundry(self, model: str) -> FoundryChatClient:
         from agent_framework.foundry import FoundryChatClient
 
         endpoint = self._env("FOUNDRY_PROJECT_ENDPOINT")
@@ -304,13 +320,16 @@ class MAFClientManager(ClientManager):
             credential=self._get_async_credential(),
         )
 
-    def _get_async_credential(self) -> Any:
+    def _get_async_credential(self) -> AsyncDefaultAzureCredential:
         with self._lock:
-            if self._closed:
-                raise RuntimeError("MAFClientManager is closed and cannot build a credential.")
+            self._ensure_open()
             if self._async_credential is None:
                 self._async_credential = build_async_credential()
             return self._async_credential
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("MAFClientManager is closed and cannot create resources.")
 
     async def close(self) -> None:
         """Close all provider transports and the shared credential exactly once."""
@@ -318,70 +337,22 @@ class MAFClientManager(ClientManager):
             if self._closed:
                 return
             self._closed = True
-            cached_clients = list(self._clients.items())
+            cached_clients = list(self._clients.values())
             self._clients.clear()
-            self._provider_configs.clear()
             credential = self._async_credential
             self._async_credential = None
 
         errors: list[Exception] = []
-        closed_resource_ids: set[int] = set()
-        for key, chat_client in cached_clients:
-            await self._close_owned_resource(
-                getattr(chat_client, "client", None),
-                f"{key.provider} AsyncOpenAI transport",
-                errors,
-                closed_resource_ids,
-            )
-            if key.provider == "foundry":
-                await self._close_owned_resource(
-                    getattr(chat_client, "project_client", None),
-                    "Foundry AIProjectClient transport",
-                    errors,
-                    closed_resource_ids,
+        for chat_client in cached_clients:
+            errors.extend(await chat_client.close())
+        if credential is not None:
+            errors.extend(
+                await _close_owned_resources(
+                    (_OwnedResource(credential, "shared async credential"),)
                 )
-        await self._close_owned_resource(
-            credential,
-            "shared async credential",
-            errors,
-            closed_resource_ids,
-            required=False,
-        )
+            )
         if errors:
             raise ExceptionGroup("Failed to close one or more MAF client resources.", errors)
-
-    @staticmethod
-    async def _close_owned_resource(
-        resource: Any,
-        label: str,
-        errors: list[Exception],
-        closed_resource_ids: set[int],
-        *,
-        required: bool = True,
-    ) -> None:
-        if resource is None:
-            if required:
-                logger.warning(
-                    "%s is unavailable; agent-framework 1.3 client internals may have changed.",
-                    label,
-                )
-            return
-        resource_id = id(resource)
-        if resource_id in closed_resource_ids:
-            return
-        closed_resource_ids.add(resource_id)
-        close = getattr(resource, "close", None)
-        if not callable(close):
-            if required:
-                logger.warning("%s does not expose close().", label)
-            return
-        try:
-            result = close()
-            if isawaitable(result):
-                await result
-        except Exception as exc:
-            logger.error("Failed to close %s: %s", label, exc)
-            errors.append(exc)
 
 
 # ---------------------------------------------------------------------------

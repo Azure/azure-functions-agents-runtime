@@ -50,37 +50,20 @@ endpoints, non-HTTP triggers, delegated agents, and workflow sub-agent
 activities. MAF `Agent` objects are still created per invocation because they
 carry mutable request state.
 
-Keep provider endpoint, API-version, organization, and authentication settings
-stable for a worker lifetime. If one changes, the runtime rejects the next
-client request; restart the Functions worker to apply the new configuration.
+Provider settings are process configuration. Deployments and app-setting
+updates recycle Functions workers, so each new worker builds clients from the
+new settings; mutating `os.environ` inside a running worker is unsupported.
 
-### Plugging in a custom client manager
+### Advanced client manager lifecycle
 
-Implement `ClientManager` and install it once, before the default manager is
-first requested:
+`ClientManager` is an advanced extension point used by test fakes, custom
+MAF-compatible provider clients, and embedding hosts. Install a custom manager
+once, before the default manager is requested. Replacing any active manager
+requires `await shutdown_client_manager()` before `set_client_manager(...)`.
 
-```python
-from azure_functions_agents import ClientManager, set_client_manager
-
-
-class MyClientManager(ClientManager):
-    def resolve_model(self, requested: str | None) -> str:
-        return requested or "my-default-model"
-
-    def build_chat_client(self, model: str | None):
-        return build_my_chat_client(self.resolve_model(model))
-
-
-set_client_manager(MyClientManager())
-```
-
-The active manager cannot be replaced synchronously, whether it is the default
-or a custom implementation. Tests and embedding hosts that own an async
-lifecycle must first `await shutdown_client_manager()`, then call
-`set_client_manager(...)`. Azure Functions does not currently expose a supported
-async worker-shutdown hook, so the runtime keeps its default clients for the
-worker lifetime rather than attempting cleanup from `atexit` or a signal handler;
-the host gap is tracked in
+Azure Functions does not currently expose a supported async worker-shutdown
+hook, so the runtime keeps its default clients for the worker lifetime rather
+than attempting cleanup from `atexit` or a signal handler. The host gap is tracked in
 [azure-functions-python-worker#1904](https://github.com/Azure/azure-functions-python-worker/issues/1904).
 
 ## Quick Start

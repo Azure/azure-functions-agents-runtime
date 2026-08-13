@@ -30,6 +30,16 @@ async def _reset_process_client_manager() -> None:
     await shutdown_client_manager()
 
 
+def _fake_provider_client(provider: str) -> SimpleNamespace:
+    client = SimpleNamespace(close=AsyncMock())
+    if provider == "foundry":
+        return SimpleNamespace(
+            client=client,
+            project_client=SimpleNamespace(close=AsyncMock()),
+        )
+    return SimpleNamespace(client=client)
+
+
 @pytest.mark.parametrize(
     ("provider", "provider_env", "provider_model"),
     [
@@ -140,7 +150,7 @@ def test_build_chat_client_with_target_matches_client_branch(
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
     if endpoint_name and endpoint:
         monkeypatch.setenv(endpoint_name, endpoint)
-    client = object()
+    client = _fake_provider_client(provider)
 
     with patch.object(MAFClientManager, builder, return_value=client) as build:
         built_client, target = MAFClientManager().build_chat_client_with_target("model-one")
@@ -155,7 +165,7 @@ def test_maf_target_uses_one_provider_and_model_resolution_pass(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
-    client = object()
+    client = _fake_provider_client("foundry")
 
     with (
         patch.object(MAFClientManager, "_provider", return_value="foundry") as provider,
@@ -180,7 +190,7 @@ async def test_maf_manager_reuses_provider_client_on_one_worker_loop(
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
     manager = MAFClientManager()
-    client = object()
+    client = _fake_provider_client("foundry")
 
     with patch.object(MAFClientManager, "_build_foundry", return_value=client) as build:
         first, first_target = manager.build_chat_client_with_target("shared-model")
@@ -201,7 +211,11 @@ def test_maf_manager_logs_cache_creation_at_info_and_hit_at_debug(
     manager = MAFClientManager()
     caplog.set_level("DEBUG", logger="azure.functions.AgentRuntime")
 
-    with patch.object(MAFClientManager, "_build_openai", return_value=object()):
+    with patch.object(
+        MAFClientManager,
+        "_build_openai",
+        return_value=_fake_provider_client("openai"),
+    ):
         manager.build_chat_client_with_target("shared-model")
         manager.build_chat_client_with_target("shared-model")
 
@@ -243,7 +257,7 @@ def test_maf_manager_reuses_auto_detected_provider_client(
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv(endpoint_name, endpoint)
     manager = MAFClientManager()
-    client = object()
+    client = _fake_provider_client(provider)
 
     with patch.object(MAFClientManager, builder, return_value=client) as build:
         first, first_target = manager.build_chat_client_with_target("shared-model")
@@ -261,7 +275,10 @@ def test_maf_manager_partitions_cached_clients_by_resolved_model(
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
     manager = MAFClientManager()
-    clients = [object(), object()]
+    clients = [
+        _fake_provider_client("foundry"),
+        _fake_provider_client("foundry"),
+    ]
 
     with patch.object(MAFClientManager, "_build_foundry", side_effect=clients) as build:
         first, _ = manager.build_chat_client_with_target("model-one")
@@ -273,42 +290,32 @@ def test_maf_manager_partitions_cached_clients_by_resolved_model(
     assert build.call_count == 2
 
 
-def test_maf_manager_rejects_endpoint_change_during_worker_lifetime(
+@pytest.mark.parametrize(
+    ("provider", "builder", "client"),
+    [
+        ("openai", "_build_openai", object()),
+        (
+            "foundry",
+            "_build_foundry",
+            SimpleNamespace(client=SimpleNamespace(close=AsyncMock())),
+        ),
+    ],
+)
+def test_maf_manager_fails_fast_when_pinned_client_ownership_contract_is_missing(
     monkeypatch: pytest.MonkeyPatch,
+    provider: str,
+    builder: str,
+    client: object,
 ) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
-    monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project-one.example")
-    manager = MAFClientManager()
-    client = object()
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", provider)
+    if provider == "foundry":
+        monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
 
-    with patch.object(MAFClientManager, "_build_foundry", return_value=client) as build:
-        first, _ = manager.build_chat_client_with_target("shared-model")
-        monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project-two.example")
-        with pytest.raises(RuntimeError, match="provider configuration changed"):
-            manager.build_chat_client_with_target("shared-model")
-
-    assert first is client
-    build.assert_called_once_with("shared-model")
-
-
-def test_maf_manager_rejects_api_version_change_during_worker_lifetime(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai")
-    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://account.openai.azure.com")
-    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
-    monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "version-one")
-    manager = MAFClientManager()
-    client = object()
-
-    with patch.object(MAFClientManager, "_build_azure_openai", return_value=client) as build:
-        first, _ = manager.build_chat_client_with_target("shared-model")
-        monkeypatch.setenv("AZURE_OPENAI_API_VERSION", "version-two")
-        with pytest.raises(RuntimeError, match="provider configuration changed"):
-            manager.build_chat_client_with_target("shared-model")
-
-    assert first is client
-    build.assert_called_once_with("shared-model")
+    with (
+        patch.object(MAFClientManager, builder, return_value=client),
+        pytest.raises(AttributeError),
+    ):
+        MAFClientManager().build_chat_client_with_target("shared-model")
 
 
 def test_maf_manager_publishes_one_client_during_concurrent_first_use(
@@ -317,7 +324,7 @@ def test_maf_manager_publishes_one_client_during_concurrent_first_use(
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "foundry")
     monkeypatch.setenv("FOUNDRY_PROJECT_ENDPOINT", "https://project.example")
     manager = MAFClientManager()
-    client = object()
+    client = _fake_provider_client("foundry")
 
     def _build(_model: str) -> object:
         time.sleep(0.02)
@@ -383,6 +390,32 @@ async def test_maf_manager_closes_openai_transport_once(
         await manager.close()
 
     transport.close.assert_awaited_once_with()
+
+
+@pytest.mark.asyncio
+async def test_maf_manager_closes_azure_openai_transport_and_credential(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "azure_openai")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://account.openai.azure.com")
+    monkeypatch.delenv("AZURE_OPENAI_API_KEY", raising=False)
+    manager = MAFClientManager()
+    transport = SimpleNamespace(close=AsyncMock())
+    chat_client = SimpleNamespace(client=transport)
+    credential = SimpleNamespace(close=AsyncMock())
+
+    with (
+        patch("agent_framework.openai.OpenAIChatClient", return_value=chat_client),
+        patch(
+            "azure_functions_agents.client_manager.build_async_credential",
+            return_value=credential,
+        ),
+    ):
+        manager.build_chat_client_with_target("shared-model")
+        await manager.close()
+
+    transport.close.assert_awaited_once_with()
+    credential.close.assert_awaited_once_with()
 
 
 @pytest.mark.asyncio
@@ -610,7 +643,7 @@ def test_maf_subclass_build_chat_client_override_keeps_virtual_dispatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_PROVIDER", "openai")
-    provider_client = object()
+    provider_client = _fake_provider_client("openai")
 
     class WrappingMAFClientManager(MAFClientManager):
         calls = 0
