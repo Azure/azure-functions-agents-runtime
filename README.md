@@ -56,18 +56,6 @@ Provider settings are process configuration. Deployments and app-setting
 updates recycle Functions workers, so each new worker builds clients from the
 new settings; mutating `os.environ` inside a running worker is unsupported.
 
-### Advanced client manager lifecycle
-
-`ClientManager` is an advanced extension point used by test fakes, custom
-MAF-compatible provider clients, and embedding hosts. Install a custom manager
-once, before the default manager is requested. Replacing any active manager
-requires `await shutdown_client_manager()` before `set_client_manager(...)`.
-
-Azure Functions does not currently expose a supported async worker-shutdown
-hook, so the runtime keeps its default clients for the worker lifetime rather
-than attempting cleanup from `atexit` or a signal handler. The host gap is tracked in
-[azure-functions-python-worker#1904](https://github.com/Azure/azure-functions-python-worker/issues/1904).
-
 ## Quick Start
 
 ### 1. Create the agent file

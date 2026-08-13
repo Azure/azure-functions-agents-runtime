@@ -343,7 +343,7 @@ This split keeps parsing, policy, Azure binding registration, and runtime execut
 
 ### Custom inference client
 
-To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and the README section [Advanced client manager lifecycle](https://github.com/Azure/azure-functions-agents-runtime/blob/main/README.md#advanced-client-manager-lifecycle).
+To plug in a different chat backend, implement the `ClientManager` interface and register it once with `set_client_manager(...)`; after that, `runner.run_agent()` and `runner.run_agent_stream()` use your implementation for every call. See `src/azure_functions_agents/client_manager.py` and [Provider-client lifetime](#provider-client-lifetime).
 
 This extension point is deliberately below the registration layer: no trigger or endpoint code needs to change when you swap providers. The `ResolvedAgent.model` value is still the hand-off contract, but your manager decides how to interpret it. Delegated specialists resolve their model through the same `ClientManager`, so a custom implementation applies uniformly to coordinators and specialists alike.
 
@@ -365,6 +365,14 @@ built-in endpoints, delegated specialists, and Workflow Sub Agent activities
 therefore reuse the same SDK connection pool when they resolve to the same
 target. `Agent`, `AgentSession`, history, and tools remain per run because those
 objects carry mutable request state.
+
+The cached MAF wrapper is shared by concurrent async invocations. Characterization
+tests against the pinned Agent Framework version drive real `OpenAIChatClient`
+and `FoundryChatClient` wrappers through overlapping streaming, non-streaming,
+and mixed calls. They verify that prompts, sessions, function-call IDs, and
+stream events remain isolated without serializing requests. An explicit upstream
+compatibility contract is tracked in
+[microsoft/agent-framework#7654](https://github.com/microsoft/agent-framework/issues/7654).
 
 This follows the Azure Functions recommendation to
 [reuse SDK client instances across invocations](https://learn.microsoft.com/azure/azure-functions/manage-connections#manage-sdk-client-connections).
