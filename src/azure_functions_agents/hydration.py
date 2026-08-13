@@ -110,9 +110,9 @@ class AgentBlueprint:
 async def _enter_agent(owner: Agent[Any]) -> Agent[Any]:
     try:
         return await owner.__aenter__()
-    except BaseException:
+    except BaseException as exc:
         with suppress(Exception):
-            await owner.__aexit__(None, None, None)
+            await owner.__aexit__(type(exc), exc, exc.__traceback__)
         raise
 
 
@@ -174,7 +174,7 @@ async def _run_managed(
                     agent.run(
                         messages,
                         session=session,
-                        options=options or _build_chat_options_from_environment(),
+                        options=options if options is not None else _build_chat_options_from_environment(),
                     ),
                     timeout=remaining,
                 )
