@@ -7,7 +7,7 @@ engine, and cannot see or invoke each other's workflow capabilities.
 
 All operational evidence is a deterministic local fake. No GitHub, monitoring,
 scanner, deployment, or other cloud API is called. A configured model provider
-is still required for the two owners and their specialist agents.
+is still required for the two workflow-enabled agents and their specialists.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ flowchart LR
   D --> RR[Release Risk Reviewer]
 ```
 
-There is intentionally no `main.agent.md`. Each owner has a distinct
+There is intentionally no `main.agent.md`. Each workflow-enabled agent has a distinct
 `workflows.exclude` set and one distinct `workflows.subagents` grant. Specialists
 are internal files without triggers or built-in endpoints.
 

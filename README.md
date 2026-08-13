@@ -430,10 +430,10 @@ def fetch_logs(args: dict[str, Any]) -> dict[str, Any]:
 Use both `@tool` and `@workflow_tool` when the same callable should be
 available both directly in chat and inside workflows. See
 [`docs/workflows.md`](docs/workflows.md) for the Activity handler
-contract and `workflows.exclude`. Any agent with a supported trigger, chat API,
-or MCP endpoint can own workflows; see the
+contract and `workflows.exclude`. Any agent can enable workflows; triggers and
+built-in endpoints independently determine how that agent is invoked. See the
 [`per-agent-workflows`](samples/per-agent-workflows) sample for two independent
-non-main owners sharing one Durable engine.
+non-main workflow-enabled agents sharing one Durable engine.
 
 ## Built-in Endpoint Routes
 
@@ -557,7 +557,7 @@ See the [`samples/`](samples/) directory for complete, deployable example apps:
 - [`workflow-incident-triage`](samples/workflow-incident-triage) — interactive Dynamic Workflow with live progress
 - [`workflow-queue-p0-report`](samples/workflow-queue-p0-report) — queue-started fan-out workflow that publishes an HTML Blob report
 - [`workflow-subagents-preview`](samples/workflow-subagents-preview) — queue-started parallel PR analysis with isolated workflow specialists and a stable HTML Blob report
-- [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow owners and independent policies
+- [`per-agent-workflows`](samples/per-agent-workflows) — Engineering Operations Hub with two non-main workflow-enabled agents and independent policies
 
 ## Deployment Notes
 
@@ -590,7 +590,7 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
-| `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE` | Retain the Durable workflow runtime while rejecting new workflow starts during final-owner drain; keep enabled until Task Hub tooling confirms no non-terminal instances |
+| `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE` | Retain the Durable workflow runtime while rejecting new workflow starts when removing the final workflow-enabled agent; keep enabled until Task Hub tooling confirms no non-terminal instances |
 
 ## Development
 

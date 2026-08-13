@@ -17,9 +17,9 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [secured-endpoints](secured-endpoints/) | HTTP + MCP | | | | | | |
 
 [`per-agent-workflows`](per-agent-workflows/) is the Engineering Operations Hub:
-two non-main owners share one Durable engine while retaining separate policies.
-Run it locally with Azurite and use either owner's browser chat UI to start and
-observe an independent workflow.
+two non-main workflow-enabled agents share one Durable engine while retaining
+separate policies. Run it locally with Azurite and use either agent's browser
+chat UI to start and observe an independent workflow.
 
 ## Run Locally (optional)
 

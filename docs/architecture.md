@@ -45,7 +45,7 @@ A few boundaries are worth calling out explicitly:
   the slug index and validates references, then
   freezes the `AgentCatalog`, complete workflow-handler catalog, and per-owner
   workflow-policy catalog. Only pass 2 creates/mutates the app, registers the
-  workflow runtime once, and registers agent surfaces (FRDs 0007 and 0009).
+  workflow runtime once, and registers agent surfaces (FRDs 0004 and 0007).
 - **Registration is Azure-specific.** This is the first stage that knows about `azure.functions.FunctionApp`, decorators, routes, and trigger bindings.
 - **Execution is deferred.** The runner is not part of startup registration; it is called later by handler closures when an HTTP route or trigger actually fires.
 

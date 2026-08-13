@@ -264,7 +264,7 @@ def validate_plan(
             if task.agent not in policy.allowed_subagents:
                 raise PlanValidationError(
                     f"task {task.id!r}: Sub Agent {task.agent!r} is not authorized "
-                    f"for this workflow owner. Allowed Sub Agents: "
+                    f"for this workflow-enabled agent. Allowed Sub Agents: "
                     f"{sorted(policy.allowed_subagents)}"
                 )
 

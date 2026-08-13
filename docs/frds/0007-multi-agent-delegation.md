@@ -290,8 +290,8 @@ created for that top-level invocation. A delegated call is not another
 top-level request, so it opens no specialist sandbox session. A separate
 delegated sandbox session could be a future enhancement.
 
-Dynamic-Workflow tools are already restricted to `main.agent.md` by FRD 0004,
-regardless of delegation. No delegation-specific removal is needed.
+Dynamic-Workflow tools are scoped by each workflow-enabled agent's policy under
+FRD 0004, so delegation does not need a separate removal rule.
 
 Conversation history is also isolated: the delegate tool's handler calls
 `agent.run(task)` with no `session=` argument at all, so the specialist

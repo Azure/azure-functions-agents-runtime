@@ -11,7 +11,7 @@
 > [parallel PR report sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-subagents-preview/README.md)
 > demonstrates workflow Sub Agents. The
 > [Engineering Operations Hub](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/per-agent-workflows/README.md)
-> demonstrates two non-main workflow owners with independent policies in one app.
+> demonstrates two non-main workflow-enabled agents with independent policies in one app.
 > Larger features such as sub-orchestrations,
 > configurable retry policies, and MCP Tasks integration are tracked as v2
 > follow-up work.
@@ -166,30 +166,31 @@ prefer `start_workflow` over direct tool calls. The agent author does
 not need to document the tools or the heuristics in their markdown — the
 agent markdown stays focused on the domain.
 
-Any agent may become a workflow owner by setting `workflows.enabled: true`.
+Any agent may enable workflows by setting `workflows.enabled: true`.
 Invocation remains independent: triggers and built-in endpoints determine how
-the owner can be reached, and `debug_chat_ui` automatically enables its backing
+the agent can be reached, and `debug_chat_ui` automatically enables its backing
 chat API.
 
 File placement does not assign these roles. See
 [Agent roles and reachability](./front-matter-spec.md#agent-roles-and-reachability)
-for how direct agents, workflow owners, and internal specialists are identified.
+for how direct, workflow-enabled, and internal specialist agents are identified.
 
-### App-wide engine, per-owner policy
+### App-wide engine, per-agent policy
 
 The app discovers complete, immutable catalogs of workflow handlers and agents.
-If at least one workflow owner exists, startup creates one `DFApp` and
+If at least one workflow-enabled agent exists, startup creates one `DFApp` and
 registers one Durable orchestrator plus one copy of each Activity for the whole
-app. It does **not** register a separate engine per owner.
+app. It does **not** register a separate engine per agent.
 
-An app with no owners remains a plain `FunctionApp` unless the operator enables
-[final-owner drain mode](#removing-the-final-workflow-owner).
+An app with no workflow-enabled agents remains a plain `FunctionApp` unless the
+operator enables
+[drain mode](#removing-the-final-workflow-enabled-agent).
 
-Each enabled owner instead gets an immutable policy containing only its allowed
+Each workflow-enabled agent instead gets an immutable policy containing only its allowed
 workflow tools (after `workflows.exclude`) and its deny-by-default
 `workflows.subagents` grants. Prompt guidance, `start_workflow` validation, and
-Activity dispatch all use that owner's policy. One owner's exclusion never
-removes a handler another owner is allowed to use.
+Activity dispatch all use that agent's policy. One agent's exclusion never
+removes a handler another agent is allowed to use.
 
 ### Workflow tool authoring
 
@@ -280,12 +281,13 @@ hardening controls.
 
 ### Workflow Sub Agents
 
-The owner grants access in its agent frontmatter with `workflows.subagents`. Each
+The workflow-enabled agent grants access in its frontmatter with
+`workflows.subagents`. Each
 frontmatter grant contains `agent` and optional `when`; it is not a DAG node.
 The model then generates a `sub_agent` DAG node with exactly `id`, `type`,
 `agent`, `task`, and optional `depends_on`. A node does not accept `when`,
 `tool`, `args`, `duration`, or `until`.
-The runtime validates every specialist slug against the workflow owner's
+The runtime validates every specialist slug against the workflow-enabled agent's
 immutable grant before any node is scheduled and fails closed if the specialist
 is unavailable.
 
@@ -414,7 +416,8 @@ channel from the orchestrator into the agent's chat thread.
   output enters the agent's context window via `get_workflow_status`.
 - The `GET /agents/{slug}/workflows` endpoint is scoped to the calling session
   via the `x-ms-session-id` request header and the per-workflow
-  ownership scheme described in [Ownership](#ownership).
+  isolation scheme described in
+  [Agent and session isolation](#agent-and-session-isolation).
 
 The data shape maps directly onto MCP Tasks SEP-2557 (`CreateTaskResult`,
 `tasks/get`, `tasks/cancel`); future direct MCP Tasks support is a thin
@@ -454,7 +457,7 @@ runtime contract enforced by the framework. External clients (e.g.
 an MCP-Tasks-aware client) are free to adopt the same convention or
 to drive completion handling some other way (e.g. a dedicated `task
 completed` UI event with no synthetic prompt). The server-side
-mechanics — `GET /agents/{slug}/workflows`, `get_workflow_status`, ownership
+mechanics — `GET /agents/{slug}/workflows`, `get_workflow_status`, isolation
 scoping — are the actual contract; the synthetic-prompt format is a
 client-side detail.
 
@@ -488,48 +491,53 @@ tooling for operational monitoring and control.
 Every trigger invocation uses that agent's slug, policy, and bound Durable
 client. HTTP triggers use the request session (or the normal generated session).
 Non-HTTP triggers generate a fresh invocation session and intentionally create
-no application-level owner index or reconnect API. In all cases the starter
+no application-level session index or reconnect API. In all cases the starter
 returns after the initial model turn; orchestration continues asynchronously.
 
-## Ownership
+## Agent and session isolation
 
-Workflow ownership is the pair `(owner_slug, session_id)`. Its Durable instance
+Each workflow is isolated by the workflow-enabled agent's canonical slug and the
+invocation `session_id`. Internally, Durable payloads call this pair
+`(owner_slug, session_id)`; `owner_slug` is not a frontmatter field. The instance
 ID begins with a 32-hex-character (128-bit) truncated SHA-256 digest over an
 unambiguous length-delimited encoding of that pair; neither raw value appears in
 the ID. `get_workflow_status`,
 `list_workflows`, `cancel_workflow`, and `terminate_workflow` filter
-on that prefix. A workflow whose owner **or** session does not match is treated
-as nonexistent (404/empty, never 403), so two owners remain isolated even when
+on that prefix. A workflow whose agent **or** session does not match is treated
+as nonexistent (404/empty, never 403), so two agents remain isolated even when
 callers deliberately reuse the same session ID.
 
 Activities reauthorize immediately before dispatch against the **currently
-deployed** owner policy. Removing an owner while another owner remains, or
+deployed** agent policy. Removing a workflow-enabled agent while another remains, or
 tightening a tool/Sub Agent grant, therefore revokes pending capability-bearing
 nodes; they fail closed rather than continuing under a stale policy snapshot.
 
-### Removing the final workflow owner
+### Removing the final workflow-enabled agent
 
-Removing the final owner without retaining the Durable runtime can strand
-pending instances: a plain `FunctionApp` has no registered orchestrator or
-Activities, so those instances cannot reach owner-policy reauthorization. Use
-this two-deployment drain procedure:
+Removing the final workflow-enabled agent without retaining the Durable runtime
+can strand pending instances. For example, an Activity work item may already be
+queued in the Task Hub but not yet executed. The resulting plain `FunctionApp`
+has no registered orchestrator or Activity Function to receive that work item,
+so it cannot reach policy reauthorization and fail explicitly; it remains
+non-terminal in the hub instead. Use this drain procedure:
 
 1. Set `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE=true` while the current
    workflow deployment is still active. Drain mode removes `start_workflow` from
    the agent's tool set and defensively rejects direct application-level start
    calls before Durable scheduling, while list, status, cancel, terminate,
    orchestrator, and Activity execution remain available. The management tools
-   can access only workflows started under the same owner and session ID; use
+   can access only workflows started under the same agent and session ID; use
    Durable Functions or DTS Task Hub tooling as the authoritative app-wide
    management surface from the start of the drain. Startup emits a warning and
    records drain mode in the indexing summary.
 2. Stop or quiesce external trigger/chat traffic that could repeatedly ask the
    agent to start workflows. Direct Durable control-plane starts are privileged
    operations outside this application guard and must also stop.
-3. Remove or disable the final owner if desired, but keep drain mode enabled.
-   The app remains a `DFApp` with an empty owner-policy catalog, so pending tool
-   or Sub Agent Activities from removed owners fail closed instead of becoming
-   stranded. The removed owner's chat tools and
+3. Prefer to let existing instances finish before removing or disabling the
+   final workflow-enabled agent. If removal must happen first, keep drain mode
+   enabled. The app remains a `DFApp` with an empty agent-policy catalog, so
+   pending tool or Sub Agent Activities from the removed agent fail closed
+   instead of remaining queued indefinitely. The removed agent's chat tools and
    `/agents/{slug}/workflows`/`workflow-status` endpoints no longer exist, so
    Durable/DTS tooling is now the only complete management surface.
 4. Use Durable Functions management tooling or the DTS dashboard to query the
@@ -542,8 +550,8 @@ this two-deployment drain procedure:
    Already-dispatched Activity side effects are not rolled back. Confirm every
    instance reaches a terminal status.
 6. Only after that confirmation, remove
-   `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE`. An app with no owners then
-   returns to a plain `FunctionApp`.
+   `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE`. An app with no
+   workflow-enabled agents then returns to a plain `FunctionApp`.
 
 If the Task Hub cannot be queried, termination cannot be confirmed, or
 non-terminal instances remain, keep drain mode and the Durable runtime deployed;
@@ -560,17 +568,17 @@ the retained runtime no longer polls.
 ### Migration from legacy workflow IDs
 
 This experimental feature intentionally changes IDs from a session-only 48-bit
-prefix to the owner-and-session 128-bit prefix. New agent tools and polling
+prefix to the agent-and-session 128-bit prefix. New agent tools and polling
 routes cannot list, inspect, cancel, or terminate pre-upgrade IDs. In addition,
 legacy orchestration inputs contain no `owner_slug`, so an in-flight legacy
 workflow fails closed when it next dispatches a `tool` or `sub_agent` Activity;
-pure `wait` nodes do not require owner authorization. Drain or terminate active
+pure `wait` nodes do not require agent authorization. Drain or terminate active
 workflows before upgrading. Use Durable Functions or DTS tooling to inspect or
 control any legacy instances that remain.
 
 ### Operational scaling notes
 
-Each worker reconstructs the immutable owner-policy and handler catalogs from
+Each worker reconstructs the immutable agent-policy and handler catalogs from
 the same deployed agent project during app startup. Orchestrators persist
 `owner_slug` in their input and pass it to Activities, so an Activity may safely
 run on a different worker. Do not share a Task Hub between applications or
@@ -580,11 +588,11 @@ changes can therefore fail pending nodes closed as soon as a new worker handles
 them.
 
 Session workflow listing currently calls Durable's task-hub status API and
-filters by owner/session prefix in the application. Configure backend retention
+filters by agent/session prefix in the application. Configure backend retention
 or periodically purge completed orchestration history so polling cost does not
-grow without bound. The active-workflow limit is per `(owner_slug, session_id)`;
+grow without bound. The active-workflow limit is per agent and session;
 non-HTTP trigger invocations generate new session IDs, so that limit is not an
-owner-wide throttle.
+agent-wide throttle.
 
 ## Observability
 
@@ -614,8 +622,8 @@ owner-wide throttle.
 v1 includes:
 
 - five built-in workflow tools;
-- any agent may own workflows, with one app-wide engine and immutable
-  per-owner policies;
+- any agent may enable workflows, with one app-wide engine and immutable
+  per-agent policies;
 - DAG execution of `@workflow_tool` calls and wait tasks;
 - deny-by-default `workflows.subagents` grants and stateless `sub_agent` tasks;
 - fan-out/fan-in via `depends_on`;
@@ -630,6 +638,6 @@ v1 includes:
   workflows per session, and status-list result count.
 
 v2 follow-up work includes sub-orchestrations and bounded nested agents,
-configurable caps, retry and timeout policies, HMAC-backed workflow
-ownership, blob-offloaded large outputs, an MCP Tasks bridge, richer error
-taxonomy, and storage hygiene.
+configurable caps, retry and timeout policies, HMAC-backed workflow identity,
+blob-offloaded large outputs, an MCP Tasks bridge, richer error taxonomy, and
+storage hygiene.

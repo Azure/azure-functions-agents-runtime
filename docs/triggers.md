@@ -43,13 +43,13 @@ for a runnable example (`tech.agent.md` is one such endpoint-less specialist).
 
 When an agent sets `workflows.enabled: true`, each supported declared
 trigger can initiate a Dynamic Workflow. Its handler receives the Durable client
-and uses that agent's slug and immutable owner policy. The runtime schedules the
+and uses that agent's slug and immutable workflow policy. The runtime schedules the
 workflow asynchronously, and the trigger Function does not wait for it to finish.
 
 This behavior is generic across HTTP, timer, queue, blob, Event Grid, Service
 Bus, connector, and the other supported trigger decorators. HTTP uses the
 caller-provided or generated session ID. Non-HTTP invocations generate a fresh
-session ID; there is intentionally no owner index for finding those sessions, so
+session ID; there is intentionally no app-wide index for finding those sessions, so
 the workflow should publish its terminal result and operators should use
 Durable/DTS tooling for management.
 
@@ -153,7 +153,7 @@ HTTP requests can pass `x-ms-session-id`; otherwise the runtime creates a sessio
 An HTTP request receives the agent's immediate response, not the eventual
 workflow result. The configured response schema/example continues to govern the
 immediate response. Runtime workflow monitoring routes are available only when
-the same workflow owner also enables the built-in chat API. For non-HTTP result
+the same workflow-enabled agent also enables the built-in chat API. For non-HTTP result
 delivery, see
 [Trigger-started workflows](./workflows.md#trigger-started-workflows).
 

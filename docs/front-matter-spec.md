@@ -116,7 +116,7 @@ Agent markdown files (`*.agent.md`) can be placed at the app root or in an
 Files from both locations are combined and sorted by path for deterministic
 ordering. `main.agent.md` in either location is marked as the main agent for
 compatibility, but neither its filename nor its directory determines whether an
-agent is directly invokable, a coordinator, a workflow owner, or a specialist.
+agent is directly invokable, a coordinator, workflow-enabled, or a specialist.
 
 ### Agent roles and reachability
 
@@ -127,8 +127,8 @@ Roles come from invocation surfaces and references, not file placement:
 | Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
 | Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
 | Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
-| Workflow owner | Sets `workflows.enabled: true`. |
-| Workflow Sub Agent | Is referenced by an owner's `workflows.subagents`. It does not need `workflows.enabled` and may omit its own trigger/endpoints when it is internal-only. |
+| Workflow-enabled agent | Sets `workflows.enabled: true`. |
+| Workflow Sub Agent | Is referenced by a workflow-enabled agent's `workflows.subagents`. It does not need `workflows.enabled` and may omit its own trigger/endpoints when it is internal-only. |
 
 These roles can overlap. For example, an agent can have its own HTTP trigger and
 also be referenced as another agent's Chat or Workflow Sub Agent.
@@ -608,8 +608,8 @@ workflows:
 `workflows.enabled` is a strict boolean. When true, it injects
 workflow-management tools (`start_workflow`, `get_workflow_status`,
 `list_workflows`, `cancel_workflow`, `terminate_workflow`) and exposes the
-owner-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
-workflow task targets. No new owner or starter fields are required; owner
+agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
+workflow task targets. No new role or starter fields are required; workflow
 identity comes from the agent's canonical slug.
 The v1 runtime currently requires workflow tool handlers to be synchronous,
 accept one dictionary argument, and return JSON-serializable values. This is an
@@ -618,8 +618,8 @@ Functions requirement.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 
-`workflows.exclude` filters only that owner's workflow Activity targets; it does
-not affect normal tools or another owner's workflow policy. Conversely,
+`workflows.exclude` filters only that agent's workflow Activity targets; it does
+not affect normal tools or another agent's workflow policy. Conversely,
 `tools.exclude` filters normal MAF tools and does not hide workflow tools.
 
 Any agent may enable workflows. Invocation remains governed independently by its
