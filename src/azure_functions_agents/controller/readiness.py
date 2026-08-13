@@ -72,6 +72,7 @@ from ..transport.transport_models import (
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     PersistedSandboxBinding,
     SandboxCapacityError,
+    SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxCreateSource,
     SandboxFileNotFoundError,
@@ -1338,7 +1339,16 @@ async def _provision_reserved_session(
             package,
             setup_deadline,
         )
+    except SandboxCreateOutcomeUnknownError:
+        await _preserve_indeterminate_provision(state_binding.store, fence)
+        raise SessionActivationSetupTimeoutError(
+            "Sandbox creation was accepted but is not yet ready for reconciliation."
+        ) from None
     except SandboxGroupAuthorizationError:
+        if await _is_indeterminate_provision(state_binding.store, fence):
+            raise SessionActivationSetupTimeoutError(
+                "Sandbox creation is awaiting reconciliation."
+            ) from None
         try:
             await _fail_reserved_provision_authorization(
                 state_binding.store,
@@ -1357,6 +1367,34 @@ async def _provision_reserved_session(
                 "Sandbox file-plane provisioning is temporarily unavailable."
             ) from exc
         raise
+
+
+async def _preserve_indeterminate_provision(
+    store: SessionStateStore,
+    fence: SessionOperationFence,
+) -> None:
+    """Persist an accepted-create outcome that needs stable-label reconciliation."""
+    await store.advance_operation(
+        fence=fence,
+        phase="provision_reconcile",
+        error_code="provision_create_indeterminate",
+        updated_at=datetime.now(UTC),
+    )
+
+
+async def _is_indeterminate_provision(
+    store: SessionStateStore,
+    fence: SessionOperationFence,
+) -> bool:
+    operation = await store.get_operation(
+        fence.owner_partition,
+        fence.session_id,
+        fence.operation_id,
+    )
+    return (
+        operation.record.kind == "provision_submit"
+        and operation.record.phase == "provision_reconcile"
+    )
 
 
 async def _fail_reserved_provision_authorization(
@@ -1441,6 +1479,7 @@ async def _provision_reserved_session_inner(
     phase = operation.record.phase
     if phase not in {
         "provision_create",
+        "provision_reconcile",
         "provision_lifecycle",
         "provision_content",
         "provision_manifest",
@@ -1563,7 +1602,7 @@ async def _finish_created_provision(
     handle: SandboxSessionHandle,
     setup_deadline: SetupDeadline,
 ) -> ActivatedSession:
-    if phase == "provision_create":
+    if phase in {"provision_create", "provision_reconcile"}:
         bound_session = _session_with_sandbox_for_operation(
             current.record,
             sandbox_id=handle.identity.sandbox_id,

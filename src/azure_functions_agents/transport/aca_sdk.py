@@ -41,6 +41,7 @@ from .transport_models import (
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
     SandboxCapacityError,
+    SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxEgressHeader,
     SandboxEgressHostRule,
@@ -158,6 +159,11 @@ def _load_sdk_factories() -> SdkFactories:
         auto_suspend_policy=sdk.AutoSuspendPolicy,
         auto_delete_policy=sdk.AutoDeletePolicy,
     )
+
+
+def validate_aca_sandbox_dependency() -> None:
+    """Validate the optional SDK import without constructing credentials or clients."""
+    _SDK_FACTORIES()
 
 
 _SDK_FACTORIES: Callable[[], SdkFactories] = _load_sdk_factories
@@ -296,6 +302,7 @@ class AcaSandboxAdapter:
                 _OPERATION_LABEL if stable_attempt else _PROVISIONING_ATTEMPT_LABEL
             ): provisioning_attempt_id,
         }
+        create_accepted = False
         try:
             poller = await self._begin_create_sandbox(
                 request,
@@ -304,12 +311,18 @@ class AcaSandboxAdapter:
                 provisioning_attempt_id=provisioning_attempt_id,
                 cleanup_on_failure=not stable_attempt,
             )
+            create_accepted = True
             return await self._await_create_result(
                 poller,
                 provisioning_attempt_id,
                 cleanup_on_failure=not stable_attempt,
             )
         except SandboxGroupAuthorizationError:
+            if stable_attempt and create_accepted:
+                return await self._recover_stable_accepted_create(
+                    provisioning_attempt_id,
+                    request.labels.to_provider_labels(),
+                )
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
             if stable_attempt:
@@ -321,6 +334,32 @@ class AcaSandboxAdapter:
                 if len(existing) == 1:
                     return await self._handle_for_sandbox_id(existing[0])
             raise
+
+    async def _recover_stable_accepted_create(
+        self,
+        provisioning_attempt_id: str,
+        expected_labels: Mapping[str, str],
+    ) -> AcaSandboxHandle:
+        """Recover a labeled create whose accepted poll cannot be observed."""
+        try:
+            existing = await self._find_failed_create_sandboxes(
+                provisioning_attempt_id,
+                label_key=_OPERATION_LABEL,
+                expected_labels=expected_labels,
+            )
+        except SandboxGroupAuthorizationError:
+            raise SandboxCreateOutcomeUnknownError(
+                "Accepted sandbox creation could not be reconciled yet."
+            ) from None
+        if len(existing) == 1:
+            return await self._handle_for_sandbox_id(existing[0])
+        if len(existing) > 1:
+            raise SandboxProvisioningError(
+                "A durable provisioning operation matches multiple sandboxes."
+            )
+        raise SandboxCreateOutcomeUnknownError(
+            "Accepted sandbox creation could not be reconciled yet."
+        )
 
     async def _begin_create_sandbox(
         self,

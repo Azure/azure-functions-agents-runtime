@@ -238,6 +238,12 @@ async def test_timer_reconciler_deadline_allows_a_successful_pass(
         "_build_session_reconciler",
         lambda *_args, **_kwargs: _SuccessfulReconciler(),
     )
+    telemetry_events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        app_module,
+        "emit_runtime_event",
+        lambda name, attributes: telemetry_events.append((name, dict(attributes))),
+    )
 
     with caplog.at_level(logging.INFO):
         report = await app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
@@ -273,6 +279,18 @@ async def test_timer_reconciler_deadline_allows_a_successful_pass(
             "evicted_results": 6,
             "tombstoned_sessions": 3,
         }
+    ]
+    assert telemetry_events == [
+        (
+            "af.sandbox.reconciliation.completed",
+            {
+                "af.sandbox.cadence_seconds": 3600,
+                "af.sandbox.deleted_sandboxes": 4,
+                "af.sandbox.deleted_snapshots": 5,
+                "af.sandbox.evicted_results": 6,
+                "af.sandbox.tombstoned_sessions": 3,
+            },
+        )
     ]
 
 

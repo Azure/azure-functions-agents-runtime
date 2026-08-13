@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import types
+from contextlib import contextmanager
 
 import pytest
 
@@ -276,6 +277,35 @@ def test_runtime_span_add_event_forwards_name_and_non_none_attributes() -> None:
     span.add_event("unit.test.event", {"kept": "value", "count": 2, "dropped": None})
 
     assert events == [("unit.test.event", {"kept": "value", "count": 2})]
+
+
+def test_emit_runtime_event_uses_a_short_customer_queryable_span(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    @contextmanager
+    def record_span(name: str, **kwargs: object):  # type: ignore[no-untyped-def]
+        attributes = kwargs["attributes"]
+        assert isinstance(attributes, dict)
+        calls.append((name, attributes))
+        yield obs.RuntimeSpan(None)
+
+    monkeypatch.setattr(obs, "start_span", record_span)
+
+    obs.emit_runtime_event("af.sandbox.reconciliation.completed", {"af.sandbox.count": 1})
+
+    assert calls == [
+        (
+            "af.sandbox.reconciliation.completed",
+            {"af.sandbox.count": 1},
+        )
+    ]
+
+
+def test_emit_runtime_event_noops_without_observability(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    monkeypatch.setattr(obs, "_enabled", False)
+    monkeypatch.setattr(obs, "get_tracer", lambda: pytest.fail("tracer must not be loaded"))
+
+    obs.emit_runtime_event("af.sandbox.reconciliation.completed", {"af.sandbox.count": 1})
 
 
 def test_record_sandbox_execution_gated_when_disabled(monkeypatch) -> None:  # type: ignore[no-untyped-def]

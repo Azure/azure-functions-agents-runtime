@@ -11,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from .._logger import logger
+from .._observability import emit_runtime_event
 from ..execution.backend import RunError, RunStatus
 from ..execution.binding import AgentBinding
 from ..execution.run_control import RunJournalProtocolError
@@ -2351,4 +2352,14 @@ def _log_session_reclaimed(
             separators=(",", ":"),
             sort_keys=True,
         ),
+    )
+    emit_runtime_event(
+        "af.sandbox.session.reclaimed",
+        {
+            "af.sandbox.backing_outcome": backing_outcome,
+            "af.sandbox.deleted_snapshot_count": deleted_snapshot_count,
+            "af.sandbox.session_id": session_id,
+            "af.sandbox.sandbox_id": sandbox_id,
+            "af.sandbox.tombstone_reason": "reclaimed_idle_session",
+        },
     )

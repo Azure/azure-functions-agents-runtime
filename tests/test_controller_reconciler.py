@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import azure_functions_agents.controller.reconciler as reconciler_module
 from azure_functions_agents.controller.readiness import session_with_admitted_run
 from azure_functions_agents.controller.reconciler import (
     ReconcilerConfig,
@@ -990,6 +991,37 @@ async def test_finish_deleting_logs_already_absent_backing(
             "session_id": "session-1",
             "tombstone_reason": "reclaimed_idle_session",
         }
+    ]
+
+
+def test_reclaim_emits_a_customer_queryable_telemetry_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        reconciler_module,
+        "emit_runtime_event",
+        lambda name, attributes: events.append((name, dict(attributes))),
+    )
+
+    reconciler_module._log_session_reclaimed(
+        session_id="session-1",
+        sandbox_id="sandbox-1",
+        backing_deleted=True,
+        deleted_snapshot_count=2,
+    )
+
+    assert events == [
+        (
+            "af.sandbox.session.reclaimed",
+            {
+                "af.sandbox.backing_outcome": "deleted",
+                "af.sandbox.deleted_snapshot_count": 2,
+                "af.sandbox.session_id": "session-1",
+                "af.sandbox.sandbox_id": "sandbox-1",
+                "af.sandbox.tombstone_reason": "reclaimed_idle_session",
+            },
+        )
     ]
 
 

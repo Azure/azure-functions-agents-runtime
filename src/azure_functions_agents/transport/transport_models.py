@@ -35,6 +35,10 @@ class SandboxGroupAuthorizationError(SandboxProvisioningError):
         super().__init__(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
 
 
+class SandboxCreateOutcomeUnknownError(SandboxProvisioningError):
+    """A create was accepted but its durable outcome cannot yet be reconciled."""
+
+
 class SandboxGroupBindingError(SandboxTransportError):
     """Raised when a configured, persisted, ARM, or live group binding disagrees."""
 

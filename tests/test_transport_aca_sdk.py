@@ -26,6 +26,7 @@ from azure_functions_agents.transport.transport_models import (
     DiskSource,
     PersistedSandboxBinding,
     PresetSource,
+    SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxEgressHeader,
     SandboxEgressHostRule,
@@ -611,6 +612,76 @@ async def test_create_translates_begin_authorization_failure(
 
     assert "sensitive provider response" not in str(caught.value)
     assert caught.value.__suppress_context__
+    assert environment.group_client.create_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_stable_create_recovers_labeled_sandbox_after_poller_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+    environment.group_client.create_result_error = rejection
+
+    handle = await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert handle.identity.sandbox_id == "created-1"
+    assert len(environment.group_client.create_calls) == 1
+    assert environment.group_client.deleted_sandbox_ids == []
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_stable_create_keeps_post_acceptance_authorization_failure_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+    environment.group_client.create_result_error = rejection
+    original_list = environment.group_client.list_sandboxes
+
+    def list_before_create_then_forbid(**kwargs: Any):
+        if environment.group_client.create_calls:
+            raise rejection
+        return original_list(**kwargs)
+
+    monkeypatch.setattr(
+        environment.group_client,
+        "list_sandboxes",
+        list_before_create_then_forbid,
+    )
+
+    with pytest.raises(SandboxCreateOutcomeUnknownError) as caught:
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert len(environment.group_client.create_calls) == 1
+    assert "created-1" in environment.sandboxes
     await adapter.close()
 
 

@@ -16,7 +16,7 @@ import azure.durable_functions as df
 import azure.functions as func
 
 from ._logger import logger
-from ._observability import configure_observability
+from ._observability import configure_observability, emit_runtime_event
 from ._source_marker import source_marker
 from .config.http_auth import resolve_aca_submission_auth
 from .config.loader import load_agent_specs, load_global_config
@@ -194,6 +194,16 @@ async def _run_deployed_reconciler_timer_pass(
             separators=(",", ":"),
             sort_keys=True,
         ),
+    )
+    emit_runtime_event(
+        "af.sandbox.reconciliation.completed",
+        {
+            "af.sandbox.cadence_seconds": cadence_seconds,
+            "af.sandbox.deleted_sandboxes": report.deleted_sandboxes,
+            "af.sandbox.deleted_snapshots": report.deleted_snapshots,
+            "af.sandbox.evicted_results": report.evicted_results,
+            "af.sandbox.tombstoned_sessions": report.tombstoned_sessions,
+        },
     )
     return report
 
@@ -407,6 +417,9 @@ def _build_session_runtime_binding(
     reclaim_idle_seconds = (
         retention.reclaim_idle if retention is not None else DEFAULT_RECLAIM_IDLE_SECONDS
     )
+    from .transport.aca_sdk import validate_aca_sandbox_dependency
+
+    validate_aca_sandbox_dependency()
 
     async def provider_factory() -> SandboxSessionProvider:
         from .transport.aca_sdk import AcaSandboxAdapter

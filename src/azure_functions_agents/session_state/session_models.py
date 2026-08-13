@@ -49,6 +49,7 @@ type DurableRunStatus = Literal[
 type DurableOperationKind = Literal["provision_submit", "submit_run", "reclaim_backing"]
 type DurableOperationPhase = Literal[
     "provision_create",
+    "provision_reconcile",
     "provision_lifecycle",
     "provision_content",
     "provision_manifest",
@@ -106,6 +107,7 @@ _OPERATION_STATES: frozenset[str] = frozenset({"active", "completed", "aborted"}
 _OPERATION_PHASES: frozenset[str] = frozenset(
     {
         "provision_create",
+        "provision_reconcile",
         "provision_lifecycle",
         "provision_content",
         "provision_manifest",
@@ -129,6 +131,7 @@ _OPERATION_PHASES_BY_KIND: Mapping[str, frozenset[str]] = {
     "provision_submit": frozenset(
         {
             "provision_create",
+            "provision_reconcile",
             "provision_lifecycle",
             "provision_content",
             "provision_manifest",
@@ -163,7 +166,10 @@ _OPERATION_PHASES_BY_KIND: Mapping[str, frozenset[str]] = {
 }
 _OPERATION_PHASE_TRANSITIONS: Mapping[str, Mapping[str, frozenset[str]]] = {
     "provision_submit": {
-        "provision_create": frozenset({"provision_lifecycle", "provision_rearm"}),
+        "provision_create": frozenset(
+            {"provision_reconcile", "provision_lifecycle", "provision_rearm"}
+        ),
+        "provision_reconcile": frozenset({"provision_lifecycle", "provision_rearm"}),
         "provision_lifecycle": frozenset({"provision_content", "provision_rearm"}),
         "provision_content": frozenset({"provision_manifest", "provision_rearm"}),
         "provision_manifest": frozenset({"provision_journal", "provision_rearm"}),

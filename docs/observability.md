@@ -53,6 +53,10 @@ classifies as **system logs** (emitted with `customer_app_insight = false`), so 
 app's `traces`. `host.json` `logLevel` does **not** surface them, and worker-side `DEBUG` would
 require the `PYTHON_ENABLE_DEBUG_LOGGING` app setting. This is by design.
 
+ACA reconciliation and reclaim audit records are the narrow exception: they are emitted as short
+runtime spans with `af.sandbox.*` attributes, so they are queryable in `AppDependencies`. Their
+companion internal log lines remain system-only; do not query `AppTraces` for either event.
+
 **So to debug a run, use the spans — not the log list:**
 
 - `agent.run {name}` and `dynamic_session.execute`, with all the `af.*` attributes below.
@@ -336,24 +340,24 @@ AppDependencies
 ```
 
 ```kql
-// ACA timer-pass summaries and successful session reclaim/tombstone audit events
-AppTraces
-| extend event = parse_json(Message)
-| where tostring(event.event_name) in (
-    "sandbox_reconciliation_completed",
-    "sandbox_session_reclaimed"
+// ACA timer-pass summaries and successful session reclaim/tombstone audit events.
+// Runtime logs are system-only; these short spans are customer-queryable dependencies.
+AppDependencies
+| where Name in (
+    "af.sandbox.reconciliation.completed",
+    "af.sandbox.session.reclaimed"
 )
 | project
     TimeGenerated,
-    event_name = tostring(event.event_name),
-    cadence_seconds = toint(event.cadence_seconds),
-    session_id = tostring(event.session_id),
-    sandbox_id = tostring(event.sandbox_id),
-    backing_outcome = tostring(event.backing_outcome),
-    tombstone_reason = tostring(event.tombstone_reason),
-    deleted_sandboxes = toint(event.deleted_sandboxes),
-    deleted_snapshots = toint(event.deleted_snapshots),
-    deleted_snapshot_count = toint(event.deleted_snapshot_count)
+    event_name = Name,
+    cadence_seconds = toint(Properties["af.sandbox.cadence_seconds"]),
+    session_id = tostring(Properties["af.sandbox.session_id"]),
+    sandbox_id = tostring(Properties["af.sandbox.sandbox_id"]),
+    backing_outcome = tostring(Properties["af.sandbox.backing_outcome"]),
+    tombstone_reason = tostring(Properties["af.sandbox.tombstone_reason"]),
+    deleted_sandboxes = toint(Properties["af.sandbox.deleted_sandboxes"]),
+    deleted_snapshots = toint(Properties["af.sandbox.deleted_snapshots"]),
+    deleted_snapshot_count = toint(Properties["af.sandbox.deleted_snapshot_count"])
 | order by TimeGenerated desc
 ```
 

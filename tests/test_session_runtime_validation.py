@@ -100,6 +100,8 @@ from pathlib import Path
 import pytest
 
 from azure_functions_agents.app import create_function_app
+from azure_functions_agents.transport import aca_sdk
+from azure_functions_agents.transport.transport_models import AcaSandboxDependencyError
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
 
@@ -112,6 +114,19 @@ def test_session_runtime_absent_defaults_to_in_lang_worker_no_row_fires() -> Non
     path is untouched by FRD 0008.
     """
     app = create_function_app(FIXTURES_ROOT / "17_session_runtime_absent")
+    assert app.get_functions()
+
+
+def test_default_runtime_does_not_validate_the_optional_aca_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_sdk_load() -> object:
+        raise AssertionError("default runtime must not load the ACA SDK")
+
+    monkeypatch.setattr(aca_sdk, "_SDK_FACTORIES", unexpected_sdk_load)
+
+    app = create_function_app(FIXTURES_ROOT / "17_session_runtime_absent")
+
     assert app.get_functions()
 
 
@@ -237,3 +252,38 @@ def test_valid_aca_config_passes_capability_gate_on_supported_host(
     assert binding["type"] == "timerTrigger"
     assert binding["name"] == "timer"
     assert binding["schedule"] == "0 0 * * * *"
+
+
+def test_valid_aca_config_fails_startup_when_optional_sdk_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    version_info = namedtuple(
+        "version_info",
+        ("major", "minor", "micro", "releaselevel", "serial"),
+    )
+    monkeypatch.setattr(sys, "version_info", version_info(3, 13, 0, "final", 0))
+    monkeypatch.setenv(
+        "WEBSITE_OWNER_NAME",
+        "11111111-2222-3333-4444-555555555555+westus2webspace",
+    )
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "aca-valid-test")
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    credential_created = False
+
+    def missing_sdk() -> object:
+        raise AcaSandboxDependencyError("ACA Sandbox support requires the aca_sandbox optional dependency.")
+
+    def unexpected_credential() -> object:
+        nonlocal credential_created
+        credential_created = True
+        raise AssertionError("startup dependency validation must not create credentials")
+
+    monkeypatch.setattr(aca_sdk, "_SDK_FACTORIES", missing_sdk)
+    monkeypatch.setattr(aca_sdk, "_CREDENTIAL_FACTORY", unexpected_credential)
+
+    with pytest.raises(AcaSandboxDependencyError, match="aca_sandbox optional dependency"):
+        create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid")
+
+    assert not credential_created
