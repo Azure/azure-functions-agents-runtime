@@ -13,11 +13,11 @@ The yielded orchestrator result is a JSON object with `text`, `messages`, `respo
 > **Status: public experimental v1.** The API is intentionally small and
 > may change based on early feedback, but the behavior described here is
 > the supported v1 surface. Run the
-> [workflow-incident-triage sample](../samples/workflow-incident-triage/README.md)
+> [workflow-incident-triage sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-incident-triage/README.md)
 > for the interactive experience, or the
-> [queue-trigger sample](../samples/workflow-queue-p0-report/README.md) for a
+> [queue-trigger sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-queue-p0-report/README.md) for a
 > non-interactive starter. The
-> [parallel PR report sample](../samples/workflow-subagents-preview/README.md)
+> [parallel PR report sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-subagents-preview/README.md)
 > demonstrates workflow Sub Agents. Larger features such as sub-orchestrations,
 > configurable retry policies, and MCP Tasks integration are tracked as v2
 > follow-up work.
