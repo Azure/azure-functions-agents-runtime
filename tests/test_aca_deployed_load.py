@@ -89,6 +89,21 @@ def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only
     assert "acaLoadConcurrency=100 requires acaRuntimeTarget" in pipeline
 
 
+def test_deployed_agent_preflight_acquires_but_never_decodes_or_logs_easy_auth_tokens() -> None:
+    root = Path(__file__).parent.parent
+    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    agent_job = pipeline.split('- job: "ACADeployedAgentTurn"', maxsplit=1)[1].split(
+        '- job: "ACADeployedColdStart"', maxsplit=1
+    )[0]
+    preflight = agent_job.split("python - <<'PY'", maxsplit=1)[1].split("\n            PY", maxsplit=1)[0]
+
+    assert "await credential.get_token(" in preflight
+    assert 'print("Easy Auth token acquired")' in preflight
+    assert preflight.count("print(") == 1
+    for forbidden in ("base64", "json", "split(", "urlsafe_b64decode", "claim", "token.token"):
+        assert forbidden not in preflight
+
+
 def test_load_orchestration_preserves_public_and_read_only_boundaries() -> None:
     source = (Path(__file__).parent / "live" / "test_aca_deployed_load.py").read_text()
 

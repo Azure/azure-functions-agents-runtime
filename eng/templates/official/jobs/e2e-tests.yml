@@ -308,8 +308,6 @@ jobs:
             export AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY="${ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY}"
             python - <<'PY'
             import asyncio
-            import base64
-            import json
             import os
 
             from azure.identity.aio import DefaultAzureCredential
@@ -318,21 +316,14 @@ jobs:
             async def main() -> None:
                 credential = DefaultAzureCredential()
                 try:
-                    token = await credential.get_token(
+                    await credential.get_token(
                         os.environ[
                             "AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE"
                         ]
                     )
                 finally:
                     await credential.close()
-                payload_segment = token.token.split(".")[1]
-                payload_segment += "=" * (-len(payload_segment) % 4)
-                claims = json.loads(base64.urlsafe_b64decode(payload_segment))
-                safe_names = ("aud", "appid", "azp", "oid", "roles", "tid")
-                print(
-                    "Easy Auth token claim summary: "
-                    + json.dumps({name: claims.get(name) for name in safe_names}, sort_keys=True)
-                )
+                print("Easy Auth token acquired")
 
 
             asyncio.run(main())
