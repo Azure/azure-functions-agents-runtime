@@ -44,6 +44,18 @@ If `AZURE_FUNCTIONS_AGENTS_PROVIDER` is unset, auto-detection picks the first pr
 
 Model resolution precedence is: explicit requested model > provider-specific env (`FOUNDRY_MODEL` for Foundry, `AZURE_OPENAI_DEPLOYMENT` for Azure OpenAI) > `AZURE_FUNCTIONS_AGENTS_MODEL` > provider default.
 
+### Provider client lifetime
+
+The runtime reuses provider SDK clients and their HTTP connection pools for the
+life of each Python worker process. This applies uniformly to built-in chat
+endpoints, non-HTTP triggers, delegated agents, and workflow sub-agent
+activities. MAF `Agent` objects are still created per invocation because they
+carry mutable request state.
+
+Provider settings are process configuration. Deployments and app-setting
+updates recycle Functions workers, so each new worker builds clients from the
+new settings; mutating `os.environ` inside a running worker is unsupported.
+
 ## Quick Start
 
 ### 1. Create the agent file

@@ -7,32 +7,39 @@ agent registration or HTTP/streaming layers.
 
 Only one implementation ships today: :class:`MAFClientManager`. It is selected
 automatically by :func:`get_client_manager` and lives behind a process-wide
-singleton because building a provider client (and the underlying credential
-caches it owns) is cheap to share across requests.
+singleton. It caches provider clients by resolved target so one Python worker
+reuses the underlying HTTP connection pools across requests.
 
 ABC surface
 -----------
 
 * :meth:`ClientManager.resolve_model` — pick the actual model/deployment to
   use given an optional per-call request.
-* :meth:`ClientManager.build_chat_client` — return a fresh ``ChatClient``
-  bound to a specific model.
-* :meth:`ClientManager.build_chat_client_with_target` — return a fresh client
-    with authoritative inference-target metadata when available.
+* :meth:`ClientManager.build_chat_client` — return a ``ChatClient`` bound to a
+  specific model.
+* :meth:`ClientManager.build_chat_client_with_target` — return a client with
+  authoritative inference-target metadata when available.
 * :meth:`ClientManager.close` — release any resources held by the manager
-  (called from the application's shutdown hook).
+  when an embedding host owns an async shutdown lifecycle.
 """
 
 from __future__ import annotations
 
 import os
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any
+from typing import TYPE_CHECKING, Any, Protocol
 
 from ._credential import build_async_credential
 from ._logger import logger
 from .config.env import runtime_env_value
+
+if TYPE_CHECKING:
+    from agent_framework import BaseChatClient
+    from agent_framework.foundry import FoundryChatClient
+    from agent_framework.openai import OpenAIChatClient
+    from azure.identity.aio import DefaultAzureCredential as AsyncDefaultAzureCredential
 
 # ---------------------------------------------------------------------------
 # ABC
@@ -45,6 +52,44 @@ class InferenceTarget:
 
     provider: str | None = None
     model: str | None = None
+
+
+@dataclass(frozen=True)
+class _ClientCacheKey:
+    provider: str
+    model: str
+
+
+class _AsyncCloseable(Protocol):
+    async def close(self) -> None: ...
+
+
+@dataclass(frozen=True)
+class _OwnedResource:
+    value: _AsyncCloseable
+    label: str
+
+
+@dataclass(frozen=True)
+class _ManagedChatClient:
+    client: BaseChatClient[Any]
+    resources: tuple[_OwnedResource, ...]
+
+    async def close(self) -> list[Exception]:
+        return await _close_owned_resources(self.resources)
+
+
+async def _close_owned_resources(
+    resources: tuple[_OwnedResource, ...],
+) -> list[Exception]:
+    errors: list[Exception] = []
+    for resource in resources:
+        try:
+            await resource.value.close()
+        except Exception as exc:
+            logger.error("Failed to close %s: %s", resource.label, exc)
+            errors.append(exc)
+    return errors
 
 
 class ClientManager(ABC):
@@ -103,6 +148,12 @@ class MAFClientManager(ClientManager):
 
     name = "maf"
 
+    def __init__(self) -> None:
+        self._clients: dict[_ClientCacheKey, _ManagedChatClient] = {}
+        self._async_credential: AsyncDefaultAzureCredential | None = None
+        self._lock = threading.RLock()
+        self._closed = False
+
     def resolve_model(self, requested: str | None) -> str:
         """Resolve model as requested > provider-specific env > runtime env > default."""
         return self._resolve_model(requested, self._provider())
@@ -140,19 +191,17 @@ class MAFClientManager(ClientManager):
     ) -> tuple[Any, InferenceTarget]:
         provider = self._provider()
         resolved = self._resolve_model(model, provider)
-        logger.info("MAF provider=%s model=%s", provider, resolved)
-        if provider == "openai":
-            client = self._build_openai(resolved)
-        elif provider == "azure_openai":
-            client = self._build_azure_openai(resolved)
-        elif provider == "foundry":
-            client = self._build_foundry(resolved)
-        else:
-            raise RuntimeError(
-                f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
-                "Use one of: openai, azure_openai, foundry."
-            )
-        return client, InferenceTarget(
+        cache_key = _ClientCacheKey(provider, resolved)
+        with self._lock:
+            self._ensure_open()
+            managed = self._clients.get(cache_key)
+            if managed is None:
+                managed = self._build_provider_client(provider, resolved)
+                self._clients[cache_key] = managed
+                logger.info("Created MAF provider client: provider=%s model=%s", provider, resolved)
+            else:
+                logger.debug("Reusing MAF provider client: provider=%s model=%s", provider, resolved)
+        return managed.client, InferenceTarget(
             provider=provider,
             model=resolved,
         )
@@ -160,6 +209,36 @@ class MAFClientManager(ClientManager):
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
+
+    def _build_provider_client(self, provider: str, model: str) -> _ManagedChatClient:
+        if provider == "openai":
+            client = self._build_openai(model)
+            return _ManagedChatClient(
+                client,
+                (_OwnedResource(client.client, "OpenAI AsyncOpenAI transport"),),
+            )
+        if provider == "azure_openai":
+            client = self._build_azure_openai(model)
+            return _ManagedChatClient(
+                client,
+                (_OwnedResource(client.client, "Azure OpenAI AsyncOpenAI transport"),),
+            )
+        if provider == "foundry":
+            client = self._build_foundry(model)
+            return _ManagedChatClient(
+                client,
+                (
+                    _OwnedResource(client.client, "Foundry AsyncOpenAI transport"),
+                    _OwnedResource(
+                        client.project_client,
+                        "Foundry AIProjectClient transport",
+                    ),
+                ),
+            )
+        raise RuntimeError(
+            f"Unknown AZURE_FUNCTIONS_AGENTS_PROVIDER '{provider}'. "
+            "Use one of: openai, azure_openai, foundry."
+        )
 
     @staticmethod
     def _env(name: str) -> str:
@@ -192,7 +271,7 @@ class MAFClientManager(ClientManager):
         )
 
     @classmethod
-    def _build_openai(cls, model: str) -> Any:
+    def _build_openai(cls, model: str) -> OpenAIChatClient:
         from agent_framework.openai import OpenAIChatClient
 
         return OpenAIChatClient(
@@ -200,11 +279,10 @@ class MAFClientManager(ClientManager):
             api_key=cls._env("OPENAI_API_KEY") or None,
         )
 
-    @classmethod
-    def _build_azure_openai(cls, model: str) -> Any:
+    def _build_azure_openai(self, model: str) -> OpenAIChatClient:
         from agent_framework.openai import OpenAIChatClient
 
-        endpoint = cls._env("AZURE_OPENAI_ENDPOINT")
+        endpoint = self._env("AZURE_OPENAI_ENDPOINT")
         if not endpoint:
             raise RuntimeError(
                 "AZURE_FUNCTIONS_AGENTS_PROVIDER=azure_openai requires "
@@ -217,21 +295,20 @@ class MAFClientManager(ClientManager):
         # Only forward api_version when the user explicitly sets it. MAF defaults
         # to the Responses API ("preview") which rejects Chat Completions GA
         # versions like "2024-10-21" with "API version not supported".
-        api_version = cls._env("AZURE_OPENAI_API_VERSION")
+        api_version = self._env("AZURE_OPENAI_API_VERSION")
         if api_version:
             kwargs["api_version"] = api_version
-        api_key = cls._env("AZURE_OPENAI_API_KEY")
+        api_key = self._env("AZURE_OPENAI_API_KEY")
         if api_key:
             kwargs["api_key"] = api_key
         else:
-            kwargs["credential"] = build_async_credential()
+            kwargs["credential"] = self._get_async_credential()
         return OpenAIChatClient(**kwargs)
 
-    @classmethod
-    def _build_foundry(cls, model: str) -> Any:
+    def _build_foundry(self, model: str) -> FoundryChatClient:
         from agent_framework.foundry import FoundryChatClient
 
-        endpoint = cls._env("FOUNDRY_PROJECT_ENDPOINT")
+        endpoint = self._env("FOUNDRY_PROJECT_ENDPOINT")
         if not endpoint:
             raise RuntimeError(
                 "AZURE_FUNCTIONS_AGENTS_PROVIDER=foundry requires "
@@ -240,15 +317,51 @@ class MAFClientManager(ClientManager):
         return FoundryChatClient(
             project_endpoint=endpoint,
             model=model,
-            credential=build_async_credential(),
+            credential=self._get_async_credential(),
         )
+
+    def _get_async_credential(self) -> AsyncDefaultAzureCredential:
+        with self._lock:
+            self._ensure_open()
+            if self._async_credential is None:
+                self._async_credential = build_async_credential()
+            return self._async_credential
+
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise RuntimeError("MAFClientManager is closed and cannot create resources.")
+
+    async def close(self) -> None:
+        """Close all provider transports and the shared credential exactly once."""
+        with self._lock:
+            if self._closed:
+                return
+            self._closed = True
+            cached_clients = list(self._clients.values())
+            self._clients.clear()
+            credential = self._async_credential
+            self._async_credential = None
+
+        errors: list[Exception] = []
+        for chat_client in cached_clients:
+            errors.extend(await chat_client.close())
+        if credential is not None:
+            errors.extend(
+                await _close_owned_resources(
+                    (_OwnedResource(credential, "shared async credential"),)
+                )
+            )
+        if errors:
+            raise ExceptionGroup("Failed to close one or more MAF client resources.", errors)
 
 
 # ---------------------------------------------------------------------------
 # Process-wide singleton selection
 # ---------------------------------------------------------------------------
 
-_INSTANCE: ClientManager | None = None
+_SHUTTING_DOWN = object()
+_INSTANCE: ClientManager | object | None = None
+_INSTANCE_LOCK = threading.Lock()
 
 
 def get_client_manager() -> ClientManager:
@@ -259,27 +372,52 @@ def get_client_manager() -> ClientManager:
     between alternative implementations.
     """
     global _INSTANCE
-    if _INSTANCE is None:
-        _INSTANCE = MAFClientManager()
-        logger.info("ClientManager initialized: %s", _INSTANCE.name)
-    return _INSTANCE
+    with _INSTANCE_LOCK:
+        if _INSTANCE is _SHUTTING_DOWN:
+            raise RuntimeError("Client manager shutdown is in progress")
+        if _INSTANCE is None:
+            _INSTANCE = MAFClientManager()
+            logger.info("ClientManager initialized: %s", _INSTANCE.name)
+        assert isinstance(_INSTANCE, ClientManager)
+        return _INSTANCE
 
 
 def set_client_manager(manager: ClientManager) -> None:
     """Override the process-wide :class:`ClientManager`.
 
     Intended for tests and for advanced apps that want to plug in a custom
-    backend.
+    backend. Call and await :func:`shutdown_client_manager` before replacing
+    any active manager, including a custom implementation.
     """
     global _INSTANCE
-    _INSTANCE = manager
+    with _INSTANCE_LOCK:
+        if _INSTANCE is _SHUTTING_DOWN:
+            raise RuntimeError("Client manager shutdown is in progress")
+        current = _INSTANCE
+        if current is manager:
+            return
+        if current is not None:
+            raise RuntimeError(
+                "Cannot replace the active ClientManager. "
+                "Await shutdown_client_manager() before replacing it."
+            )
+        _INSTANCE = manager
 
 
 async def shutdown_client_manager() -> None:
-    """Close the active manager (if any). Idempotent."""
+    """Close the active manager; sequential calls are safe, concurrent calls are rejected."""
     global _INSTANCE
-    if _INSTANCE is not None:
-        try:
-            await _INSTANCE.close()
-        finally:
-            _INSTANCE = None
+    with _INSTANCE_LOCK:
+        manager = _INSTANCE
+        if manager is _SHUTTING_DOWN:
+            raise RuntimeError("Client manager shutdown is already in progress")
+        if manager is None:
+            return
+        _INSTANCE = _SHUTTING_DOWN
+    assert isinstance(manager, ClientManager)
+    try:
+        await manager.close()
+    finally:
+        with _INSTANCE_LOCK:
+            if _INSTANCE is _SHUTTING_DOWN:
+                _INSTANCE = None
