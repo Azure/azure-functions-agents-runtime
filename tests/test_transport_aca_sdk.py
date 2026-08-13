@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from inspect import signature
@@ -393,6 +393,78 @@ async def test_create_reuses_a_stable_operation_label_after_ambiguous_recovery(
     )
     await first.close()
     await second.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_create_waits_for_a_temporarily_invisible_stable_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    request = _request(labels=labels)
+    first = await adapter.create(request, persisted_group=_binding())
+    original_list = environment.group_client.list_sandboxes
+    visible = False
+
+    def list_when_visible(**kwargs: Any):
+        async def iterate():
+            if visible:
+                async for item in original_list(**kwargs):
+                    yield item
+
+        return iterate()
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", list_when_visible)
+    monkeypatch.setattr(aca_sdk, "_sleep", no_delay)
+
+    with pytest.raises(SandboxCreateOutcomeUnknownError):
+        await adapter.create(
+            replace(request, reconcile_only=True),
+            persisted_group=_binding(),
+        )
+
+    assert len(environment.group_client.create_calls) == 1
+    visible = True
+    reconciled = await adapter.create(
+        replace(request, reconcile_only=True),
+        persisted_group=_binding(),
+    )
+
+    assert reconciled.identity.sandbox_id == first.identity.sandbox_id
+    assert len(environment.group_client.create_calls) == 1
+    await first.close()
+    await reconciled.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_create_requires_a_stable_operation_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxProvisioningError, match="stable operation label"):
+        await adapter.create(
+            _request(reconcile_only=True),
+            persisted_group=_binding(),
+        )
+
+    assert environment.group_client.create_calls == []
     await adapter.close()
 
 

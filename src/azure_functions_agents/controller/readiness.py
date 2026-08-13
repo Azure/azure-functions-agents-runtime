@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -1362,6 +1362,8 @@ async def _provision_reserved_session(
             "Sandbox file-plane provisioning artifact is temporarily unavailable."
         ) from exc
     except SandboxFileOperationError as exc:
+        if exc.status_code in {401, 403}:
+            raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
         if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
             raise SessionActivationSetupTimeoutError(
                 "Sandbox file-plane provisioning is temporarily unavailable."
@@ -1502,6 +1504,7 @@ async def _provision_reserved_session_inner(
         labels=labels,
         setup_deadline=setup_deadline,
     )
+    create_request = replace(create_request, reconcile_only=phase == "provision_reconcile")
     current = await _within_setup_budget(
         state_binding.store.get_session(session.owner_partition, session.session_id),
         setup_deadline,

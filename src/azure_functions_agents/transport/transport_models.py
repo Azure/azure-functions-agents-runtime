@@ -590,6 +590,7 @@ class SandboxCreateRequest:
     ports: tuple[object, ...] = ()
     skip_egress_proxy: bool = False
     polling_interval_seconds: int = 3
+    reconcile_only: bool = False
 
     @classmethod
     def create(
@@ -608,6 +609,7 @@ class SandboxCreateRequest:
         ports: tuple[object, ...] = (),
         skip_egress_proxy: bool = False,
         polling_interval_seconds: int = 3,
+        reconcile_only: bool = False,
     ) -> SandboxCreateRequest:
         if not isinstance(source, (DiskSource, DiskIdSource, PresetSource)):
             raise SandboxProvisioningError(
@@ -632,6 +634,8 @@ class SandboxCreateRequest:
             )
         if polling_interval_seconds <= 0:
             raise SandboxProvisioningError("Sandbox polling_interval_seconds must be positive.")
+        if not isinstance(reconcile_only, bool):
+            raise SandboxProvisioningError("Sandbox reconcile_only must be a boolean.")
         for command_part in (*entrypoint, *cmd):
             _require_nonempty_string(command_part, "entrypoint or cmd item")
 
@@ -650,6 +654,7 @@ class SandboxCreateRequest:
             ports=ports,
             skip_egress_proxy=skip_egress_proxy,
             polling_interval_seconds=polling_interval_seconds,
+            reconcile_only=reconcile_only,
         )
 
     @property

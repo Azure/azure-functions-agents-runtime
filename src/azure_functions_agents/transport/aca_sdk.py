@@ -284,6 +284,10 @@ class AcaSandboxAdapter:
         egress = _compile_egress_policy(self._factories, request.egress_policy)
         provisioning_attempt_id = request.labels.operation_label or uuid.uuid4().hex
         stable_attempt = request.labels.operation_label is not None
+        if request.reconcile_only and not stable_attempt:
+            raise SandboxProvisioningError(
+                "Reconciliation-only provisioning requires a stable operation label."
+            )
         if stable_attempt:
             existing = await self._find_failed_create_sandboxes(
                 provisioning_attempt_id,
@@ -295,6 +299,10 @@ class AcaSandboxAdapter:
             if len(existing) > 1:
                 raise SandboxProvisioningError(
                     "A durable provisioning operation matches multiple sandboxes."
+                )
+            if request.reconcile_only:
+                raise SandboxCreateOutcomeUnknownError(
+                    "Accepted sandbox creation could not be reconciled yet."
                 )
         labels = {
             **request.labels.to_provider_labels(),

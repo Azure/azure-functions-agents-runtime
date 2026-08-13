@@ -85,6 +85,7 @@ from azure_functions_agents.session_state import (
 from azure_functions_agents.transport.transport_models import (
     DiskSource,
     SandboxCapacityError,
+    SandboxCreateOutcomeUnknownError,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
@@ -541,6 +542,70 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
 
 
 @pytest.mark.asyncio
+async def test_indeterminate_provision_waits_for_stable_label_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class DelayedVisibilityProvider(FakeSandboxSessionProvider):
+        def __init__(self, handle: FakeSandboxSessionHandle) -> None:
+            super().__init__(handle)
+            self.visible = False
+            self.reconcile_requests = 0
+
+        async def create(self, request, *, persisted_group):  # type: ignore[no-untyped-def]
+            if not self.create_calls:
+                self.create_calls.append(request)
+                self.handle.labels = request.labels.to_provider_labels()
+                self.sandboxes[self.handle.identity.sandbox_id] = self.handle
+                raise SandboxCreateOutcomeUnknownError()
+            assert request.reconcile_only
+            self.reconcile_requests += 1
+            if not self.visible:
+                raise SandboxCreateOutcomeUnknownError()
+            return self.handle
+
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = DelayedVisibilityProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="ambiguous-create")
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+
+    [operation] = store.durable_operations.values()
+    _expire_provision_lease(store, operation)
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+
+    assert len(provider.create_calls) == 1
+    assert provider.reconcile_requests == 1
+    _expire_provision_lease(store, next(iter(store.durable_operations.values())))
+    provider.visible = True
+    recovered = await backend.start_run(request)
+
+    assert recovered.state == "accepted"
+    assert recovered.session_id == operation.target.session_id
+    assert recovered.run_id == operation.target.run_id
+    assert len(provider.create_calls) == 1
+    assert provider.reconcile_requests == 2
+
+
+@pytest.mark.asyncio
 async def test_duplicate_submit_reuses_run_after_launch_response_loss(
     tmp_path: Path,
 ) -> None:
@@ -723,6 +788,54 @@ async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     assert len(provider.sandboxes) == 1
     assert len(provider.create_calls) == 1
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_file_plane_authorization_failure_is_redacted_and_resumable(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    handle.write_errors.append(
+        SandboxFileOperationError("provider response with a secret", status_code=status_code)
+    )
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    response = await submit_run(
+        backend,
+        StartRunRequest(prompt="hello", idempotency_key=f"file-plane-{status_code}"),
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert "secret" not in json.dumps(response.body)
+    assert store.session is not None
+    [operation] = store.durable_operations.values()
+    assert store.session.status == "creating"
+    assert store.session.active_run_id == operation.target.run_id
+    assert store.session.active_operation_id == operation.operation_id
+    assert operation.phase == "provision_content"
+    assert operation.state == "active"
+    assert len(provider.create_calls) == 1
 
 
 @pytest.mark.asyncio
