@@ -59,7 +59,7 @@ from ..transport.transport_models import (
     SandboxTransportError,
 )
 from .journal_integrity import handle_journal_corruption, journal_corruption_status
-from .readiness import DEFAULT_RECLAIM_IDLE_SECONDS, terminal_run
+from .readiness import DEFAULT_RECLAIM_IDLE_SECONDS, SetupDeadline, terminal_run
 
 _RECLAIMABLE_SESSION_STATUSES = frozenset(
     {"creating", "ready", "suspended", "quarantined"}
@@ -1532,6 +1532,7 @@ class SessionReconciler:
         self,
         owner_partition: OwnerPartition,
         session_id: str,
+        setup_deadline: SetupDeadline | None = None,
     ) -> ReconcileReport:
         """Reconcile one app-owned session without a broad Table scan."""
         if owner_partition.app_hash != self._app_hash:

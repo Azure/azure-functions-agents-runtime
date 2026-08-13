@@ -47,7 +47,12 @@ class RequestBudget:
         setup_seconds = min(SETUP_BUDGET_SECONDS, wall_seconds)
         return cls(
             wall_deadline=now + wall_seconds,
-            setup=SetupBudget.create(deadline=now + setup_seconds, clock=clock),
+            setup=SetupBudget.create(
+                deadline=now + setup_seconds,
+                clock=clock,
+                origin=now,
+                configured_budget_seconds=SETUP_BUDGET_SECONDS,
+            ),
             _clock=clock,
         )
 

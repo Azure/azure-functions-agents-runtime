@@ -52,6 +52,16 @@ from .fake_sandbox_transport import FakeSandboxTransport
 DEFAULT_GROUP_RESOURCE_ID = (
     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group"
 )
+_OPERATION_LEASE_SECONDS = 60
+_PROVISION_SUBMIT_LEASE_SECONDS = 120
+
+
+def _operation_lease_seconds(kind: str) -> int:
+    return (
+        _PROVISION_SUBMIT_LEASE_SECONDS
+        if kind == "provision_submit"
+        else _OPERATION_LEASE_SECONDS
+    )
 
 
 class FakeSandboxSessionHandle(FakeSandboxTransport):
@@ -486,6 +496,11 @@ class FakeSessionStateStore:
         assert self.etag == etag
         assert previous.active_operation_id is None
         assert updated.active_operation_id == operation.operation_id
+        operation = replace(
+            operation,
+            lease_expires_at=operation.updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+        )
         self.session = updated
         self.durable_operations[operation.operation_id] = operation
         self.etag = "etag-operation-begun"
@@ -515,9 +530,14 @@ class FakeSessionStateStore:
                 )
         if self.session is not None:
             raise AssertionError("session row already exists")
+        operation = replace(
+            records.operation,
+            lease_expires_at=records.operation.updated_at
+            + timedelta(seconds=_operation_lease_seconds(records.operation.kind)),
+        )
         self.session = records.session
         self.runs[records.run.run_id] = records.run
-        self.durable_operations[records.operation.operation_id] = records.operation
+        self.durable_operations[operation.operation_id] = operation
         if owner_idempotency is not None:
             self.owner_idempotency[owner_idempotency.idempotency_hash] = owner_idempotency
             self.owner_idempotency_etags[owner_idempotency.idempotency_hash] = "owner-idem-etag"
@@ -527,7 +547,7 @@ class FakeSessionStateStore:
             run=records.run,
             run_etag="run-etag",
             session_etag=self.etag,
-            fence=SessionOperationFence.create(records.operation),
+            fence=SessionOperationFence.create(operation),
             replayed=False,
         )
 
@@ -548,6 +568,8 @@ class FakeSessionStateStore:
             token=token,
             attempt_count=operation.attempt_count + 1,
             error_code=None,
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
             updated_at=updated_at,
         )
         self.durable_operations[resumed.operation_id] = resumed
@@ -577,7 +599,8 @@ class FakeSessionStateStore:
             token=token,
             attempt_count=operation.attempt_count + 1,
             error_code=None,
-            lease_expires_at=updated_at + timedelta(seconds=60),
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
             updated_at=updated_at,
         )
         self.durable_operations[resumed.operation_id] = resumed
@@ -614,6 +637,8 @@ class FakeSessionStateStore:
             token=token,
             phase=phase,
             attempt_count=operation.attempt_count + 1,
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
             updated_at=updated_at,
         )
         self.durable_operations[claimed.operation_id] = claimed
@@ -641,6 +666,8 @@ class FakeSessionStateStore:
             operation,
             phase=phase,
             error_code=error_code,
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
             updated_at=updated_at,
             target=operation.target if updated_target is None else updated_target,
         )

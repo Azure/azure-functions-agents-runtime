@@ -661,7 +661,7 @@ class SandboxCreateRequest:
     def provisioning_timeout_seconds(self) -> float:
         """Return the explicit bounded SDK polling timeout for this request."""
 
-        return min(self.remaining_setup_budget_seconds, 30.0)
+        return self.remaining_setup_budget_seconds
 
 
 def parse_sandbox_group_resource_id(value: str) -> SandboxGroupResourceId:

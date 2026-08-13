@@ -23,6 +23,12 @@ from azure_functions_agents.controller.readiness import (
     SessionRuntimeBinding,
     StateStoreBinding,
 )
+from azure_functions_agents.execution.setup_budget import (
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.registration._handlers import (
     _controller_response_to_fastapi,
     _tool_error_count,
@@ -68,12 +74,89 @@ def test_controller_timeout_adapter_preserves_post_start_session_header() -> Non
     assert response.headers["x-ms-session-id"] == "session-123"
 
 
+def test_setup_timeout_observer_sets_redacted_attributes_once_and_consumes_metadata(
+    monkeypatch: Any,
+    caplog: Any,
+) -> None:
+    span = RecordingSpan()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.current_span",
+        lambda: span,
+    )
+    metadata = SetupTimeoutMetadata.create(
+        phase=SetupPhase.PROVISION_RECONCILE,
+        reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        configured_budget_seconds=90.0,
+        elapsed_seconds=90.0,
+        remaining_seconds=0.0,
+        request_mode="respond_async",
+        session_present=True,
+    )
+    controller_response = ControllerResponse(
+        status_code=504,
+        body={"error": "setup_deadline_exceeded"},
+        timeout_metadata=metadata,
+    )
+
+    response = _controller_response_to_fastapi(controller_response)
+    _controller_response_to_fastapi(controller_response)
+
+    expected = {
+        "af.setup.stage": "setup",
+        "af.setup.phase": "provision_reconcile",
+        "af.setup.reason": "provision_lease_live",
+        "af.setup.exception_type": "session_activation_setup_timeout",
+        "af.setup.configured_budget_seconds": 90.0,
+        "af.setup.elapsed_seconds": 90.0,
+        "af.setup.remaining_seconds": 0.0,
+        "af.setup.request_mode": "respond_async",
+        "af.setup.session_present": True,
+        "af.http.status_code": 504,
+        "af.http.retry_after_seconds": 120,
+        "af.http.retry_with": "respond-async",
+        "af.fault_domain": "runtime",
+    }
+    assert span.attributes == expected
+    assert span.events == [("af.setup_deadline_exceeded", expected)]
+    assert controller_response.timeout_metadata is None
+    assert response.status_code == 504
+    assert response.body == b'{"error": "setup_deadline_exceeded"}'
+    assert all(forbidden not in caplog.text for forbidden in ("metadata", "session-", "run-"))
+
+
+def test_setup_timeout_observer_is_safe_without_an_active_span(monkeypatch: Any) -> None:
+    from azure_functions_agents._observability import RuntimeSpan
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.current_span",
+        lambda: RuntimeSpan(None),
+    )
+    response = ControllerResponse(
+        status_code=504,
+        body={"error": "setup_deadline_exceeded"},
+        timeout_metadata=SetupTimeoutMetadata.create(
+            phase=SetupPhase.CONTENT,
+            reason=SetupTimeoutReason.DEADLINE_ELAPSED,
+            exception_type=SetupTimeoutExceptionType.SETUP_BUDGET_EXPIRED,
+            configured_budget_seconds=90.0,
+            elapsed_seconds=90.0,
+            remaining_seconds=0.0,
+        ),
+    )
+
+    _controller_response_to_fastapi(response)
+
+    assert response.timeout_metadata is None
+
+
 class RecordingSpan:
     def __init__(self) -> None:
         self.events: list[tuple[str, dict[str, Any] | None]] = []
+        self.attributes: dict[str, object] = {}
 
     def set_attribute(self, key: str, value: Any) -> None:
-        return None
+        self.attributes[key] = value
 
     def set_content(self, key: str, value: str) -> None:
         return None

@@ -214,7 +214,7 @@ first response, first SSE event, and terminal `done`, then verifies public
 terminal status and result availability for every fresh session. It retries
 only typed `504 setup_deadline_exceeded` responses, honors `Retry-After`, and
 reuses the same idempotency key. A first attempt passes only when it returns
-`202` in at most **35 seconds** (the 30-second setup contract plus a 5-second
+`202` in at most **105 seconds** (the 90-second setup contract plus a 15-second
 network allowance); a typed first-attempt `504` is a cold-start SLO failure
 even if a later retry succeeds. Model terminal latency has no new threshold:
 the existing authored timeout remains the bound and terminal latency is
@@ -234,16 +234,16 @@ of `ACADeployedAgentTurn` and its optional load concurrency. The load job keeps
 its 360-minute cap and remains the sole human N=100 path.
 `ACA_DEPLOYED_COLD_START_SAMPLES` is an optional, non-secret Manual/Scheduled pipeline
 variable mapped only when provided; the default is three. The pipeline accepts
-only integer values **1..4**. Its enforced four-sample maximum is
-**4 x 465 + 60 final recovery + 4 x 240 cleanup = 2,880 seconds (48 minutes)**,
-leaving exactly **12 minutes** of the 60-minute cap for job overhead. All job
+only integer values **1..3**. Its enforced three-sample maximum is
+**3 x 615 + 60 final recovery + 3 x 240 cleanup = 2,625 seconds**,
+leaving **975 seconds** of the 60-minute cap for job overhead. All job
 setup must fit within that allowance. The test still allows **1..5** for direct
 local/manual pytest:
 five samples are not pipeline-supported and require a caller-provided watchdog
-longer than 65 minutes.
+longer than 75 minutes.
 
-Each sample allows 180 seconds of admission (at most three 45-second attempts
-and retry waits), 240 seconds of SSE terminal observation, and 45 seconds of
+Each sample allows 330 seconds of admission (two independent 105-second
+admission watchdogs plus a 120-second retry wait), 240 seconds of SSE terminal observation, and 45 seconds of
 public terminal reads. The shared final recovery window polls once per second;
 every attempted key must resolve for cleanup or the report marks cleanup
 incomplete. Unit doubles validate orchestration and report contracts; they do
@@ -292,7 +292,7 @@ the protected non-secret variables `ACA_DEPLOYED_TABLE_SERVICE_URI`,
 `ACA_DEPLOYED_TABLE_NAME`, `ACA_DEPLOYED_APP_SUBSCRIPTION_ID`, and
 `ACA_DEPLOYED_APP_SITE_NAME`.
 
-ACA resume can outlast one 30-second request setup budget while the provider
+ACA resume can outlast one 90-second request setup budget while the provider
 continues bringing the sandbox online. The lifecycle client retries only the
 typed `setup_deadline_exceeded` response, with the same session and idempotency
 key, for a fixed bounded window. This is a public client retry; it does not add
@@ -375,16 +375,14 @@ storage costs, and needs ACA and model quota for all sessions. The fixed
 four-session provisioning batches deliberately avoid treating simultaneous
 content/package delivery saturation as evidence about concurrent runs: each
 batch reaches public-terminal, durable ready/suspended idle before the next
-batch posts. Every public setup POST has an enforced 45-second attempt bound,
-and each complete Phase A batch has an outermost 660-second (11m)
-deadline covering submission, retry waits, public terminal evidence, and
-durable idle validation. Setup may retry up to 12 times, but individual retry
-waits are not additive:
-the outer 11m batch deadline is enforced. The same 11m bound applies to the
-Phase B admission and backing-loss held admission. Twenty-five enforced 11m
-Phase A batches cap `N=100` provisioning at 275m. Do not add individual 540-second
-`ClientSession` values to that bound: the batch deadline is outermost. Phase B
-setup is concurrent before its 300-second formal hold and 11-minute event
+batch posts. Every public setup POST has an independent 105-second admission
+watchdog. Each complete Phase A batch and Phase B admission have an outermost
+330-second bound: two 105-second attempts plus one 120-second retry wait.
+The same bound applies to backing-loss held admission. This yields
+`ceil(N / provision_concurrency) * 330 + 60`: 1,710 seconds for CI `N=5`
+with concurrency 1 and 8,310 seconds for human `N=100` with concurrency 4.
+Do not add individual client or stream timeouts to that bound: the batch
+deadline is outermost. Phase B setup is concurrent before its 300-second formal hold and event
 bound. The load-only agent has a
 900-second authored timeout; plan for batch provisioning plus the hold, and use
 a CI-dedicated Sandbox Group. The Manual/Scheduled ADO job has a 360-minute safety cap;
@@ -465,7 +463,7 @@ more than the 120-second proof timeout plus a 15-second margin inside the
 five-minute hold. This rejects an over-spread batch instead of assuming it can
 meet the common-active requirement. Ambiguous, malformed, and final
 setup-deadline admissions wait for the bounded public `Retry-After` lease
-hint (falling back to 60 seconds), then reuse the same key and resolve
+hint (falling back to 120 seconds), then reuse the same key and resolve
 read-only through their owner-scoped idempotency reservations for cleanup;
 unresolved reservations are reported and
 keep cleanup incomplete. After the fixed hold releases, every admitted run must expose ordered public

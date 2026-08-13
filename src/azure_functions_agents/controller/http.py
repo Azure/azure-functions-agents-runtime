@@ -17,7 +17,7 @@ from ..execution.backend import (
     StartRunRequest,
 )
 from ..execution.compat import collect_terminal_run
-from ..execution.setup_budget import SetupBudgetExpiredError
+from ..execution.setup_budget import SetupBudgetExpiredError, SetupTimeoutMetadata
 from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
@@ -46,6 +46,9 @@ class ControllerResponse:
     status_code: int
     body: dict[str, object] | str
     headers: Mapping[str, str] = field(default_factory=dict)
+    timeout_metadata: SetupTimeoutMetadata | None = field(
+        default=None, repr=False, compare=False
+    )
 
 
 def prefers_respond_async(headers: Mapping[str, str] | None) -> bool:
@@ -111,8 +114,14 @@ async def submit_run(
     """Start a run, return an LRO ticket, or preserve the synchronous contract."""
     try:
         handle = await backend.start_run(request)
-    except (SetupBudgetExpiredError, SessionActivationSetupTimeoutError):
-        return _setup_timeout_response()
+    except (SetupBudgetExpiredError, SessionActivationSetupTimeoutError) as exc:
+        return _setup_timeout_response(
+            metadata=_with_request_metadata(
+                exc.metadata,
+                respond_async=respond_async,
+                session_present=request.session_id is not None,
+            )
+        )
     except SessionActivationAuthorizationError:
         return _sandbox_group_authorization_response()
     except ActiveRunConflictError as exc:
@@ -306,7 +315,10 @@ def _error_payload(error: RunError) -> dict[str, object]:
     return payload
 
 
-def _setup_timeout_response() -> ControllerResponse:
+SETUP_TIMEOUT_RETRY_AFTER_SECONDS = 120
+
+
+def _setup_timeout_response(*, metadata: SetupTimeoutMetadata) -> ControllerResponse:
     return ControllerResponse(
         status_code=504,
         body={
@@ -314,7 +326,29 @@ def _setup_timeout_response() -> ControllerResponse:
             "reason": "setup_deadline_exceeded",
             "retry_with": "respond-async",
         },
-        headers={"x-ms-retry-with": "respond-async", "Retry-After": "60"},
+        headers={
+            "x-ms-retry-with": "respond-async",
+            "Retry-After": str(SETUP_TIMEOUT_RETRY_AFTER_SECONDS),
+        },
+        timeout_metadata=metadata,
+    )
+
+
+def _with_request_metadata(
+    metadata: SetupTimeoutMetadata,
+    *,
+    respond_async: bool,
+    session_present: bool,
+) -> SetupTimeoutMetadata:
+    return SetupTimeoutMetadata.create(
+        phase=metadata.phase,
+        reason=metadata.reason,
+        exception_type=metadata.exception_type,
+        configured_budget_seconds=metadata.configured_budget_seconds,
+        elapsed_seconds=metadata.elapsed_seconds,
+        remaining_seconds=metadata.remaining_seconds,
+        request_mode="respond_async" if respond_async else "synchronous",
+        session_present=session_present,
     )
 
 

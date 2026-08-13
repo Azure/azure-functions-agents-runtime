@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -1143,7 +1144,9 @@ async def test_active_conflict_reconciles_once_before_returning_or_admitting(
     provider = FakeSandboxSessionProvider(handle)
     reconcile_calls = 0
 
-    async def targeted_reconcile(_: OwnerPartition, __: str) -> None:
+    async def targeted_reconcile(
+        _: OwnerPartition, __: str, ___: SetupBudget
+    ) -> None:
         nonlocal reconcile_calls
         reconcile_calls += 1
         if reconcile_calls == 2:
@@ -1495,6 +1498,145 @@ async def test_backend_setup_deadline_bounds_submission_revalidation(
     with pytest.raises(SessionActivationSetupTimeoutError):
         await asyncio.wait_for(start, timeout=1.0)
 
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+
+@pytest.mark.asyncio
+async def test_controller_setup_deadline_bounds_hanging_journal_claim_and_retry_resumes(
+    tmp_path: Path,
+) -> None:
+    class HangingClaimStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.hang = True
+            self.claim_started = asyncio.Event()
+
+        async def claim_operation_journal(self, **kwargs):  # type: ignore[no-untyped-def]
+            if self.hang:
+                self.claim_started.set()
+                await asyncio.Event().wait()
+            return await super().claim_operation_journal(**kwargs)
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = HangingClaimStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=session.session_id),
+        )
+
+    handle.exec_hook = accept
+    setup_budget = SetupBudget.start(setup_seconds=0.01)
+    controller_budget = RequestBudget(
+        wall_deadline=time.monotonic() + 1.0,
+        setup=setup_budget,
+        _clock=time.monotonic,
+    )
+    request = StartRunRequest(
+        prompt="hello",
+        session_id=session.session_id,
+        idempotency_key="hanging-claim",
+    )
+    response = await submit_run(
+        AcaSandboxExecutionBackend(
+            _binding(),
+            runtime=_runtime(script_root, provider, store),
+            owner=_owner(),
+            setup_budget=setup_budget,
+        ),
+        request,
+        agent_slug="main",
+        respond_async=False,
+        budget=controller_budget,
+    )
+
+    assert response.status_code == 504
+    assert response.headers["Retry-After"] == "120"
+    assert store.claim_started.is_set()
+    assert store.session is not None
+    assert store.session.active_run_id is not None
+    assert len(store.runs) == 1
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+    store.hang = False
+    resumed = await AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        setup_budget=SetupBudget.start(setup_seconds=1.0),
+    ).start_run(request)
+
+    assert resumed.run_id == store.session.active_run_id
+    assert len(store.runs) == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_setup_deadline_bounds_live_owner_journal_status_without_launch(
+    tmp_path: Path,
+) -> None:
+    class LiveOwnerStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.live_owner = True
+
+        async def claim_operation_journal(self, **kwargs):  # type: ignore[no-untyped-def]
+            if self.live_owner:
+                return None
+            return await super().claim_operation_journal(**kwargs)
+
+    class HangingStatusRunControl(SandboxRunControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.status_started = asyncio.Event()
+
+        async def get_status(self, handle, context):  # type: ignore[no-untyped-def]
+            del handle, context
+            self.status_started.set()
+            await asyncio.Event().wait()
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = LiveOwnerStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    run_control = HangingStatusRunControl()
+    setup_budget = SetupBudget.start(setup_seconds=0.01)
+    controller_budget = RequestBudget(
+        wall_deadline=time.monotonic() + 1.0,
+        setup=setup_budget,
+        _clock=time.monotonic,
+    )
+    request = StartRunRequest(
+        prompt="hello",
+        session_id=session.session_id,
+        idempotency_key="hanging-status",
+    )
+    response = await submit_run(
+        AcaSandboxExecutionBackend(
+            _binding(),
+            runtime=_runtime(script_root, provider, store),
+            owner=_owner(),
+            run_control=run_control,
+            setup_budget=setup_budget,
+        ),
+        request,
+        agent_slug="main",
+        respond_async=False,
+        budget=controller_budget,
+    )
+
+    assert response.status_code == 504
+    assert response.headers["Retry-After"] == "120"
+    assert run_control.status_started.is_set()
+    assert store.session is not None
+    assert store.session.active_run_id is not None
+    assert len(store.runs) == 1
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
 

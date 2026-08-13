@@ -97,10 +97,20 @@ _STATUSES_ADMITTING_RUN: frozenset[str] = frozenset({"ready", "suspended"})
 
 _MAX_ADOPTION_ATTEMPTS = 5
 _OPERATION_LEASE_SECONDS = 60
+_PROVISION_SUBMIT_LEASE_SECONDS = 120
 _JOURNAL_INTEGRITY_FAILURE_REASON = "journal_corrupt"
 _RECONCILER_CURSOR_PARTITION_PREFIX = "reconciler:"
 _RECONCILER_CURSOR_ROW_KEY = "cursor"
 _MAX_RECONCILER_CURSOR_BYTES = 32 * 1024
+
+
+def _operation_lease_seconds(kind: DurableOperationKind) -> int:
+    """Select the persisted-operation lease duration without caller policy."""
+    return (
+        _PROVISION_SUBMIT_LEASE_SECONDS
+        if kind == "provision_submit"
+        else _OPERATION_LEASE_SECONDS
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -683,6 +693,20 @@ class AzureTableSessionStateStore:
         from azure.data.tables import TableTransactionError
 
         _validate_operation_begin(previous, updated, operation)
+        operation = _operation_with(
+            operation,
+            target=operation.target,
+            token=operation.token,
+            phase=operation.phase,
+            state=operation.state,
+            attempt_count=operation.attempt_count,
+            error_code=operation.error_code,
+            lease_expires_at=operation.updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            next_attempt_at=operation.next_attempt_at,
+            updated_at=operation.updated_at,
+            finished_at=operation.finished_at,
+        )
         try:
             await self._table_client.submit_transaction(
                 [
@@ -722,13 +746,27 @@ class AzureTableSessionStateStore:
                     fence=None,
                     replayed=True,
                 )
+        operation = _operation_with(
+            records.operation,
+            target=records.operation.target,
+            token=records.operation.token,
+            phase=records.operation.phase,
+            state=records.operation.state,
+            attempt_count=records.operation.attempt_count,
+            error_code=records.operation.error_code,
+            lease_expires_at=records.operation.updated_at
+            + timedelta(seconds=_operation_lease_seconds(records.operation.kind)),
+            next_attempt_at=records.operation.next_attempt_at,
+            updated_at=records.operation.updated_at,
+            finished_at=records.operation.finished_at,
+        )
         operations: list[_TransactionOp] = [
             _create_op(records.session),
             _create_op(records.run),
         ]
         if owner_idempotency is not None:
             operations.append(_create_op(owner_idempotency))
-        operations.append(_create_op(records.operation))
+        operations.append(_create_op(operation))
         try:
             results = await self._table_client.submit_transaction(operations)
         except TableTransactionError as exc:
@@ -757,7 +795,7 @@ class AzureTableSessionStateStore:
             run=records.run,
             run_etag=_etag_from_write_result(results[1]),
             session_etag=_etag_from_write_result(results[0]),
-            fence=SessionOperationFence.create(records.operation),
+            fence=SessionOperationFence.create(operation),
             replayed=False,
         )
 
@@ -793,7 +831,8 @@ class AzureTableSessionStateStore:
             state=operation.record.state,
             attempt_count=operation.record.attempt_count + 1,
             error_code=None,
-            lease_expires_at=updated_at + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
             next_attempt_at=None,
             updated_at=updated_at,
             finished_at=None,
@@ -853,7 +892,8 @@ class AzureTableSessionStateStore:
             state=operation.record.state,
             attempt_count=operation.record.attempt_count + 1,
             error_code=None,
-            lease_expires_at=updated_at + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
             next_attempt_at=None,
             updated_at=updated_at,
             finished_at=None,
@@ -937,7 +977,8 @@ class AzureTableSessionStateStore:
             state="active",
             attempt_count=operation.record.attempt_count + 1,
             error_code=None,
-            lease_expires_at=updated_at + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
             next_attempt_at=None,
             updated_at=updated_at,
             finished_at=None,
@@ -997,7 +1038,8 @@ class AzureTableSessionStateStore:
             state=operation.record.state,
             attempt_count=operation.record.attempt_count,
             error_code=error_code,
-            lease_expires_at=updated_at + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            lease_expires_at=updated_at
+            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
             next_attempt_at=updated_at if error_code is not None else None,
             updated_at=updated_at,
             finished_at=None,
@@ -1372,7 +1414,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.record.attempt_count,
             error_code=None,
             lease_expires_at=records.run.updated_at
-            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
             next_attempt_at=None,
             updated_at=records.run.updated_at,
             finished_at=None,

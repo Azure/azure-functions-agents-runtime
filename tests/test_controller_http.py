@@ -29,7 +29,14 @@ from azure_functions_agents.execution.backend import (
     RunStatus,
     StartRunRequest,
 )
-from azure_functions_agents.execution.setup_budget import SetupBudget, SetupBudgetExpiredError
+from azure_functions_agents.execution.setup_budget import (
+    SetupBudget,
+    SetupBudgetExpiredError,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.session_state import RunRowNotFoundError
 
 
@@ -278,7 +285,16 @@ async def test_sync_deadline_provider_cleanup_error_returns_typed_timeout() -> N
 @pytest.mark.asyncio
 async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
     backend = FakeBackend(_status())
-    backend.raise_on_start = SetupBudgetExpiredError("expired")
+    backend.raise_on_start = SetupBudgetExpiredError(
+        SetupTimeoutMetadata.create(
+            phase=SetupPhase.PROVISION_CREATE,
+            reason=SetupTimeoutReason.DEADLINE_ELAPSED,
+            exception_type=SetupTimeoutExceptionType.SETUP_BUDGET_EXPIRED,
+            configured_budget_seconds=90.0,
+            elapsed_seconds=90.0,
+            remaining_seconds=0.0,
+        )
+    )
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -290,13 +306,22 @@ async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
 
     assert not backend.started
     assert response.status_code == 504
-    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "60"}
+    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "120"}
 
 
 @pytest.mark.asyncio
 async def test_live_provision_lease_returns_the_same_setup_retry_hint() -> None:
     backend = FakeBackend(_status())
-    backend.raise_on_start = SessionActivationSetupTimeoutError("provision lease is live")
+    backend.raise_on_start = SessionActivationSetupTimeoutError(
+        SetupTimeoutMetadata.create(
+            phase=SetupPhase.PROVISION_RECONCILE,
+            reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+            exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+            configured_budget_seconds=90.0,
+            elapsed_seconds=90.0,
+            remaining_seconds=0.0,
+        )
+    )
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -312,7 +337,7 @@ async def test_live_provision_lease_returns_the_same_setup_retry_hint() -> None:
         "reason": "setup_deadline_exceeded",
         "retry_with": "respond-async",
     }
-    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "60"}
+    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "120"}
 
 
 @pytest.mark.asyncio

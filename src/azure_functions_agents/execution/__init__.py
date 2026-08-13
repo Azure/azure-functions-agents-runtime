@@ -1,6 +1,5 @@
 """Execution backend contracts."""
 
-from .aca_sandbox import AcaSandboxExecutionBackend
 from .backend import (
     AgentExecutionBackend,
     EventCursorExpiredError,
@@ -20,11 +19,6 @@ from .compat import (
     run_to_agent_result,
     split_runner_call,
     status_to_agent_result,
-)
-from .factory import (
-    ACA_SANDBOX_EXECUTION_PROVIDER,
-    DEFAULT_EXECUTION_PROVIDER,
-    create_execution_backend,
 )
 from .in_lang_worker import LanguageWorkerExecutionBackend
 from .result import AgentResult
@@ -72,3 +66,20 @@ __all__ = [
     "status_to_agent_result",
     "unavailable_backend_message",
 ]
+
+
+def __getattr__(name: str) -> object:
+    """Delay the ACA implementation import until controller contracts are initialized."""
+    if name == "AcaSandboxExecutionBackend":
+        from .aca_sandbox import AcaSandboxExecutionBackend
+
+        return AcaSandboxExecutionBackend
+    if name in {
+        "ACA_SANDBOX_EXECUTION_PROVIDER",
+        "DEFAULT_EXECUTION_PROVIDER",
+        "create_execution_backend",
+    }:
+        from . import factory
+
+        return getattr(factory, name)
+    raise AttributeError(name)

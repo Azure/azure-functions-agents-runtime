@@ -122,6 +122,15 @@ spans and the sandbox/`web_request` tool spans together.
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
 
+### Setup deadline observations
+
+ACA setup timeout responses emit one `af.setup_deadline_exceeded` event and one
+runtime warning at the registration boundary. They contain only the setup phase,
+reason, exception type, configured/elapsed/remaining budget, request mode,
+session-present flag, HTTP `504`, and retry policy. They never contain prompts,
+response content, identifiers, labels, tokens, provider payloads, or exception
+messages; timeout metadata is internal and is not serialized in HTTP responses.
+
 #### Span events (runtime lifecycle milestones)
 
 These `agent.run {name}` span events mark runtime-owned input/output-contract boundaries. They carry

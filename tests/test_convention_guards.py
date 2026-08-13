@@ -10,6 +10,8 @@ from collections import defaultdict
 from collections.abc import Iterable
 from pathlib import Path
 
+import pytest
+
 _PROVENANCE_PATTERNS = (
     ("decision citation", re.compile(r"\bDecisions?\s*#?\s*\d+\b", re.IGNORECASE)),
     ("pull request citation", re.compile(r"\b(?:PR|pull request)\s*#?\s*\d+\b", re.IGNORECASE)),
@@ -38,6 +40,220 @@ _CANONICAL_PATH_MODULES = frozenset(
 
 def _repository_root() -> Path:
     return Path(__file__).resolve().parents[1]
+
+
+def test_setup_deadline_calls_are_explicitly_classified() -> None:
+    """Keep setup timeout telemetry closed over the declared phase enum."""
+    root = _repository_root()
+    paths = (
+        root / "src/azure_functions_agents/controller/readiness.py",
+        root / "src/azure_functions_agents/execution/aca_sandbox.py",
+    )
+    sources = [path.read_text(encoding="utf-8") for path in paths]
+    for path, source in zip(paths, sources, strict=True):
+        findings = _setup_deadline_guard_findings(ast.parse(source, filename=str(path)))
+        assert not findings, "\n".join(findings)
+    journal_findings = _journal_submission_guard_findings(
+        ast.parse(sources[1], filename=str(paths[1]))
+    )
+    assert not journal_findings, "\n".join(journal_findings)
+
+    budget_tree = ast.parse(
+        (root / "src/azure_functions_agents/execution/setup_budget.py").read_text(
+            encoding="utf-8"
+        )
+    )
+    setup_phase = next(
+        node
+        for node in budget_tree.body
+        if isinstance(node, ast.ClassDef) and node.name == "SetupPhase"
+    )
+    values = {
+        target.id
+        for node in setup_phase.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    referenced = {
+        node.attr
+        for source in sources
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.Attribute)
+        and isinstance(node.value, ast.Name)
+        and node.value.id == "SetupPhase"
+    }
+    assert values <= referenced, f"unmapped setup phases: {sorted(values - referenced)}"
+
+
+def _setup_deadline_guard_findings(tree: ast.AST) -> list[str]:
+    """Return semantic violations in code that consumes the shared setup budget."""
+    findings: list[str] = []
+    asyncio_names = {"asyncio"}
+    timeout_names: set[str] = set()
+    for node in tree.body:
+        if isinstance(node, ast.Import):
+            asyncio_names.update(
+                alias.asname or alias.name
+                for alias in node.names
+                if alias.name == "asyncio"
+            )
+        if isinstance(node, ast.ImportFrom) and node.module == "asyncio":
+            timeout_names.update(
+                alias.asname or alias.name for alias in node.names if alias.name == "timeout"
+            )
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name == "_remaining_setup_seconds":
+            findings.append(f"{node.lineno}: removed helper")
+        if not isinstance(node, ast.Call):
+            continue
+        if (
+            isinstance(node.func, ast.Name)
+            and node.func.id == "_within_setup_budget"
+            and not _has_phase_keyword(node)
+        ):
+            findings.append(f"{node.lineno}: _within_setup_budget lacks phase")
+        if (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "remaining_setup_seconds"
+            and not _has_phase_keyword(node)
+        ):
+            findings.append(f"{node.lineno}: remaining_setup_seconds lacks phase")
+        if _is_asyncio_timeout_call(node, asyncio_names, timeout_names) and not _consumes_typed_remaining(
+            node
+        ):
+            findings.append(f"{node.lineno}: asyncio timeout lacks typed remaining budget")
+    return findings
+
+
+def _journal_submission_guard_findings(tree: ast.AST) -> list[str]:
+    """Reject journal ownership and submission awaits outside the shared budget."""
+    target = next(
+        (
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.AsyncFunctionDef) and node.name == "_submit_fenced_journal"
+        ),
+        None,
+    )
+    if target is None:
+        return ["_submit_fenced_journal is missing"]
+
+    class JournalVisitor(ast.NodeVisitor):
+        def __init__(self) -> None:
+            self.findings: list[str] = []
+            self._budget_wrapper_depth = 0
+
+        def visit_Call(self, node: ast.Call) -> None:
+            is_budget_wrapper = (
+                isinstance(node.func, ast.Name) and node.func.id == "_within_setup_budget"
+            )
+            if is_budget_wrapper:
+                self._budget_wrapper_depth += 1
+                self.generic_visit(node)
+                self._budget_wrapper_depth -= 1
+                return
+            if (
+                self._budget_wrapper_depth == 0
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr in {"claim_operation_journal", "get_status", "submit"}
+            ):
+                self.findings.append(
+                    f"{node.lineno}: journal {node.func.attr} lacks shared setup budget"
+                )
+            self.generic_visit(node)
+
+    visitor = JournalVisitor()
+    visitor.visit(target)
+    return visitor.findings
+
+
+def _has_phase_keyword(node: ast.Call) -> bool:
+    return any(keyword.arg == "phase" for keyword in node.keywords)
+
+
+def _is_asyncio_timeout_call(
+    node: ast.Call, asyncio_names: set[str], timeout_names: set[str]
+) -> bool:
+    return (
+        (
+            isinstance(node.func, ast.Name)
+            and node.func.id in timeout_names
+        )
+        or (
+            isinstance(node.func, ast.Attribute)
+            and node.func.attr == "timeout"
+            and isinstance(node.func.value, ast.Name)
+            and node.func.value.id in asyncio_names
+        )
+    )
+
+
+def _consumes_typed_remaining(node: ast.Call) -> bool:
+    if not node.args:
+        return False
+    argument = node.args[0]
+    return (
+        isinstance(argument, ast.Call)
+        and isinstance(argument.func, ast.Attribute)
+        and argument.func.attr == "remaining_setup_seconds"
+        and _has_phase_keyword(argument)
+    )
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "async def call(budget):\n    return await _within_setup_budget(work(), budget)\n",
+            "_within_setup_budget lacks phase",
+        ),
+        (
+            "import asyncio\nasync def call(budget):\n    async with asyncio.timeout(1): pass\n",
+            "asyncio timeout lacks typed remaining budget",
+        ),
+        (
+            "import asyncio as aio\nasync def call(budget):\n    async with aio.timeout(1): pass\n",
+            "asyncio timeout lacks typed remaining budget",
+        ),
+        (
+            "from asyncio import timeout as bounded\nasync def call(budget):\n    async with bounded(1): pass\n",
+            "asyncio timeout lacks typed remaining budget",
+        ),
+        (
+            "def _remaining_setup_seconds(): pass\n",
+            "removed helper",
+        ),
+    ],
+)
+def test_setup_deadline_guard_rejects_mutations(source: str, expected: str) -> None:
+    assert any(expected in finding for finding in _setup_deadline_guard_findings(ast.parse(source)))
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        (
+            "async def _submit_fenced_journal(store):\n"
+            "    return await store.claim_operation_journal()\n",
+            "journal claim_operation_journal lacks shared setup budget",
+        ),
+        (
+            "async def _submit_fenced_journal(control):\n"
+            "    return await control.get_status()\n",
+            "journal get_status lacks shared setup budget",
+        ),
+        (
+            "async def _submit_fenced_journal(control):\n"
+            "    return await control.submit()\n",
+            "journal submit lacks shared setup budget",
+        ),
+    ],
+)
+def test_journal_submission_guard_rejects_unbounded_awaits(source: str, expected: str) -> None:
+    assert any(
+        expected in finding for finding in _journal_submission_guard_findings(ast.parse(source))
+    )
 
 
 def _python_files(root: Path) -> list[Path]:

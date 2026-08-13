@@ -51,8 +51,8 @@ def test_cold_start_report_is_aggregate_and_redacted() -> None:
 @pytest.mark.parametrize(
     ("status", "elapsed", "typed_deadline", "expected"),
     [
-        (202, 35.0, False, None),
-        (202, 35.1, False, "first_attempt_acceptance_exceeded"),
+        (202, 105.0, False, None),
+        (202, 105.1, False, "first_attempt_acceptance_exceeded"),
         (504, 30.0, True, "typed_setup_deadline_exceeded"),
         (503, 1.0, False, "first_attempt_http_503"),
     ],
@@ -421,17 +421,18 @@ def test_timeout_budget_and_manual_job_cap_are_aligned() -> None:
     pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
     runbook = (root / "tests" / "live" / "README.md").read_text()
 
-    assert support.maximum_cold_start_budget_seconds(3, controller_cleanup_seconds=240) == 2175
-    assert support.maximum_cold_start_budget_seconds(4, controller_cleanup_seconds=240) == 2880
-    assert support.maximum_cold_start_budget_seconds(5, controller_cleanup_seconds=240) == 3585
-    assert support.SAMPLE_WINDOW_SECONDS == 465
+    assert support.ADMISSION_WINDOW_SECONDS == 2 * 105 + 120
+    assert support.SAMPLE_WINDOW_SECONDS == 330 + 240 + 45
+    assert support.maximum_cold_start_budget_seconds(3, controller_cleanup_seconds=240) == 2625
+    assert support.maximum_cold_start_budget_seconds(4, controller_cleanup_seconds=240) == 3480
+    assert support.maximum_cold_start_budget_seconds(5, controller_cleanup_seconds=240) == 4335
     assert support.FINAL_RECOVERY_WINDOW_SECONDS == 60
     assert "timeoutInMinutes: 60" in pipeline
-    assert "4 x 465 + 60 final recovery + 4 x 240 cleanup = 2,880 seconds (48 minutes)" in runbook
-    assert "leaving exactly **12 minutes** of the 60-minute cap for job overhead" in runbook
+    assert "3 x 615 + 60 final recovery + 3 x 240 cleanup = 2,625 seconds" in runbook
+    assert "975 seconds" in runbook
     assert "All job\nsetup must fit within that allowance." in runbook
     assert "watchdog\n+longer" not in runbook
-    assert "watchdog\nlonger than 65 minutes" in runbook
+    assert "watchdog\nlonger than 75 minutes" in runbook
 
 
 def test_cold_start_runtime_matrix_and_boundaries_are_explicit() -> None:
@@ -468,15 +469,15 @@ def test_cold_start_runtime_matrix_and_boundaries_are_explicit() -> None:
     assert "Easy Auth token claim summary" not in cold_job
 
 
-def test_cold_start_pipeline_preflight_allows_four_and_rejects_five() -> None:
+def test_cold_start_pipeline_preflight_allows_three_and_rejects_four() -> None:
     root = Path(__file__).parent.parent
     pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
     cold_job = pipeline.split('- job: "ACADeployedColdStart"', maxsplit=1)[1]
-    accepted = re.compile(r"^[1-4]$")
+    accepted = re.compile(r"^[1-3]$")
 
-    assert accepted.fullmatch("4")
-    assert accepted.fullmatch("5") is None
+    assert accepted.fullmatch("3")
+    assert accepted.fullmatch("4") is None
     assert 'case "${ACA_DEPLOYED_COLD_START_SAMPLES}" in' in cold_job
-    assert "[1-4]) ;;" in cold_job
-    assert "must be an integer from 1 through 4" in cold_job
-    assert "direct pytest with a caller-provided watchdog longer than 65 minutes" in cold_job
+    assert "[1-3]) ;;" in cold_job
+    assert "must be an integer from 1 through 3" in cold_job
+    assert "direct pytest with a caller-provided watchdog longer than 75 minutes" in cold_job

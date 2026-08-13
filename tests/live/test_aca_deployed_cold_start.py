@@ -50,7 +50,7 @@ from azure_functions_agents.session_state import EntraUserOwnerContext, owner_pa
 _LOGGER = logging.getLogger(__name__)
 _COLD_START_AGENT_SLUG = "deployed_turn"
 _PROMPT = "Return a brief acknowledgement."
-_SETUP_ATTEMPTS = 3
+_SETUP_ATTEMPTS = 2
 _RECOVERY_POLL_SECONDS = 1.0
 _PUBLIC_TERMINAL_WINDOW_SECONDS = 45.0
 _CLEANUP_CANDIDATE_TIMEOUT_SECONDS = 240.0

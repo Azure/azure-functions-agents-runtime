@@ -413,9 +413,9 @@ jobs:
             echo "Azure service connection authenticated"
             if [ -n "${ACA_DEPLOYED_COLD_START_SAMPLES:-}" ]; then
               case "${ACA_DEPLOYED_COLD_START_SAMPLES}" in
-                [1-4]) ;;
+                [1-3]) ;;
                 *)
-                  echo "ACA_DEPLOYED_COLD_START_SAMPLES must be an integer from 1 through 4 in ACADeployedColdStart. For 5 samples, run direct pytest with a caller-provided watchdog longer than 65 minutes." >&2
+                  echo "ACA_DEPLOYED_COLD_START_SAMPLES must be an integer from 1 through 3 in ACADeployedColdStart. For 5 samples, run direct pytest with a caller-provided watchdog longer than 75 minutes." >&2
                   exit 1
                   ;;
               esac

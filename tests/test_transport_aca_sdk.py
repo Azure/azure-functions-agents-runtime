@@ -339,7 +339,7 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
     assert call["disk"] == "runtime-bootstrap"
     assert call["ports"] == []
     assert call["skip_egress_proxy"] is False
-    assert call["polling_timeout"] == 30.0
+    assert call["polling_timeout"] == 45
     assert call["polling_interval"] == 3
     assert {
         key: value

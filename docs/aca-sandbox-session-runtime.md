@@ -106,6 +106,14 @@ listing, creating, or attaching data-plane sandboxes. Missing data-plane access
 fails fast with HTTP `503` and `sandbox_group_authorization_failed`; it is not a
 retryable setup timeout. Grant the role at the individual Sandbox Group scope.
 
+## Setup admission deadline
+
+ACA session admission uses one 90-second setup budget anchored before targeted
+reconciliation. Synchronous execution retains its 180-second wall cap; a
+full-cap request therefore leaves a 90-second execution floor. Durable
+`provision_submit` operations use 120-second leases, and setup `504` responses
+retain `retry_with=respond-async` with `Retry-After: 120`.
+
 ## Egress and credentials
 
 Every sandbox is created with `default_action="Deny"` and

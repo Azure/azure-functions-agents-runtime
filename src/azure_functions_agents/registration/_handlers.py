@@ -19,6 +19,7 @@ from .._observability import (
     FaultDomain,
     LifecycleStage,
     capture_sensitive_data,
+    current_span,
     start_span,
 )
 from .._source_marker import source_marker
@@ -272,6 +273,7 @@ def _session_runtime_kwargs(
 
 def _controller_response_to_fastapi(response: ControllerResponse) -> Response:
     """Adapt a framework-neutral controller response at the registration boundary."""
+    _observe_setup_timeout_response(response)
     content = (
         response.body
         if isinstance(response.body, str)
@@ -283,6 +285,34 @@ def _controller_response_to_fastapi(response: ControllerResponse) -> Response:
         media_type="text/plain" if isinstance(response.body, str) else "application/json",
         headers=dict(response.headers),
     )
+
+
+def _observe_setup_timeout_response(response: ControllerResponse) -> None:
+    """Emit one safe timeout observation before an internal response is adapted."""
+    metadata = response.timeout_metadata
+    if metadata is None:
+        return
+    object.__setattr__(response, "timeout_metadata", None)
+    attributes: dict[str, object] = {
+        "af.setup.stage": metadata.stage,
+        "af.setup.phase": metadata.phase.value,
+        "af.setup.reason": metadata.reason.value,
+        "af.setup.exception_type": metadata.exception_type.value,
+        "af.setup.configured_budget_seconds": metadata.configured_budget_seconds,
+        "af.setup.elapsed_seconds": metadata.elapsed_seconds,
+        "af.setup.remaining_seconds": metadata.remaining_seconds,
+        "af.setup.request_mode": metadata.request_mode,
+        "af.setup.session_present": metadata.session_present,
+        "af.http.status_code": 504,
+        "af.http.retry_after_seconds": 120,
+        "af.http.retry_with": "respond-async",
+        ATTR_FAULT_DOMAIN: FaultDomain.RUNTIME,
+    }
+    span = current_span()
+    for key, value in attributes.items():
+        span.set_attribute(key, value)
+    span.add_event("af.setup_deadline_exceeded", attributes)
+    logger.warning("Sandbox setup deadline exceeded: %s", attributes)
 
 
 def _controller_session_id(response: ControllerResponse) -> str | None:

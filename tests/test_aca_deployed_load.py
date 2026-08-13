@@ -985,7 +985,7 @@ async def test_final_setup_deadline_recovers_cleanup_candidate(
     assert outcome.submitted.accepted.session_id == "session-recovered"
     assert not outcome.unresolved_idempotency
     assert len(keys) == 1
-    assert retry_delays == [60.0] * 11
+    assert retry_delays == [120.0]
 
 
 @pytest.mark.asyncio
@@ -996,7 +996,7 @@ async def test_provisioning_deadline_before_retry_preserves_attempt_metrics(
     module = load_module
 
     async def setup_deadline(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
-        return 504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"}
+        return 504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "120"}
 
     monkeypatch.setattr(module, "json_request", setup_deadline)
 
@@ -1019,15 +1019,17 @@ async def test_provisioning_deadline_before_retry_preserves_attempt_metrics(
     assert failure.value.failure_categories == (("setup_deadline_exceeded", 1),)
     assert "setup retry deadline was exhausted" in str(failure.value)
 @pytest.mark.asyncio
-async def test_load_submission_retries_eleven_setup_leases_with_the_same_key(
+async def test_load_submission_retries_one_setup_lease_with_the_same_key(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
 ) -> None:
     module = load_module
     deployed = SimpleNamespace(chat_url="https://example.test/chat")
     responses = iter(
-        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 11
-        + [(202, {"session_id": "session-accepted", "run_id": "run-accepted"}, {})]
+        [
+            (504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "120"}),
+            (202, {"session_id": "session-accepted", "run_id": "run-accepted"}, {}),
+        ]
     )
     headers_seen: list[dict[str, str]] = []
     payloads_seen: list[dict[str, object]] = []
@@ -1059,12 +1061,12 @@ async def test_load_submission_retries_eleven_setup_leases_with_the_same_key(
 
     assert outcome.submitted is not None
     assert outcome.submitted.accepted is accepted
-    assert outcome.retries == 11
-    assert len(headers_seen) == 12
+    assert outcome.retries == 1
+    assert len(headers_seen) == 2
     assert {headers["Idempotency-Key"] for headers in headers_seen} == {keys[0]}
     assert all("x-ms-session-id" not in headers for headers in headers_seen)
-    assert payloads_seen == [{"prompt": module._READINESS_PROMPT}] * 12  # type: ignore[attr-defined]
-    assert retry_delays == [60.0] * 11
+    assert payloads_seen == [{"prompt": module._READINESS_PROMPT}] * 2  # type: ignore[attr-defined]
+    assert retry_delays == [120.0]
 
 
 @pytest.mark.asyncio
@@ -1709,16 +1711,15 @@ def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
     job = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
     runbook = (root / "tests" / "live" / "README.md").read_text()
 
-    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in load_source
-    assert "_SETUP_DEADLINE_ATTEMPTS = 12" in load_source
-    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0" in loss_source
-    assert "_SETUP_RETRY_ATTEMPTS = 12" in loss_source
-    assert "_PROVISION_BATCH_TIMEOUT_SECONDS = 660.0" in load_source
-    assert "_PHASE_B_ADMISSION_TIMEOUT_SECONDS = 660.0" in load_source
-    assert "_HELD_RUN_SETUP_TIMEOUT_SECONDS = 660.0" in loss_source
+    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0" in load_source
+    assert "_SETUP_DEADLINE_ATTEMPTS = 2" in load_source
+    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0" in loss_source
+    assert "_SETUP_RETRY_ATTEMPTS = 2" in loss_source
+    assert "_PROVISION_BATCH_TIMEOUT_SECONDS = 330.0" in load_source
+    assert "_PHASE_B_ADMISSION_TIMEOUT_SECONDS = 330.0" in load_source
+    assert "_HELD_RUN_SETUP_TIMEOUT_SECONDS = 330.0" in loss_source
     assert "timeoutInMinutes: 360" in job
-    assert "up to 12 times" in runbook
-    assert "11m" in runbook
-    assert "275m" in runbook
-    assert "85m" in runbook
+    assert "two 105-second attempts plus one 120-second retry wait" in runbook
+    assert "1,710 seconds" in runbook
+    assert "8,310 seconds" in runbook
     assert "360-minute safety cap" in runbook

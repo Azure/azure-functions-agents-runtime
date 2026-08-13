@@ -401,6 +401,7 @@ controlling amendments.
 | 158 | Dual-runtime provisioning bound | Serialize matrix / per-leg 2 / per-leg 1 | Keep parallel 3.13/3.14 diagnostics, but default and require `1` provisioning slot per leg when both share one Sandbox Group; single-runtime human N=100 may explicitly use up to 4. | Human + Agent | 2026-08-12 | U3 |
 | 159 | Sandbox Group authorization failure | Retry as setup timeout / fail fast and settle | Map provider `401`/`403` to a redacted `sandbox_group_authorization_failed` 503, atomically fail the reserved run and release its operation, and replay the same terminal outcome. Require controller `Container Apps SandboxGroup Data Owner`; Contributor is insufficient. | Human + Agent | 2026-08-13 | U3 |
 | 160 | Accepted-create authorization ambiguity | Fail every 401/403 / recover stable label / leave durable operation indeterminate | Fail fast only before acceptance. After `begin_create` returns, reconcile the stable label; if authorization prevents reconciliation, retain the active provision for safe replay/reaping rather than terminalizing a potentially created backing. | Agent | 2026-08-13 | U3 corrective |
+| 161 | U3 setup deadline | 30s/60s / 90s/120s | Use a 90s setup budget, renewable 120s provision lease, and 120s retry; retain the 180s sync cap. Supersedes timing in #79/#100. | Human | 2026-08-13 | U3 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -505,8 +506,7 @@ risk is API churn, not the absence of the capabilities below.
 `snapshot_id`, or `preset`; its implicit `disk="ubuntu"` is forbidden. It must
 never set `skip_egress_proxy=True`, and its `polling_timeout` must receive the
 remaining setup budget rather than its SDK default of 300 seconds. This protects
-the 30-second synchronous setup sub-budget and the 180-second total synchronous
-wait cap.
+the 90-second setup sub-budget and the 180-second total synchronous wait cap.
 
 The egress compiler emits an explicit `EgressPolicy(default_action="Deny",
 traffic_inspection="Full", ...)`. `default_action` otherwise defaults
@@ -675,7 +675,7 @@ class AgentExecutionBackend(Protocol):
 2. Direct recovery is supported: instantiate `SandboxClient(... sandbox_id=<stored sandbox_id>)`; group `get_sandbox_client(id)` is optional convenience. Stateless controller recovery must store/use `sandbox_id`.
 3. Real journal file operations are `list_files`, `stat_file`, `read_file`, `write_file`, `delete_file`, `mkdir` on `SandboxClient`; do not emulate file transport through exec. Plan journal root is `/var/lib/azurefunctions-agents-runtime/`; inbox payload <=4 MiB; content delivery has a large-payload exception.
 4. Lifecycle is **per sandbox**: `set_lifecycle_policy(LifecyclePolicy(auto_suspend=..., auto_delete=...))`; `AutoDeletePolicy.delete_interval_seconds` is readable. Therefore config validation row 13 is always hard failure; no warn/clamp fallback. Per-run disable/re-arm and per-session retention are supported.
-5. `begin_create_sandbox` requires exactly one explicit source from `disk`, `disk_id`, `snapshot_id`, `preset`; specify CPU/memory, `auto_suspend_seconds`, mode, labels, environment, explicit egress policy, ports, entrypoint/cmd, and budgeted `polling_timeout`/interval. `polling_timeout` defaults 300; it must receive the 30-second setup budget, preserving >=150 seconds of 180-second sync budget. Do not use unsafe defaults.
+5. `begin_create_sandbox` requires exactly one explicit source from `disk`, `disk_id`, `snapshot_id`, `preset`; specify CPU/memory, `auto_suspend_seconds`, mode, labels, environment, explicit egress policy, ports, entrypoint/cmd, and budgeted `polling_timeout`/interval. `polling_timeout` defaults 300; it must receive the current remainder of the 90-second setup budget. At the full 180-second wall cap this preserves a 90-second execution floor; shorter authored timeouts preserve `setup=min(90,T)` and `T - actual setup elapsed`. Do not use unsafe defaults.
 6. No inbound sandbox ports: assert empty/no open port policy. Controller actions are outbound data-plane only; transport port is `submit/get_status/read_events/get_result/cancel/ensure_ready` beneath the four public backend methods.
 7. Egress SDK defaults are unsafe: `default_action` defaults Allow and `traffic_inspection` may be unset/`None`. Set `default_action="Deny"` and `traffic_inspection="Full"` explicitly; never set `skip_egress_proxy=True`. Simple allow/deny belong in `host_rules`; Transform/Rewrite only in ordered `rules`; compiler must reject broad Allow shadowing narrow Deny. Credential transforms use static values or `EgressSecretRef`, injected outside sandbox.
 8. All `azure.containerapps.sandbox` imports must be confined to `transport/aca_sdk.py`, pinned in `[aca_sandbox]` extra with `azure-data-tables`, `httpx`, `azure-identity`. Test double only in `tests/doubles`, never package; factory never returns double. This is the SDK adapter boundary.
@@ -736,7 +736,7 @@ by real ACA smoke.
 * Snapshot APIs are `create_snapshot`, `list_snapshots`, `get_snapshot`, and `delete_snapshot`/`begin_delete_snapshot`. Snapshots are region-pinned, immutable, and never auto-GCed; reconciler pruning is mandatory. A snapshot-sourced sandbox cannot set entrypoint/cmd/environment and inherits tier.
 * `create_disk_image`/`begin_create_disk_image` build from any OCI ref; list/get/delete/public-list exist. Boot uses disk name or immutable disk ID. `commit()` returns a disk image. The runtime needs no Microsoft Container Registry/cross-team publishing pipeline.
 * Egress has separate `host_rules` (host → Allow/Deny only) and `rules` (full match/action; Transform/Rewrite belong only here). `get_egress_decisions()` is the audit signal. Group secrets APIs are upsert/list/list-keys/peek/delete.
-* `EgressPolicy` defaults are unsafe: `default_action="Allow"` and `traffic_inspection=None`; `skip_egress_proxy=True` bypasses all control. Emit `Deny`, explicit `Full`, and never set proxy skip true. `begin_create_sandbox` default `polling_timeout=300` cannot consume the 30-second setup budget.
+* `EgressPolicy` defaults are unsafe: `default_action="Allow"` and `traffic_inspection=None`; `skip_egress_proxy=True` bypasses all control. Emit `Deny`, explicit `Full`, and never set proxy skip true. `begin_create_sandbox` default `polling_timeout=300` cannot consume the 90-second setup budget.
 * No ingress is asserted by supplying no ports; port API exists but is not used. SDK churn, not missing capabilities, is the live external platform risk.
 
 #### 3. Execution seam, state, and HTTP semantics
@@ -785,7 +785,7 @@ A controller recycle is survivable: a later instance resolves the current ETag/g
 
 ##### HTTP, idempotency, and status
 
-Management routes are GET run, GET result, GET events, and POST cancel. Headers: `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, and `Last-Event-ID`. Async acceptance is `202` + `Location` + `Retry-After: 2`; completed failed async **status** reads are `200` with typed error, not 5xx. A result read is `410` after eviction, absence, or session tombstone. `409 active_run_exists`, `422 idempotency_key_conflict`, and typed `504` distinguish setup from run timeout. Dedupe happens before active-run admission: same key/same payload replays; same key/different payload is 422; distinct key while active is 409; post-eviction replay is 410; retry after abandonment rotates key. SSE adds named `snapshot-restart` and in-band terminal errors. Sync setup budget is 30s with >=150s execution floor, so provisioning threads remaining setup budget into `polling_timeout` or goes async.
+Management routes are GET run, GET result, GET events, and POST cancel. Headers: `Prefer: respond-async`, `x-ms-session-id`, `Idempotency-Key`, and `Last-Event-ID`. Async acceptance is `202` + `Location` + `Retry-After: 2`; completed failed async **status** reads are `200` with typed error, not 5xx. A result read is `410` after eviction, absence, or session tombstone. `409 active_run_exists`, `422 idempotency_key_conflict`, and typed `504` distinguish setup from run timeout. Dedupe happens before active-run admission: same key/same payload replays; same key/different payload is 422; distinct key while active is 409; post-eviction replay is 410; retry after abandonment rotates key. SSE adds named `snapshot-restart` and in-band terminal errors. Sync setup budget is 90s; only a full 180s wall budget guarantees a 90s execution floor, while shorter authored timeout `T` preserves `setup=min(90,T)` and `T - actual setup elapsed`. Provisioning threads the current remaining setup budget into `polling_timeout`.
 
 Structured input validation remains controller-side pre-dispatch; output validation remains controller-side post-run. Invalid output creates typed validation `RunError` and terminal `failed` (async 200 typed body, sync 5xx), never succeeded with an invalid payload.
 
@@ -888,7 +888,7 @@ the relevant documentation and real-ACA validation slices.
 6. **No snapshot list/delete or assumed platform snapshot GC:** invalid. Both list/delete APIs exist; snapshots are never GCed and reconciler must prune.
 7. **Safe SDK defaults:** invalid. Default egress Allow, inspection None, `skip_egress_proxy=True`, implicit `disk="ubuntu"`, and 300s polling timeout are unsafe; all require explicit guards/values.
 8. **Implicit disk source / multiple source tolerance:** invalid. Exactly one source is required; explicit disk/name/id/snapshot/preset is a provisioning contract.
-9. **300-second provisioning wait under HTTP setup:** invalid. Thread <=30-second setup budget to polling timeout or choose async.
+9. **300-second provisioning wait under HTTP setup:** invalid. Thread the current remainder of the <=90-second setup budget to polling timeout.
 10. **MCR/cross-team disk publishing prerequisite:** invalid. The SDK self-serves OCI-to-disk build; no separate image publishing pipeline is required.
 11. **No adapter firewall / SDK imports distributed:** invalid. The pinned preview SDK stays only in `transport/aca_sdk.py`, with an import-graph guard and real adapter smoke.
 12. **Sandbox reads Run-From-Package Blob with a storage grant:** invalid across Functions SKUs. Controller captures local script root and delivers file content; an attached group identity does not imply storage access.
@@ -1009,7 +1009,7 @@ x-ms-session-id: <session_id>
 ```
 
 * Sync admission-to-response is capped at 180 seconds under the Functions ~230-second HTTP ceiling. It covers state lookup, create/resume, content transfer/verification, and execution. The remaining headroom is reserved for cancellation and response delivery.
-* The default split is a 30-second setup sub-budget (lookup, create/resume, package verify/`ensure_ready`) and a >=150-second execution floor. Readiness not reached in 30 seconds returns `504` before a run is launched; partial provisioning is cleaned by the reconciler. The split is tunable, but setup fast-fail and distinct reasons are contractual.
+* The default split is a 90-second setup sub-budget (lookup, create/resume, package verify/`ensure_ready`) under the 180-second synchronous wall cap. At that full cap the execution floor is 90 seconds. For authored timeout `T < 180`, setup is `min(90,T)` and execution receives `T - actual setup elapsed`; no separate floor or silent extension is promised. Readiness not reached in the bounded setup window returns typed `504` before a run is launched; partial provisioning remains durable for safe reconciliation.
 * The actual SDK `begin_create_sandbox(polling_timeout=...)` must receive the remaining setup budget; its default 300 seconds cannot be allowed to consume the sync window. A run whose authored timeout exceeds 180 seconds is allowed only with explicit async.
 * No sync request silently converts to async. A `504` body includes `error`, `reason` (`setup_deadline_exceeded` or `run_deadline_exceeded`), and `retry_with: respond-async`, plus `x-ms-retry-with: respond-async`. SDKs expose a typed error and opt-in—not automatic—async retry.
 * Setup-timeout retry may reuse its Idempotency-Key because no run was launched. A run-deadline retry must await slot settlement, rotate to a fresh key, then resubmit async. An authored watchdog firing at `timeout <= 180s` produces terminal `timed_out`; exhaustion of the 180-second cap while a longer authored timeout remains produces controller cancellation and terminal `canceled`.
@@ -1221,7 +1221,7 @@ an enabled v1 surface.
 2. **Backstop is readable; row 13 is always hard fail.** `AutoDeletePolicy.delete_interval_seconds` is readable. Delete the FRD fallback that warns when unreadable and clamps `min(reclaim_idle, auto_delete - cadence - grace)` at runtime. There is no unreadable-backstop path in the approved plan.
 3. **Reconcile platform truth and prune snapshots.** Group client has `list_sandboxes(labels=...)`; reconciler must detect Table/platform divergence from label-scoped list results, not Table-only scans. Snapshot APIs include `list_snapshots`/`delete_snapshot`; snapshots are not auto-GC, so record IDs and prune them. The earlier group-only/lifecycle-risk framing is corrected to this actual risk.
 4. **Safe defaults are unsafe unless explicit.** `EgressPolicy.default_action` defaults to `Allow`, `traffic_inspection` defaults to `None`, `skip_egress_proxy=True` bypasses control, and disk defaults to `ubuntu` unless exactly one source is explicitly supplied. Provisioning/compiler must emit explicit disk source, `default_action="Deny"`, `traffic_inspection="Full"`, and never set bypass. Transform/Rewrite rules belong in ordered `rules`, not `host_rules`; first match wins.
-5. **Polling must obey HTTP budget.** SDK `begin_create_sandbox` default `polling_timeout=300` conflicts with the 30-second sync setup budget. Thread remaining setup budget to it or make operation async. Never claim the SDK default is safely aligned.
+5. **Polling must obey HTTP budget.** SDK `begin_create_sandbox` default `polling_timeout=300` conflicts with the 90-second setup budget. Thread the current remaining setup budget to every initial/capacity-retry poller. Never claim the SDK default is safely aligned.
 6. **Preview adapter constraint is real.** The published package is preview/beta. Pin `azure-containerapps-sandbox==0.1.0b4`, confine all SDK symbols to `transport/aca_sdk.py`, use only real adapter in production, retain test-only doubles under `tests/doubles`, enforce import-graph guard, and run real ACA smoke from first adapter PR. The risk is SDK churn, not missing lifecycle/egress/image APIs.
 7. **Exact lifecycle verbs and file operations.** Use `stop`/`begin_stop` (not nonexistent `suspend`) and `resume`; journal transport uses direct file APIs (`write_file`, `read_file`, etc.), not `exec` scripting. Direct `SandboxClient` construction from persisted `sandbox_id` supports stateless controller recovery.
 
@@ -1275,3 +1275,320 @@ Every capability requires a runtime-produced semantic trace. Hand-authored
 fixtures remain expectations rather than acceptance evidence. The startup
 availability gate remains closed until the subsequent live service and load
 acceptance work completes.
+
+## 12. U3 setup deadline amendment — Finalized
+
+**Status:** Finalized. The human selected the 90-second setup / 120-second
+provision-lease policy, and the independent Phase 2 architecture review
+approved the budget, fencing, telemetry, live-watchdog, and compatibility
+contract below before implementation.
+
+### Contract and constants
+
+The implementation changes only these semantic constants:
+
+| Contract | Current | Required |
+|---|---:|---:|
+| `execution.setup_budget.SETUP_BUDGET_SECONDS` | 30 | **90** |
+| `execution.setup_budget.SYNCHRONOUS_RUN_CAP_SECONDS` | 180 | **180** (unchanged) |
+| `execution.setup_budget.MINIMUM_EXECUTION_BUDGET_SECONDS` | 150 | **90** (= 180 - 90) |
+| `controller.readiness.PROVISION_SUBMIT_LEASE_SECONDS` (new) | inline 60 | **120** |
+| `controller.http.SETUP_TIMEOUT_RETRY_AFTER_SECONDS` (new) | inline 60 | **120** |
+
+The persisted operation kind selects the lease duration: **every active lease
+write** for `provision_submit` is 120 seconds, including initial begin, resume,
+takeover, journal claim, and phase advance. Each provision phase transition
+renews that 120-second lease. `submit_run` and `reclaim_backing` remain 60
+seconds, as do their generic/timer semantics; this amendment does not change
+timer cadence, timer pass deadline, or reclaim arithmetic. The public `504`
+body remains exactly `error=reason=setup_deadline_exceeded` plus
+`retry_with=respond-async`; it now has `Retry-After: 120` and retains
+`x-ms-retry-with: respond-async`.
+
+Built-in MCP remains valid with ACA. Its invocation creates the same request
+budget and controller submission used by built-in chat, passing the one
+90-second setup budget into the ACA backend. A setup expiry is observed through
+the same redacted timeout observer exactly once, then returned as the MCP
+tool's typed JSON error body (`setup_deadline_exceeded` and
+`retry_with=respond-async`). The MCP framework owns the outer response, so this
+tool result is not represented as an HTTP 504 and cannot carry HTTP headers;
+HTTP-facing controller routes retain `Retry-After: 120`. The default
+in-language MCP path is unchanged.
+
+The journal portion of that same budget wraps journal ownership claim,
+live-owner status observation, and run-control submission. Expiry leaves the
+durable operation and admitted run active for fencing/resumption; it does not
+launch, adopt, or retry a second run.
+
+### Typed, redacted timeout contract
+
+Add a closed `SetupPhase(StrEnum)` and frozen, SDK-neutral
+`SetupTimeoutMetadata` in `execution/setup_budget.py`, carried by
+`SetupBudgetExpiredError` and `SessionActivationSetupTimeoutError`, then
+attached only to the internal `ControllerResponse` projection (never
+serialized). `SetupPhase` has exactly the values below; metadata accepts the
+enum rather than an open string:
+
+| Field | Allowed values / rule |
+|---|---|
+| `stage` | `setup` |
+| `phase` | `request_lock`, `state_store`, `package_capture`, `provider_bind`, `session_lookup`, `operation_state`, `idempotency_lookup`, `provision_create`, `provision_reconcile`, `capacity_reap`, `lifecycle`, `content`, `manifest`, `journal`, `submit_admission`, `pre_submit_validation`, `post_create_reconcile`, `session_attach`, `session_resume` |
+| `reason` | `deadline_elapsed`, `operation_timeout`, `provision_lease_live`, `provision_indeterminate` |
+| `exception_type` | `setup_budget_expired`, `session_activation_setup_timeout` |
+| `configured_budget_seconds` | 90 for request-created budgets; `None` only for legacy/test-created absolute deadlines with no reliable origin |
+| `elapsed_seconds`, `remaining_seconds` | rounded non-negative monotonic durations when the budget has an origin; otherwise `None`. Expiry reports remaining `0`, never a negative value. |
+| `request_mode` | `synchronous` or `respond_async`, added only by `submit_run()` |
+| `session_present` | boolean from `StartRunRequest.session_id is not None`; no session/run/owner/hash/label is emitted |
+
+`SetupBudget` therefore stores optional monotonic origin and configured budget
+alongside its absolute deadline. `start()` and `RequestBudget.start()` populate
+them; compatibility `create(deadline=...)` may leave timing fields unknown.
+`SetupDeadline.remaining_setup_seconds()` requires a keyword-only
+`phase: SetupPhase` with no default, and `_within_setup_budget()` likewise
+requires an explicit phase. Remove
+`controller.readiness._remaining_setup_seconds()`; attach/resume, manifest
+polling, create-request construction, session locking, and journal submission
+call the typed API directly. Every direct budget read and bounded await in
+`controller/readiness.py` and `execution/aca_sandbox.py` must migrate; mypy
+rejects an unclassified call site. The session-lock timeout uses
+`request_lock`; the live provision lease uses `provision_lease_live`; ambiguous
+accepted create/reconcile uses `provision_indeterminate`. Messages remain
+fixed, non-diagnostic text.
+
+The source-to-metadata mapping is deterministic. Every call site supplies its
+phase explicitly; implementations must never infer it from a raw exception
+message, SDK type text, or provider response.
+
+| Source | Explicit phase | Reason | Exception type |
+|---|---|---|---|
+| Shared setup-budget expiry | The required `SetupPhase` supplied by the caller | `deadline_elapsed` | `setup_budget_expired` |
+| Session/request lock timeout | `request_lock` | `operation_timeout` | `session_activation_setup_timeout` |
+| State/session/operation/idempotency Table I/O | `state_store`, `session_lookup`, `operation_state`, or `idempotency_lookup` | `operation_timeout` | `session_activation_setup_timeout` |
+| Content package capture | `package_capture` | `operation_timeout` | `session_activation_setup_timeout` |
+| Provider construction/binding or attach/resume | `provider_bind`, `session_attach`, or `session_resume` | `operation_timeout` | `session_activation_setup_timeout` |
+| Provision create/reconcile or capacity reap | `provision_create`, `provision_reconcile`, or `capacity_reap` | `operation_timeout` | `session_activation_setup_timeout` |
+| Lifecycle/content/manifest bounded work | `lifecycle`, `content`, or `manifest` | `operation_timeout` | `session_activation_setup_timeout` |
+| Admission/pre-submit/journal/post-create work | `submit_admission`, `pre_submit_validation`, `journal`, or `post_create_reconcile` | `operation_timeout` | `session_activation_setup_timeout` |
+| Live durable provision lease | `provision_reconcile` | `provision_lease_live` | `session_activation_setup_timeout` |
+| Accepted-create reconciliation ambiguity | `provision_reconcile` | `provision_indeterminate` | `session_activation_setup_timeout` |
+| Resumable content readiness | `content` | `deadline_elapsed` | `setup_budget_expired` |
+| Resumable manifest readiness | `manifest` | `deadline_elapsed` | `setup_budget_expired` |
+
+An AST convention guard enumerates `controller/readiness.py` and
+`execution/aca_sandbox.py`. It fails when `_within_setup_budget(...)` or
+`remaining_setup_seconds(...)` lacks `phase=`, when the removed
+`_remaining_setup_seconds` helper reappears, or when direct
+`asyncio.timeout(...)` does not consume typed
+`remaining_setup_seconds(phase=...)` (the centralized wrapper receives its
+required phase separately). Mutation tests cover every rejected form. A
+mapping test enumerates `SetupPhase` and fails if any enum member lacks a
+source/mapping assertion.
+
+One registration-private timeout-response observer receives every internal
+`ControllerResponse` before a response adapter serializes it. When metadata is
+present, it emits **exactly one** `af.setup_deadline_exceeded` span event and
+one redacted structured warning with only the allowlisted fields plus
+`af.http.status_code=504` and `af.fault_domain=runtime`. It adds the same
+allowlisted fields as `af.setup.*` span attributes. The observer is idempotent
+per internal response and removes/consumes the metadata before serialization.
+Do not call `record_exception`, `logger.exception`, or interpolate the caught
+exception. Prompts, bodies, model output/results, idempotency keys,
+owner/session/run/sandbox IDs, operation labels/tokens, provider
+request/response bodies, raw exception messages, and metadata itself are
+prohibited from this event, log, and every response serialization path, even
+when sensitive-data capture is enabled.
+
+### Propagation and HTTP behavior
+
+The smallest path is:
+
+`RequestBudget.start()` → its one `SetupBudget` → ACA backend/readiness
+wrappers → typed setup exception → `submit_run()` → internal response metadata
+→ the one registration-private timeout-response observer → response adapter.
+
+No backend protocol method, durable row schema, provider port, or public
+response schema changes. `AcaSandboxExecutionBackend` continues to pass the
+one request budget to all setup work. `controller.http` converts only the two
+typed setup exceptions, preserving the current 504 response. The registration
+boundary must apply the observer to **every** `submit_run()` caller: trigger
+handlers in `registration/_handlers.py`, standard endpoint submissions, and
+the built-in chat and chatstream flows in `registration/endpoints.py`. It
+consumes metadata before converting to FastAPI and must not add it to the
+response. The in-language-worker/default path does not construct this metadata
+or emit this setup-timeout event.
+
+`AcaSandboxExecutionBackend.start_run()` anchors that one setup budget before
+its first targeted `runtime.reconcile_session()` call. `TargetedReconciler`,
+`SessionRuntimeBinding.reconcile_session()`, the `app.py` closure, and
+`SessionReconciler.reconcile_session()` accept that deadline; the backend
+bounds both the initial and conflict-retry calls with
+`phase=provision_reconcile` and reuses the same budget in `_start_run_once()`.
+Neither reconciliation starts a fresh clock. The targeted reconciler retains
+its existing ETag-fenced/idempotent terminal adoption, expired-operation
+takeover, and cleanup behavior; those mutations are themselves recoverable
+setup work and may occur before a later timeout. Cancellation/expiry must leave
+their durable operation resumable. This path never calls provider create or
+admits a new run. An initial or retry reconciliation timeout returns the typed
+504, after which same-key retry observes the durable result of any completed
+reconciliation work.
+
+Both synchronous and `Prefer: respond-async` submissions have at most 90
+seconds to reserve/activate/prepare a session; async changes post-admission
+run observation, not setup admission. A synchronous request still has at most
+`min(authored timeout, 180 seconds)` from the single request anchor for setup
+plus execution. The 90-second execution floor therefore applies only when the
+wall budget is the full 180 seconds. For a shorter authored timeout `T`, setup
+remains `min(90, T)` and any remaining synchronous execution allowance is
+`T - actual setup elapsed`; no separate execution floor is promised. This
+preserves the existing authored-timeout contract, including very short values:
+setup exhaustion returns the typed 504 rather than silently extending `T` or
+converting to async. An authored run longer than 180 seconds still requires
+explicit async; its watchdog is unchanged. At the full cap, the 90/90 split
+trades 60 seconds of synchronous execution capacity for materially less
+cold-start failure while staying below the Functions front-end limit and
+preserving cleanup/response headroom.
+
+### Durable provision safety
+
+The first request owns a durable `provision_submit` lease for 120 seconds but
+may stop waiting at its one anchored 90-second setup deadline, preserving a
+30-second margin. Every subsequent active provision write (resume, takeover,
+journal claim, and phase advance) renews the persisted kind-selected
+120-second lease, so the margin applies to the request's initial setup window,
+not as a fixed cap on later recovery. During a live lease window, same-key
+replay reads the durable reservation and returns the typed 504; it neither
+rotates the lease nor calls create. Only after `lease_expires_at <= now` may
+`takeover_expired_operation()` win its ETag/token fence. A winner first uses
+the existing sequence's stable
+`operation_correlation_label` in `reconcile_only` mode; exactly one matching
+provider sandbox is adopted, more than one fails closed, and zero remains
+indeterminate rather than authorizing an unchecked duplicate. Only the
+existing controlled create/reconcile state machine may then proceed. Token
+rotation never changes that label. A 120-second `Retry-After` is deliberately
+conservative and does not reveal remaining lease time.
+
+`session_state/store.py` must select the duration from the persisted operation
+kind rather than from the caller or an inline constant. It must apply that
+selector to begin, resume, takeover, journal claim, and phase advance, so a
+retry cannot accidentally downgrade a live `provision_submit` lease to 60
+seconds.
+
+### Provider polling budget
+
+`transport/transport_models.py` and `transport/aca_sdk.py` remove the fixed
+30-second create-poll cap. The create request/provider polling API receives the
+current remaining time from the one shared setup budget immediately before
+each provider poller is created; it must not manufacture a second deadline.
+On a capacity retry, recompute remaining time immediately before the retry's
+new poller and fail with the typed timeout if none remains. A retry therefore
+cannot reuse the first attempt's polling allowance, and control-plane cleanup
+timeouts remain unrelated.
+
+### Implementation, validation, and documentation plan
+
+**Production files:** update `execution/setup_budget.py`, `controller/budget.py`,
+`controller/readiness.py`, `execution/aca_sandbox.py`, `controller/http.py`,
+`app.py`, `controller/reconciler.py`,
+`registration/_handlers.py`, `registration/endpoints.py`, a shared
+registration-private timeout-observation helper, `_observability.py`,
+`transport/transport_models.py`, `transport/aca_sdk.py`, and
+`session_state/store.py`. Preserve `session_state/session_models.py`'s
+persisted operation kind and update `controller/reconciler.py` only where it
+must exercise the kind-selected store lease. The store owns stable-label
+reconciliation, ETag takeover, and the operation-kind duration selector.
+
+**Unit tests:** extend `test_execution_setup_budget.py`,
+`test_controller_budget.py`, `test_controller_readiness.py`,
+`test_execution_aca_sandbox.py`, `test_controller_http.py`,
+`test_registration_handlers.py`, `test_registration_endpoints.py`,
+`test_transport_models.py`, `test_transport_aca_sdk.py`,
+`tests/test_controller_reconciler.py`, and `test_observability.py`. Add or
+extend the operation-store tests in `test_session_state_store_errors.py` and
+the Azurite operation tests in
+`tests/endtoend/test_session_state_store_azurite.py` and
+`tests/endtoend/test_controller_readiness_azurite.py`. Update the existing
+live-helper contract tests in `test_aca_deployed_agent_turn.py`,
+`test_aca_deployed_cold_start.py`, `test_aca_deployed_load.py`, and
+`test_aca_deployed_loss.py`.
+
+**Live helpers and CI:** update
+`tests/live/aca_deployed_agent_support.py`,
+`aca_deployed_cold_start_support.py`, `test_aca_deployed_cold_start.py`,
+`test_aca_deployed_load.py`, `test_aca_deployed_loss.py`, and
+`test_aca_deployed_lifecycle.py`; update
+`eng/templates/official/jobs/e2e-tests.yml`. Enforce a dedicated 105-second
+per-request **admission watchdog** (90 setup + 15 network allowance) in the
+helper, its unit contract, and CI. It starts at admission and expires
+independently of any longer SSE stream or terminal-result window; neither
+window may extend it. Cold-start uses two attempts:
+`2 * 105 + 120 = 330` admission seconds and
+`330 + 240 + 45 = 615` seconds/sample. Keep the default three samples and
+set the CI maximum to three:
+`3 * 615 + 60 + 3 * 240 = 2,625` seconds, leaving 975 seconds overhead.
+Direct five-sample runs require a watchdog **greater than 75 minutes**. Load
+provisioning uses the same two-attempt 330-second bound per session:
+`ceil(N / provision_concurrency) * 330 + 60`; this is 1,710 seconds for CI
+`N=5`, concurrency 1, and 8,310 seconds for human `N=100`, concurrency 4.
+Keep its 360-minute job cap and update all assertions/mocks that encode 30,
+45, 60, 180, 465, or the former retry count.
+
+**Documentation:** on implementation, update this FRD,
+`docs/architecture.md` (budget/lease/telemetry module-map text),
+`docs/aca-sandbox-session-runtime.md`, `docs/observability.md`, and
+`tests/live/README.md`. No config schema or front-matter changes are planned; do not run
+`generate_config_reference.py` or `update-schema-docs`.
+
+### Required test matrix
+
+1. Default/in-language-worker request path remains behaviorally and
+   observability unchanged; timer cadence and unrelated `submit_run` and
+   `reclaim_backing` leases remain 60 seconds.
+2. One anchored 90-second setup budget reaches create polling and every
+   readiness wrapper; provider polling receives the current remaining shared
+   budget, including full, partially consumed, and capacity-retry cases; a
+   180-second sync cap yields a 90-second execution floor, while authored
+   timeouts below 180 preserve `setup=min(90,T)` and the remaining
+   `T - actual setup elapsed` execution allowance without extension.
+3. Expired setup, wrapper timeout, live provision lease, and indeterminate
+   create each return the unchanged typed 504 body with `Retry-After: 120`;
+   sync and async modes and both session-present and session-absent requests
+   are covered.
+4. Every metadata field accepts only its allowlist; known-clock elapsed and
+   remaining values are correct, unknown legacy absolute deadlines are `None`,
+   and each row in the source-to-phase/reason/exception-type table is covered
+   in synchronous and asynchronous, session-present and session-absent paths.
+5. Captured logs/span events contain the allowed attributes and no prompt,
+   body, output, IDs, labels, tokens, idempotency key, provider object, or
+   exception message, including with sensitive capture enabled. Every
+   `submit_run()` caller—trigger, standard endpoint, built-in chat, and
+   chatstream—emits exactly one event and one warning, and never serializes
+   metadata.
+6. A 90-second expiry leaves the 120-second provision lease live; each active
+   provision begin/resume/takeover/journal/phase write renews it to 120 seconds
+   by persisted operation kind, while `submit_run` and `reclaim_backing`
+   remain 60 seconds. Replay cannot create or rotate a live lease; pre-expiry
+   takeover fails; post-expiry ETag takeover uses the unchanged stable label
+   and adopts/reconciles before any create.
+7. Cold-start and load helper arithmetic, option bounds, retry parsing, cleanup,
+   the independent 105-second admission watchdog, and CI's maximum of three
+   samples match the equations above; direct five samples require a watchdog
+   greater than 75 minutes, and lifecycle retry remains public-client-only.
+8. Initial targeted reconciliation and conflict-retry reconciliation share the
+   original setup clock and use `provision_reconcile`; either can time out to
+   the typed 504 without provider create, new-run admission, or a second
+   budget. Existing fenced adoption/takeover/cleanup may complete before
+   timeout, and partial work remains durably resumable and idempotent.
+9. AST mutation fixtures fail for missing `phase=`, a reintroduced
+   `_remaining_setup_seconds`, an untyped direct `asyncio.timeout`, and an
+   unmapped `SetupPhase` enum member.
+
+### Risks, non-goals, rollback
+
+The main risk is a longer pre-run wait masking provider latency or extending
+paid live qualification. The bounded setup clock, 120-second durable fence,
+conservative retry, and aggregate-only live reports contain that risk. This
+amendment does not change provider retry policy, create labels, durable schema,
+auth/ownership, authoring/configuration, timer behavior, or automatic
+sync-to-async conversion. Roll back by restoring the three constants and live
+watchdog arithmetic as one change; retained operations remain safe because
+their stable labels and ETag fences are unchanged.

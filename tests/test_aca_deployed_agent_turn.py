@@ -36,12 +36,12 @@ _NOW = datetime(2026, 8, 12, tzinfo=UTC)
 @pytest.mark.parametrize(
     ("headers", "expected"),
     [
-        ({"Retry-After": "60"}, 60.0),
+        ({"Retry-After": "120"}, 120.0),
         ({"retry-after": "1"}, 1.0),
-        ({}, 60.0),
-        ({"Retry-After": "0"}, 60.0),
-        ({"Retry-After": "61"}, 60.0),
-        ({"Retry-After": "invalid"}, 60.0),
+        ({}, 120.0),
+        ({"Retry-After": "0"}, 120.0),
+        ({"Retry-After": "121"}, 120.0),
+        ({"Retry-After": "invalid"}, 120.0),
     ],
 )
 def test_setup_retry_after_uses_only_a_bounded_lease_delay(

@@ -34,6 +34,7 @@ from .controller.readiness import (
     DEFAULT_AUTO_SUSPEND_SECONDS,
     DEFAULT_RECLAIM_IDLE_SECONDS,
     SessionRuntimeBinding,
+    SetupDeadline,
     StateStoreBinding,
     lifecycle_policy_for_idle,
 )
@@ -437,7 +438,11 @@ def _build_session_runtime_binding(
 
     runtime: SessionRuntimeBinding
 
-    async def targeted_reconcile(partition: OwnerPartition, session_id: str) -> None:
+    async def targeted_reconcile(
+        partition: OwnerPartition,
+        session_id: str,
+        setup_deadline: SetupDeadline,
+    ) -> None:
         state_binding = await runtime.get_state_store()
         provider = await runtime.get_provider()
         reconciler = _build_session_reconciler(
@@ -447,7 +452,7 @@ def _build_session_runtime_binding(
             cadence_seconds=resolve_reconciler_cadence(),
             terminal_bindings=terminal_bindings,
         )
-        await reconciler.reconcile_session(partition, session_id)
+        await reconciler.reconcile_session(partition, session_id, setup_deadline)
 
     async def bounded_reconcile() -> None:
         state_binding = await runtime.get_state_store()

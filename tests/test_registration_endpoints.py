@@ -24,11 +24,18 @@ from azure_functions_agents.config.schema import (
 from azure_functions_agents.controller.http import ControllerResponse
 from azure_functions_agents.controller.readiness import (
     SessionActivationNotFoundError,
+    SessionActivationSetupTimeoutError,
     SessionRuntimeBinding,
     StateStoreBinding,
 )
 from azure_functions_agents.execution.backend import RunContext, RunEvent, RunHandle, RunStatus
 from azure_functions_agents.execution.binding import AgentBinding
+from azure_functions_agents.execution.setup_budget import (
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.endpoints import (
     _MAX_HISTORY_REPLAY_MESSAGES,
@@ -607,18 +614,29 @@ async def test_builtin_mcp_aca_path_threads_the_resolved_output_validator(
         response_schema={"type": "object", "required": ["answer"]},
     )
 
-    async def run_agent(*_args: Any, **kwargs: Any) -> Any:
+    def create_backend(**kwargs: Any) -> object:
         captured.update(kwargs)
-        return SimpleNamespace(
-            session_id="session-1",
-            content='{"answer":"ok"}',
-            tool_calls=[],
-            delegate_error_count=0,
+        return object()
+
+    async def submit(
+        backend: object,
+        request: Any,
+        **kwargs: Any,
+    ) -> ControllerResponse:
+        del backend, request, kwargs
+        return ControllerResponse(
+            status_code=200,
+            body={"response": '{"answer":"ok"}', "tool_calls": []},
+            headers={"x-ms-session-id": "session-1"},
         )
 
     monkeypatch.setattr(
-        "azure_functions_agents.registration.endpoints._run_agent",
-        run_agent,
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        create_backend,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.submit_run",
+        submit,
     )
     register_builtin_endpoints(
         app,  # type: ignore[arg-type]
@@ -638,7 +656,99 @@ async def test_builtin_mcp_aca_path_threads_the_resolved_output_validator(
     )
 
     assert json.loads(response)["session_id"] == "session-1"
-    assert callable(captured["output_validator"])
+    assert callable(captured["binding"].output_validator)
+
+
+@pytest.mark.asyncio
+async def test_builtin_mcp_aca_setup_timeout_uses_controller_result_and_observation(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    app = FakeFunctionApp()
+    resolved = _resolved_agent(
+        name="Test Agent",
+        is_main=False,
+        builtin_endpoints=BuiltinEndpointsConfig(mcp=True),
+    ).model_copy(
+        update={"timeout": 180.0}
+    )
+    metadata = SetupTimeoutMetadata.create(
+        phase=SetupPhase.JOURNAL,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        configured_budget_seconds=90.0,
+        elapsed_seconds=90.0,
+        remaining_seconds=0.0,
+    )
+    captured: dict[str, Any] = {}
+
+    class SetupTimeoutBackend:
+        async def start_run(self, request: Any) -> Any:
+            del request
+            raise SessionActivationSetupTimeoutError(metadata)
+
+    def create_backend(**kwargs: Any) -> SetupTimeoutBackend:
+        captured.update(kwargs)
+        return SetupTimeoutBackend()
+
+    spans = _install_start_span_capture(monkeypatch)
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        create_backend,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers.current_span",
+        lambda: spans[-1],
+    )
+    register_builtin_endpoints(
+        app,  # type: ignore[arg-type]
+        resolved,
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+    route = next(route for route in app.routes if route.get("mcp_tool_trigger"))
+
+    result = await route["handler"](
+        json.dumps(
+            {
+                "arguments": {"prompt": "private prompt"},
+                "sessionId": "private-session",
+            }
+        )
+    )
+
+    assert captured["setup_budget"].configured_budget_seconds == 90.0
+    assert json.loads(result) == {
+        "error": "setup_deadline_exceeded",
+        "reason": "setup_deadline_exceeded",
+        "retry_with": "respond-async",
+    }
+    [span] = spans
+    assert span.attributes["af.setup.phase"] == "journal"
+    assert span.attributes["af.http.retry_after_seconds"] == 120
+    assert span.events == [
+        (
+            "af.setup_deadline_exceeded",
+            {
+                "af.setup.stage": "setup",
+                "af.setup.phase": "journal",
+                "af.setup.reason": "operation_timeout",
+                "af.setup.exception_type": "session_activation_setup_timeout",
+                "af.setup.configured_budget_seconds": 90.0,
+                "af.setup.elapsed_seconds": 90.0,
+                "af.setup.remaining_seconds": 0.0,
+                "af.setup.request_mode": "synchronous",
+                "af.setup.session_present": True,
+                "af.http.status_code": 504,
+                "af.http.retry_after_seconds": 120,
+                "af.http.retry_with": "respond-async",
+                "af.fault_domain": "runtime",
+            },
+        )
+    ]
+    assert "private prompt" not in caplog.text
+    assert "private-session" not in caplog.text
 
 
 def test_builtin_chat_sync_uses_controller_session_header(
@@ -894,6 +1004,7 @@ class _CapturedSpan:
         self.errors: list[tuple[str, str]] = []
         self.exceptions: list[BaseException] = []
         self.content: dict[str, str] = {}
+        self.events: list[tuple[str, dict[str, Any] | None]] = []
 
     def set_attribute(self, key: str, value: Any) -> None:
         if value is not None:
@@ -903,7 +1014,7 @@ class _CapturedSpan:
         self.content[key] = value
 
     def add_event(self, name: str, attributes: dict[str, Any] | None = None) -> None:
-        pass
+        self.events.append((name, attributes))
 
     def set_error(self, message: str, *, fault_domain: str) -> None:
         self.errors.append((message, fault_domain))

@@ -176,8 +176,10 @@ async def test_loss_submission_retries_the_same_key_after_setup_deadline(
     module = loss_module
     headers_seen: list[dict[str, str]] = []
     responses = iter(
-        [(504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"})] * 11
-        + [(202, {"session_id": "session-1", "run_id": "run-1"}, {})]
+        [
+            (504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "120"}),
+            (202, {"session_id": "session-1", "run_id": "run-1"}, {}),
+        ]
     )
 
     async def request(*_: object, **kwargs: object) -> tuple[int, dict[str, str], dict[str, str]]:
@@ -205,9 +207,9 @@ async def test_loss_submission_retries_the_same_key_after_setup_deadline(
     )
 
     assert actual is accepted
-    assert len(headers_seen) == 12
+    assert len(headers_seen) == 2
     assert {headers["Idempotency-Key"] for headers in headers_seen} == {"fixed-key"}
-    assert retry_delays == [60.0] * 11
+    assert retry_delays == [120.0]
 
 
 @pytest.mark.asyncio

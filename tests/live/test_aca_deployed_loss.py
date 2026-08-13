@@ -50,9 +50,9 @@ from azure_functions_agents.transport.transport_models import SandboxSummary, Sa
 
 _LOAD_AGENT_SLUG = "deployed_load"
 _HOLD_PROMPT = "Call qualification_hold exactly once, then return a brief acknowledgement."
-_SETUP_RETRY_ATTEMPTS = 12
-_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 45.0
-_HELD_RUN_SETUP_TIMEOUT_SECONDS = 660.0
+_SETUP_RETRY_ATTEMPTS = 2
+_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0
+_HELD_RUN_SETUP_TIMEOUT_SECONDS = 330.0
 _HELD_RUN_RECOVERY_RESERVE_SECONDS = 60.0
 _RECOVERY_ATTEMPTS = 5
 _POLL_SECONDS = 1.0
