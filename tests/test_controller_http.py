@@ -8,6 +8,7 @@ import pytest
 
 from azure_functions_agents.controller.budget import RequestBudget
 from azure_functions_agents.controller.http import (
+    cancel_run,
     read_result,
     read_status,
     submit_run,
@@ -327,6 +328,33 @@ async def test_sandbox_group_authorization_failure_returns_actionable_nonretryab
         agent_slug="main",
         respond_async=True,
         budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert response.headers == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_sandbox_group_authorization_failure_returns_actionable_nonretryable_response() -> (
+    None
+):
+    backend = FakeBackend(_status())
+    backend.raise_on_cancel = SessionActivationAuthorizationError(
+        "Sandbox Group data-plane authorization failed."
+    )
+
+    response = await cancel_run(
+        backend,  # type: ignore[arg-type]
+        RunContext(run_id="run-1", session_id="session-1"),
     )
 
     assert response.status_code == 503

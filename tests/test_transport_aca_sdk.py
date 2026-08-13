@@ -998,6 +998,80 @@ async def test_resume_closes_handle_when_the_resume_call_itself_fails(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_resume_translates_sdk_authorization_failure_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    provider_message = "sensitive provider response body"
+    rejection = HttpResponseError(provider_message)
+    rejection.status_code = status_code
+
+    async def forbidden_resume() -> None:
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "resume", forbidden_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert provider_message not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_resume_translates_manifest_authorization_failure_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    provider_message = "sensitive provider response body"
+    rejection = HttpResponseError(provider_message)
+    rejection.status_code = status_code
+
+    async def forbidden_read(*_: object, **__: object) -> bytes:
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "read_file", forbidden_read)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert provider_message not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_resume_retries_direct_manifest_until_nonblocking_resume_is_ready(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -225,6 +225,8 @@ async def cancel_run(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
+    except SessionActivationAuthorizationError:
+        return _sandbox_group_authorization_response()
 
 
 def status_payload(status: RunStatus) -> dict[str, object]:
