@@ -178,23 +178,6 @@ def test_reserved_names_match_management_tools():
     assert actual == set(registry.RESERVED_TOOL_NAMES)
 
 
-def test_drain_policy_exposes_management_tools_without_start():
-    policy = schema.WorkflowPlanPolicy(
-        allowed_tools=frozenset(),
-        allowed_subagents=frozenset(),
-        starts_allowed=False,
-    )
-
-    actual = {tool.name for tool in tools.build_workflow_tools(policy=policy)}
-
-    assert actual == {
-        "get_workflow_status",
-        "list_workflows",
-        "cancel_workflow",
-        "terminate_workflow",
-    }
-
-
 def test_register_workflow_tool_rejects_async_handler():
     async def async_handler(args):
         return {}
@@ -754,37 +737,6 @@ async def test_start_workflow_uses_passed_policy_for_sub_agent_authorization() -
     result = await tools.start_workflow(params, session, policy=policy)
 
     assert "not authorized" in json.loads(result)["error"]
-
-
-@pytest.mark.asyncio
-async def test_start_workflow_rejects_new_instances_in_drain_mode(
-) -> None:
-    class _UnexpectedClient:
-        async def get_status_all(self):
-            raise AssertionError("drain mode must reject before Durable scheduling")
-
-    session = context.WorkflowSessionContext(
-        workflow_agent_slug="incident",
-        session_id="session-1",
-        agent_name="Incident",
-        durable_client=_UnexpectedClient(),
-    )
-
-    result = await tools.start_workflow(
-        tools.StartWorkflowParams(
-            tasks=[{"id": "pause", "type": "wait", "duration": "PT1S"}]
-        ),
-        session,
-        policy=schema.WorkflowPlanPolicy(
-            allowed_tools=frozenset(),
-            allowed_subagents=frozenset(),
-            starts_allowed=False,
-        ),
-    )
-
-    assert json.loads(result) == {
-        "error": "workflow drain mode is active; new workflows cannot be started"
-    }
 
 
 @pytest.mark.asyncio

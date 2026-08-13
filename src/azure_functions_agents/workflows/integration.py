@@ -140,16 +140,6 @@ _TRIGGER_ADDENDUM = (
     "response format permits it."
 )
 
-_DRAIN_ADDENDUM = (
-    "\n\n"
-    "## Workflow drain mode\n\n"
-    "This app is draining existing workflows. New workflow starts are disabled. "
-    "Do not attempt to call `start_workflow`; only use workflow status, list, "
-    "cancel, or terminate tools when the user explicitly asks to manage an "
-    "existing workflow.\n"
-)
-
-
 @dataclass(frozen=True)
 class WorkflowIntegrationResult:
     """Workflow registration output for each invocation channel.
@@ -408,12 +398,6 @@ def _build_addendum(
     trigger_invocation: bool,
     handler_catalog: registry.WorkflowHandlerCatalog | None = None,
 ) -> str:
-    if not policy.starts_allowed:
-        return (
-            _DRAIN_ADDENDUM
-            if trigger_invocation
-            else _DRAIN_ADDENDUM + _CHAT_NOTIFICATION_ADDENDUM
-        )
     channel_addendum = _TRIGGER_ADDENDUM if trigger_invocation else _CHAT_ADDENDUM
     return (
         _SHARED_ADDENDUM
@@ -427,8 +411,6 @@ def _build_plan_policy(
     allowed_tools: frozenset[str],
     workflow_subagents: Sequence[WorkflowSubagentRef],
     catalog: AgentCatalog | None,
-    *,
-    starts_allowed: bool = True,
 ) -> WorkflowPlanPolicy:
     guidance: list[tuple[str, str]] = []
     for ref in workflow_subagents:
@@ -443,7 +425,6 @@ def _build_plan_policy(
         allowed_tools=allowed_tools,
         allowed_subagents=frozenset(ref.agent for ref in workflow_subagents),
         subagent_guidance=tuple(guidance),
-        starts_allowed=starts_allowed,
     )
 
 
@@ -467,8 +448,6 @@ def validate_workflow_agent_trigger(resolved: ResolvedAgent) -> None:
 def build_workflow_agent_policy_catalog(
     catalog: AgentCatalog,
     handler_catalog: registry.WorkflowHandlerCatalog,
-    *,
-    starts_allowed: bool = True,
 ) -> WorkflowAgentPolicyCatalog:
     """Freeze one independent workflow policy per workflow-enabled agent."""
     policies: dict[str, WorkflowPlanPolicy] = {}
@@ -488,7 +467,6 @@ def build_workflow_agent_policy_catalog(
             allowed_tools,
             resolved.workflows.subagents,
             catalog,
-            starts_allowed=starts_allowed,
         )
     return MappingProxyType(policies)
 

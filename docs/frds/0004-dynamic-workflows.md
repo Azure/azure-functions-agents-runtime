@@ -479,7 +479,7 @@ tightening its grants, therefore makes a pending disallowed Activity fail rather
 than continue with stale authorization. Durable orchestrator replay performs no
 mutable policy lookup.
 
-#### Final-agent removal and drain mode
+#### Final-agent removal lifecycle
 
 The last workflow-enabled agent is a special deployment edge case. With no agent
 policy, normal composition intentionally returns to a plain `FunctionApp` to
@@ -501,32 +501,19 @@ sequenceDiagram
 ```
 
 This differs from ordinary policy revocation: the work item cannot reach
-`require_workflow_agent_policy()` and fail because the Function that executes that check
-is absent. `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE=true` retains the
-`DFApp`, orchestrator, and Activities while allowing the current policy catalog
-to be empty. It also omits `start_workflow` from agent tool sets and defensively
-rejects direct application-level starts.
+`require_workflow_agent_policy()` and fail because the Function that executes
+that check is absent. The application does not expose a drain-mode environment
+variable for this edge case. Publishing such a switch would create a durable
+customer compatibility commitment without resolving privileged direct Durable
+starts or establishing whether lifecycle ownership belongs in this runtime or
+Durable itself.
 
-The safe transition is:
-
-1. Enable drain mode while the final workflow-enabled agent is still deployed,
-   and quiesce external starters.
-2. Prefer to let existing instances reach terminal states. If the agent must be
-   removed first, keep drain mode enabled: retained Activities then execute and
-   fail explicitly against the missing policy instead of remaining queued
-   indefinitely.
-3. Use Task Hub management tooling—not the session-scoped application list—to
-   confirm there are no `Pending`, `Running`, `Suspended`, or `ContinuedAsNew`
-   instances. Terminate any remainder when completion is no longer possible;
-   termination does not undo already-dispatched Activity side effects.
-4. Only after confirmation, disable drain mode. An app with no workflow-enabled
-   agents then returns to a plain `FunctionApp`.
-
-Task Hub name, Storage or DTS connection, `host.json` Durable settings, and
-extension bundle must continue to identify the same backend throughout the
-drain. If the hub cannot be queried or termination cannot be confirmed, the
-retained runtime must remain deployed. Direct Durable control-plane starts are
-privileged operations outside the application-level start guard.
+Before removing the final workflow-enabled agent, operators should stop new
+starters and use Task Hub tooling to let existing instances finish or terminate
+them. The supported long-term behavior is deferred to
+[issue #161](https://github.com/Azure/azure-functions-agents-runtime/issues/161),
+which tracks runtime/Durable ownership and a remediation that does not
+prematurely add public surface.
 
 #### Runnable proof
 
@@ -580,6 +567,7 @@ that cross-agent status access returns 404.
 | 38 | Trigger decorator resolution | Add a shared resolver / duplicate capability validation / retain registration-local fallback | Keep the registration-local `connector_trigger` to `generic_trigger` fallback and avoid an unrelated hard failure for non-workflow agents | Agent | 2026-08-11 |
 | 39 | Activity-wave failure propagation | Rely on Durable wrapper behavior / explicitly rethrow the failed wave result | Explicitly rethrow failed `task_all` results so policy denials retain their actionable error instead of degrading to a secondary `TypeError` | Agent | 2026-08-11 |
 | 40 | Internal workflow-agent terminology | `owner_slug` / `agent_slug` / `workflow_agent_slug` | Use `workflow_agent_slug` throughout workflow plumbing and persisted payloads: it identifies the top-level agent that starts, authorizes, and namespaces the workflow without colliding conceptually with a delegated Sub Agent | Human | 2026-08-12 |
+| 41 | Final-agent lifecycle public surface | Keep `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE` / remove it and track the lifecycle gap / always register Durable | Remove the environment variable before release and track the edge case in #161; publishing an operational switch would create a customer compatibility commitment before runtime versus Durable ownership is resolved. This supersedes Decision #36. | Human + Laveesh Rohra | 2026-08-13 |
 
 ## 6. Test plan
 
@@ -632,17 +620,16 @@ that cross-agent status access returns 404.
     end through Queue, Durable execution, fake PR tools, HTML reduction, and
     Blob publication, including convergence on the same Blob after repeated
     publication.
-- [x] Evolution #151: multi-agent workflows and final-agent drain
+- [x] Evolution #151: multi-agent workflows
   - compose every workflow-enabled agent with an independent immutable policy;
   - register one app-wide Durable engine and complete execution catalogs;
   - isolate IDs and management by agent plus session and return non-existence
     semantics for cross-agent access;
   - reauthorize capability-bearing Activities against the deployed policy;
-  - retain the Durable runtime with an empty policy catalog in drain mode and
-    reject new application-level starts;
-  - fail startup for invalid drain-mode values;
   - keep an ordinary app with no workflow-enabled agents on plain
     `FunctionApp`;
+  - document and track the unresolved final-agent lifecycle edge case without
+    exposing a drain-mode environment variable;
   - treat legacy session-only IDs as not-found without deleting or mutating
     their Durable instances;
   - prove independent agents and same-session isolation against Azure Storage

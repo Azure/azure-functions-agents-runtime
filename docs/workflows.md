@@ -182,9 +182,7 @@ If at least one workflow-enabled agent exists, startup creates one `DFApp` and
 registers one Durable orchestrator plus one copy of each Activity for the whole
 app. It does **not** register a separate engine per agent.
 
-An app with no workflow-enabled agents remains a plain `FunctionApp` unless the
-operator enables
-[drain mode](#removing-the-final-workflow-enabled-agent).
+An app with no workflow-enabled agents remains a plain `FunctionApp`.
 
 Each workflow-enabled agent instead gets an immutable policy containing only its allowed
 workflow tools (after `workflows.exclude`) and its deny-by-default
@@ -514,56 +512,21 @@ nodes; they fail closed rather than continuing under a stale policy snapshot.
 
 ### Removing the final workflow-enabled agent
 
-Removing the final workflow-enabled agent without retaining the Durable runtime
-can strand pending instances. For example, an Activity work item may already be
-queued in the Task Hub but not yet executed. The resulting plain `FunctionApp`
-has no registered orchestrator or Activity Function to receive that work item,
-so it cannot reach policy reauthorization and fail explicitly; it remains
-non-terminal in the hub instead. Use this drain procedure:
+Removing the final workflow-enabled agent is a known deployment lifecycle edge
+case. An Activity work item may already be queued in the Task Hub but not yet
+executed. The resulting plain `FunctionApp` has no registered orchestrator or
+Activity Function to receive that work item, so it cannot reach policy
+reauthorization and fail explicitly; it may remain non-terminal in the hub.
 
-1. Set `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE=true` while the current
-   workflow deployment is still active. Drain mode removes `start_workflow` from
-   the agent's tool set and defensively rejects direct application-level start
-   calls before Durable scheduling, while list, status, cancel, terminate,
-   orchestrator, and Activity execution remain available. The management tools
-   can access only workflows started under the same agent and session ID; use
-   Durable Functions or DTS Task Hub tooling as the authoritative app-wide
-   management surface from the start of the drain. Startup emits a warning and
-   records drain mode in the indexing summary.
-2. Stop or quiesce external trigger/chat traffic that could repeatedly ask the
-   agent to start workflows. Direct Durable control-plane starts are privileged
-   operations outside this application guard and must also stop.
-3. Prefer to let existing instances finish before removing or disabling the
-   final workflow-enabled agent. If removal must happen first, keep drain mode
-   enabled. The app remains a `DFApp` with an empty agent-policy catalog, so
-   pending tool or Sub Agent Activities from the removed agent fail closed
-   instead of remaining queued indefinitely. The removed agent's chat tools and
-   `/agents/{slug}/workflows`/`workflow-status` endpoints no longer exist, so
-   Durable/DTS tooling is now the only complete management surface.
-4. Use Durable Functions management tooling or the DTS dashboard to query the
-   whole Task Hub. The session-scoped application list endpoint is capped and
-   cannot discover every non-HTTP invocation. Drain is complete only when
-   repeated queries show no `Pending`, `Running`, `Suspended`, or
-   `ContinuedAsNew` instances.
-5. If instances do not complete within the maintenance window, inspect their
-   history and terminate the remainder through Durable/DTS management tooling.
-   Already-dispatched Activity side effects are not rolled back. Confirm every
-   instance reaches a terminal status.
-6. Only after that confirmation, remove
-   `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE`. An app with no
-   workflow-enabled agents then returns to a plain `FunctionApp`.
+There is currently no application environment variable or supported runtime
+drain mode for this transition. Before removing the final workflow-enabled
+agent, stop new starters and use Durable Functions or DTS Task Hub tooling to
+let existing instances finish or terminate them. Confirm that no non-terminal
+instances remain, and preserve the Task Hub name, backend connection,
+`host.json` Durable settings, and extension bundle during the transition.
 
-If the Task Hub cannot be queried, termination cannot be confirmed, or
-non-terminal instances remain, keep drain mode and the Durable runtime deployed;
-do not complete the final transition. Accepted true values are `true`, `1`,
-`yes`, and `y`; false values are `false`, `0`, `no`, and `n`. Any other
-non-empty value fails startup.
-
-Keep the Durable backend identity constant throughout the drain window:
-`host.json` Durable configuration, Task Hub name, Azure Storage or DTS
-connection settings, and extension bundle must continue pointing at the same
-Task Hub. Changing those values during the drain can strand instances in a hub
-the retained runtime no longer polls.
+The runtime/Durable ownership and long-term remediation are tracked in
+[the final-agent lifecycle issue](https://github.com/Azure/azure-functions-agents-runtime/issues/161).
 
 ### Migration from legacy workflow IDs
 

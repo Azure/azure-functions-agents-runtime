@@ -590,7 +590,6 @@ correlation, `host.json` `telemetryMode: OpenTelemetry` is optional and additive
 | `AZURE_FUNCTIONS_AGENTS_MODEL` | Runtime-owned model fallback when no provider-specific model/deployment is set |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT` | Optional reasoning effort for supported reasoning models (valid values include `none`, `low`, `medium`, `high`, `xhigh`) |
 | `AZURE_FUNCTIONS_AGENTS_REASONING_SUMMARY` | Optional reasoning summary mode for supported reasoning models (valid values are `auto`, `concise`, `detailed`) |
-| `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE` | Retain the Durable workflow runtime while rejecting new workflow starts when removing the final workflow-enabled agent; keep enabled until Task Hub tooling confirms no non-terminal instances |
 
 ## Development
 
