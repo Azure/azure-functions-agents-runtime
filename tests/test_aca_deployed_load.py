@@ -56,6 +56,18 @@ def test_provision_concurrency_cli_wins_and_local_default_is_four(
     assert support.provision_concurrency_from_option_or_environment(_config(None)) == 4
 
 
+def test_dual_runtime_pipeline_limits_shared_group_provisioning_to_one_per_leg() -> None:
+    root = Path(__file__).parent.parent
+    source = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    runbook = (root / "tests" / "live" / "README.md").read_text()
+
+    assert "default: '1'" in source
+    assert 'ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY}" -gt 1' in source
+    assert "acaProvisionConcurrency above 1 requires acaRuntimeTarget=python313 or python314." in source
+    assert "at most one session per runtime leg (two total)" in runbook
+    assert "parallel Python 3.13/3.14 validation" in runbook
+
+
 @pytest.mark.parametrize("value", ["0", "5", "three", "2.5"])
 def test_provision_concurrency_rejects_unsafe_values(value: str) -> None:
     with pytest.raises(AcaSmokeEnvironmentError, match="provision-concurrency"):
@@ -962,6 +974,36 @@ async def test_final_setup_deadline_recovers_cleanup_candidate(
 
 
 @pytest.mark.asyncio
+async def test_provisioning_deadline_before_retry_preserves_attempt_metrics(
+    monkeypatch: pytest.MonkeyPatch,
+    load_module: object,
+) -> None:
+    module = load_module
+
+    async def setup_deadline(*_: object, **__: object) -> tuple[int, dict[str, str], dict[str, str]]:
+        return 504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "60"}
+
+    monkeypatch.setattr(module, "json_request", setup_deadline)
+
+    with pytest.raises(module._AdmissionDeadlineError) as failure:  # type: ignore[attr-defined]
+        await module._submit_session_batch(  # type: ignore[attr-defined]
+            object(),
+            SimpleNamespace(deployed=SimpleNamespace(chat_url="https://example.test/chat")),
+            {},
+            object(),
+            "partition",
+            session_ids=[None],
+            prompt="readiness",
+            submitted=[],
+            attempted_idempotency_keys=[],
+            deadline=module.time.perf_counter() + 0.01,  # type: ignore[attr-defined]
+        )
+
+    assert failure.value.retries == 1
+    assert failure.value.attempt_count == 2
+    assert failure.value.failure_categories == (("setup_deadline_exceeded", 1),)
+    assert "setup retry deadline was exhausted" in str(failure.value)
+@pytest.mark.asyncio
 async def test_load_submission_retries_eleven_setup_leases_with_the_same_key(
     monkeypatch: pytest.MonkeyPatch,
     load_module: object,
@@ -1638,7 +1680,7 @@ def test_deployed_job_uses_queue_parameters_for_n5_n100_and_provisioning() -> No
     assert "ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY: ${{ parameters.acaLoadConcurrency }}" in source
     assert "ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY: ${{ parameters.acaProvisionConcurrency }}" in source
     assert "acaLoadConcurrency=100 requires acaRuntimeTarget=python313 or python314." in source
-    assert "acaProvisionConcurrency above 2 requires acaRuntimeTarget=python313 or python314." in source
+    assert "acaProvisionConcurrency above 1 requires acaRuntimeTarget=python313 or python314." in source
     assert "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY" in source
     assert 'job: "ACADeployedAgentTurn"' in source
     assert "timeoutInMinutes: 360" in source

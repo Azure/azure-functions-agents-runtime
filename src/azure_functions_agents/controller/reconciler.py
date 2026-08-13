@@ -711,6 +711,31 @@ class SessionReconciler:
             fence.session_id,
             run.run_id,
         )
+        snapshots = {
+            snapshot.snapshot_id: snapshot
+            for snapshot in await self._provider.list_snapshots()
+        }
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if (
+            not fence.matches(current.record, operation.record)
+            or current.record.sandbox_id != target_sandbox_id
+            or current.record.active_run_id != run.run_id
+        ):
+            return report
+        for snapshot_id in current.record.snapshot_ids:
+            snapshot = snapshots.get(snapshot_id)
+            if snapshot is None or snapshot.sandbox_id != target_sandbox_id:
+                continue
+            await self._provider.delete_snapshot(snapshot_id)
+            report = _replace_report(
+                report,
+                deleted_snapshots=report.deleted_snapshots + 1,
+            )
         terminal = (
             None
             if current_run.record.status in TERMINAL_RUN_STATUSES

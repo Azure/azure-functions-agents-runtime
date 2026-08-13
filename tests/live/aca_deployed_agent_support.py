@@ -99,6 +99,19 @@ class AcceptedRun:
     management_urls: Mapping[str, str]
 
 
+class SseResponseStatusError(AcaSmokeEnvironmentError):
+    """Redacted diagnostic for a public SSE response that cannot be parsed as events."""
+
+    def __init__(self, url: str, status: int) -> None:
+        self.status = status
+        self.status_classification = _http_status_classification(status)
+        super().__init__(
+            "Function App SSE endpoint returned a non-success response "
+            f"({self.status_classification}, HTTP {status}) at "
+            f"{redact_deployed_aca_evidence(url)}."
+        )
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class AuthorizationEvidence:
     """Validated app-only authorization material without a printable token representation."""
@@ -309,10 +322,8 @@ async def read_sse_until_matching_event(
             async with session.get(url, headers=headers) as response:
                 status = response.status
                 response_headers = dict(response.headers)
-                if status >= 502:
-                    _raise_unavailable_response(url, status)
                 if status != 200:
-                    return status, None, response_headers
+                    raise SseResponseStatusError(url, status)
                 events: list[SseEvent] = []
                 pending = ""
                 async for chunk in response.content:
@@ -367,8 +378,6 @@ async def read_sse_events_with_first_event_time(
             raise AcaSmokeEnvironmentError(
                 "Function App SSE stream did not reach done before the overall deadline."
             ) from exc
-        if status != 200:
-            return status, events, response_headers, first_event_at
         events = append_contiguous_sse_events(events, segment)
         if first_event_at is None and segment_first_event_at is not None:
             first_event_at = segment_first_event_at
@@ -392,8 +401,8 @@ async def _read_sse_response(
         async with session.get(url, headers=headers) as response:
             status = response.status
             response_headers = dict(response.headers)
-            if status >= 502:
-                _raise_unavailable_response(url, status)
+            if status != 200:
+                raise SseResponseStatusError(url, status)
             chunks: list[str] = []
             first_event_at: float | None = None
             pending = ""
@@ -516,10 +525,12 @@ def _timeout_from_environment() -> float:
     return timeout
 
 
-def _raise_unavailable_response(url: str, status: int) -> None:
-    raise AcaSmokeEnvironmentError(
-        f"Function App was unavailable at {redact_deployed_aca_evidence(url)} (HTTP {status})."
-    )
+def _http_status_classification(status: int) -> str:
+    if 400 <= status <= 499:
+        return "client_error"
+    if 500 <= status <= 599:
+        return "server_error"
+    return "unexpected_status"
 
 
 async def _json_body(response: ClientResponse) -> dict[str, object]:

@@ -139,11 +139,14 @@ Useful failure signals include:
 In v1, normal disk suspension resumes the same sandbox and generation; it is
 not loss and does not imply snapshot-backed durability. When the reconciler
 detects missing backing, it tombstones the session and preserves its durable
-status; subsequent unavailable result or session behavior is `410 Gone`. Only
-the destructive real-Azure loss-to-`410` acceptance test and sign-off remain
-deferred. Content, egress, credential, and disk changes require a replacement
+status; subsequent unavailable result or session behavior is `410 Gone`. The
+committed live backing-loss proof deletes only its exact-label backing and
+verifies the controller's abandoned/tombstoned state and public `410` result
+behavior. Content, egress, credential, and disk changes require a replacement
 session. The committed live qualification path in
 [the live ACA test guide](../tests/live/README.md) covers adapter create, delivery,
-lower-level model turn, public Easy Auth turn, and lifecycle; its staged
-N=10/25/50/100 load run is still in progress. For detailed internal
-state-machine behavior, use the architecture and FRD references above.
+lower-level model turn, public Easy Auth turn, lifecycle, and backing loss.
+`N=5` is the sole agent/CI load diagnostic; `N=100` formal acceptance is
+human-only for one selected runtime. The Manual/Scheduled runtime matrix is
+nonblocking. For detailed internal state-machine behavior, use the architecture
+and FRD references above.

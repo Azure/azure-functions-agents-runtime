@@ -97,7 +97,7 @@ def test_entrypoints_forward_shared_connection_and_human_only_parameters() -> No
     assert "- name: acaLoadConcurrency" in template
     assert "default: '5'" in template
     assert "- name: acaProvisionConcurrency" in template
-    assert "default: '2'" in template
+    assert "default: '1'" in template
     assert all(value in template for value in ("- '1'", "- '2'", "- '4'", "- '100'"))
 
 
@@ -110,10 +110,10 @@ def test_n100_and_provisioning_preflights_protect_shared_group_without_affecting
     assert "ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY: ${{ parameters.acaLoadConcurrency }}" in turn_job
     assert "ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY: ${{ parameters.acaProvisionConcurrency }}" in turn_job
     assert 'ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY}" = "100"' in turn_job
-    assert 'ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY}" -gt 2' in turn_job
+    assert 'ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY}" -gt 1' in turn_job
     assert turn_job.count('[ "${{ parameters.acaRuntimeTarget }}" = "both" ]') == 2
     assert "acaLoadConcurrency=100 requires acaRuntimeTarget=python313 or python314" in turn_job
-    assert "acaProvisionConcurrency above 2 requires acaRuntimeTarget=python313 or python314" in turn_job
+    assert "acaProvisionConcurrency above 1 requires acaRuntimeTarget=python313 or python314" in turn_job
     assert "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY" in turn_job
     assert "ACA_DEPLOYED_LOAD_CONCURRENCY" not in turn_job
     assert "ACA_DEPLOYED_LOAD_CONCURRENCY" not in cold_job

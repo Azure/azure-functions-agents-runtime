@@ -300,10 +300,10 @@ before it returns its minimal acknowledgement. Tool selection is model-mediated,
 not deterministic: the test verifies exactly one public `tool_start` and
 `tool_end` for `qualification_hold` per run and fails if the model does not
 cooperate. The five-minute hold is credential-free; no test or sandbox writes Table state,
-and the controller remains the sole durable-state writer. The runner first
-provisions sessions through the Easy-Auth-protected public endpoint at a fixed
-concurrency of four, then submits the held runs concurrently only after every
-prepared session is public-terminal and durably idle.
+and the controller remains the sole durable-state writer. The runner provisions
+sessions through the Easy-Auth-protected public endpoint in bounded batches,
+then submits the held runs concurrently only after every prepared session is
+public-terminal and durably idle.
 
 Use the same deployed settings as the lifecycle test, then supply the load
 concurrency explicitly. Omission intentionally skips this test even when the
@@ -410,11 +410,12 @@ variables remain harmless for callers that still define them, but the matrix
 uses the runtime-specific inputs above.
 
 `acaProvisionConcurrency` is a queue-time string parameter with values `1`,
-`2`, or `4`; it defaults to `2`. The matrix's default `both` target therefore
-provisions at most two sessions per runtime leg (four total), preserving the
-known safe shared Sandbox Group file-plane bound. The preflight rejects a
-`both` run above `2`. A human-selected single runtime may use `4`, including
-the N=100 formal path. Direct/local pytest accepts
+`2`, or `4`; it defaults to `1`. The matrix's default `both` target therefore
+provisions at most one session per runtime leg (two total) against the shared
+Sandbox Group. The preflight rejects a `both` run above `1`; it preserves
+parallel Python 3.13/3.14 validation rather than serializing the matrix. A
+human-selected single runtime may use `4`, including the N=100 formal path.
+Direct/local pytest accepts
 `--aca-provision-concurrency` or
 `AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY` in `1..4` and defaults to
 `4`.

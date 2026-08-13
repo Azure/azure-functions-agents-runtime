@@ -133,6 +133,7 @@ class _AdmissionOutcome:
     unclassified_service_throttles: int
     failure: str | None
     unresolved_idempotency: bool
+    deadline_exhausted: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,6 +174,35 @@ class _AdmissionFailureError(AcaSmokeEnvironmentError):
         self.attempted_idempotency_keys = attempted_idempotency_keys
         self.failure_categories = failure_categories
         self.attempt_count = attempt_count
+
+
+class _AdmissionDeadlineError(_AdmissionFailureError):
+    """Aggregate admission failure caused by a bounded setup retry deadline."""
+
+    def __init__(
+        self,
+        *,
+        failures: int,
+        retries: int,
+        throttles: int,
+        unresolved_idempotencies: int,
+        attempted_idempotency_keys: tuple[str, ...],
+        failure_categories: tuple[tuple[str, int], ...],
+        attempt_count: int,
+    ) -> None:
+        super().__init__(
+            failures=failures,
+            retries=retries,
+            throttles=throttles,
+            unresolved_idempotencies=unresolved_idempotencies,
+            attempted_idempotency_keys=attempted_idempotency_keys,
+            failure_categories=failure_categories,
+            attempt_count=attempt_count,
+        )
+        self.args = (
+            "A load-admission setup retry deadline was exhausted; "
+            f"{self.args[0]}",
+        )
 
 
 @pytest.mark.live_aca
@@ -454,6 +484,7 @@ async def _prepare_sessions(
     for start in range(0, concurrency, provision_concurrency):
         before_batch = len(prepared)
         batch_size = min(provision_concurrency, concurrency - start)
+        deadline = time.perf_counter() + _PROVISION_BATCH_TIMEOUT_SECONDS
         try:
             async with asyncio.timeout(_PROVISION_BATCH_TIMEOUT_SECONDS):
                 admission = await _submit_session_batch(
@@ -466,18 +497,20 @@ async def _prepare_sessions(
                     prompt=_READINESS_PROMPT,
                     submitted=prepared,
                     attempted_idempotency_keys=attempted_idempotency_keys,
+                    deadline=deadline,
                 )
-                batch = prepared[before_batch:]
-                _assert_distinct_admissions(batch, batch_size)
-                await _assert_prepared_sessions(
-                    events,
-                    client,
-                    resources,
-                    config,
-                    partition_key,
-                    batch,
-                    authorization,
-                )
+                async with asyncio.timeout(_remaining_timeout_seconds(deadline)):
+                    batch = prepared[before_batch:]
+                    _assert_distinct_admissions(batch, batch_size)
+                    await _assert_prepared_sessions(
+                        events,
+                        client,
+                        resources,
+                        config,
+                        partition_key,
+                        batch,
+                        authorization,
+                    )
         except TimeoutError as exc:
             raise AcaSmokeEnvironmentError(
                 "A Phase A provisioning batch did not reach public terminal durable idle state "
@@ -506,6 +539,7 @@ async def _submit_existing_sessions(
     attempted_idempotency_keys: list[str],
 ) -> _AdmissionSummary:
     """Launch the formal held turns concurrently against the already prepared sessions."""
+    deadline = time.perf_counter() + _PHASE_B_ADMISSION_TIMEOUT_SECONDS
     try:
         async with asyncio.timeout(_PHASE_B_ADMISSION_TIMEOUT_SECONDS):
             admission = await _submit_session_batch(
@@ -518,6 +552,7 @@ async def _submit_existing_sessions(
                 prompt=_LOAD_PROMPT,
                 submitted=held,
                 attempted_idempotency_keys=attempted_idempotency_keys,
+                deadline=deadline,
             )
     except TimeoutError as exc:
         raise AcaSmokeEnvironmentError(
@@ -626,6 +661,7 @@ async def _submit_session_batch(
     prompt: str,
     submitted: list[_SubmittedRun],
     attempted_idempotency_keys: list[str],
+    deadline: float | None = None,
 ) -> _AdmissionSummary:
     first_key_index = len(attempted_idempotency_keys)
 
@@ -639,6 +675,7 @@ async def _submit_session_batch(
             attempted_idempotency_keys,
             prompt=prompt,
             session_id=session_id,
+            deadline=deadline,
         )
         if outcome.submitted is not None:
             submitted.append(outcome.submitted)
@@ -675,7 +712,12 @@ async def _submit_session_batch(
     )
     if failures or exceptions:
         cause = exceptions[0] if exceptions else None
-        error = _AdmissionFailureError(
+        error_type: type[_AdmissionFailureError] = (
+            _AdmissionDeadlineError
+            if any(outcome.deadline_exhausted for outcome in outcomes)
+            else _AdmissionFailureError
+        )
+        error = error_type(
             failures=len(failures) + len(exceptions),
             retries=retries,
             throttles=throttles,
@@ -686,7 +728,7 @@ async def _submit_session_batch(
         )
         if cause is not None:
             raise error from cause
-        raise _AdmissionFailureError(
+        raise error_type(
             failures=len(failures),
             retries=retries,
             throttles=throttles,
@@ -751,17 +793,26 @@ async def _submit_one(
     *,
     prompt: str = _LOAD_PROMPT,
     session_id: str | None = None,
+    deadline: float | None = None,
 ) -> _AdmissionOutcome:
     idempotency_key = uuid.uuid4().hex
     attempted_idempotency_keys.append(idempotency_key)
     submitted_at = time.perf_counter()
     retries = 0
     for attempt in range(_SETUP_DEADLINE_ATTEMPTS):
+        if deadline is not None and time.perf_counter() >= deadline:
+            return _setup_deadline_outcome(idempotency_key, retries)
         try:
             request_headers = {**headers, "Idempotency-Key": idempotency_key}
             if session_id is not None:
                 request_headers["x-ms-session-id"] = session_id
-            async with asyncio.timeout(_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS):
+            attempt_timeout_seconds = _SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS
+            if deadline is not None:
+                attempt_timeout_seconds = _remaining_timeout_seconds(
+                    deadline,
+                    maximum=_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS,
+                )
+            async with asyncio.timeout(attempt_timeout_seconds):
                 status, payload, response_headers = await json_request(
                     client,
                     "POST",
@@ -846,7 +897,10 @@ async def _submit_one(
         if status == 504 and payload.get("error") == "setup_deadline_exceeded":
             if attempt + 1 < _SETUP_DEADLINE_ATTEMPTS:
                 retries += 1
-                await asyncio.sleep(setup_retry_after_seconds(response_headers))
+                retry_after_seconds = setup_retry_after_seconds(response_headers)
+                if deadline is not None and time.perf_counter() + retry_after_seconds >= deadline:
+                    return _setup_deadline_outcome(idempotency_key, retries)
+                await asyncio.sleep(retry_after_seconds)
                 continue
             recovered = await _recover_submitted_run(
                 resources,
@@ -880,6 +934,27 @@ async def _submit_one(
             unclassified_service_throttles=0,
         )
     raise AssertionError("setup-deadline admission loop must return an outcome")
+
+
+def _setup_deadline_outcome(idempotency_key: str, retries: int) -> _AdmissionOutcome:
+    """Preserve retry evidence when the enclosing setup budget expires before retry."""
+    return _AdmissionOutcome(
+        idempotency_key=idempotency_key,
+        submitted=None,
+        retries=retries,
+        unclassified_service_throttles=0,
+        failure="setup_deadline_exceeded",
+        unresolved_idempotency=True,
+        deadline_exhausted=True,
+    )
+
+
+def _remaining_timeout_seconds(deadline: float, *, maximum: float | None = None) -> float:
+    """Return a positive remaining timeout, optionally capped for one request."""
+    remaining = deadline - time.perf_counter()
+    if remaining <= 0:
+        raise TimeoutError
+    return min(remaining, maximum) if maximum is not None else remaining
 
 
 async def _recover_submitted_run(

@@ -21,7 +21,7 @@ parameters:
   - name: acaProvisionConcurrency
     displayName: 'Deployed ACA provisioning concurrency'
     type: string
-    default: '2'
+    default: '1'
     values:
       - '1'
       - '2'

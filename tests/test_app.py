@@ -113,6 +113,20 @@ class _CancellationSuppressingBlockingReconciler:
             self.finalized.set()
 
 
+@pytest.mark.parametrize(
+    "timeout_seconds",
+    (0.0, -1.0, float("nan"), float("inf"), float("-inf")),
+)
+def test_timer_reconciler_deadline_rejects_nonpositive_or_nonfinite_timeout(
+    timeout_seconds: float,
+) -> None:
+    with pytest.raises(ValueError, match="positive and finite"):
+        app_module._ReconcilerTimerPassDeadline.start(
+            timeout_seconds=timeout_seconds,
+            clock=lambda: 100.0,
+        )
+
+
 @pytest.mark.asyncio
 async def test_timer_reconciler_deadline_uses_fake_clock_before_provider_io(
     caplog: pytest.LogCaptureFixture,

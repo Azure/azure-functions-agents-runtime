@@ -610,6 +610,45 @@ async def test_public_sse_overall_deadline_cancels_a_blocking_response() -> None
     assert time.perf_counter() - started < 1
 
 
+@pytest.mark.asyncio
+async def test_public_sse_non_success_is_typed_redacted_and_never_parsed() -> None:
+    class UnexpectedContent:
+        def __aiter__(self) -> UnexpectedContent:
+            return self
+
+        async def __anext__(self) -> bytes:
+            raise AssertionError("A non-success SSE body must not be parsed.")
+
+    class Response:
+        status = 500
+
+        def __init__(self) -> None:
+            self.headers = {"x-test": "value"}
+            self.content = UnexpectedContent()
+
+        async def __aenter__(self) -> Response:
+            return self
+
+        async def __aexit__(self, *_: object) -> None:
+            return None
+
+    class Session:
+        def get(self, *_: object, **__: object) -> Response:
+            return Response()
+
+    with pytest.raises(support.SseResponseStatusError) as failure:
+        await support.read_sse_events_with_first_event_time(
+            Session(),  # type: ignore[arg-type]
+            "https://example.test/events?token=secret",
+            headers={"Authorization": "Bearer top-secret"},
+            overall_timeout_seconds=1,
+        )
+
+    assert failure.value.status == 500
+    assert failure.value.status_classification == "server_error"
+    assert "HTTP 500" in str(failure.value)
+    assert "secret" not in str(failure.value)
+    assert "top-secret" not in str(failure.value)
 def test_submission_and_accepted_payloads_follow_the_public_controller_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
