@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -1421,6 +1422,8 @@ class SessionReconciler:
         if not fence.matches(current.record, operation.record):
             return report
         target_sandbox_id = fence.target.sandbox_id
+        backing_deleted = False
+        deleted_snapshot_count = 0
         if target_sandbox_id is not None and target_sandbox_id in inventory:
             if not _matches_reclaim_target_label(
                 inventory[target_sandbox_id],
@@ -1440,6 +1443,7 @@ class SessionReconciler:
                 report,
                 deleted_sandboxes=report.deleted_sandboxes + 1,
             )
+            backing_deleted = True
         fence = await self._store.advance_operation(
             fence=fence,
             phase="reclaim_snapshots",
@@ -1454,6 +1458,7 @@ class SessionReconciler:
                 report,
                 deleted_snapshots=report.deleted_snapshots + 1,
             )
+            deleted_snapshot_count += 1
         latest = await self._store.get_session(fence.owner_partition, fence.session_id)
         tombstoned = _tombstoned_operation_session(
             latest.record,
@@ -1464,6 +1469,12 @@ class SessionReconciler:
             fence=fence,
             updated_session=tombstoned,
             updated_at=now,
+        )
+        _log_session_reclaimed(
+            session_id=tombstoned.session_id,
+            sandbox_id=target_sandbox_id,
+            backing_deleted=backing_deleted,
+            deleted_snapshot_count=deleted_snapshot_count,
         )
         return _replace_report(
             report,
@@ -1480,9 +1491,12 @@ class SessionReconciler:
     ) -> ReconcileReport:
         if session.active_run_id is not None:
             return report
+        backing_deleted = False
+        deleted_snapshot_count = 0
         if session.sandbox_id is not None and session.sandbox_id in inventory:
             await self._provider.delete_sandbox(session.sandbox_id)
             report = _replace_report(report, deleted_sandboxes=report.deleted_sandboxes + 1)
+            backing_deleted = True
         for snapshot_id in session.snapshot_ids:
             snapshot = snapshots.get(snapshot_id)
             if (
@@ -1492,6 +1506,7 @@ class SessionReconciler:
             ):
                 await self._provider.delete_snapshot(snapshot_id)
                 report = _replace_report(report, deleted_snapshots=report.deleted_snapshots + 1)
+                deleted_snapshot_count += 1
         latest = await self._store.get_session(session.owner_partition, session.session_id)
         if latest.record.status == "deleting" and latest.record.active_run_id is None:
             await self._store.tombstone_session(
@@ -1503,6 +1518,12 @@ class SessionReconciler:
             report = _replace_report(
                 report,
                 tombstoned_sessions=report.tombstoned_sessions + 1,
+            )
+            _log_session_reclaimed(
+                session_id=latest.record.session_id,
+                sandbox_id=latest.record.sandbox_id,
+                backing_deleted=backing_deleted,
+                deleted_snapshot_count=deleted_snapshot_count,
             )
         return report
 
@@ -2299,3 +2320,35 @@ def _replace_report(report: ReconcileReport, **changes: int) -> ReconcileReport:
     }
     values.update(changes)
     return ReconcileReport(**values)
+
+
+def _log_session_reclaimed(
+    *,
+    session_id: str,
+    sandbox_id: str | None,
+    backing_deleted: bool,
+    deleted_snapshot_count: int,
+) -> None:
+    backing_outcome = (
+        "deleted"
+        if backing_deleted
+        else "already_absent"
+        if sandbox_id is not None
+        else "not_bound"
+    )
+    logger.info(
+        "%s",
+        json.dumps(
+            {
+                "backing_outcome": backing_outcome,
+                "deleted_snapshot_count": deleted_snapshot_count,
+                "event_name": "sandbox_session_reclaimed",
+                "sandbox_id": sandbox_id,
+                "session_id": session_id,
+                "tombstone_reason": "reclaimed_idle_session",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )

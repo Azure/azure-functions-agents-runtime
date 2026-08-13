@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
@@ -289,6 +291,16 @@ def _owner() -> FunctionAppOwnerContext:
 
 def _app_hash() -> str:
     return owner_partition(_owner()).app_hash
+
+
+def _reclaim_log_payloads(
+    caplog: pytest.LogCaptureFixture,
+) -> list[dict[str, object]]:
+    return [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if "sandbox_session_reclaimed" in record.getMessage()
+    ]
 
 
 def _foreign_owner() -> FunctionAppOwnerContext:
@@ -899,29 +911,113 @@ async def test_reconciler_does_not_overwrite_new_operation_with_suspended_state(
 
 
 @pytest.mark.asyncio
-async def test_reconciler_reclaims_suspended_session_after_idle_expiry() -> None:
+async def test_reconciler_reclaims_suspended_session_after_idle_expiry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(hours=1),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+        snapshot_ids=("snapshot-1",),
+    )
+    store = FakeSessionStateStore(session)
+    provider = InventoryProvider(
+        sandboxes=(_sandbox(now, state="Suspended"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snapshot-1",
+                sandbox_id="sandbox-1",
+                created_at=now.isoformat(),
+            ),
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await SessionReconciler(
+            store=store,
+            provider=provider,  # type: ignore[arg-type]
+            app_hash=_app_hash(),
+            now=lambda: now,
+        ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.tombstoned_sessions == 1
+    assert report.deleted_snapshots == 1
+    assert provider.deleted_sandboxes == ["sandbox-1"]
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert _reclaim_log_payloads(caplog) == [
+        {
+            "backing_outcome": "deleted",
+            "deleted_snapshot_count": 1,
+            "event_name": "sandbox_session_reclaimed",
+            "sandbox_id": "sandbox-1",
+            "session_id": "session-1",
+            "tombstone_reason": "reclaimed_idle_session",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_finish_deleting_logs_already_absent_backing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now, status="deleting")
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(session),
+        provider=InventoryProvider(sandboxes=()),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await reconciler._finish_deleting(  # type: ignore[attr-defined]
+            session,
+            {},
+            {},
+            now,
+            ReconcileReport(),
+        )
+
+    assert report.tombstoned_sessions == 1
+    assert _reclaim_log_payloads(caplog) == [
+        {
+            "backing_outcome": "already_absent",
+            "deleted_snapshot_count": 0,
+            "event_name": "sandbox_session_reclaimed",
+            "sandbox_id": "sandbox-1",
+            "session_id": "session-1",
+            "tombstone_reason": "reclaimed_idle_session",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idle_reclaim_does_not_log_success_when_delete_is_deferred(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     now = datetime(2026, 8, 5, tzinfo=UTC)
     session = _session(
         now - timedelta(hours=1),
         status="suspended",
         expires_at=now - timedelta(minutes=10),
     )
-    store = FakeSessionStateStore(session)
-    provider = InventoryProvider(
-        sandboxes=(_sandbox(now, state="Suspended"),)
-    )
-
-    report = await SessionReconciler(
-        store=store,
-        provider=provider,  # type: ignore[arg-type]
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(session),
+        provider=FailOnceDeleteProvider(sandboxes=(_sandbox(now, state="Suspended"),)),  # type: ignore[arg-type]
         app_hash=_app_hash(),
         now=lambda: now,
-    ).reconcile_session(session.owner_partition, session.session_id)
+    )
 
-    assert report.tombstoned_sessions == 1
-    assert provider.deleted_sandboxes == ["sandbox-1"]
-    assert store.session is not None
-    assert store.session.status == "tombstoned"
+    with caplog.at_level(logging.INFO):
+        report = await reconciler.reconcile_session(
+            session.owner_partition,
+            session.session_id,
+        )
+
+    assert report == ReconcileReport()
+    assert _reclaim_log_payloads(caplog) == []
 
 
 @pytest.mark.asyncio

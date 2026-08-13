@@ -335,6 +335,28 @@ AppDependencies
 | project TimeGenerated, OperationId, specialist, outcome, DurationMs, Properties
 ```
 
+```kql
+// ACA timer-pass summaries and successful session reclaim/tombstone audit events
+AppTraces
+| extend event = parse_json(Message)
+| where tostring(event.event_name) in (
+    "sandbox_reconciliation_completed",
+    "sandbox_session_reclaimed"
+)
+| project
+    TimeGenerated,
+    event_name = tostring(event.event_name),
+    cadence_seconds = toint(event.cadence_seconds),
+    session_id = tostring(event.session_id),
+    sandbox_id = tostring(event.sandbox_id),
+    backing_outcome = tostring(event.backing_outcome),
+    tombstone_reason = tostring(event.tombstone_reason),
+    deleted_sandboxes = toint(event.deleted_sandboxes),
+    deleted_snapshots = toint(event.deleted_snapshots),
+    deleted_snapshot_count = toint(event.deleted_snapshot_count)
+| order by TimeGenerated desc
+```
+
 ### Measuring telemetry volume (billed bytes per run)
 
 Use these to size ingestion/cost before and after enabling observability. `_BilledSize` is the

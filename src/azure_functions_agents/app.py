@@ -169,7 +169,7 @@ async def _run_deployed_reconciler_timer_pass(
         return await reconciler.run_once()
 
     try:
-        return await deadline.wait_for(reconcile())
+        report = await deadline.wait_for(reconcile())
     except ReconcilerTimerPassDeadlineExceededError:
         logger.error(
             "Sandbox session reconciliation timer pass exceeded its %.0f-second application "
@@ -177,6 +177,25 @@ async def _run_deployed_reconciler_timer_pass(
             timeout_seconds,
         )
         raise
+    logger.info(
+        "%s",
+        json.dumps(
+            {
+                "abandoned_runs": report.abandoned_runs,
+                "adopted_terminal_runs": report.adopted_terminal_runs,
+                "cadence_seconds": cadence_seconds,
+                "deleted_sandboxes": report.deleted_sandboxes,
+                "deleted_snapshots": report.deleted_snapshots,
+                "event_name": "sandbox_reconciliation_completed",
+                "evicted_results": report.evicted_results,
+                "tombstoned_sessions": report.tombstoned_sessions,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    return report
 
 
 def _tool_name(tool: object) -> str:

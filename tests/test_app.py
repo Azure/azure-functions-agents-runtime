@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import textwrap
 from pathlib import Path
@@ -93,7 +94,19 @@ class _BlockingProviderRuntime(_TimerPassRuntime):
 
 class _SuccessfulReconciler:
     async def run_once(self) -> ReconcileReport:
-        return ReconcileReport(deleted_sandboxes=1)
+        return ReconcileReport(
+            adopted_terminal_runs=1,
+            abandoned_runs=2,
+            tombstoned_sessions=3,
+            deleted_sandboxes=4,
+            deleted_snapshots=5,
+            evicted_results=6,
+        )
+
+
+class _FailingReconciler:
+    async def run_once(self) -> ReconcileReport:
+        raise RuntimeError("reconciliation failed")
 
 
 class _CancellationSuppressingBlockingReconciler:
@@ -216,6 +229,7 @@ async def test_timer_reconciler_deadline_rejects_a_cancellation_suppressing_run_
 @pytest.mark.asyncio
 async def test_timer_reconciler_deadline_allows_a_successful_pass(
     monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
 ) -> None:
     runtime = _TimerPassRuntime()
 
@@ -225,16 +239,64 @@ async def test_timer_reconciler_deadline_allows_a_successful_pass(
         lambda *_args, **_kwargs: _SuccessfulReconciler(),
     )
 
-    report = await app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
-        runtime,
-        cadence_seconds=3600,
-        terminal_bindings={},
-        timeout_seconds=1.0,
-    )
+    with caplog.at_level(logging.INFO):
+        report = await app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
+            runtime,
+            cadence_seconds=3600,
+            terminal_bindings={},
+            timeout_seconds=1.0,
+        )
 
-    assert report == ReconcileReport(deleted_sandboxes=1)
+    assert report == ReconcileReport(
+        adopted_terminal_runs=1,
+        abandoned_runs=2,
+        tombstoned_sessions=3,
+        deleted_sandboxes=4,
+        deleted_snapshots=5,
+        evicted_results=6,
+    )
     assert runtime.state_store_calls == 1
     assert runtime.provider_calls == 1
+    payloads = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if "sandbox_reconciliation_completed" in record.getMessage()
+    ]
+    assert payloads == [
+        {
+            "abandoned_runs": 2,
+            "adopted_terminal_runs": 1,
+            "cadence_seconds": 3600,
+            "deleted_sandboxes": 4,
+            "deleted_snapshots": 5,
+            "event_name": "sandbox_reconciliation_completed",
+            "evicted_results": 6,
+            "tombstoned_sessions": 3,
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_timer_reconciler_does_not_log_success_when_pass_raises(
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    runtime = _TimerPassRuntime()
+    monkeypatch.setattr(
+        app_module,
+        "_build_session_reconciler",
+        lambda *_args, **_kwargs: _FailingReconciler(),
+    )
+
+    with caplog.at_level(logging.INFO), pytest.raises(RuntimeError, match="reconciliation failed"):
+        await app_module._run_deployed_reconciler_timer_pass(  # type: ignore[arg-type]
+            runtime,
+            cadence_seconds=3600,
+            terminal_bindings={},
+            timeout_seconds=1.0,
+        )
+
+    assert "sandbox_reconciliation_completed" not in caplog.text
 
 
 @pytest.mark.asyncio
