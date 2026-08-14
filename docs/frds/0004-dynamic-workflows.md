@@ -449,6 +449,63 @@ current validation, scheduling, result, and status behavior. The optional fields
 are omitted with exclude-unset/exclude-none serialization when absent so static
 plan model dumps and Durable wire payloads do not gain `null` fields.
 
+#### Before and after
+
+The diagram contrasts the static fan-out/fan-in already supported before this
+extension with the data-driven flow proposed here. Blue nodes are existing
+capabilities; green and amber nodes are new in Issue #1276.
+
+```mermaid
+flowchart TB
+    subgraph BEFORE["Before Issue #1276 — static DAG (already supported)"]
+        direction LR
+        B0["LLM authors every task<br/>and every dependency"]:::existing
+        B1["analyze_pr_a"]:::existing
+        B2["analyze_pr_b"]:::existing
+        B3["analyze_pr_c"]:::existing
+        B4["summarize<br/>fixed fan-in"]:::existing
+
+        B0 --> B1
+        B0 --> B2
+        B0 --> B3
+        B1 --> B4
+        B2 --> B4
+        B3 --> B4
+    end
+
+    subgraph AFTER["With Issue #1276 — data-driven DAG"]
+        direction LR
+        A0["LLM authors logical tasks only<br/>discover → analyze → summarize"]:::existing
+        A1["discover result<br/>[PR A, PR B, PR C]"]:::existing
+        A2["Runtime resolves for_each<br/>checks owner policy + node budget"]:::new
+        A3["analyze[0]<br/>when = true → run"]:::new
+        A4["analyze[1]<br/>when = false → skipped"]:::skipped
+        A5["analyze[2]<br/>when = true → run"]:::new
+        A6["analyze logical result<br/>ordered [0, 1, 2] aggregate"]:::new
+        A7["summarize<br/>consumes ${analyze.result}"]:::existing
+
+        A0 --> A1 --> A2
+        A2 --> A3
+        A2 --> A4
+        A2 --> A5
+        A3 --> A6
+        A4 --> A6
+        A5 --> A6
+        A6 --> A7
+    end
+
+    classDef existing fill:#dbeafe,stroke:#2563eb,color:#172554
+    classDef new fill:#dcfce7,stroke:#16a34a,color:#052e16
+    classDef skipped fill:#fef3c7,stroke:#d97706,color:#451a03
+```
+
+| Before this extension | Added by Issue #1276 |
+| --- | --- |
+| The LLM enumerates every concrete task id before submission. | The LLM authors one logical `for_each` task; the runtime creates bounded `[index]` instances. |
+| Parallel roots and fixed `depends_on` fan-in are supported. | Fan-out size comes from an upstream JSON array at runtime. |
+| Every ready task runs. | Constrained `when` predicates can skip a logical task or individual instance. |
+| Downstream templates reference separately authored task results. | The logical task exposes one source-ordered aggregate, including explicit skipped positions. |
+
 #### Pipeline mapping
 
 | Pipeline stage | Module(s) | Change |
@@ -549,14 +606,14 @@ Materialized instance ids are runtime-owned and use
 visible in status and diagnostics but cannot appear in authored `depends_on` or
 template references. Authored task ids continue to allow letters, numbers,
 underscore, and hyphen only; `[` and `]` are rejected, reserving the rendered
-instance-id namespace for the runtime. Materialization and scheduling always use the numeric
-`(logical_task_id, index)` tuple as the ordering key, with logical task id as the
-outer key when multiple tasks become ready together. The scheduler must not sort
-the rendered instance-id strings because `analyze[10]` sorts before `analyze[2]`
-lexicographically and would violate source-index wave selection even though that
-string order is itself replay-deterministic. These rules make the same persisted
-inputs and upstream results produce the same instance ids and Durable scheduling
-history on replay.
+instance-id namespace for the runtime. Materialization and scheduling always use
+the numeric `(logical_task_id, index)` tuple as the ordering key, with logical
+task id as the outer key when multiple tasks become ready together. The scheduler
+must not sort the rendered instance-id strings because `analyze[10]` sorts before
+`analyze[2]` lexicographically and would violate source-index wave selection even
+though that string order is itself replay-deterministic. These rules make the
+same persisted inputs and upstream results produce the same instance ids and
+Durable scheduling history on replay.
 
 An empty array is valid: no instances run, the logical node immediately becomes
 `aggregated`, and its result is `[]`.
