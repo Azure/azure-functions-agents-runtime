@@ -1,10 +1,10 @@
 ---
 frd: 0004
 title: Dynamic workflows
-status: In review
+status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-08-13
+updated: 2026-08-14
 issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
@@ -807,6 +807,7 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 33 | Iterated wait tasks | Permit identical timers / template deadlines / reject iteration | Reject `for_each` on `wait`; keep `when` available for conditional waits | Agent | 2026-08-13 |
 | 34 | Controlled runtime failure provenance | Raise native Durable failure / return envelope and status-map / Activity wrapper | Return one stable envelope and map `output.failed` to `Failed`; reserve native raises for unexpected and Activity failures | Agent | 2026-08-13 |
 | 35 | Dynamic instance namespace | Permit all authored ids / escape collisions / reserve bracket suffixes | Restrict authored ids to letters, numbers, underscore, and hyphen; reserve `[index]` suffixes for runtime instances | Agent | 2026-08-13 |
+| 36 | Dynamic control-flow design approval | Revise individual Decisions 25-35 / approve the proposed set | Approve Decisions 25-35 as proposed and advance to implementation | Human (TsuyoshiUshio) | 2026-08-14 |
 
 ## 6. Test plan
 
@@ -962,6 +963,8 @@ The Dynamic Workflow sample for this extension must demonstrate:
   numeric instance ordering, and controlled-failure provenance as blocking
   ambiguities; this draft now defines each explicitly and also clarifies static
   serialization, iteration-local parsing, status schema versioning, and iterated
-  waits. Human sign-off is pending; no product implementation may begin until
-  Decisions 25-35 are accepted or revised and this FRD returns to
-  `status: Finalized`.
+  waits. A final independent review found no blocking issues and deemed the
+  extension ready for human review.
+- **Dynamic control flow human sign-off:** TsuyoshiUshio, 2026-08-14. Approved
+  Decisions 25-35 as proposed and authorized implementation and testing. FRD
+  status returned to `Finalized`.
