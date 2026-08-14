@@ -1,4 +1,4 @@
-"""Verify both Engineering Operations Hub workflow-enabled agents end to end."""
+"""Run the Engineering Operations Hub workflow E2E verifier."""
 
 from __future__ import annotations
 

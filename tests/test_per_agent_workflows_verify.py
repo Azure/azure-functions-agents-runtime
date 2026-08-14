@@ -11,7 +11,7 @@ from types import ModuleType
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-VERIFY_SCRIPT = REPO_ROOT / "eng" / "scripts" / "verify_per_agent_workflows.py"
+VERIFY_SCRIPT = REPO_ROOT / "tests" / "scripts" / "verify_per_agent_workflows.py"
 
 
 def _load_verify_module() -> ModuleType:
