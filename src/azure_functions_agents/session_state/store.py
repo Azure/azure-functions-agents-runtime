@@ -66,6 +66,7 @@ from .session_models import (
     SessionStateContractError,
     TableEntity,
     parse_operation_id,
+    validate_canceled_submit_rearm_transient,
     validate_generation_transition,
     validate_operation_phase_transition,
 )
@@ -97,10 +98,29 @@ _STATUSES_ADMITTING_RUN: frozenset[str] = frozenset({"ready", "suspended"})
 
 _MAX_ADOPTION_ATTEMPTS = 5
 _OPERATION_LEASE_SECONDS = 120
+_ADMISSION_TRANSACTION_TIMEOUT_SECONDS = 30
 _JOURNAL_INTEGRITY_FAILURE_REASON = "journal_corrupt"
+_PRELAUNCH_CANCEL_REASON = "canceled_before_launch"
 _RECONCILER_CURSOR_PARTITION_PREFIX = "reconciler:"
 _RECONCILER_CURSOR_ROW_KEY = "cursor"
 _MAX_RECONCILER_CURSOR_BYTES = 32 * 1024
+_PRELAUNCH_PROVISION_PHASES: frozenset[DurableOperationPhase] = frozenset(
+    {
+        "provision_create",
+        "provision_lifecycle",
+        "provision_content",
+        "provision_manifest",
+        "provision_journal",
+    }
+)
+
+type PreLaunchCancelDisposition = Literal[
+    "canceled_before_launch",
+    "launch_claimed",
+    "terminal",
+    "retry",
+]
+type AdmissionDisposition = Literal["not_reserved", "committed", "possibly_committed"]
 
 
 # ---------------------------------------------------------------------------
@@ -144,15 +164,15 @@ class OwnerIdempotencyRead:
 class AdmissionOutcome:
     """Result of :meth:`SessionStateStore.admit_run`.
 
-    ``session_etag`` is ``None`` only when ``replayed`` is ``True`` -- an
-    idempotent replay returns the previously admitted run without reading or
-    writing the session row again.
+    ``run_etag`` and ``session_etag`` are absent only while a timed-out
+    transaction acknowledgement remains unconfirmed.
     """
 
     run: DurableRunRecord
-    run_etag: str
+    run_etag: str | None
     session_etag: str | None
     replayed: bool
+    admission: AdmissionDisposition = "committed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,10 +180,11 @@ class ProvisionSubmitOutcome:
     """Result of atomically reserving a new session's first submitted run."""
 
     run: DurableRunRecord
-    run_etag: str
+    run_etag: str | None
     session_etag: str | None
     fence: SessionOperationFence | None
     replayed: bool
+    admission: AdmissionDisposition = "committed"
 
 
 @dataclass(frozen=True, slots=True)
@@ -238,6 +259,20 @@ class OperationOutcome:
     session_etag: str
     run: DurableRunRecord | None
     run_etag: str | None
+
+
+@dataclass(frozen=True, slots=True)
+class PreLaunchCancelOutcome:
+    """Result of racing pre-launch cancellation against the journal claim."""
+
+    disposition: PreLaunchCancelDisposition
+    run: DurableRunRecord
+    run_etag: str
+    session: DurableSessionRecord
+    session_etag: str
+    operation: DurableSessionOperation | None
+    operation_etag: str | None
+    fence: SessionOperationFence | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -327,6 +362,12 @@ class SessionStateStore(Protocol):
     ) -> ProvisionSubmitOutcome:
         """Atomically reserve a new session, first run, owner claim, and operation."""
 
+    async def confirm_provision_submit(
+        self,
+        records: ProvisionSubmitRecords,
+    ) -> ProvisionSubmitOutcome:
+        """Point-read an acknowledgement-ambiguous new-session reservation."""
+
     async def resume_operation(
         self,
         *,
@@ -357,6 +398,17 @@ class SessionStateStore(Protocol):
         updated_at: datetime,
     ) -> SessionOperationFence | None:
         """Claim one submit operation's journal launch while its lease is available."""
+
+    async def cancel_prelaunch_submit(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        token: str,
+        updated_at: datetime,
+    ) -> PreLaunchCancelOutcome:
+        """Cancel an accepted submit unless its journal launch already won."""
 
     async def advance_operation(
         self,
@@ -412,6 +464,14 @@ class SessionStateStore(Protocol):
         records: AdmissionRecords,
     ) -> AdmissionOutcome:
         """Atomically admit a run while advancing its active submit operation."""
+
+    async def confirm_operation_run_admission(
+        self,
+        *,
+        fence: SessionOperationFence,
+        records: AdmissionRecords,
+    ) -> AdmissionOutcome:
+        """Point-read an acknowledgement-ambiguous existing-session admission."""
 
     async def get_owner_idempotency(
         self,
@@ -718,7 +778,7 @@ class AzureTableSessionStateStore:
         self,
         records: ProvisionSubmitRecords,
     ) -> ProvisionSubmitOutcome:
-        from azure.core.exceptions import HttpResponseError
+        from azure.core.exceptions import AzureError, HttpResponseError
         from azure.data.tables import TableTransactionError
 
         owner_idempotency = records.owner_idempotency
@@ -758,7 +818,10 @@ class AzureTableSessionStateStore:
             operations.append(_create_op(owner_idempotency))
         operations.append(_create_op(operation))
         try:
-            results = await self._table_client.submit_transaction(operations)
+            results = await self._table_client.submit_transaction(
+                operations,
+                timeout=_ADMISSION_TRANSACTION_TIMEOUT_SECONDS,
+            )
         except TableTransactionError as exc:
             if owner_idempotency is not None and exc.index in (0, 2):
                 winner = await self.get_owner_idempotency(
@@ -774,18 +837,99 @@ class AzureTableSessionStateStore:
                         fence=None,
                         replayed=True,
                     )
+            if _is_ambiguous_transaction_error(exc):
+                return await self.confirm_provision_submit(records)
             if exc.index in range(len(operations)):
                 raise ConcurrencyConflictError(
                     "new-session provision reservation changed concurrently"
                 ) from exc
             raise _map_http_error(exc, context="begin_provision_submit") from exc
         except HttpResponseError as exc:
+            if _is_ambiguous_transaction_error(exc):
+                return await self.confirm_provision_submit(records)
             raise _map_http_error(exc, context="begin_provision_submit") from exc
+        except AzureError:
+            return await self.confirm_provision_submit(records)
         return ProvisionSubmitOutcome(
             run=records.run,
             run_etag=_etag_from_write_result(results[1]),
             session_etag=_etag_from_write_result(results[0]),
             fence=SessionOperationFence.create(operation),
+            replayed=False,
+        )
+
+    async def confirm_provision_submit(
+        self,
+        records: ProvisionSubmitRecords,
+    ) -> ProvisionSubmitOutcome:
+        """Confirm a provision reservation without starting provider work."""
+        try:
+            owner_idempotency = records.owner_idempotency
+            owner = (
+                None
+                if owner_idempotency is None
+                else await self.get_owner_idempotency(
+                    records.session.owner_partition,
+                    owner_idempotency.idempotency_hash,
+                )
+            )
+            if owner is not None:
+                assert owner_idempotency is not None
+                if owner.record.request_hash != owner_idempotency.request_hash:
+                    raise IdempotencyConflictError(
+                        "idempotency key already used with a different payload",
+                        existing_run_id=owner.record.run_id,
+                    )
+                if (
+                    owner.record.session_id != records.session.session_id
+                    or owner.record.run_id != records.run.run_id
+                ):
+                    replay = await self._replay_owner_idempotency(owner, owner_idempotency)
+                    return ProvisionSubmitOutcome(
+                        run=replay.run,
+                        run_etag=replay.run_etag,
+                        session_etag=replay.session_etag,
+                        fence=None,
+                        replayed=True,
+                    )
+            session = await self.get_session(
+                records.session.owner_partition,
+                records.session.session_id,
+            )
+            run = await self.get_run(
+                records.run.owner_partition,
+                records.run.session_id,
+                records.run.run_id,
+            )
+            operation = await self.get_operation(
+                records.operation.owner_partition,
+                records.operation.target.session_id,
+                records.operation.operation_id,
+            )
+        except (
+            OperationRowNotFoundError,
+            RunRowNotFoundError,
+            SessionRowNotFoundError,
+            StateStoreUnavailableError,
+        ):
+            return _possibly_committed_provision_submit(records)
+        if not _matches_provision_submit_reservation(
+            records,
+            session.record,
+            run.record,
+            operation.record,
+            None if owner is None else owner.record,
+        ):
+            return _possibly_committed_provision_submit(records)
+        return ProvisionSubmitOutcome(
+            run=run.record,
+            run_etag=run.etag,
+            session_etag=session.etag,
+            fence=(
+                SessionOperationFence.create(operation.record)
+                if operation.record.token == records.operation.token
+                else None
+            ),
             replayed=False,
         )
 
@@ -926,11 +1070,15 @@ class AzureTableSessionStateStore:
                 "session points to a missing durable operation"
             ) from exc
         _require_operation_matches_session(session.record, operation.record)
+        if operation.record.target.run_id != run_id:
+            return None
+        run = await self.get_run(owner_partition, session_id, run_id)
+        _require_run_matches_operation(run.record, operation.record)
         if (
             operation.record.kind not in {"provision_submit", "submit_run"}
-            or operation.record.target.run_id != run_id
             or session.record.active_run_id != run_id
             or operation.record.state != "active"
+            or run.record.status != "accepted"
             or operation.record.phase
             not in {
                 "provision_journal",
@@ -978,10 +1126,11 @@ class AzureTableSessionStateStore:
                 [
                     _update_op(session.record, etag=session.etag),
                     _update_op(claimed, etag=operation.etag),
+                    _update_op(run.record, etag=run.etag),
                 ]
             )
         except TableTransactionError as exc:
-            if exc.index in (0, 1):
+            if exc.index in (0, 1, 2):
                 raise StaleOperationTokenError(
                     f"operation {operation_id!r} journal claim is stale"
                 ) from exc
@@ -989,6 +1138,151 @@ class AzureTableSessionStateStore:
         except HttpResponseError as exc:
             raise _map_http_error(exc, context="claim_operation_journal") from exc
         return SessionOperationFence.create(claimed)
+
+    async def cancel_prelaunch_submit(
+        self,
+        *,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+        token: str,
+        updated_at: datetime,
+    ) -> PreLaunchCancelOutcome:
+        """Cancel one accepted submit before its journal launch is claimed."""
+        from azure.core.exceptions import HttpResponseError
+        from azure.data.tables import TableTransactionError
+
+        session, run, operation = await self._read_prelaunch_cancel_records(
+            owner_partition,
+            session_id,
+            run_id,
+        )
+        disposition = _prelaunch_cancel_disposition(
+            session.record,
+            run.record,
+            None if operation is None else operation.record,
+        )
+        if disposition != "retry":
+            return _prelaunch_cancel_outcome(
+                disposition=disposition,
+                session=session,
+                run=run,
+                operation=operation,
+            )
+        if not _is_prelaunch_cancelable(
+            session.record,
+            run.record,
+            None if operation is None else operation.record,
+        ):
+            return _prelaunch_cancel_outcome(
+                disposition="retry",
+                session=session,
+                run=run,
+                operation=operation,
+            )
+        assert operation is not None
+        if token == operation.record.token:
+            raise SessionStateStoreError("pre-launch cancellation must rotate the operation token")
+        effective_updated_at = max(
+            updated_at,
+            session.record.updated_at,
+            run.record.updated_at,
+            operation.record.updated_at,
+        )
+        rearm_phase = _prelaunch_rearm_phase(operation.record)
+        assert rearm_phase is not None
+        try:
+            validate_operation_phase_transition(
+                operation.record.kind,
+                operation.record.phase,
+                rearm_phase,
+            )
+        except SessionStateContractError as exc:
+            raise SessionStateStoreError(str(exc)) from exc
+        canceled_run = _prelaunch_canceled_run(run.record, updated_at=effective_updated_at)
+        canceled_operation = _operation_with(
+            operation.record,
+            target=operation.record.target,
+            token=token,
+            phase=rearm_phase,
+            state="active",
+            attempt_count=operation.record.attempt_count + 1,
+            error_code=None,
+            lease_expires_at=effective_updated_at + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            next_attempt_at=None,
+            updated_at=effective_updated_at,
+            finished_at=None,
+        )
+        retained_session = _retain_active_run(
+            session.record,
+            updated_at=effective_updated_at,
+        )
+        try:
+            validate_canceled_submit_rearm_transient(
+                retained_session,
+                canceled_run,
+                canceled_operation,
+            )
+        except SessionStateContractError as exc:
+            raise SessionStateStoreError(str(exc)) from exc
+        try:
+            results = await self._table_client.submit_transaction(
+                [
+                    _update_op(retained_session, etag=session.etag),
+                    _update_op(canceled_run, etag=run.etag),
+                    _update_op(canceled_operation, etag=operation.etag),
+                ]
+            )
+        except TableTransactionError as exc:
+            if exc.index not in (0, 1, 2):
+                raise _map_http_error(exc, context="cancel_prelaunch_submit") from exc
+            session, run, operation = await self._read_prelaunch_cancel_records(
+                owner_partition,
+                session_id,
+                run_id,
+            )
+            disposition = _prelaunch_cancel_disposition(
+                session.record,
+                run.record,
+                None if operation is None else operation.record,
+            )
+            return _prelaunch_cancel_outcome(
+                disposition=disposition,
+                session=session,
+                run=run,
+                operation=operation,
+            )
+        except HttpResponseError as exc:
+            raise _map_http_error(exc, context="cancel_prelaunch_submit") from exc
+        return PreLaunchCancelOutcome(
+            disposition="canceled_before_launch",
+            run=canceled_run,
+            run_etag=_etag_from_write_result(results[1]),
+            session=retained_session,
+            session_etag=_etag_from_write_result(results[0]),
+            operation=canceled_operation,
+            operation_etag=_etag_from_write_result(results[2]),
+            fence=SessionOperationFence.create(canceled_operation),
+        )
+
+    async def _read_prelaunch_cancel_records(
+        self,
+        owner_partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+    ) -> tuple[SessionRead, RunRead, OperationRead | None]:
+        session = await self.get_session(owner_partition, session_id)
+        run = await self.get_run(owner_partition, session_id, run_id)
+        operation_id = session.record.active_operation_id
+        if operation_id is None:
+            return session, run, None
+        try:
+            operation = await self.get_operation(owner_partition, session_id, operation_id)
+        except OperationRowNotFoundError as exc:
+            raise SessionStateStoreError(
+                "session points to a missing durable operation"
+            ) from exc
+        return session, run, operation
 
     async def advance_operation(
         self,
@@ -1123,9 +1417,21 @@ class AzureTableSessionStateStore:
         session, operation = await self._read_fenced_operation(fence)
         effective_terminal = terminal_run
         current_run: RunRead | None = None
+        retained_submit_rearm = (
+            (
+                (
+                    operation.record.kind == "provision_submit"
+                    and operation.record.phase == "provision_rearm"
+                )
+                or (
+                    operation.record.kind == "submit_run"
+                    and operation.record.phase == "submit_rearm"
+                )
+            )
+            and session.record.active_run_id == operation.record.target.run_id
+        )
         if (
-            effective_terminal is None
-            and terminal_state == "completed"
+            terminal_state == "completed"
             and operation.record.target.run_id is not None
         ):
             current_run = await self.get_run(
@@ -1133,11 +1439,31 @@ class AzureTableSessionStateStore:
                 fence.session_id,
                 operation.record.target.run_id,
             )
-            if current_run.record.status not in _TERMINAL_RUN_STATUSES:
+            _require_run_matches_operation(current_run.record, operation.record)
+            if (
+                effective_terminal is None
+                and current_run.record.status not in _TERMINAL_RUN_STATUSES
+            ):
                 raise SessionStateStoreError(
                     "operation cannot complete before its target run is terminal"
                 )
-            effective_terminal = current_run.record
+            if effective_terminal is None:
+                effective_terminal = current_run.record
+        retained_prelaunch_cancel = (
+            retained_submit_rearm
+            and current_run is not None
+            and current_run.record.status == "canceled"
+        )
+        if retained_prelaunch_cancel:
+            assert current_run is not None
+            try:
+                validate_canceled_submit_rearm_transient(
+                    session.record,
+                    current_run.record,
+                    operation.record,
+                )
+            except SessionStateContractError as exc:
+                raise SessionStateStoreError(str(exc)) from exc
         _validate_operation_completion(
             session.record,
             operation.record,
@@ -1160,16 +1486,23 @@ class AzureTableSessionStateStore:
         )
         run_to_write: DurableRunRecord | None = None
         if terminal_run is not None:
-            current_run = await self.get_run(
-                fence.owner_partition,
-                fence.session_id,
-                terminal_run.run_id,
-            )
+            if current_run is None:
+                current_run = await self.get_run(
+                    fence.owner_partition,
+                    fence.session_id,
+                    terminal_run.run_id,
+                )
             run_to_write = _terminal_run_for_operation(current_run.record, terminal_run)
 
         operations: list[_TransactionOp] = []
-        if current_run is not None and run_to_write is not None:
-            operations.append(_update_op(run_to_write, etag=current_run.etag))
+        run_participates = run_to_write is not None or retained_prelaunch_cancel
+        if current_run is not None and run_participates:
+            operations.append(
+                _update_op(
+                    current_run.record if run_to_write is None else run_to_write,
+                    etag=current_run.etag,
+                )
+            )
         operations.extend(
             [
                 _update_op(updated_session, etag=session.etag),
@@ -1187,15 +1520,20 @@ class AzureTableSessionStateStore:
         except HttpResponseError as exc:
             raise _map_http_error(exc, context="finish_operation") from exc
 
-        run_offset = 1 if current_run is not None and run_to_write is not None else 0
+        run_offset = 1 if current_run is not None and run_participates else 0
+        outcome_run = (
+            current_run.record
+            if retained_prelaunch_cancel and run_to_write is None and current_run is not None
+            else run_to_write
+        )
         return OperationOutcome(
             operation=completed_operation,
             operation_etag=_etag_from_write_result(results[run_offset + 1]),
             session_etag=_etag_from_write_result(results[run_offset]),
-            run=run_to_write,
+            run=outcome_run,
             run_etag=(
                 None
-                if run_to_write is None
+                if outcome_run is None
                 else _etag_from_write_result(results[0])
             ),
         )
@@ -1351,7 +1689,7 @@ class AzureTableSessionStateStore:
         fence: SessionOperationFence,
         records: AdmissionRecords,
     ) -> AdmissionOutcome:
-        from azure.core.exceptions import HttpResponseError
+        from azure.core.exceptions import AzureError, HttpResponseError
         from azure.data.tables import TableTransactionError
 
         session, operation = await self._read_fenced_operation(fence)
@@ -1417,7 +1755,10 @@ class AzureTableSessionStateStore:
             operations.append(_create_op(records.idempotency))
         operations.append(_update_op(advanced, etag=operation.etag))
         try:
-            results = await self._table_client.submit_transaction(operations)
+            results = await self._table_client.submit_transaction(
+                operations,
+                timeout=_ADMISSION_TRANSACTION_TIMEOUT_SECONDS,
+            )
         except TableTransactionError as exc:
             if records.idempotency is not None:
                 replay = await self._try_replay_idempotency(
@@ -1427,17 +1768,81 @@ class AzureTableSessionStateStore:
                 )
                 if replay is not None:
                     return replay
+            if _is_ambiguous_transaction_error(exc):
+                return await self.confirm_operation_run_admission(
+                    fence=fence,
+                    records=records,
+                )
             if exc.index in range(len(operations)):
                 raise StaleOperationTokenError(
                     f"operation {fence.operation_id!r} token is stale"
                 ) from exc
             raise _map_http_error(exc, context="admit_operation_run") from exc
         except HttpResponseError as exc:
+            if _is_ambiguous_transaction_error(exc):
+                return await self.confirm_operation_run_admission(
+                    fence=fence,
+                    records=records,
+                )
             raise _map_http_error(exc, context="admit_operation_run") from exc
+        except AzureError:
+            return await self.confirm_operation_run_admission(
+                fence=fence,
+                records=records,
+            )
         return AdmissionOutcome(
             run=records.run,
             run_etag=_etag_from_write_result(results[1]),
             session_etag=_etag_from_write_result(results[0]),
+            replayed=False,
+        )
+
+    async def confirm_operation_run_admission(
+        self,
+        *,
+        fence: SessionOperationFence,
+        records: AdmissionRecords,
+    ) -> AdmissionOutcome:
+        """Confirm a submit-operation admission without aborting its fence."""
+        try:
+            if records.idempotency is not None:
+                replay = await self._try_replay_idempotency(
+                    records.session.owner_partition,
+                    records.session.session_id,
+                    records.idempotency,
+                )
+                if replay is not None and replay.run.run_id != records.run.run_id:
+                    return replay
+            session = await self.get_session(fence.owner_partition, fence.session_id)
+            run = await self.get_run(
+                records.run.owner_partition,
+                records.run.session_id,
+                records.run.run_id,
+            )
+            operation = await self.get_operation(
+                fence.owner_partition,
+                fence.session_id,
+                fence.operation_id,
+            )
+        except (
+            OperationRowNotFoundError,
+            RunRowNotFoundError,
+            SessionRowNotFoundError,
+            StateStoreUnavailableError,
+        ):
+            return _possibly_committed_operation_admission(records)
+        if not _matches_operation_admission(
+            records,
+            fence,
+            session.record,
+            run.record,
+            operation.record,
+        ):
+            return _possibly_committed_operation_admission(records)
+        return AdmissionOutcome(
+            run=run.record,
+            run_etag=run.etag,
+            session_etag=session.etag,
             replayed=False,
         )
 
@@ -1703,7 +2108,6 @@ class AzureTableSessionStateStore:
                 active_session_read = await self.get_session(partition, session_id)
             except SessionRowNotFoundError:
                 active_session_read = None
-
             owns_slot = (
                 active_session_read is not None
                 and active_session_read.record.active_run_id == run_id
@@ -2206,6 +2610,75 @@ def _journal_invalidated_run(
     )
 
 
+def _prelaunch_canceled_run(
+    run: DurableRunRecord,
+    *,
+    updated_at: datetime,
+) -> DurableRunRecord:
+    return DurableRunRecord.create(
+        owner_partition=run.owner_partition,
+        session_id=run.session_id,
+        run_id=run.run_id,
+        generation=run.generation,
+        status="canceled",
+        result_available=False,
+        status_reason=_PRELAUNCH_CANCEL_REASON,
+        expires_at=run.expires_at,
+        created_at=run.created_at,
+        updated_at=updated_at,
+        agent_slug=run.agent_slug,
+    )
+
+
+def _retain_active_run(
+    session: DurableSessionRecord,
+    *,
+    updated_at: datetime,
+) -> DurableSessionRecord:
+    return DurableSessionRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        sandbox_id=session.sandbox_id,
+        generation=session.generation,
+        digest_kind=session.digest_kind,
+        digest=session.digest,
+        protocol=session.protocol,
+        status=session.status,
+        last_activity_at=session.last_activity_at,
+        expires_at=session.expires_at,
+        idle_policy_armed=session.idle_policy_armed,
+        active_run_id=session.active_run_id,
+        snapshot_ids=session.snapshot_ids,
+        region=session.region,
+        state_store_fingerprint=session.state_store_fingerprint,
+        quarantine_reason=session.quarantine_reason,
+        tombstone_reason=session.tombstone_reason,
+        created_at=session.created_at,
+        updated_at=updated_at,
+        active_operation_id=session.active_operation_id,
+        operation_sequence=session.operation_sequence,
+    )
+
+
+def _prelaunch_cancel_outcome(
+    *,
+    disposition: PreLaunchCancelDisposition,
+    session: SessionRead,
+    run: RunRead,
+    operation: OperationRead | None,
+) -> PreLaunchCancelOutcome:
+    return PreLaunchCancelOutcome(
+        disposition=disposition,
+        run=run.record,
+        run_etag=run.etag,
+        session=session.record,
+        session_etag=session.etag,
+        operation=None if operation is None else operation.record,
+        operation_etag=None if operation is None else operation.etag,
+        fence=None,
+    )
+
+
 def _require_matching_terminal_outcome(
     current: DurableRunRecord, terminal_run: DurableRunRecord, run_id: str
 ) -> None:
@@ -2267,20 +2740,109 @@ def _operation_with(
     )
 
 
+def _operation_matches_session(
+    session: DurableSessionRecord,
+    operation: DurableSessionOperation,
+) -> bool:
+    target = operation.target
+    return (
+        operation.owner_partition.partition_key == session.owner_partition.partition_key
+        and target.session_id == session.session_id
+        and (target.sandbox_id is None or target.sandbox_id == session.sandbox_id)
+        and target.generation == session.generation
+        and target.digest_kind == session.digest_kind
+        and target.digest == session.digest
+    )
+
+
+def _operation_matches_run(
+    run: DurableRunRecord,
+    operation: DurableSessionOperation,
+) -> bool:
+    target = operation.target
+    return (
+        run.owner_partition.partition_key == operation.owner_partition.partition_key
+        and run.session_id == target.session_id
+        and run.run_id == target.run_id
+        and run.generation == target.generation
+    )
+
+
+def _is_prelaunch_cancelable(
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    operation: DurableSessionOperation | None,
+) -> bool:
+    return (
+        operation is not None
+        and _operation_matches_session(session, operation)
+        and _operation_matches_run(run, operation)
+        and session.active_run_id == run.run_id
+        and session.active_operation_id == operation.operation_id
+        and session.operation_sequence == operation.sequence
+        and run.status == "accepted"
+        and operation.state == "active"
+        and _prelaunch_rearm_phase(operation) is not None
+    )
+
+
+def _prelaunch_rearm_phase(
+    operation: DurableSessionOperation,
+) -> DurableOperationPhase | None:
+    if (
+        operation.kind == "provision_submit"
+        and operation.phase in _PRELAUNCH_PROVISION_PHASES
+    ):
+        return "provision_rearm"
+    if operation.kind == "submit_run" and operation.phase == "submit_journal":
+        return "submit_rearm"
+    return None
+
+
+def _prelaunch_cancel_disposition(
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    operation: DurableSessionOperation | None,
+) -> PreLaunchCancelDisposition:
+    if run.status in _TERMINAL_RUN_STATUSES:
+        return "terminal"
+    if (
+        operation is not None
+        and _operation_matches_session(session, operation)
+        and _operation_matches_run(run, operation)
+        and session.active_run_id == run.run_id
+        and session.active_operation_id == operation.operation_id
+        and session.operation_sequence == operation.sequence
+        and operation.state == "active"
+        and (
+            (
+                operation.kind == "provision_submit"
+                and operation.phase == "provision_launching"
+            )
+            or (
+                operation.kind == "submit_run"
+                and operation.phase == "submit_launching"
+            )
+        )
+    ):
+        return "launch_claimed"
+    return "retry"
+
+
 def _require_operation_matches_session(
     session: DurableSessionRecord,
     operation: DurableSessionOperation,
 ) -> None:
-    target = operation.target
-    if (
-        operation.owner_partition.partition_key != session.owner_partition.partition_key
-        or target.session_id != session.session_id
-        or (target.sandbox_id is not None and target.sandbox_id != session.sandbox_id)
-        or target.generation != session.generation
-        or target.digest_kind != session.digest_kind
-        or target.digest != session.digest
-    ):
+    if not _operation_matches_session(session, operation):
         raise SessionStateStoreError("durable operation target no longer matches its session")
+
+
+def _require_run_matches_operation(
+    run: DurableRunRecord,
+    operation: DurableSessionOperation,
+) -> None:
+    if not _operation_matches_run(run, operation):
+        raise SessionStateStoreError("durable operation target no longer matches its run")
 
 
 def _validate_operation_begin(
@@ -2470,6 +3032,115 @@ def _etag_from_entity(entity: SdkTableEntity) -> str:
     if not isinstance(etag, str) or not etag:
         raise StateStoreUnavailableError("Table entity response did not include an ETag")
     return etag
+
+
+def _is_ambiguous_transaction_error(exc: object) -> bool:
+    status_code = getattr(exc, "status_code", None)
+    return (
+        not isinstance(status_code, int)
+        or status_code in {408, 429}
+        or status_code >= 500
+    )
+
+
+def _possibly_committed_provision_submit(
+    records: ProvisionSubmitRecords,
+) -> ProvisionSubmitOutcome:
+    return ProvisionSubmitOutcome(
+        run=records.run,
+        run_etag=None,
+        session_etag=None,
+        fence=None,
+        replayed=False,
+        admission="possibly_committed",
+    )
+
+
+def _possibly_committed_operation_admission(
+    records: AdmissionRecords,
+) -> AdmissionOutcome:
+    return AdmissionOutcome(
+        run=records.run,
+        run_etag=None,
+        session_etag=None,
+        replayed=False,
+        admission="possibly_committed",
+    )
+
+
+def _matches_provision_submit_reservation(
+    records: ProvisionSubmitRecords,
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    operation: DurableSessionOperation,
+    owner_idempotency: DurableOwnerIdempotencyRecord | None,
+) -> bool:
+    expected_owner_idempotency = records.owner_idempotency
+    return (
+        session.owner_partition.partition_key == records.session.owner_partition.partition_key
+        and session.session_id == records.session.session_id
+        and session.generation == records.session.generation
+        and session.active_run_id == records.run.run_id
+        and session.active_operation_id == records.operation.operation_id
+        and session.operation_sequence == records.operation.sequence
+        and run.owner_partition.partition_key == records.run.owner_partition.partition_key
+        and run.session_id == records.run.session_id
+        and run.run_id == records.run.run_id
+        and run.generation == records.run.generation
+        and operation.owner_partition.partition_key
+        == records.operation.owner_partition.partition_key
+        and operation.operation_id == records.operation.operation_id
+        and operation.sequence == records.operation.sequence
+        and operation.kind == "provision_submit"
+        and operation.state == "active"
+        and operation.target.session_id == records.operation.target.session_id
+        and operation.target.run_id == records.operation.target.run_id
+        and operation.target.generation == records.operation.target.generation
+        and operation.target.digest_kind == records.operation.target.digest_kind
+        and operation.target.digest == records.operation.target.digest
+        and (
+            expected_owner_idempotency is None
+            or (
+                owner_idempotency is not None
+                and owner_idempotency.owner_partition.partition_key
+                == expected_owner_idempotency.owner_partition.partition_key
+                and owner_idempotency.idempotency_hash
+                == expected_owner_idempotency.idempotency_hash
+                and owner_idempotency.request_hash == expected_owner_idempotency.request_hash
+                and owner_idempotency.session_id == expected_owner_idempotency.session_id
+                and owner_idempotency.run_id == expected_owner_idempotency.run_id
+            )
+        )
+    )
+
+
+def _matches_operation_admission(
+    records: AdmissionRecords,
+    fence: SessionOperationFence,
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    operation: DurableSessionOperation,
+) -> bool:
+    return (
+        session.owner_partition.partition_key == fence.owner_partition.partition_key
+        and session.session_id == fence.session_id
+        and session.active_run_id == records.run.run_id
+        and session.active_operation_id == fence.operation_id
+        and session.operation_sequence == fence.sequence
+        and run.owner_partition.partition_key == records.run.owner_partition.partition_key
+        and run.session_id == records.run.session_id
+        and run.run_id == records.run.run_id
+        and run.generation == records.run.generation
+        and operation.owner_partition.partition_key == fence.owner_partition.partition_key
+        and operation.operation_id == fence.operation_id
+        and operation.sequence == fence.sequence
+        and operation.kind == "submit_run"
+        and operation.state == "active"
+        and operation.phase in {"submit_journal", "submit_launching", "submit_rearm"}
+        and operation.target.session_id == records.run.session_id
+        and operation.target.run_id == records.run.run_id
+        and operation.target.generation == records.run.generation
+    )
 
 
 def _map_http_error(exc: HttpResponseError, *, context: str) -> SessionStateStoreError:

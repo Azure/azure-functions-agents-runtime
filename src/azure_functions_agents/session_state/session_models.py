@@ -1653,6 +1653,41 @@ class ProvisionSubmitRecords:
         )
 
 
+def validate_canceled_submit_rearm_transient(
+    session: DurableSessionRecord,
+    run: DurableRunRecord,
+    operation: DurableSessionOperation,
+) -> None:
+    """Validate the pre-launch cancellation transient that retains an active slot."""
+    target = operation.target
+    expected_rearm_phase = {
+        "provision_submit": "provision_rearm",
+        "submit_run": "submit_rearm",
+    }.get(operation.kind)
+    if (
+        run.status != "canceled"
+        or session.active_run_id != run.run_id
+        or session.active_operation_id != operation.operation_id
+        or session.operation_sequence != operation.sequence
+        or expected_rearm_phase is None
+        or operation.phase != expected_rearm_phase
+        or operation.state != "active"
+        or run.owner_partition.partition_key != session.owner_partition.partition_key
+        or operation.owner_partition.partition_key != session.owner_partition.partition_key
+        or run.session_id != session.session_id
+        or target.session_id != session.session_id
+        or run.generation != session.generation
+        or target.generation != session.generation
+        or target.digest_kind != session.digest_kind
+        or target.digest != session.digest
+        or target.run_id != run.run_id
+        or (target.sandbox_id is not None and target.sandbox_id != session.sandbox_id)
+    ):
+        raise SessionStateContractError(
+            "canceled submit rearm does not preserve its retained active slot"
+        )
+
+
 def _read_partition(entity: Mapping[str, object]) -> OwnerPartition:
     return OwnerPartition.parse(_require_str(entity, "PartitionKey"))
 

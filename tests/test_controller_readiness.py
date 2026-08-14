@@ -11,6 +11,7 @@ from uuid import uuid4
 import pytest
 
 import azure_functions_agents.controller.readiness as readiness_module
+from azure_functions_agents.controller.idempotency import build_idempotency_attempt
 from azure_functions_agents.controller.package import LiveManifestNotReadyError
 from azure_functions_agents.controller.readiness import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
@@ -48,6 +49,7 @@ from azure_functions_agents.session_state import (
     SessionNotAdmissibleError,
     SessionOperationTarget,
     SessionStateContractError,
+    StaleOperationTokenError,
     StateStoreUnavailableError,
     owner_partition,
 )
@@ -312,7 +314,11 @@ async def test_targeted_reconciliation_authorization_is_redacted(tmp_path: Path)
     runtime = replace(runtime, _targeted_reconciler=reconciliation)
 
     with pytest.raises(SessionActivationAuthorizationError) as caught:
-        await runtime.reconcile_session(owner_partition(_owner()), "session-1", SetupBudget.start())
+        await runtime.reconcile_session(
+            owner_partition(_owner()),
+            "session-1",
+            SetupBudget.start(),
+        )
 
     assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
 
@@ -326,17 +332,18 @@ async def test_reserved_provision_keeps_post_acceptance_authorization_indetermin
     provider.create_errors.append(SandboxCreateOutcomeUnknownError())
     store = _FakeStore()
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
-        await provision_new_session_submit(
-            _runtime(script_root, provider, store),
-            _owner(),
-            session_id="new-session",
-            run_id="run-1",
-            timeout=None,
-            attempt=None,
-            setup_deadline=SetupBudget.start(),
-        )
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(),
+    )
 
+    assert provisioned.setup_timed_out
+    assert provisioned.timeout_metadata is not None
     assert store.session is not None
     assert store.session.status == "creating"
     assert store.session.active_run_id == "run-1"
@@ -346,6 +353,111 @@ async def test_reserved_provision_keeps_post_acceptance_authorization_indetermin
     assert operation.state == "active"
     assert operation.phase == "provision_reconcile"
     assert operation.error_code == "provision_create_indeterminate"
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_returns_durable_cancel_after_losing_its_fence(
+    tmp_path: Path,
+) -> None:
+    class _CancelWinningStore(_FakeStore):
+        async def advance_operation(self, **kwargs: object):  # type: ignore[no-untyped-def]
+            if kwargs["phase"] == "provision_lifecycle":
+                fence = kwargs["fence"]
+                assert isinstance(fence, readiness_module.SessionOperationFence)
+                await self.cancel_prelaunch_submit(
+                    owner_partition=fence.owner_partition,
+                    session_id=fence.session_id,
+                    run_id="run-1",
+                    token="b" * 32,
+                    updated_at=datetime.now(UTC),
+                )
+                raise StaleOperationTokenError("cancel won the provision fence")
+            return await super().advance_operation(**kwargs)
+
+    script_root = _script_root(tmp_path)
+    handle = _CountingHandle()
+    store = _CancelWinningStore()
+
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, _FakeProvider(handle), store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert provisioned.activated is None
+    assert provisioned.outcome.run.status == "canceled"
+    assert provisioned.outcome.fence is None
+    assert handle.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_terminal_pre_pointer_replay_does_not_take_over_provision_rearm(
+    tmp_path: Path,
+) -> None:
+    class _CancelOnReserveStore(_FakeStore):
+        async def begin_provision_submit(self, records):  # type: ignore[no-untyped-def]
+            outcome = await super().begin_provision_submit(records)
+            if not outcome.replayed:
+                await self.cancel_prelaunch_submit(
+                    owner_partition=records.session.owner_partition,
+                    session_id=records.session.session_id,
+                    run_id=records.run.run_id,
+                    token="b" * 32,
+                    updated_at=datetime.now(UTC),
+                )
+            return outcome
+
+    script_root = _script_root(tmp_path)
+    store = _CancelOnReserveStore()
+    provider = _FakeProvider(_FakeHandle())
+    attempt = build_idempotency_attempt(
+        agent_slug="main",
+        prompt="hello",
+        timeout=None,
+        idempotency_key="retry-canceled-pre-pointer",
+    )
+    assert attempt is not None
+
+    first = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=SetupBudget.start(),
+    )
+    assert first.outcome.run.status == "canceled"
+    assert store.session is not None
+    assert store.session.sandbox_id is None
+    operation_id = store.session.active_operation_id
+    assert operation_id is not None
+    canceled_operation = store.durable_operations[operation_id]
+    store.durable_operations[operation_id] = replace(
+        canceled_operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+    replay = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="different-candidate-is-ignored",
+        run_id="different-candidate-is-ignored",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert replay.outcome.replayed is True
+    assert replay.outcome.run.run_id == "run-1"
+    assert replay.outcome.run.status == "canceled"
+    assert replay.activated is None
+    assert store.durable_operations[operation_id].token == canceled_operation.token
+    assert provider.create_calls == []
 
 
 @pytest.mark.asyncio
@@ -383,16 +495,8 @@ async def test_reserved_provision_closes_created_handle_after_post_create_failur
     store = _PhaseFailureStore()
     runtime = _runtime(script_root, _FakeProvider(handle), store)
 
-    with pytest.raises(
-        (
-            SandboxFileOperationError,
-            SessionActivationError,
-            readiness_module.ContentPackagingError,
-            readiness_module.LiveManifestNotReadyError,
-            ConcurrencyConflictError,
-        )
-    ):
-        await provision_new_session_submit(
+    if failure_phase == "lifecycle":
+        provisioned = await provision_new_session_submit(
             runtime,
             _owner(),
             session_id="new-session",
@@ -401,6 +505,27 @@ async def test_reserved_provision_closes_created_handle_after_post_create_failur
             attempt=None,
             setup_deadline=SetupBudget.start(),
         )
+        assert provisioned.setup_timed_out
+        assert provisioned.timeout_metadata is not None
+    else:
+        with pytest.raises(
+            (
+                SandboxFileOperationError,
+                SessionActivationError,
+                readiness_module.ContentPackagingError,
+                readiness_module.LiveManifestNotReadyError,
+                ConcurrencyConflictError,
+            )
+        ):
+            await provision_new_session_submit(
+                runtime,
+                _owner(),
+                session_id="new-session",
+                run_id="run-1",
+                timeout=None,
+                attempt=None,
+                setup_deadline=SetupBudget.start(),
+            )
 
     assert handle.close_calls == 1
 

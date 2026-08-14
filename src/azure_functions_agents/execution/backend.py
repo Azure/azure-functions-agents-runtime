@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
+from .setup_budget import SetupBudgetExpiredError, SetupTimeoutMetadata
+
 type RunState = Literal[
     "accepted",
     "running",
@@ -16,6 +18,8 @@ type RunState = Literal[
     "timed_out",
     "abandoned",
 ]
+type RunPhase = Literal["provisioning", "executing", "settling", "terminal"]
+type DurableAdmissionOutcome = Literal["committed", "possibly_committed"]
 
 TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"done", "error"})
 SESSION_TOMBSTONED_ERROR_CODE = "session_tombstoned"
@@ -39,6 +43,7 @@ class RunHandle:
     session_id: str
     state: RunState
     created_at: datetime
+    phase: RunPhase | None = None
 
 
 @dataclass
@@ -47,6 +52,42 @@ class RunContext:
 
     run_id: str
     session_id: str
+
+
+class DurableAdmissionSetupTimeoutError(SetupBudgetExpiredError):
+    """Setup timed out after a durable admission may have been recorded."""
+
+    def __init__(
+        self,
+        *,
+        outcome: DurableAdmissionOutcome,
+        handle: RunHandle,
+        metadata: SetupTimeoutMetadata,
+    ) -> None:
+        if outcome not in {"committed", "possibly_committed"}:
+            raise ValueError("outcome must be 'committed' or 'possibly_committed'")
+        super().__init__(metadata)
+        self.outcome = outcome
+        self.handle = handle
+
+
+class LinkedActiveRunConflictError(Exception):
+    """An active-run conflict with durable management context."""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        session_id: str,
+        run_id: str,
+        status: RunState,
+        phase: RunPhase | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.session_id = session_id
+        self.run_id = run_id
+        self.status = status
+        self.phase = phase
 
 
 @dataclass
@@ -80,6 +121,7 @@ class RunStatus:
     result_available: bool
     result: RunResult | None = None
     error: RunError | None = None
+    phase: RunPhase | None = None
 
 
 @dataclass

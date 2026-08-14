@@ -26,6 +26,7 @@ from azure_functions_agents.session_state import (
     encode_snapshot_ids,
     operation_correlation_label,
     owner_partition,
+    validate_canceled_submit_rearm_transient,
     validate_generation,
     validate_generation_transition,
     validate_operation_phase_transition,
@@ -269,6 +270,66 @@ def test_operation_rows_bind_a_monotonic_sequence_to_the_session_target() -> Non
             "reclaim_backing",
             "reclaim_deleting",
             "reclaim_rearm",
+        )
+
+
+@pytest.mark.parametrize(
+    ("kind", "rearm_phase", "prelaunch_phase", "session_status"),
+    [
+        ("provision_submit", "provision_rearm", "provision_journal", "creating"),
+        ("submit_run", "submit_rearm", "submit_journal", "running"),
+    ],
+)
+def test_canceled_submit_rearm_validates_the_retained_terminal_slot(
+    kind: str,
+    rearm_phase: str,
+    prelaunch_phase: str,
+    session_status: str,
+) -> None:
+    operation = DurableSessionOperation.create(
+        owner_partition=_partition(),
+        target=SessionOperationTarget.create(
+            session_id=_SESSION_ID,
+            sandbox_id="sandbox-1",
+            generation=1,
+            digest_kind="funcs_zip",
+            digest="sha256:" + ("b" * 64),
+            run_id=_RUN_ID,
+        ),
+        sequence=1,
+        kind=kind,  # type: ignore[arg-type]
+        phase=rearm_phase,  # type: ignore[arg-type]
+        state="active",
+        correlation_label=operation_correlation_label(_SESSION_ID, 1),
+        token="a" * 32,
+        attempt_count=1,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    session = replace(
+        _session(status=session_status),  # type: ignore[arg-type]
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    canceled = replace(_run(), status="canceled")
+
+    validate_canceled_submit_rearm_transient(session, canceled, operation)
+
+    with pytest.raises(SessionStateContractError, match="canceled submit rearm"):
+        validate_canceled_submit_rearm_transient(
+            session,
+            replace(canceled, status="failed"),
+            operation,
+        )
+    with pytest.raises(SessionStateContractError, match="canceled submit rearm"):
+        validate_canceled_submit_rearm_transient(
+            session,
+            canceled,
+            replace(operation, phase=prelaunch_phase),
         )
 
 

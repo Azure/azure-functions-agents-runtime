@@ -88,6 +88,21 @@ def _operation(session: DurableSessionRecord, kind: str) -> DurableSessionOperat
     )
 
 
+def _run(session: DurableSessionRecord) -> DurableRunRecord:
+    return DurableRunRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id="run-1",
+        generation=session.generation,
+        status="accepted",
+        result_available=False,
+        status_reason=None,
+        expires_at=_NOW + timedelta(minutes=5),
+        created_at=_NOW,
+        updated_at=_NOW,
+    )
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "lease_seconds"),
@@ -177,6 +192,7 @@ async def test_fake_journal_claim_renews_the_flat_lease(
         operation=operation,
         etag=store.etag,
     )
+    store.runs["run-1"] = _run(session)
 
     claimed_at = _NOW + timedelta(seconds=5)
     claimed = await store.claim_operation_journal(

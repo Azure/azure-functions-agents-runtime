@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-17
+updated: 2026-08-18
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -410,6 +410,18 @@ controlling amendments.
 | 167 | PR smoke identity evidence | All-scope RBAC audit / protected IaC + positive turn | Protected IaC/ops guarantees the sole guest UAMI has model-only, no-state/no-group RBAC. CI verifies only group identity shape, runtime egress, and positive model access because its controller connection cannot enumerate guest model-scope roles. | Human | 2026-08-17 | U3 CI corrective |
 | 168 | Current-checkout smoke eligibility | PR-only / every protected E2E invocation | Run the nonblocking smoke on every trusted non-fork E2E invocation, including PR, main, manual, and scheduled runs. Pipeline authorization remains the security boundary; the fork guard is defense in depth. | Human | 2026-08-18 | U3 CI corrective |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
+| 169 | Setup admission outcome | Generic timeout / durable outcomes | Classify admission as `not_reserved`, `committed`, or `possibly_committed`; provider work waits for confirmation. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 170 | Timeout response projection | Always 504 / async 202 + sync 504 | Confirmed async returns the LRO `202`; confirmed sync returns linked `504`; ambiguity returns linked `504`. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 171 | Retry identity | Key only / request hash only / both | Keep key hash as attempt identity and canonical request hash as its mutation guard. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 172 | Public progress phase | New run states / derived phase | Keep seven run states; derive `provisioning`, `executing`, `settling`, or `terminal` from durable evidence. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 173 | Table-first management | Activate first / durable preflight | ACA status, result, events, and pre-launch cancel read Tables before activation through the existing four-method seam. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 174 | Pre-launch cancel fence | Journal-only cancel / cancel EGT | Cancel and journal claim race on the operation ETag; only a narrow canceled-plus-active-slot rearm transient is legal. | Human + Agent | 2026-08-14 | Setup-timeout amendment |
+| 175 | Rubber-duck review | Leave blockers / revise design | Resolve the four durable-transition, validator, seam, and ambiguous-commit blockers in the approved revision. | Agent reviewer | 2026-08-14 | Setup-timeout amendment |
+| 176 | Architecture sign-off | In review / finalized design | Human approved the amendment on 2026-08-14. This change includes its implementation and deterministic tests; opt-in deployed and Azurite evidence remains separately gated. | Human | 2026-08-14 | Setup-timeout amendment |
+| 177 | Ambiguous absence proof | Elapsed 404 / positive durable evidence | A deadline plus 404 cannot fence a late Table commit. Keep admission uncertain until matching rows appear or exact replay resolves it; independent fresh-session admission remains available. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 178 | Pre-launch cancel scope | New-session only / both submit paths | Fence both `provision_submit` and `submit_run` before launch. After launch claim, wait for a live journal and return retryable `202` while cancellation is unresolved. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 179 | Stale submit fence | Propagate / durable re-read | If cancel, takeover, or another launch claimant wins, re-read the durable run and return its linked projection; never leak the losing fence as a 500 or launch twice. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
+| 180 | Terminal provision replay | Take over / return terminal | Exact replay of a terminal reserved run returns its durable outcome before operation takeover; canceled pre-pointer work never requires a sandbox pointer. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -428,6 +440,216 @@ and folds in the mirror job to hold the 2-min-p95 SLO. It is not a second timer.
 The trade-offs accepted by Decisions #86 and #87 are that session state shares the host's `AzureWebJobsStorage` lifetime and throughput budget. ETag/CAS and live manifest cross-verification provide the durable routing controls. The controller managed identity is the sole Table writer. A Sandbox Group identity is separate; runtime attaches or forwards no identity or credentials. It must be dedicated and least-privileged, may receive explicitly required workload permissions including authenticated MCP access, and has no controller, Sandbox Group management, or state-store rights. The U3 qualification grants that identity model inference only, with no MCP or state-store permissions. The deeper state-row integrity story remains the authoritative row, monotonic generation, and live manifest cross-check.
 
 *Label-safe encoding note.* Decisions #89–91's worked examples and prose that show a 64-character lower-case hex payload for `a1-`/`o1-`/`s1-` tokens (e.g. `o1:a1-<64hex>:function_app:o1-<64hex>`, `state_store_fingerprint` as `s1-<sha256>`) are **superseded by Decisions #106/#113/#114**: every such token uses the SAME canonical `<version>-<52 lower-case base32 characters>` shape (55 characters total) everywhere — Table partition keys, future manifests, paths, and ACA labels alike. The underlying SHA-256 digest bytes, the `frame_canonical_components` framing, the `a1`/`o1` version discriminators, and the canonicalizer-registry/no-eager-migration behavior are unchanged; only the digest's string encoding moved from hex to base32, because ACA rejects labels over 63 characters and a hex `a1-`/`o1-` token (67 characters) cannot satisfy that limit. Read every `<64hex>`-shaped example elsewhere in this FRD as illustrative superseded text, not the current wire format.
+
+### 5.1 Controlling amendment — setup-timeout LRO recovery
+
+**Authority and implementation status.** This approved 2026-08-14 amendment
+controls over earlier statements that a setup timeout necessarily occurs before a
+durable run exists or can return only an unlinked `504`. It is a finalized design
+contract implemented by this change; opt-in deployed and Azurite validation
+remains separately gated.
+
+#### Defect and evidence
+
+A new-session request can commit the owner idempotency record, `creating`
+session, `accepted` run, and active `provision_submit` operation in one
+same-partition EGT, then exhaust the setup budget in provider create,
+lifecycle, content, manifest, or journal preparation. The current
+context-free setup-timeout response drops those durable IDs. The management
+path can also require `activate_session()` before reading durable state, turning
+an otherwise readable pre-launch run into a plain Functions `500`.
+
+Observed caller behavior confirms the boundary: a distinct key is serialized but
+gets an unhelpful `409`; a claimed key with a changed payload remains `422`; and
+exact replay can recover IDs only when the caller retained the original key and
+byte-equivalent request. The reservation ordering is already the crash-safe
+part; losing its recovery handle is the defect.
+
+#### Goals and non-goals
+
+The amendment must distinguish durable-admission outcomes, return a management
+handle whenever an admission is committed or possibly committed, make
+pre-launch management Table-readable, allow pre-launch cancellation, retain
+one-active-run/idempotency/fencing/quarantine guarantees, and make linked
+conflicts explain whether the run is provisioning or executing. It must prove
+the contract with deterministic, Azurite, and one-shot real-caller evidence.
+
+It does not persist prompts or request envelopes, add automatic retry, queueing,
+supersede, silent sync-to-async conversion, a fifth backend method, or a fourth
+operation kind. It does not depend on fixing the timer's separate
+application-level deadline, change `/history`, or alter the opt-in/fail-closed
+ACA gate. The separate history work overlaps `registration/endpoints.py`;
+implementation owners must coordinate that file with the human.
+
+#### Durable admission and simple recovery flow
+
+The new-session commit point is `begin_provision_submit()`'s EGT; the
+existing-session equivalent is its successful admission EGT. No provider create
+or journal launch may start before that reservation is confirmed. A typed,
+provider-neutral `DurableAdmissionSetupTimeoutError` carries the minted
+`RunHandle` and one of these outcomes:
+
+| Outcome | Response and controller behavior | Caller recovery |
+| --- | --- | --- |
+| `not_reserved` | `504 setup_deadline_exceeded`, `admission=not_reserved`, and no IDs. The transaction definitively failed or was never issued. | A new POST is immediately safe; reusing the exact key is safe because no claim exists. |
+| `committed` | Async returns the normal `202 Accepted` LRO ticket. Sync remains `504 setup_deadline_exceeded`, but includes the identical handle, `Location`, `Retry-After: 2`, `x-ms-session-id`, and `x-ms-retry-with: respond-async`. | Poll, read result/events, or cancel using the returned URLs; no prompt replay is required. |
+| `possibly_committed` | `504 admission_outcome_unknown` with candidate IDs and URLs, `admission=possibly_committed`, and no provider work by the controller that observed ambiguity. | Poll the candidate status URL or exact-replay the request until confirmation resolves. |
+
+Every returned handle includes `session_id`, `run_id`, and canonical
+status/result/events/cancel URLs. A `200` status confirms the reservation. A
+`404` does not prove absence at any wall-clock deadline because the timed-out
+Table request may already have reached the service and commit later. The caller
+may exact-replay the same key and request safely until the outcome resolves. If
+that request is no longer available, the caller may create an independent new
+session with a fresh key and no session header, but must not reinterpret the
+uncertain key or assume the candidate was disproved. This confirm-by-point-read
+result is a first-class `ProvisionSubmitOutcome`, not a generic mapped storage
+error.
+
+#### Idempotency key and request hash
+
+The idempotency key identifies the caller's logical attempt; the canonical
+request hash prevents that claimed attempt from changing meaning. Store only
+their hashes. The canonical request contains agent slug, exact prompt, and exact
+timeout; `Prefer: respond-async` is excluded because it changes response
+projection, not execution. Authorization remains independent and is recomputed
+on every management route.
+
+Thus the durable pair is `(idempotency-key hash, canonical-request hash)`: same
+key and hash replays the original run; the same key with a different hash is
+`422`; a different key with an equal prompt is a distinct request subject to the
+active-slot rule; and no key provides no cross-request replay guarantee. During
+`possibly_committed`, only exact replay is safe. This preserves privacy while
+letting a caller recover without retaining the prompt after a handle is returned.
+
+#### Table-first management and public phase
+
+The seven durable run states remain unchanged. `accepted` remains durable through
+the journal-claim boundary; there is intentionally no durable Table
+`accepted -> running` transition. The public projection adds only these derived
+phases:
+
+| Durable evidence | Public status | Public phase |
+| --- | --- | --- |
+| Accepted run with active `provision_submit` or `submit_run` before its launching phase | `accepted` | `provisioning` |
+| Accepted run at `provision_launching` or `submit_launching`, or live journal running | `accepted` or `running` | `executing` |
+| Terminal run with active cleanup/rearm operation or retained active slot | Existing terminal status | `settling` |
+| Terminal run with neither active operation nor slot | Existing terminal status | `terminal` |
+
+This is an explicit contract change to the ACA implementations of `get_run`,
+`read_events`, and `cancel_run`, not a controller catch around activation.
+`get_run` first validates the owner-scoped run, session, and matching operation
+from Tables, returning the durable provisioning or launch-boundary projection
+before activation. `read_result` returns that nonterminal projection as `200`,
+not `410`. `read_events` preflights Tables, emits ordinary heartbeats without
+fabricated events while provisioning, re-reads at no more than the existing
+1 Hz journal cadence, and attaches only after launch; its terminal `get_run()`
+remains after the `async for` rather than in `finally`.
+
+`cancel_run` likewise preflights Tables. Controller management projections must
+contain any typed setup or activation timeout that still escapes the backend and
+return a retryable response with durable IDs rather than a Functions `500`.
+
+#### Pre-launch cancel, operation race, and retained-slot transient
+
+For an accepted run with a matching `provision_submit` or `submit_run` before
+its launching phase, a dedicated cancel EGT terminalizes the run as `canceled`,
+retains its active slot while cleanup is incomplete, rotates the operation token,
+and advances the operation to the matching `provision_rearm` or `submit_rearm`.
+It preserves any assigned sandbox pointer and lifecycle metadata. A specialized
+validator—not the generic completion validator—permits only this transient:
+
+```text
+run.status == canceled
+and session.active_run_id == run.run_id
+and active submit operation is in its matching rearm phase
+```
+
+`claim_operation_journal()` and this cancel EGT race on the same operation ETag.
+If cancel wins, journal claim fails and no prompt can launch. If claim wins, it
+moves the operation to its launching phase, reports `executing`, and waits for
+the journal before using the existing verified process cancellation path; it
+still verifies that the run is `accepted` and does not persist `running`. If
+the journal is not available within setup headroom, cancel remains nonterminal
+and HTTP returns retryable `202`, never success-shaped `200`. A natural terminal
+result continues to win over cancellation. Continuation and reconciliation may
+finish only safe lifecycle rearm for a canceled run, never submit its envelope.
+Any controller that loses its provision or journal fence re-reads the durable
+run and returns that linked projection. A concurrent exact replay can therefore
+observe the original accepted run without taking the launch fence or leaking a
+stale-token `500`. Exact replay also returns a terminal reserved run before
+attempting operation takeover, so an expired canceled pre-pointer provision
+never re-enters a path that requires a sandbox pointer.
+
+While this narrow canceled-plus-active-slot state remains, the run is
+`settling`, and same-session admission stays linked `409`; after the fenced
+rearm EGT clears both operation and slot, its phase is `terminal` and admission
+can proceed. A new independent session remains separate from that session slot.
+
+#### Preserved invariants
+
+The amendment leaves these controls unchanged:
+
+- Deduplicate before active-run admission; a claimed key with a changed
+  agent/prompt/timeout remains `422`, while a distinct key during an active slot
+  remains a linked `409`.
+- Owner/key claim, session, accepted run, active slot, and submit operation stay
+  in one owner-partition EGT; provider labels still recover ambiguous provider
+  create without duplicate work.
+- Operation phases remain forward-only; takeover requires expiry plus a fresh
+  token and ETag; generation never rolls back; only the controller writes state.
+- Raw prompts, credentials, owner claims, and keys are not persisted. No concrete
+  ACA type crosses the backend seam.
+- On corruption or mismatch, ordering remains terminalize/adopt the run, then
+  quarantine the session, then emit the security event. Cancellation cannot
+  quarantine a session while an active run slot is held.
+
+#### Required validation and documentation impact
+
+Implementation must add deterministic controller/backend coverage for all three
+admission outcomes, every provision-phase timeout, response projections,
+Table-first status/result/events/cancel, derived phases, linked conflicts,
+idempotency mutation, SSE heartbeat/disconnect behavior, and typed management
+fallbacks. Azurite coverage must exercise confirmation-by-read, stale
+token/ETag rejection, cancel-vs-journal-claim, cancel-vs-takeover, rearm-vs-new
+admission, ambiguous provider create, and quarantine ordering.
+
+Real caller evidence reuses `tests/live/aca_smoke_support.py` and existing
+leak-safe provisioning. The critical test sends one new-session POST, forces or
+encounters setup delay, does not replay it, discards the prompt and idempotency
+key, and verifies that the first response alone supplies all IDs and URLs.
+Using only those URLs, it observes provisioning, opens events, cancels, and
+observes terminal settlement. Run it before and after sandbox-pointer
+persistence; separately prove a different key receives linked provisioning
+`409`, and retain one exact-replay test for the existing replay guarantee.
+
+The implementation documentation update must cover the durable admission
+context, Table-first management, and cancel-vs-launch boundary in
+`docs/architecture.md`; client/operator polling, phases, conflict, and cancel
+guidance in `docs/aca-sandbox-session-runtime.md`; and returned-handle examples
+in `README.md`. No schema or front-matter reference update is expected.
+
+#### Independent rubber-duck architecture review and sign-off
+
+The independent rubber-duck review initially found four blockers: an implied
+durable Table running transition (the approved design has none); reuse of a
+generic completion validator that rejects terminal-plus-active-slot state;
+Table-first changes to existing seam methods without sufficient explicitness;
+and an ambiguous transaction acknowledgement without a store outcome. The
+approved revision resolves them with the derived phase model, specialized cancel
+validator, explicit four-method seam changes, and
+`possibly_committed` plus bounded confirmation.
+
+The human approved this controlling design on **2026-08-14**: “The plan looks
+good, can you implement it.” That is architecture sign-off only; the required
+implementation, tests, and follow-on documentation remain pending.
+
+A post-implementation correctness review found that the approved
+`admission_confirmation_deadline` claim lacked a remote ordering barrier:
+canceling the local SDK task and observing a later `404` cannot prove that
+already-emitted transaction bytes will never commit. Decision 177 removes that
+false guarantee while preserving the candidate handle, exact-replay safety, and
+independent fresh-session recovery.
 
 ## 6. Validation, documentation, and rollout
 
@@ -451,12 +673,13 @@ must describe the same supported-host/configuration validation behavior.
 
 ## 7. Status & sign-off
 
-**Status: Finalized (U3 load acceptance pending).** The current feature contract is an authenticated
+**Status: Finalized (formal N=100 load acceptance pending).** The current feature contract is an authenticated
 Functions controller, one ACA Sandbox per session, a digest-verified captured
 content package, direct file/process journal transport, and deny-by-default
 egress. The public runtime surface includes synchronous chat, explicit async
 run management, replayable events, idempotency, one active run per session,
-and controller-managed lifecycle repair.
+controller-managed lifecycle repair, and the durable setup-timeout recovery
+contract in §5.1.
 
 v1 durability is best effort through same-sandbox ACA disk auto-suspend/resume:
 normal suspension resumes the same sandbox/generation and does not imply an
@@ -475,7 +698,10 @@ the recorded real adapter, model, deployed Easy Auth, and lifecycle evidence.
 The N=5 public load diagnostic validates orchestration and cleanup only; it does
 not close Decision #29. N=100 remains human-only formal acceptance, pending
 human-supplied evidence. The Decisions log records the sign-off, amendments,
-and historical provenance for these controlling contracts.
+and historical provenance for these controlling contracts. The setup-timeout
+implementation includes deterministic regression/race coverage and a one-shot
+deployed-host asset; opt-in deployed and Azurite execution remains separately
+gated.
 
 ## 8. SDK-verified ACA platform contract
 

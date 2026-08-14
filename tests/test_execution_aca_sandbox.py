@@ -45,7 +45,9 @@ from azure_functions_agents.execution.aca_sandbox import (
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     AgentExecutionBackend,
+    DurableAdmissionSetupTimeoutError,
     EventCursorExpiredError,
+    LinkedActiveRunConflictError,
     RunContext,
     RunError,
     StartRunRequest,
@@ -58,6 +60,7 @@ from azure_functions_agents.execution.run_control import (
 )
 from azure_functions_agents.execution.setup_budget import (
     SetupBudget,
+    SetupBudgetExpiredError,
     SetupPhase,
     SetupTimeoutExceptionType,
     SetupTimeoutMetadata,
@@ -84,9 +87,11 @@ from azure_functions_agents.session_state import (
     IdempotencyConflictError,
     OwnerPartition,
     ProvisionSubmitOutcome,
+    ProvisionSubmitRecords,
     SessionOperationFence,
     SessionOperationTarget,
     SessionRead,
+    StaleOperationTokenError,
     operation_correlation_label,
     owner_partition,
 )
@@ -193,6 +198,66 @@ def _run(session: DurableSessionRecord, *, state: str = "accepted") -> DurableRu
         created_at=now,
         updated_at=now,
     )
+
+
+def _prelaunch_provisioning_records(
+    script_root: Path,
+    *,
+    run_state: str = "accepted",
+    phase: str = "provision_create",
+    sandbox_id: str | None = None,
+) -> tuple[DurableSessionRecord, DurableRunRecord, DurableSessionOperation]:
+    base = _session(script_root)
+    run = _run(base, state=run_state)
+    operation = DurableSessionOperation.create(
+        owner_partition=base.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=base.session_id,
+            sandbox_id=sandbox_id,
+            generation=base.generation,
+            digest_kind=base.digest_kind,
+            digest=base.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="provision_submit",
+        phase=phase,  # type: ignore[arg-type]
+        state="active",
+        correlation_label=operation_correlation_label(base.session_id, 1),
+        token="f" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=run.created_at + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=run.created_at,
+        updated_at=run.updated_at,
+        finished_at=None,
+        agent_slug=_owner().agent_slug,
+    )
+    session = DurableSessionRecord.create(
+        owner_partition=base.owner_partition,
+        session_id=base.session_id,
+        sandbox_id=sandbox_id,
+        generation=base.generation,
+        digest_kind=base.digest_kind,
+        digest=base.digest,
+        protocol=base.protocol,
+        status="creating",
+        last_activity_at=base.last_activity_at,
+        expires_at=base.expires_at,
+        idle_policy_armed=False,
+        active_run_id=run.run_id,
+        snapshot_ids=base.snapshot_ids,
+        region=base.region,
+        state_store_fingerprint=base.state_store_fingerprint,
+        quarantine_reason=None,
+        tombstone_reason=None,
+        created_at=base.created_at,
+        updated_at=run.updated_at,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    return session, run, operation
 
 
 def _runtime(
@@ -325,13 +390,25 @@ class _StallingAdmissionStore(FakeSessionStateStore):
 class _StallingRevalidationStore(FakeSessionStateStore):
     def __init__(self, session: DurableSessionRecord) -> None:
         super().__init__(session)
-        self._session_reads = 0
+        self._admitted = False
+        self._post_admission_reads = 0
         self.revalidation_started = asyncio.Event()
         self.release_revalidation = asyncio.Event()
 
+    async def admit_operation_run(
+        self,
+        *,
+        fence: SessionOperationFence,
+        records: AdmissionRecords,
+    ) -> AdmissionOutcome:
+        outcome = await super().admit_operation_run(fence=fence, records=records)
+        self._admitted = True
+        return outcome
+
     async def get_session(self, partition: OwnerPartition, session_id: str) -> SessionRead:
-        self._session_reads += 1
-        if self._session_reads == 2:
+        if self._admitted:
+            self._post_admission_reads += 1
+        if self._post_admission_reads == 2:
             self.revalidation_started.set()
             await self.release_revalidation.wait()
         return await super().get_session(partition, session_id)
@@ -536,7 +613,7 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
         owner=_owner(),
     )
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="retryable"))
 
     _expire_provision_lease(store, next(iter(store.durable_operations.values())))
@@ -593,12 +670,12 @@ async def test_indeterminate_provision_waits_for_stable_label_reconciliation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="ambiguous-create")
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
     [operation] = store.durable_operations.values()
     _expire_provision_lease(store, operation)
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
     assert len(provider.create_calls) == 1
@@ -742,8 +819,8 @@ async def test_journal_acceptance_timeout_remains_a_typed_resumable_setup_timeou
         budget=RequestBudget.start(authored_timeout=None),
     )
 
-    assert response.status_code == 504
-    assert response.headers["Retry-After"] == "120"
+    assert response.status_code == 202
+    assert response.headers["Retry-After"] == "2"
     assert response.timeout_metadata is not None
     assert response.timeout_metadata.phase == SetupPhase.JOURNAL
     assert response.timeout_metadata.reason == SetupTimeoutReason.OPERATION_TIMEOUT
@@ -823,12 +900,17 @@ async def test_concurrent_retry_cannot_take_an_unexpired_journal_launch(
     )
     await asyncio.wait_for(launch_written.wait(), timeout=1.0)
 
-    with pytest.raises(ActiveRunConflictError):
-        await second_backend._resume_journal_submission(run, request, SetupBudget.start())
+    replay = await second_backend._resume_journal_submission(
+        run,
+        request,
+        SetupBudget.start(),
+    )
 
     release_launch.set()
     result = await first
 
+    assert replay.run_id == run.run_id
+    assert replay.state == "accepted"
     assert result.run_id == run.run_id
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
 
@@ -865,7 +947,7 @@ async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="content-retry")
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
     assert store.session is not None
@@ -960,7 +1042,7 @@ async def test_missing_provision_artifact_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="missing-artifact-retry")
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
     assert store.session is not None
@@ -1064,7 +1146,7 @@ async def test_provision_lifecycle_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="lifecycle-retry")
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
     operation = next(iter(store.durable_operations.values()))
@@ -1125,16 +1207,125 @@ async def test_provision_manifest_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="manifest-retry")
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
         await backend.start_run(request)
 
+    assert excinfo.value.outcome == "committed"
+    assert store.session is not None
+    assert excinfo.value.handle.session_id == store.session.session_id
+    assert excinfo.value.handle.run_id == next(iter(store.runs))
     operation = next(iter(store.durable_operations.values()))
     assert operation.phase == "provision_manifest"
+    assert store.session.sandbox_id == "sandbox-1"
 
     _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
     assert recovered.state == "accepted"
+
+
+@pytest.mark.asyncio
+async def test_new_session_timeout_before_sandbox_pointer_returns_committed_handle(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = FakeSandboxSessionProvider(handle)
+    provider.create_errors.append(SessionActivationSetupTimeoutError("create timed out"))
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="first-call"))
+
+    assert store.session is not None
+    assert excinfo.value.outcome == "committed"
+    assert excinfo.value.handle.session_id == store.session.session_id
+    assert excinfo.value.handle.run_id == store.session.active_run_id
+    assert store.session.sandbox_id is None
+    assert len(provider.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_new_session_budget_expiry_immediately_after_reservation_keeps_handle(
+    tmp_path: Path,
+) -> None:
+    clock = [0.0]
+
+    class ExpireAfterReservationStore(FakeSessionStateStore):
+        async def begin_provision_submit(
+            self,
+            records: ProvisionSubmitRecords,
+        ) -> ProvisionSubmitOutcome:
+            outcome = await super().begin_provision_submit(records)
+            clock[0] = 2.0
+            return outcome
+
+    script_root = _script_root(tmp_path)
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle("sandbox-1"))
+    store = ExpireAfterReservationStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        setup_budget=SetupBudget.create(deadline=1.0, clock=lambda: clock[0]),
+    )
+
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="first-call"))
+
+    assert store.session is not None
+    assert excinfo.value.outcome == "committed"
+    assert excinfo.value.handle.session_id == store.session.session_id
+    assert excinfo.value.handle.run_id == store.session.active_run_id
+    assert provider.create_calls == []
+
+
+@pytest.mark.asyncio
+async def test_ambiguous_new_reservation_returns_candidate_without_provider_create(
+    tmp_path: Path,
+) -> None:
+    class AmbiguousReservationStore(FakeSessionStateStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.candidate: ProvisionSubmitRecords | None = None
+
+        async def begin_provision_submit(
+            self,
+            records: ProvisionSubmitRecords,
+        ) -> ProvisionSubmitOutcome:
+            self.candidate = records
+            return ProvisionSubmitOutcome(
+                run=records.run,
+                run_etag=None,
+                session_etag=None,
+                fence=None,
+                replayed=False,
+                admission="possibly_committed",
+            )
+
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = FakeSandboxSessionProvider(handle)
+    store = AmbiguousReservationStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="first-call"))
+
+    assert store.candidate is not None
+    assert excinfo.value.outcome == "possibly_committed"
+    assert excinfo.value.handle.session_id == store.candidate.session.session_id
+    assert excinfo.value.handle.run_id == store.candidate.run.run_id
+    assert provider.create_calls == []
 
 
 @pytest.mark.asyncio
@@ -1283,6 +1474,55 @@ async def test_active_conflict_reconciles_once_before_returning_or_admitting(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_phase", "sandbox_id", "expected_phase"),
+    [
+        ("provision_create", None, "provisioning"),
+        ("provision_lifecycle", "sandbox-1", "provisioning"),
+        ("provision_content", "sandbox-1", "provisioning"),
+        ("provision_manifest", "sandbox-1", "provisioning"),
+        ("provision_journal", "sandbox-1", "provisioning"),
+        ("provision_launching", "sandbox-1", "executing"),
+    ],
+)
+async def test_existing_session_active_conflict_returns_linked_durable_phase(
+    tmp_path: Path,
+    operation_phase: str,
+    sandbox_id: str | None,
+    expected_phase: str,
+) -> None:
+    session, active_run, operation = _prelaunch_provisioning_records(
+        _script_root(tmp_path),
+        phase=operation_phase,
+        sandbox_id=sandbox_id,
+    )
+    session = replace(session, status="running")
+    store = FakeSessionStateStore(session)
+    store.runs[active_run.run_id] = active_run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle("sandbox-1"))
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(_script_root(tmp_path), provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(LinkedActiveRunConflictError) as excinfo:
+        await backend.start_run(
+            StartRunRequest(
+                prompt="next",
+                session_id=session.session_id,
+                idempotency_key="different-key",
+            )
+        )
+
+    assert excinfo.value.session_id == session.session_id
+    assert excinfo.value.run_id == active_run.run_id
+    assert excinfo.value.status == "accepted"
+    assert excinfo.value.phase == expected_phase
+
+
+@pytest.mark.asyncio
 async def test_nonterminal_status_poll_uses_targeted_reconciliation(
     tmp_path: Path,
 ) -> None:
@@ -1318,6 +1558,459 @@ async def test_nonterminal_status_poll_uses_targeted_reconciliation(
 
     assert status.state == "running"
     assert calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_phase", "sandbox_id"),
+    [
+        ("provision_create", None),
+        ("provision_lifecycle", "sandbox-1"),
+        ("provision_content", "sandbox-1"),
+        ("provision_manifest", "sandbox-1"),
+        ("provision_journal", "sandbox-1"),
+    ],
+)
+async def test_each_prelaunch_phase_returns_the_table_provisioning_projection(
+    tmp_path: Path,
+    operation_phase: str,
+    sandbox_id: str | None,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase=operation_phase,
+        sandbox_id=sandbox_id,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    context = RunContext(run_id=run.run_id, session_id=session.session_id)
+
+    status = await backend.get_run(context)
+    status_response = await read_status(backend, context)
+    result_response = await read_result(backend, context)
+
+    expected = {
+        "session_id": session.session_id,
+        "run_id": run.run_id,
+        "status": "accepted",
+        "state": "accepted",
+        "phase": "provisioning",
+        "last_event_id": 0,
+        "result_available": False,
+    }
+    assert status.state == "accepted"
+    assert status.phase == "provisioning"
+    assert status_response.status_code == 200
+    assert status_response.body == expected
+    assert result_response.status_code == 200
+    assert result_response.body == expected
+    assert provider.attach_calls == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_phase", "sandbox_id"),
+    [
+        ("provision_create", None),
+        ("provision_lifecycle", "sandbox-1"),
+        ("provision_content", "sandbox-1"),
+        ("provision_manifest", "sandbox-1"),
+        ("provision_journal", "sandbox-1"),
+    ],
+)
+async def test_each_prelaunch_phase_streams_heartbeats_without_activation(
+    tmp_path: Path,
+    operation_phase: str,
+    sandbox_id: str | None,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase=operation_phase,
+        sandbox_id=sandbox_id,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    frames = [
+        frame
+        async for frame in render_events(
+            backend,
+            RunContext(run_id=run.run_id, session_id=session.session_id),
+            after_sequence=0,
+            heartbeat_seconds=0.001,
+            lease_seconds=0.01,
+        )
+    ]
+
+    assert frames
+    assert set(frames) == {": heartbeat\n\n"}
+    assert provider.attach_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_prelaunch_events_attach_only_after_the_table_claims_launch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ProgressingStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.preflighted = asyncio.Event()
+
+        async def get_operation(
+            self,
+            partition: OwnerPartition,
+            session_id: str,
+            operation_id: str,
+        ):
+            operation = await super().get_operation(partition, session_id, operation_id)
+            if operation.record.phase == "provision_create":
+                self.preflighted.set()
+            return operation
+
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        sandbox_id="sandbox-1",
+    )
+    store = ProgressingStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    handle = FakeSandboxSessionHandle()
+    handle.seed_file(
+        status_path(run.run_id),
+        _status(state="accepted", run_id=run.run_id, session_id=session.session_id),
+    )
+    handle.seed_file(
+        f"{run_path(run.run_id)}/events.jsonl",
+        json.dumps(
+            {
+                "sequence": 1,
+                "type": "delta",
+                "data": {"content": "ready"},
+                "timestamp": "2026-08-14T00:00:00+00:00",
+            }
+        ).encode("utf-8")
+        + b"\n",
+    )
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.aca_sandbox._TABLE_PROGRESS_POLL_SECONDS",
+        0.001,
+    )
+    context = RunContext(run_id=run.run_id, session_id=session.session_id)
+    stream = backend.read_events(context, after_sequence=0)
+    pending = asyncio.create_task(anext(stream))
+
+    await asyncio.wait_for(store.preflighted.wait(), timeout=1.0)
+    assert provider.attach_calls == 0
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        phase="provision_launching",
+    )
+
+    event = await asyncio.wait_for(pending, timeout=1.0)
+    await stream.aclose()
+
+    assert event.sequence == 1
+    assert event.data == {"content": "ready"}
+    assert provider.attach_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("operation_phase", "sandbox_id"),
+    [
+        ("provision_create", None),
+        ("provision_lifecycle", "sandbox-1"),
+        ("provision_content", "sandbox-1"),
+        ("provision_manifest", "sandbox-1"),
+        ("provision_journal", "sandbox-1"),
+    ],
+)
+async def test_each_prelaunch_phase_cancel_returns_settling_without_activation(
+    tmp_path: Path,
+    operation_phase: str,
+    sandbox_id: str | None,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase=operation_phase,
+        sandbox_id=sandbox_id,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    context = RunContext(run_id=run.run_id, session_id=session.session_id)
+
+    status = await backend.cancel_run(context)
+    events = [event async for event in backend.read_events(context, after_sequence=0)]
+
+    assert status.state == "canceled"
+    assert status.phase == "settling"
+    assert store.runs[run.run_id].status == "canceled"
+    assert store.runs[run.run_id].status_reason == "canceled_before_launch"
+    assert store.durable_operations[operation.operation_id].phase == "provision_rearm"
+    assert store.durable_operations[operation.operation_id].token != operation.token
+    assert store.session is not None
+    assert store.session.active_run_id == run.run_id
+    assert events == []
+    assert provider.attach_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_launch_claimed_prelaunch_cancel_falls_through_to_live_journal(
+    tmp_path: Path,
+) -> None:
+    class TrackingStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.cancel_calls = 0
+
+        async def cancel_prelaunch_submit(self, **kwargs):
+            self.cancel_calls += 1
+            return await super().cancel_prelaunch_submit(**kwargs)
+
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase="provision_launching",
+        sandbox_id="sandbox-1",
+    )
+    store = TrackingStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    handle = FakeSandboxSessionHandle()
+    handle.seed_file(
+        status_path(run.run_id),
+        _status(state="running", run_id=run.run_id, session_id=session.session_id),
+    )
+    handle.seed_file(process_path(run.run_id), b'{"process_group_id":42}')
+
+    async def journal_canceled(_command: str) -> None:
+        handle.seed_file(
+            status_path(run.run_id),
+            _status(state="canceled", run_id=run.run_id, session_id=session.session_id),
+        )
+
+    handle.exec_hook = journal_canceled
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    status = await backend.cancel_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+    assert status.state == "canceled"
+    assert store.cancel_calls == 1
+    assert provider.attach_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_launch_claimed_cancel_waits_for_journal_before_returning(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase="provision_launching",
+        sandbox_id="sandbox-1",
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    handle = FakeSandboxSessionHandle()
+
+    async def journal_canceled(_command: str) -> None:
+        handle.seed_file(
+            status_path(run.run_id),
+            _status(state="canceled", run_id=run.run_id, session_id=session.session_id),
+        )
+
+    handle.exec_hook = journal_canceled
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    pending = asyncio.create_task(
+        backend.cancel_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+    )
+    await asyncio.sleep(0.05)
+
+    assert not pending.done()
+    handle.seed_file(
+        status_path(run.run_id),
+        _status(state="running", run_id=run.run_id, session_id=session.session_id),
+    )
+    handle.seed_file(process_path(run.run_id), b'{"process_group_id":42}')
+
+    status = await asyncio.wait_for(pending, timeout=1.0)
+
+    assert status.state == "canceled"
+    assert provider.attach_calls >= 1
+
+
+@pytest.mark.asyncio
+async def test_management_setup_timeout_after_a_durable_read_is_linked_not_500(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase="provision_launching",
+        sandbox_id="sandbox-1",
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.attach_delay = 0.05
+    original_start = SetupBudget.start
+    monkeypatch.setattr(
+        "azure_functions_agents.execution.aca_sandbox.SetupBudget.start",
+        lambda: original_start(setup_seconds=0.001),
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    context = RunContext(run_id=run.run_id, session_id=session.session_id)
+
+    status = await backend.get_run(context)
+    response = await cancel_controller_run(backend, context)
+
+    assert status.state == "accepted"
+    assert status.phase == "executing"
+    assert response.status_code == 202
+    assert response.body == {
+        "session_id": session.session_id,
+        "run_id": run.run_id,
+        "status": "accepted",
+        "state": "accepted",
+        "phase": "executing",
+        "last_event_id": 0,
+        "result_available": False,
+    }
+    assert response.headers == {"Retry-After": "2"}
+
+
+@pytest.mark.asyncio
+async def test_launch_boundary_returns_durable_phase_when_journal_status_is_unavailable(
+    tmp_path: Path,
+) -> None:
+    class UnavailableStatusHandle(FakeSandboxSessionHandle):
+        async def read_file(self, path: str) -> bytes:
+            if path == status_path("run-1"):
+                raise SandboxFileOperationError("journal status unavailable")
+            return await super().read_file(path)
+
+    script_root = _script_root(tmp_path)
+    session, run, operation = _prelaunch_provisioning_records(
+        script_root,
+        phase="provision_launching",
+        sandbox_id="sandbox-1",
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(UnavailableStatusHandle())
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    status = await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+    assert status.state == "accepted"
+    assert status.phase == "executing"
+    assert provider.attach_calls == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("retain_slot", "expected_phase"),
+    [(True, "settling"), (False, "terminal")],
+)
+async def test_terminal_run_phase_waits_for_both_slot_and_operation_to_clear(
+    retain_slot: bool,
+    expected_phase: str,
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session, accepted, operation = _prelaunch_provisioning_records(
+        script_root,
+        run_state="canceled",
+        phase="provision_rearm",
+    )
+    terminal = replace(
+        accepted,
+        status="canceled",
+        status_reason="sandbox_canceled",
+    )
+    if not retain_slot:
+        session = replace(
+            session,
+            status="ready",
+            idle_policy_armed=True,
+            active_run_id=None,
+            active_operation_id=None,
+        )
+    store = FakeSessionStateStore(session)
+    store.runs[terminal.run_id] = terminal
+    if retain_slot:
+        store.durable_operations[operation.operation_id] = operation
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    response = await read_status(
+        backend,
+        RunContext(run_id=terminal.run_id, session_id=terminal.session_id),
+    )
+
+    assert response.status_code == 200
+    assert isinstance(response.body, dict)
+    assert response.body["status"] == "canceled"
+    assert response.body.get("phase") == expected_phase
+    assert provider.attach_calls == 0
 
 
 @pytest.mark.asyncio
@@ -1372,7 +2065,7 @@ async def test_backend_retains_admitted_slot_when_acceptance_times_out(
         run_control=SandboxRunControl(event_poll_interval_seconds=0.001),
     )
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
 
     operations = [call.operation for call in handle.calls]
@@ -1558,10 +2251,76 @@ async def test_backend_setup_deadline_bounds_run_admission(
     )
     await asyncio.wait_for(store.admission_started.wait(), timeout=1.0)
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
         await asyncio.wait_for(start, timeout=1.0)
 
+    assert excinfo.value.outcome == "possibly_committed"
     assert [call for call in handle.calls if call.operation == "exec"] == []
+
+
+@pytest.mark.asyncio
+async def test_existing_admission_timeout_after_commit_keeps_linked_run(
+    tmp_path: Path,
+) -> None:
+    class CommitThenStallStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.committed = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def admit_operation_run(
+            self,
+            *,
+            fence: SessionOperationFence,
+            records: AdmissionRecords,
+        ) -> AdmissionOutcome:
+            outcome = await super().admit_operation_run(fence=fence, records=records)
+            self.committed.set()
+            await self.release.wait()
+            return outcome
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = CommitThenStallStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        setup_budget=SetupBudget.start(setup_seconds=0.1),
+    )
+
+    start = asyncio.create_task(
+        backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
+    )
+    await asyncio.wait_for(store.committed.wait(), timeout=1.0)
+
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
+        await asyncio.wait_for(start, timeout=1.0)
+
+    assert store.session is not None
+    assert excinfo.value.outcome == "committed"
+    assert excinfo.value.handle.run_id == store.session.active_run_id
+    assert excinfo.value.handle.run_id in store.runs
+    assert store.session.active_operation_id is not None
+    assert "abort_operation" not in store.operations
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+    attach_calls_before_cancel = provider.attach_calls
+
+    status = await backend.cancel_run(
+        RunContext(
+            run_id=excinfo.value.handle.run_id,
+            session_id=excinfo.value.handle.session_id,
+        )
+    )
+
+    assert status.state == "canceled"
+    assert status.phase == "settling"
+    operation = store.durable_operations[store.session.active_operation_id]
+    assert operation.kind == "submit_run"
+    assert operation.phase == "submit_rearm"
+    assert provider.attach_calls == attach_calls_before_cancel
 
 
 @pytest.mark.asyncio
@@ -1590,9 +2349,11 @@ async def test_backend_setup_deadline_bounds_submission_revalidation(
     )
     await asyncio.wait_for(store.revalidation_started.wait(), timeout=1.0)
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError) as excinfo:
         await asyncio.wait_for(start, timeout=1.0)
 
+    assert excinfo.value.outcome == "committed"
+    assert excinfo.value.handle.run_id in store.runs
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
 
@@ -1651,7 +2412,7 @@ async def test_controller_setup_deadline_bounds_hanging_journal_claim_and_retry_
     )
 
     assert response.status_code == 504
-    assert response.headers["Retry-After"] == "120"
+    assert response.headers["Retry-After"] == "2"
     assert store.claim_started.is_set()
     assert store.session is not None
     assert store.session.active_run_id is not None
@@ -1682,6 +2443,8 @@ async def test_controller_setup_deadline_bounds_live_owner_journal_status_withou
 
         async def claim_operation_journal(self, **kwargs):  # type: ignore[no-untyped-def]
             if self.live_owner:
+                claimed = await super().claim_operation_journal(**kwargs)
+                assert claimed is not None
                 return None
             return await super().claim_operation_journal(**kwargs)
 
@@ -1727,7 +2490,7 @@ async def test_controller_setup_deadline_bounds_live_owner_journal_status_withou
     )
 
     assert response.status_code == 504
-    assert response.headers["Retry-After"] == "120"
+    assert response.headers["Retry-After"] == "2"
     assert run_control.status_started.is_set()
     assert store.session is not None
     assert store.session.active_run_id is not None
@@ -2328,11 +3091,11 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
     )
 
     winner = await backend.start_run(
-        StartRunRequest(prompt="hello", idempotency_key="caller-key")
+        StartRunRequest(prompt="hello", idempotency_key="caller-key", timeout=30.0)
     )
     _complete_provisioning(store, next(iter(store.durable_operations.values())))
     replay = await backend.start_run(
-        StartRunRequest(prompt="hello", idempotency_key="caller-key")
+        StartRunRequest(prompt="hello", idempotency_key="caller-key", timeout=30.0)
     )
 
     assert replay.run_id == winner.run_id
@@ -2340,8 +3103,64 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
     with pytest.raises(IdempotencyConflictError):
         await backend.start_run(
-            StartRunRequest(prompt="different", idempotency_key="caller-key")
+            StartRunRequest(prompt="different", idempotency_key="caller-key", timeout=30.0)
         )
+    with pytest.raises(IdempotencyConflictError):
+        await backend.start_run(
+            StartRunRequest(prompt="hello", idempotency_key="caller-key", timeout=31.0)
+        )
+    with pytest.raises(ActiveRunConflictError) as conflict:
+        await backend.start_run(
+            StartRunRequest(prompt="hello", idempotency_key="different-key", timeout=30.0)
+        )
+    assert conflict.value.active_run_id == winner.run_id
+
+
+@pytest.mark.asyncio
+async def test_not_reserved_same_key_resubmission_can_start_a_new_attempt(
+    tmp_path: Path,
+) -> None:
+    class RejectFirstReservationStore(FakeSessionStateStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.reject_first = True
+
+        async def begin_provision_submit(self, records):
+            if self.reject_first:
+                self.reject_first = False
+                raise SetupBudgetExpiredError("reservation did not start")
+            return await super().begin_provision_submit(records)
+
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    store = RejectFirstReservationStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="retryable", timeout=30.0)
+
+    with pytest.raises(SetupBudgetExpiredError):
+        await backend.start_run(request)
+    assert store.session is None
+    assert store.owner_idempotency == {}
+    admitted = await backend.start_run(request)
+
+    assert admitted.run_id in store.runs
+    assert len(store.owner_idempotency) == 1
+    assert len(provider.create_calls) == 1
 
 
 @pytest.mark.asyncio
@@ -2448,7 +3267,7 @@ async def test_live_same_key_provision_replay_does_not_take_over_or_double_creat
     await asyncio.wait_for(provider.create_started.wait(), timeout=1.0)
     [operation_before] = store.durable_operations.values()
 
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
 
     assert provider.create_attempts == 1
@@ -2517,7 +3336,7 @@ async def test_canceled_provision_replay_waits_for_lease_then_resumes_same_run(
         await first
 
     assert store.durable_operations[operation.operation_id].phase == "provision_reconcile"
-    with pytest.raises(SessionActivationSetupTimeoutError):
+    with pytest.raises(DurableAdmissionSetupTimeoutError):
         await backend.start_run(request)
     assert provider.create_attempts == 1
     assert store.durable_operations[operation.operation_id].token == operation.token
@@ -2869,6 +3688,8 @@ async def test_gapped_event_stream_quarantines_without_exposing_event_contents(
 
 async def _admitted_submit_for_journal_test(
     script_root: Path,
+    *,
+    launch_claimed: bool = False,
 ) -> tuple[
     AcaSandboxExecutionBackend,
     ActivatedSession,
@@ -2900,6 +3721,15 @@ async def _admitted_submit_for_journal_test(
         fence=fence,
         records=AdmissionRecords.create(admitted, run),
     )
+    if launch_claimed:
+        claimed = await store.claim_operation_journal(
+            owner_partition=session.owner_partition,
+            session_id=session.session_id,
+            run_id=run.run_id,
+            token="b" * 32,
+            updated_at=run.updated_at,
+        )
+        assert claimed is not None
     current = await store.get_session(session.owner_partition, session.session_id)
     return (
         AcaSandboxExecutionBackend(_binding(), runtime=runtime, owner=_owner()),
@@ -2914,6 +3744,42 @@ async def _admitted_submit_for_journal_test(
         store,
         handle,
     )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raise_stale", [False, True])
+async def test_cancel_winning_journal_claim_returns_its_durable_status(
+    tmp_path: Path,
+    raise_stale: bool,
+) -> None:
+    backend, activated, run, store, handle = await _admitted_submit_for_journal_test(
+        _script_root(tmp_path)
+    )
+
+    async def cancel_before_claim(**_kwargs: object):
+        await store.cancel_prelaunch_submit(
+            owner_partition=run.owner_partition,
+            session_id=run.session_id,
+            run_id=run.run_id,
+            token="c" * 32,
+            updated_at=datetime.now(UTC),
+        )
+        if raise_stale:
+            raise StaleOperationTokenError("cancel won the journal fence")
+        return None
+
+    store.claim_operation_journal = cancel_before_claim  # type: ignore[method-assign]
+
+    status = await backend._submit_fenced_journal(
+        activated,
+        run,
+        StartRunRequest(prompt="hello", session_id=run.session_id),
+        SetupBudget.start(),
+    )
+
+    assert status.state == "canceled"
+    assert status.phase == "settling"
+    assert [call for call in handle.calls if call.operation == "exec"] == []
 
 
 @pytest.mark.asyncio
@@ -2992,7 +3858,8 @@ async def test_status_corruption_finalizes_the_matching_submit_operation(
     tmp_path: Path,
 ) -> None:
     backend, _activated, run, store, handle = await _admitted_submit_for_journal_test(
-        _script_root(tmp_path)
+        _script_root(tmp_path),
+        launch_claimed=True,
     )
     handle.seed_file(
         status_path("run-1"),
@@ -3013,7 +3880,8 @@ async def test_cancel_corruption_finalizes_the_matching_submit_operation(
     tmp_path: Path,
 ) -> None:
     backend, _activated, run, store, handle = await _admitted_submit_for_journal_test(
-        _script_root(tmp_path)
+        _script_root(tmp_path),
+        launch_claimed=True,
     )
     handle.seed_file(
         status_path("run-1"),
@@ -3034,7 +3902,8 @@ async def test_event_corruption_finalizes_the_matching_submit_operation(
     tmp_path: Path,
 ) -> None:
     backend, _activated, run, store, handle = await _admitted_submit_for_journal_test(
-        _script_root(tmp_path)
+        _script_root(tmp_path),
+        launch_claimed=True,
     )
     handle.seed_file(
         status_path("run-1"),

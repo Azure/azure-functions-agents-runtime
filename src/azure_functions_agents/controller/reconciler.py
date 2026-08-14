@@ -610,15 +610,25 @@ class SessionReconciler:
             return missing_backing
         terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
+            durable_terminal = terminal_run(
+                run,
+                status=terminal.state,
+                result_available=terminal.result_available,
+                reason=_terminal_reason(terminal),
+                updated_at=now,
+            )
+            if _is_pre_pointer_provision(session, fence):
+                return await self._settle_terminal_pre_pointer_provision(
+                    session,
+                    durable_terminal,
+                    fence,
+                    inventory,
+                    now,
+                    report,
+                )
             finalized = await self._finish_reusable_operation(
                 fence=fence,
-                terminal=terminal_run(
-                    run,
-                    status=terminal.state,
-                    result_available=terminal.result_available,
-                    reason=_terminal_reason(terminal),
-                    updated_at=now,
-                ),
+                terminal=durable_terminal,
                 now=now,
             )
             return _replace_report(
@@ -626,6 +636,15 @@ class SessionReconciler:
                 adopted_terminal_runs=report.adopted_terminal_runs + int(finalized),
             )
         if run.status in TERMINAL_RUN_STATUSES:
+            if _is_pre_pointer_provision(session, fence):
+                return await self._settle_terminal_pre_pointer_provision(
+                    session,
+                    run,
+                    fence,
+                    inventory,
+                    now,
+                    report,
+                )
             await self._finish_reusable_operation(
                 fence=fence,
                 terminal=run,
@@ -762,6 +781,46 @@ class SessionReconciler:
         return _replace_report(
             report,
             abandoned_runs=report.abandoned_runs + int(terminal is not None),
+            tombstoned_sessions=report.tombstoned_sessions + 1,
+        )
+
+    async def _settle_terminal_pre_pointer_provision(
+        self,
+        session: DurableSessionRecord,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
+        inventory: dict[str, SandboxSummary],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        matching = next(
+            (
+                summary
+                for summary in inventory.values()
+                if summary.labels.get("operation_label") == fence.correlation_label
+                and _matches_reclaim_target_label(summary, session)
+            ),
+            None,
+        )
+        if matching is not None:
+            await self._delete_reclaim_target(matching.sandbox_id, session)
+            report = _replace_report(
+                report,
+                deleted_sandboxes=report.deleted_sandboxes + 1,
+            )
+        tombstoned = _tombstoned_operation_session(
+            session,
+            tombstone_reason="provision_terminal_before_pointer",
+            updated_at=now,
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=tombstoned,
+            terminal_run=run,
+            updated_at=now,
+        )
+        return _replace_report(
+            report,
             tombstoned_sessions=report.tombstoned_sessions + 1,
         )
 
@@ -2127,6 +2186,16 @@ def _active_run(
     if session.active_run_id is None:
         return None
     return next((run for run in runs if run.run_id == session.active_run_id), None)
+
+
+def _is_pre_pointer_provision(
+    session: DurableSessionRecord,
+    fence: SessionOperationFence,
+) -> bool:
+    return (
+        fence.kind == "provision_submit"
+        and (session.sandbox_id is None or fence.target.sandbox_id is None)
+    )
 
 
 def _matches_reclaim_target_label(

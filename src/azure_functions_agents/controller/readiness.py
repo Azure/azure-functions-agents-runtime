@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
@@ -124,6 +124,7 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
+_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
 
 type _SessionLockKey = tuple[str, str]
 type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
@@ -464,6 +465,8 @@ class ProvisionedSubmission:
 
     outcome: ProvisionSubmitOutcome
     activated: ActivatedSession | None
+    setup_timed_out: bool = False
+    timeout_metadata: SetupTimeoutMetadata | None = None
 
 
 async def activate_session(
@@ -1288,93 +1291,156 @@ async def provision_new_session_submit(
             created_at=now,
         )
     )
-    outcome = await _within_setup_budget(
-        state_binding.store.begin_provision_submit(
-            ProvisionSubmitRecords.create(
-                session,
-                run,
-                operation,
-                owner_idempotency,
-            )
-        ),
+    records = ProvisionSubmitRecords.create(
+        session,
+        run,
+        operation,
+        owner_idempotency,
+    )
+    outcome = await _await_admission_with_setup_timeout(
+        lambda: state_binding.store.begin_provision_submit(records),
         setup_deadline,
+        lambda: _confirm_provision_admission_after_setup_timeout(
+            state_binding.store,
+            records,
+        ),
+        lambda result: result.admission == "possibly_committed",
         phase=SetupPhase.PROVISION_CREATE,
     )
-    if outcome.replayed:
-        if (
-            outcome.run.status in TERMINAL_RUN_STATUSES
-            and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
-        ):
-            raise SessionActivationAuthorizationError(
-                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
-            )
-        existing_session = await _within_setup_budget(
-            state_binding.store.get_session(partition, outcome.run.session_id),
-            setup_deadline,
-            phase=SetupPhase.SESSION_LOOKUP,
+    if outcome.admission == "not_reserved":
+        raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE)
+    if outcome.admission == "possibly_committed":
+        metadata = setup_deadline.timeout_metadata(
+            phase=SetupPhase.PROVISION_CREATE,
+            reason=SetupTimeoutReason.PROVISION_INDETERMINATE,
+            exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
         )
-        if existing_session.record.active_operation_id is None:
-            return ProvisionedSubmission(outcome=outcome, activated=None)
-        existing_operation = await _within_setup_budget(
-            state_binding.store.get_operation(
-                partition,
-                outcome.run.session_id,
-                existing_session.record.active_operation_id,
-            ),
-            setup_deadline,
-            phase=SetupPhase.OPERATION_STATE,
+        return ProvisionedSubmission(
+            outcome=outcome,
+            activated=None,
+            setup_timed_out=True,
+            timeout_metadata=metadata,
         )
-        if existing_operation.record.kind != "provision_submit":
-            return ProvisionedSubmission(outcome=outcome, activated=None)
-        fence = await _within_setup_budget(
-            state_binding.store.takeover_expired_operation(
-                owner_partition=partition,
-                session_id=outcome.run.session_id,
-                token=uuid4().hex,
-                updated_at=datetime.now(UTC),
-            ),
-            setup_deadline,
-            phase=SetupPhase.PROVISION_RECONCILE,
-        )
-        if fence is None:
-            raise _setup_timeout_error(
+    if (
+        outcome.replayed
+        and outcome.run.status in TERMINAL_RUN_STATUSES
+        and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
+    ):
+        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
+    activated: ActivatedSession | None = None
+    try:
+        if outcome.replayed:
+            if outcome.run.status in TERMINAL_RUN_STATUSES:
+                return ProvisionedSubmission(outcome=outcome, activated=None)
+            existing_session = await _within_setup_budget(
+                state_binding.store.get_session(partition, outcome.run.session_id),
                 setup_deadline,
-                SetupPhase.PROVISION_RECONCILE,
-                reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+                phase=SetupPhase.SESSION_LOOKUP,
             )
+            if existing_session.record.active_operation_id is None:
+                return ProvisionedSubmission(outcome=outcome, activated=None)
+            existing_operation = await _within_setup_budget(
+                state_binding.store.get_operation(
+                    partition,
+                    outcome.run.session_id,
+                    existing_session.record.active_operation_id,
+                ),
+                setup_deadline,
+                phase=SetupPhase.OPERATION_STATE,
+            )
+            if existing_operation.record.kind != "provision_submit":
+                return ProvisionedSubmission(outcome=outcome, activated=None)
+            fence = await _within_setup_budget(
+                state_binding.store.takeover_expired_operation(
+                    owner_partition=partition,
+                    session_id=outcome.run.session_id,
+                    token=uuid4().hex,
+                    updated_at=datetime.now(UTC),
+                ),
+                setup_deadline,
+                phase=SetupPhase.PROVISION_RECONCILE,
+            )
+            if fence is None:
+                metadata = setup_deadline.timeout_metadata(
+                    phase=SetupPhase.PROVISION_RECONCILE,
+                    reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+                    exception_type=(
+                        SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT
+                    ),
+                )
+                return ProvisionedSubmission(
+                    outcome=outcome,
+                    activated=None,
+                    setup_timed_out=True,
+                    timeout_metadata=metadata,
+                )
+            activated = await _provision_reserved_session(
+                runtime,
+                state_binding,
+                provider,
+                existing_session.record,
+                fence,
+                package,
+                setup_deadline,
+            )
+            return ProvisionedSubmission(outcome=outcome, activated=activated)
+        if outcome.fence is None:
+            return ProvisionedSubmission(outcome=outcome, activated=None)
         activated = await _provision_reserved_session(
             runtime,
             state_binding,
             provider,
-            existing_session.record,
-            fence,
+            session,
+            outcome.fence,
             package,
             setup_deadline,
         )
-        return ProvisionedSubmission(outcome=outcome, activated=activated)
-    assert outcome.fence is not None
-    activated = await _provision_reserved_session(
-        runtime,
-        state_binding,
-        provider,
-        session,
-        outcome.fence,
-        package,
-        setup_deadline,
-    )
-    try:
         await _within_setup_budget(
             runtime.reconcile_after_create(),
             setup_deadline,
             phase=SetupPhase.POST_CREATE_RECONCILE,
         )
+        return ProvisionedSubmission(outcome=outcome, activated=activated)
+    except (SessionActivationSetupTimeoutError, SetupBudgetExpiredError) as exc:
+        if activated is not None:
+            with suppress(Exception):
+                await activated.handle.close()
+        return ProvisionedSubmission(
+            outcome=outcome,
+            activated=None,
+            setup_timed_out=True,
+            timeout_metadata=exc.metadata,
+        )
+    except StaleOperationTokenError:
+        if activated is not None:
+            with suppress(Exception):
+                await activated.handle.close()
+        current_run = await state_binding.store.get_run(
+            partition,
+            outcome.run.session_id,
+            outcome.run.run_id,
+        )
+        current_session = await state_binding.store.get_session(
+            partition,
+            outcome.run.session_id,
+        )
+        return ProvisionedSubmission(
+            outcome=replace(
+                outcome,
+                run=current_run.record,
+                run_etag=current_run.etag,
+                session_etag=current_session.etag,
+                fence=None,
+            ),
+            activated=None,
+        )
     except BaseException:
-        try:
-            await activated.handle.close()
-        except Exception:
-            logger.exception("Could not close sandbox handle after post-create reconciliation failure")
+        if activated is not None:
+            try:
+                await activated.handle.close()
+            except Exception:
+                logger.exception("Could not close sandbox handle after post-create reconciliation failure")
         raise
-    return ProvisionedSubmission(outcome=outcome, activated=activated)
 
 
 async def _provision_reserved_session(
@@ -1537,6 +1603,15 @@ async def _provision_reserved_session_inner(
         setup_deadline,
         phase=SetupPhase.OPERATION_STATE,
     )
+    current = await _within_setup_budget(
+        state_binding.store.get_session(session.owner_partition, session.session_id),
+        setup_deadline,
+        phase=SetupPhase.SESSION_LOOKUP,
+    )
+    if not fence.matches(current.record, operation.record):
+        raise StaleOperationTokenError(
+            f"operation {fence.operation_id!r} provision fence is stale"
+        )
     phase = operation.record.phase
     if phase not in {
         "provision_create",
@@ -2146,9 +2221,110 @@ async def _within_setup_budget[T](
         async with asyncio.timeout(setup_deadline.remaining_setup_seconds(phase=phase)):
             return await operation
     except SetupBudgetExpiredError:
+        if isinstance(operation, Coroutine):
+            operation.close()
         raise
     except TimeoutError:
         raise _setup_timeout_error(setup_deadline, phase) from None
+
+
+async def _await_admission_with_setup_timeout[T](
+    operation_factory: Callable[[], Awaitable[T]],
+    setup_deadline: SetupDeadline,
+    confirm_after_timeout: Callable[[], Awaitable[T]],
+    should_confirm_after_timeout: Callable[[T], bool],
+    *,
+    phase: SetupPhase,
+) -> T:
+    """Cancel and observe an admission task before resolving a timed-out acknowledgement."""
+    started = False
+
+    async def run() -> T:
+        nonlocal started
+        started = True
+        return await operation_factory()
+
+    task = asyncio.ensure_future(run())
+    try:
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=setup_deadline.remaining_setup_seconds(phase=phase),
+        )
+    except asyncio.CancelledError:
+        await _cancel_and_wait(task)
+        raise
+    except BaseException:
+        await _cancel_and_wait(task)
+        raise
+    if task in done:
+        return task.result()
+    if not task.done():
+        task.cancel()
+    try:
+        result = await task
+    except asyncio.CancelledError:
+        current = asyncio.current_task()
+        if current is not None and current.cancelling():
+            await _cancel_and_wait(task)
+            raise
+        if not started:
+            raise _setup_timeout_error(setup_deadline, phase) from None
+        return await confirm_after_timeout()
+    if should_confirm_after_timeout(result):
+        return await confirm_after_timeout()
+    return result
+
+
+async def _bounded_admission_confirmation[T](operation: Awaitable[T], fallback: T) -> T:
+    """Bound one post-timeout point read without leaving its task behind."""
+    task = asyncio.ensure_future(operation)
+    try:
+        done, _pending = await asyncio.wait(
+            {task},
+            timeout=_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS,
+        )
+    except asyncio.CancelledError:
+        await _cancel_and_wait(task)
+        raise
+    except BaseException:
+        await _cancel_and_wait(task)
+        raise
+    if task not in done:
+        await _cancel_and_wait(task)
+        return fallback
+    try:
+        return task.result()
+    except asyncio.CancelledError:
+        return fallback
+
+
+async def _cancel_and_wait[T](task: asyncio.Future[T]) -> None:
+    if not task.done():
+        task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:
+        pass
+
+
+async def _confirm_provision_admission_after_setup_timeout(
+    store: SessionStateStore,
+    records: ProvisionSubmitRecords,
+) -> ProvisionSubmitOutcome:
+    fallback = ProvisionSubmitOutcome(
+        run=records.run,
+        run_etag=None,
+        session_etag=None,
+        fence=None,
+        replayed=False,
+        admission="possibly_committed",
+    )
+    return await _bounded_admission_confirmation(
+        store.confirm_provision_submit(records),
+        fallback,
+    )
 
 
 async def _capture_current_package(
