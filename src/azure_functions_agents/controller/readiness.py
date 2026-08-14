@@ -105,7 +105,6 @@ from .sandbox_config import SandboxCreateProfile
 DEFAULT_AUTO_SUSPEND_SECONDS = 300
 DEFAULT_RECLAIM_IDLE_SECONDS = 86_400
 DEFAULT_PROTOCOL_VERSION = "1"
-PROVISION_SUBMIT_LEASE_SECONDS = 120
 _TOUCHABLE_SESSION_STATUSES = frozenset(
     {"ready", "running", "canceling", "suspending", "suspended", "resuming"}
 )
@@ -845,7 +844,7 @@ async def begin_submit_operation(
         token=uuid4().hex,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=now + timedelta(seconds=PROVISION_SUBMIT_LEASE_SECONDS),
+        lease_expires_at=now,
         next_attempt_at=None,
         created_at=now,
         updated_at=now,
@@ -1221,7 +1220,7 @@ async def provision_new_session_submit(
         token=uuid4().hex,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=now + timedelta(seconds=PROVISION_SUBMIT_LEASE_SECONDS),
+        lease_expires_at=now,
         next_attempt_at=None,
         created_at=now,
         updated_at=now,

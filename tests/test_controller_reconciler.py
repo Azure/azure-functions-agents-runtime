@@ -1738,7 +1738,7 @@ async def test_targeted_reconciliation_resumes_a_persisted_reclaim_operation() -
     assert store.session is not None
     assert store.session.active_operation_id is not None
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     report = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert report.abandoned_runs == 1
@@ -1764,7 +1764,7 @@ async def test_targeted_reconciliation_defers_transient_per_session_failure() ->
     )
 
     first = await reconciler.reconcile_session(session.owner_partition, session.session_id)
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert first.abandoned_runs == 0
@@ -1819,7 +1819,7 @@ async def test_provider_failure_leaves_fence_resumable_on_next_pass() -> None:
     )
 
     first = await reconciler.run_once()
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.run_once()
 
     assert first.abandoned_runs == 0
@@ -1845,7 +1845,7 @@ async def test_store_failure_leaves_fence_resumable_on_next_pass() -> None:
     )
 
     first = await reconciler.run_once()
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.run_once()
 
     assert first.abandoned_runs == 0
@@ -1876,7 +1876,7 @@ async def test_reclaim_delete_then_crash_completes_when_target_is_missing_next_p
     assert store.session.active_operation_id is not None
     assert next(iter(store.durable_operations.values())).phase == "reclaim_deleting"
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.run_once()
 
     assert second.abandoned_runs == 1
@@ -2271,7 +2271,7 @@ async def test_lost_submit_snapshot_cleanup_retries_before_tombstoning() -> None
     assert store.session.active_operation_id == operation.operation_id
     assert "owned" in provider.snapshots
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert second.deleted_snapshots == 1
@@ -2537,7 +2537,7 @@ async def test_reclaim_terminal_lifecycle_failure_retries_with_the_active_fence(
         == "lifecycle_policy_apply_failed"
     )
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert second.adopted_terminal_runs == 1

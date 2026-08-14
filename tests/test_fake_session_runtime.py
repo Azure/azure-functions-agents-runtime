@@ -6,7 +6,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from azure_functions_agents.session_state import (
+    AdmissionRecords,
     AppIdentity,
+    DurableRunRecord,
     DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
@@ -89,9 +91,9 @@ def _operation(session: DurableSessionRecord, kind: str) -> DurableSessionOperat
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "lease_seconds"),
-    [("provision_submit", 120), ("submit_run", 60), ("reclaim_backing", 60)],
+    [("provision_submit", 120), ("submit_run", 120), ("reclaim_backing", 120)],
 )
-async def test_fake_operation_writes_select_lease_by_persisted_kind(
+async def test_fake_operation_writes_renew_the_flat_lease(
     kind: str,
     lease_seconds: int,
 ) -> None:
@@ -154,9 +156,9 @@ async def test_fake_operation_writes_select_lease_by_persisted_kind(
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("kind", "lease_seconds"),
-    [("provision_submit", 120), ("submit_run", 60)],
+    [("provision_submit", 120), ("submit_run", 120)],
 )
-async def test_fake_journal_claim_renews_the_kind_selected_lease(
+async def test_fake_journal_claim_renews_the_flat_lease(
     kind: str,
     lease_seconds: int,
 ) -> None:
@@ -188,4 +190,58 @@ async def test_fake_journal_claim_renews_the_kind_selected_lease(
     assert claimed is not None
     assert store.durable_operations[claimed.operation_id].lease_expires_at == claimed_at + timedelta(
         seconds=lease_seconds
+    )
+
+
+@pytest.mark.asyncio
+async def test_fake_submit_admission_renews_lease_before_takeover() -> None:
+    session = replace(_session(), status="ready", sandbox_id="sandbox-1")
+    operation = _operation(session, "submit_run")
+    store = FakeSessionStateStore(session)
+    prepared = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    fence = await store.begin_operation(
+        previous=session,
+        updated=prepared,
+        operation=operation,
+        etag=store.etag,
+    )
+    admitted_at = _NOW + timedelta(seconds=119)
+    run = DurableRunRecord.create(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id="run-1",
+        generation=session.generation,
+        status="accepted",
+        result_available=False,
+        status_reason=None,
+        expires_at=admitted_at + timedelta(minutes=15),
+        created_at=admitted_at,
+        updated_at=admitted_at,
+    )
+    admitted = replace(
+        prepared,
+        status="running",
+        active_run_id=run.run_id,
+        updated_at=admitted_at,
+    )
+
+    await store.admit_operation_run(
+        fence=fence,
+        records=AdmissionRecords.create(admitted, run),
+    )
+
+    stored = store.durable_operations[fence.operation_id]
+    assert stored.lease_expires_at == admitted_at + timedelta(seconds=120)
+    assert (
+        await store.takeover_expired_operation(
+            owner_partition=session.owner_partition,
+            session_id=session.session_id,
+            token="e" * 32,
+            updated_at=admitted_at + timedelta(seconds=1),
+        )
+        is None
     )

@@ -96,21 +96,11 @@ _STATUSES_OWNING_ACTIVE_RUN = frozenset({"running", "canceling"})
 _STATUSES_ADMITTING_RUN: frozenset[str] = frozenset({"ready", "suspended"})
 
 _MAX_ADOPTION_ATTEMPTS = 5
-_OPERATION_LEASE_SECONDS = 60
-_PROVISION_SUBMIT_LEASE_SECONDS = 120
+_OPERATION_LEASE_SECONDS = 120
 _JOURNAL_INTEGRITY_FAILURE_REASON = "journal_corrupt"
 _RECONCILER_CURSOR_PARTITION_PREFIX = "reconciler:"
 _RECONCILER_CURSOR_ROW_KEY = "cursor"
 _MAX_RECONCILER_CURSOR_BYTES = 32 * 1024
-
-
-def _operation_lease_seconds(kind: DurableOperationKind) -> int:
-    """Select the persisted-operation lease duration without caller policy."""
-    return (
-        _PROVISION_SUBMIT_LEASE_SECONDS
-        if kind == "provision_submit"
-        else _OPERATION_LEASE_SECONDS
-    )
 
 
 # ---------------------------------------------------------------------------
@@ -702,7 +692,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.attempt_count,
             error_code=operation.error_code,
             lease_expires_at=operation.updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=operation.next_attempt_at,
             updated_at=operation.updated_at,
             finished_at=operation.finished_at,
@@ -755,7 +745,7 @@ class AzureTableSessionStateStore:
             attempt_count=records.operation.attempt_count,
             error_code=records.operation.error_code,
             lease_expires_at=records.operation.updated_at
-            + timedelta(seconds=_operation_lease_seconds(records.operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=records.operation.next_attempt_at,
             updated_at=records.operation.updated_at,
             finished_at=records.operation.finished_at,
@@ -832,7 +822,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.record.attempt_count + 1,
             error_code=None,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=None,
             updated_at=updated_at,
             finished_at=None,
@@ -893,7 +883,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.record.attempt_count + 1,
             error_code=None,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=None,
             updated_at=updated_at,
             finished_at=None,
@@ -978,7 +968,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.record.attempt_count + 1,
             error_code=None,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=None,
             updated_at=updated_at,
             finished_at=None,
@@ -1039,7 +1029,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.record.attempt_count,
             error_code=error_code,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=updated_at if error_code is not None else None,
             updated_at=updated_at,
             finished_at=None,
@@ -1414,7 +1404,7 @@ class AzureTableSessionStateStore:
             attempt_count=operation.record.attempt_count,
             error_code=None,
             lease_expires_at=records.run.updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.record.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             next_attempt_at=None,
             updated_at=records.run.updated_at,
             finished_at=None,

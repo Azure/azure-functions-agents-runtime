@@ -52,16 +52,7 @@ from .fake_sandbox_transport import FakeSandboxTransport
 DEFAULT_GROUP_RESOURCE_ID = (
     "/subscriptions/sub/resourceGroups/rg/providers/Microsoft.App/sandboxGroups/group"
 )
-_OPERATION_LEASE_SECONDS = 60
-_PROVISION_SUBMIT_LEASE_SECONDS = 120
-
-
-def _operation_lease_seconds(kind: str) -> int:
-    return (
-        _PROVISION_SUBMIT_LEASE_SECONDS
-        if kind == "provision_submit"
-        else _OPERATION_LEASE_SECONDS
-    )
+_OPERATION_LEASE_SECONDS = 120
 
 
 class FakeSandboxSessionHandle(FakeSandboxTransport):
@@ -363,6 +354,8 @@ class FakeSessionStateStore:
         self.durable_operations[fence.operation_id] = replace(
             operation,
             phase="submit_journal",
+            lease_expires_at=records.run.updated_at
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             updated_at=records.run.updated_at,
         )
         self.etag = "etag-operation-admitted"
@@ -499,7 +492,7 @@ class FakeSessionStateStore:
         operation = replace(
             operation,
             lease_expires_at=operation.updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
         )
         self.session = updated
         self.durable_operations[operation.operation_id] = operation
@@ -533,7 +526,7 @@ class FakeSessionStateStore:
         operation = replace(
             records.operation,
             lease_expires_at=records.operation.updated_at
-            + timedelta(seconds=_operation_lease_seconds(records.operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
         )
         self.session = records.session
         self.runs[records.run.run_id] = records.run
@@ -569,7 +562,7 @@ class FakeSessionStateStore:
             attempt_count=operation.attempt_count + 1,
             error_code=None,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             updated_at=updated_at,
         )
         self.durable_operations[resumed.operation_id] = resumed
@@ -600,7 +593,7 @@ class FakeSessionStateStore:
             attempt_count=operation.attempt_count + 1,
             error_code=None,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             updated_at=updated_at,
         )
         self.durable_operations[resumed.operation_id] = resumed
@@ -638,7 +631,7 @@ class FakeSessionStateStore:
             phase=phase,
             attempt_count=operation.attempt_count + 1,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             updated_at=updated_at,
         )
         self.durable_operations[claimed.operation_id] = claimed
@@ -667,7 +660,7 @@ class FakeSessionStateStore:
             phase=phase,
             error_code=error_code,
             lease_expires_at=updated_at
-            + timedelta(seconds=_operation_lease_seconds(operation.kind)),
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
             updated_at=updated_at,
             target=operation.target if updated_target is None else updated_target,
         )

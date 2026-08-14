@@ -401,7 +401,7 @@ controlling amendments.
 | 158 | Dual-runtime provisioning bound | Serialize matrix / per-leg 2 / per-leg 1 | Keep parallel 3.13/3.14 diagnostics, but default and require `1` provisioning slot per leg when both share one Sandbox Group; single-runtime human N=100 may explicitly use up to 4. | Human + Agent | 2026-08-12 | U3 |
 | 159 | Sandbox Group authorization failure | Retry as setup timeout / fail fast and settle | Map provider `401`/`403` to a redacted `sandbox_group_authorization_failed` 503, atomically fail the reserved run and release its operation, and replay the same terminal outcome. Require controller `Container Apps SandboxGroup Data Owner`; Contributor is insufficient. | Human + Agent | 2026-08-13 | U3 |
 | 160 | Accepted-create authorization ambiguity | Fail every 401/403 / recover stable label / leave durable operation indeterminate | Fail fast only before acceptance. After `begin_create` returns, reconcile the stable label; if authorization prevents reconciliation, retain the active provision for safe replay/reaping rather than terminalizing a potentially created backing. | Agent | 2026-08-13 | U3 corrective |
-| 161 | U3 setup deadline | 30s/60s / 90s/120s | Use a 90s setup budget, renewable 120s provision lease, and 120s retry; retain the 180s sync cap. Supersedes timing in #79/#100. | Human | 2026-08-13 | U3 |
+| 161 | U3 setup deadline | 30s/60s / 90s/120s | Use a 90s setup budget, one renewable 120s lease for every durable operation, and 120s retry; retain the 180s sync cap. Supersedes timing in #79/#100. | Human | 2026-08-13 | U3 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -1278,8 +1278,8 @@ acceptance work completes.
 
 ## 12. U3 setup deadline amendment — Finalized
 
-**Status:** Finalized. The human selected the 90-second setup / 120-second
-provision-lease policy, and the independent Phase 2 architecture review
+**Status:** Finalized. The human selected the 90-second setup / flat 120-second
+operation-lease policy, and the independent Phase 2 architecture review
 approved the budget, fencing, telemetry, live-watchdog, and compatibility
 contract below before implementation.
 
@@ -1292,15 +1292,15 @@ The implementation changes only these semantic constants:
 | `execution.setup_budget.SETUP_BUDGET_SECONDS` | 30 | **90** |
 | `execution.setup_budget.SYNCHRONOUS_RUN_CAP_SECONDS` | 180 | **180** (unchanged) |
 | `execution.setup_budget.MINIMUM_EXECUTION_BUDGET_SECONDS` | 150 | **90** (= 180 - 90) |
-| `controller.readiness.PROVISION_SUBMIT_LEASE_SECONDS` (new) | inline 60 | **120** |
+| `session_state.store._OPERATION_LEASE_SECONDS` | kind-selected 60/120 | **120** for every durable operation |
 | `controller.http.SETUP_TIMEOUT_RETRY_AFTER_SECONDS` (new) | inline 60 | **120** |
 
-The persisted operation kind selects the lease duration: **every active lease
-write** for `provision_submit` is 120 seconds, including initial begin, resume,
-takeover, journal claim, and phase advance. Each provision phase transition
-renews that 120-second lease. `submit_run` and `reclaim_backing` remain 60
-seconds, as do their generic/timer semantics; this amendment does not change
-timer cadence, timer pass deadline, or reclaim arithmetic. The public `504`
+Every active durable-operation lease write is 120 seconds, including initial
+begin, resume, takeover, journal claim, and phase advance. Each write renews
+the sliding lease for `provision_submit`, `submit_run`, and `reclaim_backing`;
+timer cadence, timer pass deadline, and reclaim arithmetic remain unchanged.
+After a crash, `submit_run` and `reclaim_backing` recovery may begin up to 60
+seconds later than before. The public `504`
 body remains exactly `error=reason=setup_deadline_exceeded` plus
 `retry_with=respond-async`; it now has `Retry-After: 120` and retains
 `x-ms-retry-with: respond-async`.
@@ -1453,8 +1453,8 @@ preserving cleanup/response headroom.
 The first request owns a durable `provision_submit` lease for 120 seconds but
 may stop waiting at its one anchored 90-second setup deadline, preserving a
 30-second margin. Every subsequent active provision write (resume, takeover,
-journal claim, and phase advance) renews the persisted kind-selected
-120-second lease, so the margin applies to the request's initial setup window,
+journal claim, and phase advance) renews the flat 120-second lease, so the
+margin applies to the request's initial setup window,
 not as a fixed cap on later recovery. During a live lease window, same-key
 replay reads the durable reservation and returns the typed 504; it neither
 rotates the lease nor calls create. Only after `lease_expires_at <= now` may
@@ -1467,11 +1467,9 @@ existing controlled create/reconcile state machine may then proceed. Token
 rotation never changes that label. A 120-second `Retry-After` is deliberately
 conservative and does not reveal remaining lease time.
 
-`session_state/store.py` must select the duration from the persisted operation
-kind rather than from the caller or an inline constant. It must apply that
-selector to begin, resume, takeover, journal claim, and phase advance, so a
-retry cannot accidentally downgrade a live `provision_submit` lease to 60
-seconds.
+`session_state/store.py` owns one internal lease constant and applies it to
+begin, resume, takeover, journal claim, and phase advance. Callers cannot
+select a duration.
 
 ### Provider polling budget
 
@@ -1494,8 +1492,8 @@ registration-private timeout-observation helper, `_observability.py`,
 `transport/transport_models.py`, `transport/aca_sdk.py`, and
 `session_state/store.py`. Preserve `session_state/session_models.py`'s
 persisted operation kind and update `controller/reconciler.py` only where it
-must exercise the kind-selected store lease. The store owns stable-label
-reconciliation, ETag takeover, and the operation-kind duration selector.
+must exercise the flat store lease. The store owns stable-label
+reconciliation, ETag takeover, and lease duration.
 
 **Unit tests:** extend `test_execution_setup_budget.py`,
 `test_controller_budget.py`, `test_controller_readiness.py`,
@@ -1541,8 +1539,7 @@ Keep its 360-minute job cap and update all assertions/mocks that encode 30,
 ### Required test matrix
 
 1. Default/in-language-worker request path remains behaviorally and
-   observability unchanged; timer cadence and unrelated `submit_run` and
-   `reclaim_backing` leases remain 60 seconds.
+   observability unchanged; timer cadence remains unchanged.
 2. One anchored 90-second setup budget reaches create polling and every
    readiness wrapper; provider polling receives the current remaining shared
    budget, including full, partially consumed, and capacity-retry cases; a
@@ -1563,10 +1560,9 @@ Keep its 360-minute job cap and update all assertions/mocks that encode 30,
    `submit_run()` caller—trigger, standard endpoint, built-in chat, and
    chatstream—emits exactly one event and one warning, and never serializes
    metadata.
-6. A 90-second expiry leaves the 120-second provision lease live; each active
-   provision begin/resume/takeover/journal/phase write renews it to 120 seconds
-   by persisted operation kind, while `submit_run` and `reclaim_backing`
-   remain 60 seconds. Replay cannot create or rotate a live lease; pre-expiry
+6. A 90-second expiry leaves the 120-second provision lease live; every active
+   begin/resume/takeover/journal/phase write for every durable operation renews
+   it to 120 seconds. Replay cannot create or rotate a live lease; pre-expiry
    takeover fails; post-expiry ETag takeover uses the unchanged stable label
    and adopts/reconciles before any create.
 7. Cold-start and load helper arithmetic, option bounds, retry parsing, cleanup,
@@ -1589,6 +1585,6 @@ paid live qualification. The bounded setup clock, 120-second durable fence,
 conservative retry, and aggregate-only live reports contain that risk. This
 amendment does not change provider retry policy, create labels, durable schema,
 auth/ownership, authoring/configuration, timer behavior, or automatic
-sync-to-async conversion. Roll back by restoring the three constants and live
+sync-to-async conversion. Roll back by restoring the lease policy and live
 watchdog arithmetic as one change; retained operations remain safe because
 their stable labels and ETag fences are unchanged.

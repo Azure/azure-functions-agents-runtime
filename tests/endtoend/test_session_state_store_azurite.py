@@ -260,7 +260,7 @@ def _operation(
         token=token,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=_NOW + timedelta(seconds=60),
+        lease_expires_at=_NOW + timedelta(seconds=120),
         next_attempt_at=None,
         created_at=_NOW,
         updated_at=_NOW,
@@ -423,7 +423,7 @@ def _provision_submit_records(
         token="f" * 32,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=_NOW + timedelta(seconds=60),
+        lease_expires_at=_NOW + timedelta(seconds=120),
         next_attempt_at=None,
         created_at=_NOW,
         updated_at=_NOW,
@@ -726,7 +726,7 @@ async def test_submit_admission_advances_the_existing_operation_in_one_egt() -> 
         assert stored.record.active_run_id == run.run_id
         assert stored.record.active_operation_id == operation.operation_id
         assert stored_operation.record.phase == "submit_journal"
-        assert stored_operation.record.lease_expires_at == _NOW + timedelta(seconds=60)
+        assert stored_operation.record.lease_expires_at == _NOW + timedelta(seconds=120)
 
 
 @pytest.mark.asyncio
@@ -878,7 +878,7 @@ async def test_two_controllers_take_over_one_expired_operation_lease() -> None:
             operation=operation,
             etag=session_read.etag,
         )
-        takeover_at = _NOW + timedelta(seconds=61)
+        takeover_at = _NOW + timedelta(seconds=121)
 
         first, second = await asyncio.gather(
             store_a.takeover_expired_operation(
@@ -952,7 +952,7 @@ async def test_two_controllers_journal_claim_and_takeover_reject_stale_token() -
         first_operation = await store_a.get_operation(
             partition, session.session_id, operation.operation_id
         )
-        assert first_operation.record.lease_expires_at == _NOW + timedelta(seconds=60)
+        assert first_operation.record.lease_expires_at == _NOW + timedelta(seconds=120)
         assert blocked is None
 
         takeover = await store_b.claim_operation_journal(
@@ -960,18 +960,18 @@ async def test_two_controllers_journal_claim_and_takeover_reject_stale_token() -
             session_id=session.session_id,
             run_id=run.run_id,
             token="m" * 32,
-            updated_at=_NOW + timedelta(seconds=61),
+            updated_at=_NOW + timedelta(seconds=121),
         )
         assert takeover is not None
         takeover_operation = await store_b.get_operation(
             partition, session.session_id, operation.operation_id
         )
-        assert takeover_operation.record.lease_expires_at == _NOW + timedelta(seconds=121)
+        assert takeover_operation.record.lease_expires_at == _NOW + timedelta(seconds=241)
         with pytest.raises(StaleOperationTokenError):
             await store_a.advance_operation(
                 fence=first,
                 phase="submit_launching",
-                updated_at=_NOW + timedelta(seconds=61),
+                updated_at=_NOW + timedelta(seconds=121),
             )
 
 
@@ -1033,7 +1033,7 @@ async def test_reclaimer_resumes_a_crashed_durable_operation_with_real_egt() -> 
             store=store,
             provider=provider,  # type: ignore[arg-type]
             app_hash=partition.app_hash,
-            now=lambda: _NOW + timedelta(seconds=61),
+            now=lambda: _NOW + timedelta(seconds=121),
         ).reconcile_session(partition, session.session_id)
 
         assert report.abandoned_runs == 1
