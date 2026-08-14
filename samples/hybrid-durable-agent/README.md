@@ -19,7 +19,7 @@ gives production applications a natural place for database or service enrichment
 
 `DurableAiAgent` performs no model, network, or tool I/O in the orchestrator. The generated activity hydrates a fresh Agent, performs the runtime-managed call, closes the Agent, and records the JSON-safe result in Durable history.
 
-The binding projection reads only `name`, `description`, and the markdown body from `order-fulfillment.agent.md`. Model, timeout, tools, skills, MCP servers, and system tools come from app-level configuration and discovery.
+The binding projection reads `name`, `description`, the markdown body, and its `substitute_variables` parsing control from `order-fulfillment.agent.md`. Model, timeout, tools, skills, MCP servers, and system tools come from app-level configuration and discovery.
 
 Activity handlers using `agent_input` must be declared with `async def`. Each activity invocation receives its own entered Agent; the runtime closes it when the handler exits, so do not retain it beyond that invocation.
 

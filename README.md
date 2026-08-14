@@ -176,7 +176,7 @@ async def process_order(
 
 Existing `func.FunctionApp()` instances can use `agent_input(app, ...)` instead. `create_function_app()` now returns an enhanced `AiApp` or `DurableAiApp`, preserving its existing declarative routes and triggers while allowing hybrid handlers to be added.
 
-`agent_name` is the source filename stem or normalized slug, not the front-matter display name. For bindings, the agent file requires only string `name` and `description` fields; its markdown body supplies instructions. Other per-agent front-matter fields are ignored. Model, timeout, system tools, discovered tools, skills, and MCP servers come from app-level configuration.
+`agent_name` is the source filename stem or normalized slug, not the front-matter display name. For bindings, the agent file requires only string `name` and `description` fields; its markdown body supplies instructions and follows the standard environment-substitution behavior, including `substitute_variables: false`. Other per-agent front-matter fields are ignored. Model, timeout, system tools, discovered tools, skills, and MCP servers come from app-level configuration.
 
 Function and activity handlers using `agent_input` must be declared with `async def`. They receive a raw `agent_framework.Agent` that is built and entered for that Function invocation, then closed when the handler returns, raises, or is cancelled. The app caches only an immutable blueprint and reusable dependency descriptions, never the live Agent or its MCP tools. These handlers control sessions, run options, middleware, streaming, and model-call timeouts; the Azure Functions invocation timeout remains the outer bound. Do not retain the Agent after the handler returns.
 

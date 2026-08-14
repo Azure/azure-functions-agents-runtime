@@ -11,6 +11,7 @@ from agent_framework import FunctionTool
 
 from ._function_tool import WorkflowTool
 from ._slug import _function_name_from_source
+from .config.env import _to_bool, substitute_env_vars_in_text
 from .config.loader import (
     _collect_agent_files,
     _resolve_agents_dir,
@@ -111,12 +112,16 @@ def load_binding_definition(source_file: Path) -> BindingAgentDefinition:
     metadata: dict[str, object] = dict(post.metadata or {})
     name = _required_string(metadata, "name", resolved_source)
     description = _required_string(metadata, "description", resolved_source)
+    substitute_variables = _to_bool(metadata.get("substitute_variables", True), default=True)
+    instructions = str(post.content)
+    if substitute_variables:
+        instructions = substitute_env_vars_in_text(instructions)
     filename_stem = _filename_stem(resolved_source)
     slug = _function_name_from_source(resolved_source, name, warn_on_missing=False)
     return BindingAgentDefinition(
         name=name,
         description=description,
-        instructions=str(post.content),
+        instructions=instructions,
         source_file=resolved_source,
         filename_stem=filename_stem,
         slug=slug,

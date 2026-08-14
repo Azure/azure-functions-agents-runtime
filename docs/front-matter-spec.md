@@ -9,7 +9,7 @@ Azure Functions agents use a **two-tier configuration system**:
 
 Each agent is defined in a `.agent.md` file with YAML front matter followed by markdown instructions. The front matter configures the agent-specific behavior, while the markdown body contains the agent's system prompt.
 
-> **Smart agent input binding:** A definition referenced by `AiApp.agent_input()` or `agent_input(app, ...)` has a deliberately smaller projection. The binding requires only non-empty string `name` and `description` fields and uses the markdown body as instructions. It ignores every other per-agent field, even if that ignored value would be invalid for declarative `create_function_app()` usage. Model, timeout, system tools, user tools, skills, and MCP servers come from `agents.config.yaml` and app-level discovery. `agent_name` resolves the filename stem first and then its normalized slug; it never resolves the display `name`.
+> **Smart agent input binding:** A definition referenced by `AiApp.agent_input()` or `agent_input(app, ...)` has a deliberately smaller projection. The binding requires only non-empty string `name` and `description` fields and uses the markdown body as instructions. It recognizes `substitute_variables` only to control markdown-body environment substitution and ignores every other per-agent field, even if that ignored value would be invalid for declarative `create_function_app()` usage. Model, timeout, system tools, user tools, skills, and MCP servers come from `agents.config.yaml` and app-level discovery. `agent_name` resolves the filename stem first and then its normalized slug; it never resolves the display `name`.
 
 ### Configuration Model
 

@@ -60,6 +60,46 @@ def test_binding_target_accepts_normalized_slug(tmp_path: Path) -> None:
     )
 
 
+def test_binding_definition_substitutes_environment_in_instructions(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TEAM_NAME", "Fulfillment")
+    _write_agent(
+        tmp_path,
+        "order-fulfillment.agent.md",
+        "name: Order Processor\ndescription: Processes orders",
+        "Contact $TEAM_NAME or %TEAM_NAME%.",
+    )
+
+    snapshot = load_project_snapshot(tmp_path)
+    entry = compose_binding_target(snapshot, "order-fulfillment")
+
+    assert entry.definition.instructions.strip() == "Contact Fulfillment or Fulfillment."
+
+
+def test_binding_definition_honors_substitution_opt_out(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("TEAM_NAME", "Fulfillment")
+    _write_agent(
+        tmp_path,
+        "order-fulfillment.agent.md",
+        """
+        name: Order Processor
+        description: Processes orders
+        substitute_variables: false
+        """,
+        "Contact $TEAM_NAME or %TEAM_NAME%.",
+    )
+
+    snapshot = load_project_snapshot(tmp_path)
+    entry = compose_binding_target(snapshot, "order-fulfillment")
+
+    assert entry.definition.instructions.strip() == "Contact $TEAM_NAME or %TEAM_NAME%."
+
+
 @pytest.mark.parametrize("field", ["name", "description"])
 def test_binding_definition_requires_minimal_string_fields(
     field: str,

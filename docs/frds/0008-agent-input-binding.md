@@ -4,7 +4,7 @@ title: Python agent input binding
 status: Finalized
 author: hallvictoria
 created: 2026-08-11
-updated: 2026-08-12
+updated: 2026-08-14
 issues: [#1163, #1175, #1284]
 pull_requests: []
 branch: hallvictoria/agent-binding
@@ -51,8 +51,9 @@ host round trip.
 - Support both a concise `AiApp.agent_input()` API and existing caller-owned
   `FunctionApp` objects through the same free `agent_input(app, ...)` implementation.
 - Resolve the supported `agent.md` / `.agent.md` convention. For smart bindings,
-  recognize only required `name` and `description` front matter plus the markdown body
-  as instructions; ignore every other per-agent front-matter property.
+  recognize required `name` and `description` front matter, the markdown body as
+  instructions, and `substitute_variables` only as its parsing control; ignore every
+  other per-agent front-matter property.
 - Hydrate the app-level model, discovered user and system tools, skills, MCP, and
   per-call history without customer glue.
 - Validate binding definitions and discovered assets at indexing time with actionable
@@ -177,7 +178,8 @@ slugs side by side.
 A definition referenced by at least one `agent_input` decorator is reachable and may
 omit a standalone trigger and built-in endpoints. The binding projection requires only
 string `name` and `description` values and treats the markdown body as instructions.
-All other front-matter keys are ignored without validation or warnings, including
+It honors `substitute_variables` only to control standard environment substitution in
+that body. All other front-matter keys are ignored without validation or warnings, including
 `trigger`, `builtin_endpoints`, model/tool/skill/MCP filters, schemas, workflows, and
 subagents. The customer's Function owns triggering, request/response adaptation, and
 Durable behavior. Invalid values in ignored keys are silently discarded and cannot
@@ -536,6 +538,7 @@ shims for MAF 1.3 are not part of v1.
 | 27 | MCP lifetime | cache live MCP tools / cache resolved definitions / rediscover files | Cache immutable resolved MCP definitions and construct fresh MCP tools/HTTP clients for each Agent context, because MAF enters and closes owned MCP tools | Agent | 2026-08-12 |
 | 28 | Revised public surface | retain cache-era names / aliases / clean replacement | Remove preview-only `AiAgent` and `shutdown_agent_cache`; customers annotate async injection with `agent_framework.Agent`, while `shutdown_agent_runtime()` names the remaining sync-executor/client-manager cleanup | Agent | 2026-08-12 |
 | 29 | Synchronous handler scope | blocking facade / per-call `asyncio.run()` / async-only | Supersedes the sync and entity portions of #15, #19, #25, and #28: require coroutine Functions and activities, retain only the synchronous replay-safe orchestrator proxy, exclude entity injection, and remove `SyncAiAgent`, `AgentExecutor`, and `shutdown_agent_runtime` | Human | 2026-08-12 |
+| 30 | Binding instruction substitution | raw markdown / unconditional substitution / standard per-agent control | Narrowly supersedes #16: apply the standard markdown environment substitution behavior and honor `substitute_variables`; continue ignoring all capability and runtime fields | Agent | 2026-08-14 |
 
 ## 6. Test plan
 
@@ -544,6 +547,8 @@ shims for MAF 1.3 are not part of v1.
   subagent fields, including invalid values in ignored fields.
 - [ ] Unit: binding hydration uses markdown instructions, app-level model and system
   tools, all discovered user tools/skills/MCP, and session-aware history.
+- [ ] Unit: binding markdown instructions substitute `$VAR` and `%VAR%` placeholders
+  by default and preserve them when `substitute_variables: false`.
 - [ ] Unit: repeated async invocations reuse the same immutable blueprint but receive
   distinct raw Agents, clients, MCP tools, context stacks, and mutable tool lists.
 - [ ] Unit: concurrent invocations of the same slug overlap without an Agent lease and
