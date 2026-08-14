@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
-import { AiAppCard, Callout, EmptyState, StatTiles, SubscriptionPicker } from '../components/ui'
+import { AiAppCard, EmptyState, StatTiles, SubscriptionPicker } from '../components/ui'
 
 function formatCachedAt(ms: number): string {
   if (!ms) return ''
@@ -103,19 +103,6 @@ export default function AgentsPage() {
         .
       </p>
 
-      <Callout
-        title={
-          <>
-            Identified by the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app setting
-          </>
-        }
-      >
-        <div className="muted" style={{ fontSize: 13, maxWidth: 720 }}>
-          A Function App is an AI App when it carries the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app
-          setting — its value is the model provider (e.g. <code>foundry</code>). Pick a subscription to scan.
-        </div>
-      </Callout>
-
       <div className="toolbar">
         <SubscriptionPicker
           subscriptions={subscriptions}
@@ -188,7 +175,7 @@ export default function AgentsPage() {
                 <Link
                   to={`/agents/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}/${encodeURIComponent(a.name)}`}
                 >
-                  {a.name}
+                  {a.name}.agent.md
                 </Link>
               )}
             />

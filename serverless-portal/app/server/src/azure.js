@@ -1172,7 +1172,8 @@ const OPENAI_CHAT_API = '2024-10-21'
 
 async function armJson(accessToken, url, { method = 'GET', body, timeoutMs = 15000 } = {}) {
   try {
-    const res = await fetch(`https://management.azure.com${url}`, {
+    const full = url.startsWith('http') ? url : `https://management.azure.com${url}`
+    const res = await fetch(full, {
       method,
       headers: {
         Authorization: `Bearer ${accessToken}`,
@@ -1392,15 +1393,38 @@ export async function generateCapabilityCode(accessToken, subscriptionId, opts) 
 // List the resource groups in a subscription (name + location), for the create
 // flow's "existing resource group" picker.
 export async function listResourceGroups(accessToken, subscriptionId) {
+  // Follow nextLink so subscriptions with many resource groups aren't truncated
+  // to the first ARM page.
+  const resourceGroups = []
+  let url = `/subscriptions/${subscriptionId}/resourcegroups?api-version=2021-04-01`
+  for (let page = 0; page < 50 && url; page++) {
+    const res = await armJson(accessToken, url, { timeoutMs: 15000 })
+    for (const g of res.json?.value ?? []) {
+      resourceGroups.push({ name: g.name, location: g.location ?? '' })
+    }
+    url = res.json?.nextLink ?? ''
+  }
+  resourceGroups.sort((a, b) => a.name.localeCompare(b.name))
+  return { subscriptionId, resourceGroups }
+}
+
+// Check whether a Function App name is globally available (Microsoft.Web/sites).
+// Function App names share the *.azurewebsites.net namespace, so they must be
+// globally unique; this lets the deploy flow validate before provisioning.
+export async function checkFunctionAppNameAvailable(accessToken, subscriptionId, name) {
   const res = await armJson(
     accessToken,
-    `/subscriptions/${subscriptionId}/resourcegroups?api-version=2021-04-01`,
-    { timeoutMs: 15000 },
+    `/subscriptions/${subscriptionId}/providers/Microsoft.Web/checkNameAvailability?api-version=2023-12-01`,
+    { method: 'POST', body: { name, type: 'Microsoft.Web/sites' }, timeoutMs: 15000 },
   )
-  const resourceGroups = (res.json?.value ?? [])
-    .map((g) => ({ name: g.name, location: g.location ?? '' }))
-    .sort((a, b) => a.name.localeCompare(b.name))
-  return { subscriptionId, resourceGroups }
+  if (!res.ok || !res.json) {
+    return { available: false, reason: '', message: 'Could not check name availability.' }
+  }
+  return {
+    available: !!res.json.nameAvailable,
+    reason: String(res.json.reason ?? ''),
+    message: String(res.json.message ?? ''),
+  }
 }
 
 // Roles a Foundry account's callers need (matches the reference infra).

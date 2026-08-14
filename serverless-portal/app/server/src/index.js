@@ -580,7 +580,12 @@ async function runDeployJob(id, token, ctx) {
       setJob(id, { grantOutcome })
     }
 
-    await pushFilesToSite(id, token, site, await readDirFiles(dir))
+    // Overlay any capabilities the user added as drafts (mcp.json, tools/,
+    // skills/, and edits to the agent's .agent.md) so a portal-created app ships
+    // with them, not just the bare generated agent.
+    const files = await overlayDrafts(subscription, appName, await readDirFiles(dir))
+    setJob(id, { files: files.map((f) => f.name).sort() })
+    await pushFilesToSite(id, token, site, files)
 
     setJob(id, {
       status: 'deployed',
@@ -935,6 +940,27 @@ app.get(
       }
     }
     res.json(await azure.listResourceGroups(token, subscriptionId))
+  }),
+)
+
+// Check if a Function App name is globally available (for the deploy flow).
+app.get(
+  '/api/check-name',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const ref = String(req.query.subscription ?? '').trim()
+    const name = String(req.query.name ?? '').trim()
+    if (!name) throw new HttpError(400, 'A name is required.')
+    let subscriptionId = azure.DEFAULT_SUBSCRIPTION_ID
+    if (ref) {
+      try {
+        subscriptionId = await azure.resolveSubscriptionId(token, ref)
+      } catch (err) {
+        if (err instanceof azure.SubscriptionNotFoundError) throw new HttpError(404, err.message)
+        throw err
+      }
+    }
+    res.json(await azure.checkFunctionAppNameAvailable(token, subscriptionId, name))
   }),
 )
 

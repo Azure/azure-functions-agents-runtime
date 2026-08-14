@@ -36,6 +36,7 @@ interface DeployTargetPickerProps {
   regions: string[]
   radioGroup?: string
   modelHint?: string
+  lockAppName?: boolean
 }
 
 export const DeployTargetPicker = ({
@@ -49,6 +50,7 @@ export const DeployTargetPicker = ({
   regions,
   radioGroup = 'deploy-target',
   modelHint,
+  lockAppName = false,
 }: DeployTargetPickerProps) => {
   const { mode, existingApp, newApp } = value
   return (
@@ -100,9 +102,14 @@ export const DeployTargetPicker = ({
                 type="text"
                 value={newApp.appName}
                 placeholder="func-my-agents"
+                disabled={lockAppName}
                 onChange={(e) => onNewApp({ appName: e.target.value })}
               />
-              <div className="hint">Globally unique across *.azurewebsites.net.</div>
+              <div className="hint">
+                {lockAppName
+                  ? 'Locked — capabilities are attached to this app name.'
+                  : 'Globally unique across *.azurewebsites.net.'}
+              </div>
             </div>
             <div className="field">
               <label>Region</label>

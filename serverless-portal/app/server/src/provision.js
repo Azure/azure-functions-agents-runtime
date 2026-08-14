@@ -226,11 +226,21 @@ export async function provisionFlexApp(token, opts) {
 
   await ensureResourceGroup(token, subscriptionId, resourceGroup, region)
 
+  // Companion resource names come from a sanitized base so an app name with
+  // characters that are invalid for a given resource type (e.g. underscores are
+  // rejected by Log Analytics workspaces) can't fail the whole deployment.
+  const nameBase =
+    String(appName)
+      .toLowerCase()
+      .replace(/[^a-z0-9-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'agents'
+  const trimTrailingHyphen = (s) => s.replace(/-+$/g, '')
   const storageName = storageAccountName(appName)
-  const planName = `${appName}-plan`.slice(0, 40)
+  const planName = trimTrailingHyphen(`${nameBase}-plan`.slice(0, 40))
   const containerName = 'app-package'
-  const insightsName = appName
-  const workspaceName = `${appName}-logs`.slice(0, 63)
+  const insightsName = trimTrailingHyphen(nameBase.slice(0, 60))
+  const workspaceName = trimTrailingHyphen(`${nameBase}-logs`.slice(0, 63))
   const template = flexTemplate({
     appName,
     storageName,

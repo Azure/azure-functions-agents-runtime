@@ -4,6 +4,7 @@ import AgentsPage from './pages/AgentsPage'
 import AgentDetailPage from './pages/AgentDetailPage'
 import AppDetailPage from './pages/AppDetailPage'
 import CreateAgentPage from './pages/CreateAgentPage'
+import DraftAppPage from './pages/DraftAppPage'
 import PlaygroundPage from './pages/PlaygroundPage'
 
 export default function App() {
@@ -12,6 +13,7 @@ export default function App() {
       <Routes>
         <Route path="/" element={<Navigate to="/agents" replace />} />
         <Route path="/create-agent" element={<CreateAgentPage />} />
+        <Route path="/new-app/draft" element={<DraftAppPage />} />
         <Route path="/agents" element={<AgentsPage />} />
         <Route path="/agents/:subscriptionId" element={<AgentsPage />} />
         <Route path="/agents/:subscriptionId/:app/:name" element={<AgentDetailPage />} />

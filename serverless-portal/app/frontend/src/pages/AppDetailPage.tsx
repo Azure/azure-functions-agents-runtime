@@ -85,7 +85,11 @@ function parseMcpServers(content?: string | null): McpServer[] {
   }
 }
 
-type Tab = 'overview' | 'agents' | 'triggers' | 'mcp' | 'code'
+type Sel =
+  | { kind: 'overview' }
+  | { kind: 'agent'; name: string }
+  | { kind: 'mcp'; name: string }
+  | { kind: 'file'; path: string; label: string }
 
 // AI App detail — a single Azure Function App identified as an AI App by the
 // AZURE_FUNCTIONS_AGENTS_PROVIDER app setting. Shows its composition, endpoints,
@@ -95,8 +99,7 @@ export default function AppDetailPage() {
   const navigate = useNavigate()
   const { selected, setSelected } = useIdentity()
   const deployJob = useDeployJob()
-  const [tab, setTab] = useState<Tab>('overview')
-  const [codePath, setCodePath] = useState('function_app.py')
+  const [sel, setSel] = useState<Sel>({ kind: 'overview' })
 
   useEffect(() => {
     if (subscriptionId && subscriptionId !== selected) {
@@ -135,7 +138,6 @@ export default function AppDetailPage() {
   const endpoints = app ? buildAppEndpoints(app) : []
   const endpointsText = endpoints.map((e) => `${e.kind.padEnd(5)} ${e.url}`).join('\n')
   const codeFiles = app ? buildCodeFiles(app) : []
-  const connectorAgents = app?.agents.filter((a) => a.trigger === 'connector') ?? []
   const builtinCount = app?.agents.filter((a) => a.builtinEndpoints).length ?? 0
   const supportingCount = app?.supportingFunctions?.length ?? 0
 
@@ -144,7 +146,7 @@ export default function AppDetailPage() {
     queryKey: ['source', subForQuery, appName ?? '', 'mcp.json'],
     queryFn: () =>
       api.getSource({ subscription: subForQuery, app: appName!, resourceGroup: app!.resourceGroup, path: 'mcp.json' }),
-    enabled: !!app && tab === 'mcp',
+    enabled: !!app,
     staleTime: Infinity,
     refetchOnMount: false,
   })
@@ -239,213 +241,227 @@ export default function AppDetailPage() {
             </div>
           )}
 
-          <div className="tabs" style={{ marginBottom: 16 }}>
-            <button className={'tab' + (tab === 'overview' ? ' active' : '')} onClick={() => setTab('overview')}>
-              Overview
-            </button>
-            <button className={'tab' + (tab === 'agents' ? ' active' : '')} onClick={() => setTab('agents')}>
-              Agents ({app.agents.length})
-            </button>
-            <button className={'tab' + (tab === 'triggers' ? ' active' : '')} onClick={() => setTab('triggers')}>
-              Connector triggers ({connectorAgents.length})
-            </button>
-            <button className={'tab' + (tab === 'mcp' ? ' active' : '')} onClick={() => setTab('mcp')}>
-              MCP
-            </button>
-            <button className={'tab' + (tab === 'code' ? ' active' : '')} onClick={() => setTab('code')}>
-              Code
-            </button>
-          </div>
+          <div className="components">
+            <aside className="explorer">
+              <button
+                className={'node' + (sel.kind === 'overview' ? ' active' : '')}
+                onClick={() => setSel({ kind: 'overview' })}
+              >
+                📊 Overview
+              </button>
 
-          {tab === 'overview' && (
-            <div className="grid cols-2">
-              <div className="card">
-                <h3>Details</h3>
-                <dl className="meta-grid">
-                  <dt>Function App</dt>
-                  <dd className="mono">{app.name}</dd>
-                  <dt>Resource group</dt>
-                  <dd>{app.resourceGroup || '—'}</dd>
-                  <dt>Region</dt>
-                  <dd>{app.location || '—'}</dd>
-                  <dt>Provider</dt>
-                  <dd>
-                    <span className="badge gray">{app.provider || '—'}</span>
-                  </dd>
-                  <dt>Host name</dt>
-                  <dd className="mono">{app.defaultHostName || '—'}</dd>
-                </dl>
-              </div>
-              <div className="card">
-                <h3>Composition</h3>
-                <StatTiles
-                  items={[
-                    { n: app.agents.length, label: app.agents.length === 1 ? 'Agent' : 'Agents' },
-                    { n: connectorAgents.length, label: 'Triggers' },
-                    { n: builtinCount, label: 'Built-in' },
-                    { n: supportingCount, label: 'Supporting' },
-                  ]}
-                />
-                <div className="divider" />
-                <span className="group-sub">Identified by</span>
-                <div className="chips">
-                  <Badge tone="purple" title="AZURE_FUNCTIONS_AGENTS_PROVIDER app setting">
-                    🔖 agent-runtime
-                  </Badge>
-                </div>
-              </div>
-            </div>
-          )}
+              <div className="group-label">Agents</div>
+              {app.agents.map((a) => (
+                <button
+                  key={a.name}
+                  className={'node' + (sel.kind === 'agent' && sel.name === a.name ? ' active' : '')}
+                  onClick={() => setSel({ kind: 'agent', name: a.name })}
+                  title={`${a.name}.agent.md`}
+                >
+                  📄 <span className="mono">{a.name}.agent.md</span>
+                </button>
+              ))}
 
-          {tab === 'agents' && (
-            <div className="table-wrap">
-              <table>
-                <thead>
-                  <tr>
-                    <th>Agent</th>
-                    <th>Trigger</th>
-                    <th>Built-in endpoints</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {app.agents.map((a) => (
-                    <tr key={a.name}>
-                      <td>
-                        <div className="cell-title">
-                          <Link
-                            to={`/agents/${enc(subForQuery)}/${enc(app.name)}/${enc(a.name)}`}
-                          >
-                            {a.name}
-                          </Link>
-                        </div>
-                      </td>
-                      <td>
-                        {a.trigger === 'none' ? (
-                          <span className="badge gray">no trigger</span>
-                        ) : (
-                          <span className="badge blue">{a.trigger || 'http'}</span>
-                        )}
-                      </td>
-                      <td>
-                        {a.builtinEndpoints ? (
-                          <span className="badge green">
-                            <span className="dot" /> enabled
-                          </span>
-                        ) : (
-                          <span className="muted">disabled</span>
-                        )}
-                      </td>
-                    </tr>
+              {mcpServers.length > 0 && (
+                <>
+                  <div className="group-label">MCP servers</div>
+                  {mcpServers.map((s) => (
+                    <button
+                      key={'mcp:' + s.name}
+                      className={'node' + (sel.kind === 'mcp' && sel.name === s.name ? ' active' : '')}
+                      onClick={() => setSel({ kind: 'mcp', name: s.name })}
+                      title={s.url || s.name}
+                    >
+                      🧰 <span className="mono">{s.name}</span>
+                      {s.type && (
+                        <span className="badge gray" style={{ marginLeft: 'auto' }}>
+                          {s.type}
+                        </span>
+                      )}
+                    </button>
                   ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-
-          {tab === 'triggers' && (
-            <div className="table-wrap">
-              {connectorAgents.length > 0 ? (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Agent</th>
-                      <th>Trigger</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {connectorAgents.map((a) => (
-                      <tr key={a.name}>
-                        <td className="cell-title mono">{a.name}</td>
-                        <td>
-                          <span className="badge blue">connector</span>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <EmptyState>
-                  No connector triggers. Add one to an agent from its detail page, or in the Code tab
-                  (a <span className="mono">generic_trigger · connectorTrigger</span> in the agent’s
-                  <span className="mono"> .agent.md</span>).
-                </EmptyState>
+                </>
               )}
-            </div>
-          )}
 
-          {tab === 'mcp' && (
-            <div className="table-wrap">
-              {mcpServers.length > 0 ? (
-                <table>
-                  <thead>
-                    <tr>
-                      <th>Server</th>
-                      <th>Type</th>
-                      <th>URL</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {mcpServers.map((s) => (
-                      <tr key={s.name}>
-                        <td className="cell-title mono">{s.name}</td>
-                        <td>
-                          <span className="badge gray">{s.type || '—'}</span>
-                        </td>
-                        <td className="cell-sub mono">{s.url || '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              ) : (
-                <EmptyState>
-                  No MCP servers found in <span className="mono">mcp.json</span>. Open the Code tab to add
-                  one.
-                </EmptyState>
+              {app.supportingFunctions && app.supportingFunctions.length > 0 && (
+                <>
+                  <div className="group-label">Tools / triggers</div>
+                  {app.supportingFunctions.map((fn) => (
+                    <button
+                      key={'fn:' + fn.name}
+                      className={
+                        'node' +
+                        (sel.kind === 'file' && sel.path === 'function_app.py' && sel.label === fn.name
+                          ? ' active'
+                          : '')
+                      }
+                      onClick={() => setSel({ kind: 'file', path: 'function_app.py', label: fn.name })}
+                      title={`${fn.trigger} trigger · defined in function_app.py`}
+                    >
+                      🐍 <span className="mono">{fn.name}</span>
+                      <span className="badge gray" style={{ marginLeft: 'auto' }}>
+                        {fn.trigger}
+                      </span>
+                    </button>
+                  ))}
+                </>
               )}
-            </div>
-          )}
 
-          {tab === 'code' && (
-            <div className="components">
-              <aside className="explorer">
-                <div className="group-label">App files</div>
-                {codeFiles.map((f) => (
-                  <button
-                    key={f.path}
-                    className={'node' + (codePath === f.path ? ' active' : '')}
-                    onClick={() => setCodePath(f.path)}
-                    title={f.path}
-                  >
-                    {f.icon} <span className="mono">{f.label}</span>
-                  </button>
-                ))}
-              </aside>
-              <section className="component-editor">
-                <div className="card-head">
-                  <h3 className="mono" style={{ margin: 0 }}>
-                    {codePath}
-                  </h3>
-                  <span className="badge blue">source</span>
-                </div>
-                <DraftEditor
-                  key={'code:' + codePath}
-                  queryKey={['source', subForQuery, app.name, codePath]}
-                  load={() =>
-                    api.getSource({
-                      subscription: subForQuery,
-                      app: app.name,
-                      resourceGroup: app.resourceGroup,
-                      path: codePath,
-                    })
+              <div className="group-label">App files</div>
+              {codeFiles.map((f) => (
+                <button
+                  key={f.path}
+                  className={
+                    'node' +
+                    (sel.kind === 'file' && sel.path === f.path && sel.label === f.label ? ' active' : '')
                   }
-                  save={(content) =>
-                    api.saveSource({ subscription: subForQuery, app: app.name, path: codePath, content })
-                  }
-                  fallback=""
-                />
-              </section>
-            </div>
-          )}
+                  onClick={() => setSel({ kind: 'file', path: f.path, label: f.label })}
+                  title={f.path}
+                >
+                  {f.icon} <span className="mono">{f.label}</span>
+                </button>
+              ))}
+            </aside>
+
+            <section className="component-editor">
+              {sel.kind === 'overview' && (
+                <>
+                  <div className="card-head">
+                    <h3 style={{ margin: 0 }}>Overview</h3>
+                    <Badge tone="purple" title="AZURE_FUNCTIONS_AGENTS_PROVIDER app setting">
+                      🔖 agent-runtime
+                    </Badge>
+                  </div>
+                  <dl className="meta-grid">
+                    <dt>Function App</dt>
+                    <dd className="mono">{app.name}</dd>
+                    <dt>Resource group</dt>
+                    <dd>{app.resourceGroup || '—'}</dd>
+                    <dt>Region</dt>
+                    <dd>{app.location || '—'}</dd>
+                    <dt>Provider</dt>
+                    <dd>
+                      <span className="badge gray">{app.provider || '—'}</span>
+                    </dd>
+                    <dt>Host name</dt>
+                    <dd className="mono">{app.defaultHostName || '—'}</dd>
+                  </dl>
+                  <div className="divider" />
+                  <span className="group-sub">Composition</span>
+                  <StatTiles
+                    items={[
+                      { n: app.agents.length, label: app.agents.length === 1 ? 'Agent' : 'Agents' },
+                      { n: builtinCount, label: 'Built-in' },
+                      { n: supportingCount, label: 'Tools/triggers' },
+                    ]}
+                  />
+                  <p className="muted" style={{ fontSize: 12, marginTop: 12 }}>
+                    Select an agent, MCP server, or file on the left to view and edit its source.
+                  </p>
+                </>
+              )}
+
+              {sel.kind === 'agent' && (
+                <>
+                  <div className="card-head">
+                    <h3 className="mono" style={{ margin: 0 }}>
+                      {sel.name}.agent.md
+                    </h3>
+                    <Link
+                      className="btn sm"
+                      to={`/agents/${enc(subForQuery)}/${enc(app.name)}/${enc(sel.name)}`}
+                      title="Open the full agent page"
+                    >
+                      Open agent page →
+                    </Link>
+                  </div>
+                  <DraftEditor
+                    key={'agent:' + sel.name}
+                    queryKey={['agentDefinition', subForQuery, app.name, sel.name]}
+                    load={() =>
+                      api.getAgentDefinition({
+                        subscription: subForQuery,
+                        app: app.name,
+                        resourceGroup: app.resourceGroup,
+                        name: sel.name,
+                      })
+                    }
+                    save={(content) =>
+                      api.saveAgentDefinition({
+                        subscription: subForQuery,
+                        app: app.name,
+                        name: sel.name,
+                        content,
+                      })
+                    }
+                    fallback=""
+                  />
+                </>
+              )}
+
+              {sel.kind === 'mcp' && (
+                <>
+                  <div className="card-head">
+                    <h3 className="mono" style={{ margin: 0 }}>
+                      mcp.json
+                    </h3>
+                    <span className="muted" style={{ fontSize: 12 }}>
+                      server <span className="mono">{sel.name}</span> is defined here
+                    </span>
+                  </div>
+                  <DraftEditor
+                    key="mcp:mcp.json"
+                    queryKey={['source', subForQuery, app.name, 'mcp.json']}
+                    load={() =>
+                      api.getSource({
+                        subscription: subForQuery,
+                        app: app.name,
+                        resourceGroup: app.resourceGroup,
+                        path: 'mcp.json',
+                      })
+                    }
+                    save={(content) =>
+                      api.saveSource({ subscription: subForQuery, app: app.name, path: 'mcp.json', content })
+                    }
+                    fallback=""
+                  />
+                </>
+              )}
+
+              {sel.kind === 'file' && (
+                <>
+                  <div className="card-head">
+                    <h3 className="mono" style={{ margin: 0 }}>
+                      {sel.path}
+                    </h3>
+                    {sel.label !== sel.path ? (
+                      <span className="muted" style={{ fontSize: 12 }}>
+                        <span className="mono">{sel.label}</span> is defined here
+                      </span>
+                    ) : (
+                      <span className="badge blue">source</span>
+                    )}
+                  </div>
+                  <DraftEditor
+                    key={'file:' + sel.path}
+                    queryKey={['source', subForQuery, app.name, sel.path]}
+                    load={() =>
+                      api.getSource({
+                        subscription: subForQuery,
+                        app: app.name,
+                        resourceGroup: app.resourceGroup,
+                        path: sel.path,
+                      })
+                    }
+                    save={(content) =>
+                      api.saveSource({ subscription: subForQuery, app: app.name, path: sel.path, content })
+                    }
+                    fallback=""
+                  />
+                </>
+              )}
+            </section>
+          </div>
         </>
       )}
     </>

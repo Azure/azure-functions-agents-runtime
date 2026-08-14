@@ -5,8 +5,6 @@
 // stays router-agnostic and migratable.
 
 import type { ReactNode } from 'react'
-import { Badge } from './Badge'
-import { Chips } from './Chips'
 import { StatTiles } from './StatTiles'
 import { StatusBadge } from './StatusBadge'
 
@@ -34,8 +32,6 @@ interface AiAppCardProps {
   actions?: ReactNode
 }
 
-const AGENT_RUNTIME_TITLE = 'Identified by the AZURE_FUNCTIONS_AGENTS_PROVIDER app setting'
-
 export const AiAppCard = ({ app, status = 'running', renderAgent, renderAppLink, actions }: AiAppCardProps) => {
   const builtins = app.agents.filter((a) => a.builtinEndpoints).length
   const supporting = app.supportingFunctions?.length ?? 0
@@ -47,20 +43,11 @@ export const AiAppCard = ({ app, status = 'running', renderAgent, renderAppLink,
         </h3>
         <StatusBadge status={status} />
       </div>
-      <div className="cell-sub mono ai-app-loc">
-        {app.resourceGroup} · {app.location}
-      </div>
-      <Chips>
-        <Badge tone="purple" title={AGENT_RUNTIME_TITLE}>
-          🔖 agent-runtime
-        </Badge>
-        <Badge tone="blue">{app.provider}</Badge>
-      </Chips>
       <StatTiles
         items={[
           { n: app.agents.length, label: app.agents.length === 1 ? 'Agent' : 'Agents' },
           { n: builtins, label: 'Built-in' },
-          { n: supporting, label: 'Supporting' },
+          { n: supporting, label: 'Tools/triggers' },
         ]}
       />
       {app.agents.length > 0 && (
@@ -70,14 +57,7 @@ export const AiAppCard = ({ app, status = 'running', renderAgent, renderAppLink,
           <div className="ai-app-agents">
             {app.agents.map((a) => (
               <div className="ai-app-agent" key={a.name}>
-                {renderAgent ? renderAgent(a) : <span className="mono">{a.name}</span>}
-                {a.trigger === 'none' ? (
-                  <Badge tone="gray" title="Defined in a .agent.md with no trigger or built-in endpoint">
-                    no trigger
-                  </Badge>
-                ) : (
-                  <Badge tone="blue">{a.trigger || 'http'}</Badge>
-                )}
+                {renderAgent ? renderAgent(a) : <span className="mono">{a.name}.agent.md</span>}
               </div>
             ))}
           </div>

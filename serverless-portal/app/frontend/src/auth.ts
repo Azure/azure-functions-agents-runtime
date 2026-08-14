@@ -29,6 +29,109 @@ export const loginRequest: RedirectRequest = {
 // Token request for backend calls.
 const armRequest = { scopes: [ARM_SCOPE] }
 
+// ---------------------------------------------------------------------------
+// Manual ARM token (Option C) — try the portal without the interactive MSAL
+// sign-in by pasting an ARM access token (e.g. from
+// `az account get-access-token --resource https://management.azure.com`). Held
+// in sessionStorage (per-tab, cleared on tab close); when present it takes
+// precedence over MSAL for every backend call. It is a powerful bearer
+// credential, so it is never logged and never persisted beyond the tab.
+// ---------------------------------------------------------------------------
+
+const MANUAL_TOKEN_KEY = 'serverless-portal:arm-token'
+const manualTokenListeners = new Set<() => void>()
+
+function emitManualToken() {
+  for (const l of manualTokenListeners) l()
+}
+
+/** Subscribe to manual-token changes (drives useSyncExternalStore in the gate). */
+export function subscribeManualToken(cb: () => void): () => void {
+  manualTokenListeners.add(cb)
+  return () => {
+    manualTokenListeners.delete(cb)
+  }
+}
+
+/** The current manually-pasted ARM token, or null. */
+export function getManualToken(): string | null {
+  try {
+    return sessionStorage.getItem(MANUAL_TOKEN_KEY)
+  } catch {
+    return null
+  }
+}
+
+/** Store a pasted ARM token for this tab and notify listeners. */
+export function setManualToken(token: string): void {
+  try {
+    sessionStorage.setItem(MANUAL_TOKEN_KEY, token.trim())
+  } catch {
+    /* storage unavailable — non-fatal */
+  }
+  emitManualToken()
+}
+
+/** Forget the pasted ARM token (sign out / expiry) and notify listeners. */
+export function clearManualToken(): void {
+  try {
+    sessionStorage.removeItem(MANUAL_TOKEN_KEY)
+  } catch {
+    /* ignore */
+  }
+  emitManualToken()
+}
+
+export interface ArmTokenClaims {
+  name: string
+  username: string
+  oid: string
+  tenantId: string
+  audience: string
+  expiresAt: number
+}
+
+/** Decode (without verifying) the claims of a JWT ARM access token. */
+export function decodeArmToken(token: string): ArmTokenClaims | null {
+  const parts = token.trim().split('.')
+  if (parts.length !== 3) return null
+  try {
+    const json = atob(parts[1].replace(/-/g, '+').replace(/_/g, '/'))
+    const c = JSON.parse(json) as Record<string, unknown>
+    return {
+      name: String(c.name ?? ''),
+      username: String(c.upn ?? c.unique_name ?? c.preferred_username ?? ''),
+      oid: String(c.oid ?? ''),
+      tenantId: String(c.tid ?? ''),
+      audience: String(c.aud ?? ''),
+      expiresAt: Number(c.exp ?? 0),
+    }
+  } catch {
+    return null
+  }
+}
+
+/** Validate a pasted string looks like a non-expired ARM access token. */
+export function validateArmToken(
+  token: string,
+): { ok: true; claims: ArmTokenClaims } | { ok: false; error: string } {
+  const claims = decodeArmToken(token)
+  if (!claims) {
+    return { ok: false, error: 'That doesn’t look like a token — paste the full JWT (three dot-separated parts).' }
+  }
+  const aud = claims.audience.toLowerCase()
+  if (!aud.includes('management.azure.com') && !aud.includes('management.core.windows.net')) {
+    return {
+      ok: false,
+      error: `This token’s audience is “${claims.audience || 'unknown'}”, not Azure Resource Manager. Use --resource https://management.azure.com.`,
+    }
+  }
+  if (claims.expiresAt && claims.expiresAt * 1000 <= Date.now()) {
+    return { ok: false, error: 'This token has expired — run the command again for a fresh one.' }
+  }
+  return { ok: true, claims }
+}
+
 interface RuntimeAuthConfig {
   clientId: string
   authority: string
@@ -108,9 +211,22 @@ export async function signIn(): Promise<void> {
   await msal().loginRedirect(loginRequest)
 }
 
-/** Sign the user out and return to the app origin. */
+/** Sign the user out and return to the app origin. Clears a pasted token too. */
 export async function signOut(): Promise<void> {
-  await msal().logoutRedirect()
+  const hadManual = !!getManualToken()
+  clearManualToken()
+  let account = null
+  try {
+    account = msal().getActiveAccount() ?? msal().getAllAccounts()[0]
+  } catch {
+    account = null
+  }
+  if (account) {
+    await msal().logoutRedirect()
+    return
+  }
+  // Manual-token-only session: reload to the sign-in gate with a clean slate.
+  if (hadManual) window.location.assign('/')
 }
 
 /**
@@ -118,6 +234,9 @@ export async function signOut(): Promise<void> {
  * Falls back to an interactive redirect when consent/interaction is required.
  */
 export async function acquireArmToken(): Promise<string> {
+  // Option C: a pasted ARM token takes precedence over MSAL when present.
+  const manual = getManualToken()
+  if (manual) return manual
   const msalInstance = msal()
   const account = msalInstance.getActiveAccount() ?? msalInstance.getAllAccounts()[0]
   if (!account) throw new Error('Not signed in.')

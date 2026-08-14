@@ -3,7 +3,7 @@
 // Every request forwards the signed-in user's ARM access token (acquired via
 // MSAL) as a Bearer token; the backend uses it to call ARM as that user.
 
-import { acquireArmToken } from './auth'
+import { acquireArmToken, getManualToken, clearManualToken } from './auth'
 
 export interface Health {
   status: string
@@ -129,6 +129,12 @@ export interface ResourceGroupList {
   resourceGroups: ResourceGroup[]
 }
 
+export interface NameAvailability {
+  available: boolean
+  reason?: string
+  message?: string
+}
+
 export interface GrantResult {
   granted: string[]
   failed: { role: string; error: string }[]
@@ -210,6 +216,9 @@ async function req<T>(method: string, url: string, body?: unknown): Promise<T> {
     data = text
   }
   if (!res.ok) {
+    // A pasted ARM token (Option C) that expired/became invalid — drop it so the
+    // app returns to the sign-in gate where a fresh one can be pasted.
+    if (res.status === 401 && getManualToken()) clearManualToken()
     const detail =
       data && typeof data === 'object' && 'detail' in data
         ? (data as { detail: unknown }).detail
@@ -348,6 +357,13 @@ export const api = {
     req<ResourceGroupList>(
       'GET',
       subscription ? `/api/resource-groups?subscription=${enc(subscription)}` : '/api/resource-groups',
+    ),
+
+  // Check if a Function App name is globally available (for the deploy flow).
+  checkName: (p: { subscription: string; name: string }) =>
+    req<NameAvailability>(
+      'GET',
+      `/api/check-name?subscription=${enc(p.subscription)}&name=${enc(p.name)}`,
     ),
 
   // Grant a deployed app's identity access to a Foundry account (cross-sub OK).

@@ -1,4 +1,4 @@
-// Light/dark color theme. Default is light; the user's choice persists in
+// Light/dark color theme. Default is dark; the user's choice persists in
 // localStorage and is reflected as <html data-theme="…"> so the CSS token
 // overrides in styles.css take effect.
 import { useCallback, useState } from 'react'
@@ -9,9 +9,10 @@ const KEY = 'sap-theme'
 
 export function getStoredTheme(): Theme {
   try {
-    return localStorage.getItem(KEY) === 'dark' ? 'dark' : 'light'
+    // Default to dark; only an explicit 'light' choice opts out.
+    return localStorage.getItem(KEY) === 'light' ? 'light' : 'dark'
   } catch {
-    return 'light'
+    return 'dark'
   }
 }
 
