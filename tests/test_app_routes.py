@@ -44,7 +44,10 @@ class _WorkflowRequest:
     def __init__(self) -> None:
         self.headers = {"x-ms-session-id": self.session_id}
         self.query_params = {
-            "workflow_id": workflow_context.new_workflow_instance_id(self.session_id)
+            "workflow_id": workflow_context.new_workflow_instance_id(
+                "main",
+                self.session_id,
+            )
         }
 
 
@@ -98,9 +101,7 @@ def test_bare_agent_md_with_workflows_creates_durable_app(tmp_path: Path):
     assert isinstance(function_app, df.DFApp)
 
 
-def test_non_main_workflows_enabled_warns_and_does_not_enable_durable(
-    tmp_path: Path, caplog: pytest.LogCaptureFixture
-):
+def test_non_main_trigger_workflows_enable_durable(tmp_path: Path):
     _write_main_agent(tmp_path)
     agents_dir = tmp_path / "agents"
     agents_dir.mkdir()
@@ -114,11 +115,17 @@ def test_non_main_workflows_enabled_warns_and_does_not_enable_durable(
 
     function_app = app_module.create_function_app(app_root=tmp_path)
 
-    assert not isinstance(function_app, df.DFApp)
-    assert any(
-        "workflows.enabled is only honored on main.agent.md" in record.message
-        for record in caplog.records
-    )
+    assert isinstance(function_app, df.DFApp)
+    trigger_bindings = [
+        [binding.get_dict_repr()["type"] for binding in builder._function._bindings]
+        for builder in function_app._function_builders
+        if any(
+            binding.get_dict_repr()["type"] == "timerTrigger"
+            for binding in builder._function._bindings
+        )
+    ]
+    assert len(trigger_bindings) == 1
+    assert "durableClient" in trigger_bindings[0]
 
 
 def test_non_workflow_routes_do_not_register_durable_client_binding(tmp_path: Path):
@@ -266,7 +273,7 @@ async def test_workflow_list_endpoint_logs_exception_without_returning_details(
     assert body == {"error": "failed to list workflows"}
     assert secret_message not in response.body.decode()
     assert any(
-        record.message == "workflows list endpoint failed"
+        record.message.startswith("workflows list endpoint failed")
         and record.exc_info
         and secret_message in str(record.exc_info[1])
         for record in caplog.records
@@ -297,7 +304,7 @@ async def test_workflow_status_endpoint_logs_exception_without_returning_details
     assert body == {"error": "failed to fetch workflow status"}
     assert secret_message not in response.body.decode()
     assert any(
-        record.message == "workflow status endpoint failed"
+        record.message.startswith("workflow status endpoint failed")
         and record.exc_info
         and secret_message in str(record.exc_info[1])
         for record in caplog.records

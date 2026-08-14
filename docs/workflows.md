@@ -9,7 +9,10 @@
 > [queue-trigger sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-queue-p0-report/README.md) for a
 > non-interactive starter. The
 > [parallel PR report sample](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/workflow-subagents-preview/README.md)
-> demonstrates workflow Sub Agents. Larger features such as sub-orchestrations,
+> demonstrates workflow Sub Agents. The
+> [Engineering Operations Hub](https://github.com/Azure/azure-functions-agents-runtime/blob/main/samples/per-agent-workflows/README.md)
+> demonstrates two non-main workflow-enabled agents with independent policies in one app.
+> Larger features such as sub-orchestrations,
 > configurable retry policies, and MCP Tasks integration are tracked as v2
 > follow-up work.
 
@@ -41,9 +44,8 @@ They are **not** the right tool for:
   immediately with an ID; the *result* is fetched on a later turn);
 - hand-authored orchestration DSLs — plans are LLM-authored only, by
   design, so there is no YAML/markdown workflow template format;
-- cross-app coordination. v1 workflows live inside one Functions app and are
-  enabled only by its `main.agent.md`; authorized leaf specialists in that app
-  can run as workflow Sub Agents.
+- cross-app coordination. v1 workflows live inside one Functions app; any
+  agent in that app can own workflows and authorize leaf specialists.
 
 ## Why workflows (token, latency, context)
 
@@ -164,12 +166,29 @@ prefer `start_workflow` over direct tool calls. The agent author does
 not need to document the tools or the heuristics in their markdown — the
 agent markdown stays focused on the domain.
 
-> [!IMPORTANT]
-> **v1 constraint:** `workflows.enabled: true` is only honored on
-> `main.agent.md`. That main agent may be invoked interactively or by a declared
-> trigger. Other agents
-> that set the flag get a startup warning and the tools are not injected.
-> A future release will lift this constraint.
+Any agent may enable workflows by setting `workflows.enabled: true`.
+Invocation remains independent: triggers and built-in endpoints determine how
+the agent can be reached, and `debug_chat_ui` automatically enables its backing
+chat API.
+
+File placement does not assign these roles. See
+[Agent roles and reachability](./front-matter-spec.md#agent-roles-and-reachability)
+for how direct, workflow-enabled, and internal specialist agents are identified.
+
+### App-wide engine, per-agent policy
+
+The app discovers complete, immutable catalogs of workflow handlers and agents.
+If at least one workflow-enabled agent exists, startup creates one `DFApp` and
+registers one Durable orchestrator plus one copy of each Activity for the whole
+app. It does **not** register a separate engine per agent.
+
+An app with no workflow-enabled agents remains a plain `FunctionApp`.
+
+Each workflow-enabled agent instead gets an immutable policy containing only its allowed
+workflow tools (after `workflows.exclude`) and its deny-by-default
+`workflows.subagents` grants. Prompt guidance, `start_workflow` validation, and
+Activity dispatch all use that agent's policy. One agent's exclusion never
+removes a handler another agent is allowed to use.
 
 ### Workflow tool authoring
 
@@ -260,12 +279,13 @@ hardening controls.
 
 ### Workflow Sub Agents
 
-The author grants access in `main.agent.md` with `workflows.subagents`. Each
+The workflow-enabled agent grants access in its frontmatter with
+`workflows.subagents`. Each
 frontmatter grant contains `agent` and optional `when`; it is not a DAG node.
 The model then generates a `sub_agent` DAG node with exactly `id`, `type`,
 `agent`, `task`, and optional `depends_on`. A node does not accept `when`,
 `tool`, `args`, `duration`, or `until`.
-The runtime validates every specialist slug against the workflow owner's
+The runtime validates every specialist slug against the workflow-enabled agent's
 immutable grant before any node is scheduled and fails closed if the specialist
 is unavailable.
 
@@ -394,7 +414,8 @@ channel from the orchestrator into the agent's chat thread.
   output enters the agent's context window via `get_workflow_status`.
 - The `GET /agents/{slug}/workflows` endpoint is scoped to the calling session
   via the `x-ms-session-id` request header and the per-workflow
-  ownership scheme described in [Ownership](#ownership).
+  isolation scheme described in
+  [Agent and session isolation](#agent-and-session-isolation).
 
 The data shape maps directly onto MCP Tasks SEP-2557 (`CreateTaskResult`,
 `tasks/get`, `tasks/cancel`); future direct MCP Tasks support is a thin
@@ -434,7 +455,7 @@ runtime contract enforced by the framework. External clients (e.g.
 an MCP-Tasks-aware client) are free to adopt the same convention or
 to drive completion handling some other way (e.g. a dedicated `task
 completed` UI event with no synthetic prompt). The server-side
-mechanics — `GET /agents/{slug}/workflows`, `get_workflow_status`, ownership
+mechanics — `GET /agents/{slug}/workflows`, `get_workflow_status`, isolation
 scoping — are the actual contract; the synthetic-prompt format is a
 client-side detail.
 
@@ -446,7 +467,7 @@ turn.
 
 ### Trigger-started workflows
 
-Any supported Markdown-declared trigger on a workflow-enabled `main.agent.md`
+Any supported Markdown-declared trigger on a workflow-enabled agent
 can start a Dynamic Workflow:
 
 1. The agent receives the trigger payload and authors a workflow plan.
@@ -465,14 +486,76 @@ service. The trigger-specific system guidance directs the agent to use that tool
 as the workflow's final step. Use Durable Functions or Durable Task Scheduler
 tooling for operational monitoring and control.
 
-## Ownership
+Every trigger invocation uses that agent's slug, policy, and bound Durable
+client. HTTP triggers use the request session (or the normal generated session).
+Non-HTTP triggers generate a fresh invocation session and intentionally create
+no application-level session index or reconnect API. In all cases the starter
+returns after the initial model turn; orchestration continues asynchronously.
 
-Every workflow's Durable instance ID is prefixed with
-`sha256(session_id)[:12]` at creation. `get_workflow_status`,
+## Agent and session isolation
+
+Each workflow is isolated by the workflow-enabled agent's canonical slug and the
+invocation `session_id`. Internally, Durable payloads call this pair
+`(workflow_agent_slug, session_id)`; `workflow_agent_slug` is not a frontmatter field. The instance
+ID begins with a 32-hex-character (128-bit) truncated SHA-256 digest over an
+unambiguous length-delimited encoding of that pair; neither raw value appears in
+the ID. `get_workflow_status`,
 `list_workflows`, `cancel_workflow`, and `terminate_workflow` filter
-on that prefix; a workflow whose prefix does not match the calling
-session's hash is treated as nonexistent (returns 404, never 403, so
-existence cannot be probed by guessing IDs across sessions).
+on that prefix. A workflow whose agent **or** session does not match is treated
+as nonexistent (404/empty, never 403), so two agents remain isolated even when
+callers deliberately reuse the same session ID.
+
+Activities reauthorize immediately before dispatch against the **currently
+deployed** agent policy. Removing a workflow-enabled agent while another remains, or
+tightening a tool/Sub Agent grant, therefore revokes pending capability-bearing
+nodes; they fail closed rather than continuing under a stale policy snapshot.
+
+### Removing the final workflow-enabled agent
+
+Removing the final workflow-enabled agent is a known deployment lifecycle edge
+case. An Activity work item may already be queued in the Task Hub but not yet
+executed. The resulting plain `FunctionApp` has no registered orchestrator or
+Activity Function to receive that work item, so it cannot reach policy
+reauthorization and fail explicitly; it may remain non-terminal in the hub.
+
+There is currently no application environment variable or supported runtime
+drain mode for this transition. Before removing the final workflow-enabled
+agent, stop new starters and use Durable Functions or DTS Task Hub tooling to
+let existing instances finish or terminate them. Confirm that no non-terminal
+instances remain, and preserve the Task Hub name, backend connection,
+`host.json` Durable settings, and extension bundle during the transition.
+
+The runtime/Durable ownership and long-term remediation are tracked in
+[the final-agent lifecycle issue](https://github.com/Azure/azure-functions-agents-runtime/issues/161).
+
+### Migration from legacy workflow IDs
+
+This experimental feature intentionally changes IDs from a session-only 48-bit
+prefix to the agent-and-session 128-bit prefix. New agent tools and polling
+routes cannot list, inspect, cancel, or terminate pre-upgrade IDs. In addition,
+legacy orchestration inputs contain no `workflow_agent_slug`, so an in-flight legacy
+workflow fails closed when it next dispatches a `tool` or `sub_agent` Activity;
+pure `wait` nodes do not require agent authorization. Drain or terminate active
+workflows before upgrading. Use Durable Functions or DTS tooling to inspect or
+control any legacy instances that remain.
+
+### Operational scaling notes
+
+Each worker reconstructs the immutable agent-policy and handler catalogs from
+the same deployed agent project during app startup. Orchestrators persist
+`workflow_agent_slug` in their input and pass it to Activities, so an Activity may safely
+run on a different worker. Do not share a Task Hub between applications or
+deployments with different agent definitions. During a rolling deployment,
+old and new workers may briefly enforce different policy versions; restrictive
+changes can therefore fail pending nodes closed as soon as a new worker handles
+them.
+
+Session workflow listing currently calls Durable's task-hub status API and
+filters by agent/session prefix in the application. Configure backend retention
+or periodically purge completed orchestration history so polling cost does not
+grow without bound. The active-workflow limit is per agent and session;
+non-HTTP trigger invocations generate new session IDs, so that limit is not an
+agent-wide throttle.
 
 ## Observability
 
@@ -502,6 +585,8 @@ existence cannot be probed by guessing IDs across sessions).
 v1 includes:
 
 - five built-in workflow tools;
+- any agent may enable workflows, with one app-wide engine and immutable
+  per-agent policies;
 - DAG execution of `@workflow_tool` calls and wait tasks;
 - deny-by-default `workflows.subagents` grants and stateless `sub_agent` tasks;
 - fan-out/fan-in via `depends_on`;
@@ -515,8 +600,7 @@ v1 includes:
 - fixed v1 guardrails for plan size, parallelism, wait duration, active
   workflows per session, and status-list result count.
 
-v2 follow-up work includes enabling workflows for non-`main.agent.md`
-agents, sub-orchestrations and bounded nested agents, per-agent registry isolation,
-configurable caps, retry and timeout policies, HMAC-backed workflow
-ownership, blob-offloaded large outputs, an MCP Tasks bridge, richer error
-taxonomy, and storage hygiene.
+v2 follow-up work includes sub-orchestrations and bounded nested agents,
+configurable caps, retry and timeout policies, HMAC-backed workflow identity,
+blob-offloaded large outputs, an MCP Tasks bridge, richer error taxonomy, and
+storage hygiene.

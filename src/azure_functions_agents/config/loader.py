@@ -19,8 +19,6 @@ from azure_functions_agents.config.env import (
 from azure_functions_agents.config.schema import AgentSpec, GlobalConfig
 
 _FRONTMATTER_SCHEMA_LINK = "aka.ms/agents-front-matter-schema"
-
-
 _FRONTMATTER_ACTION_ITEMS = (
     "Fix YAML syntax between leading and trailing '---' delimiters.",
     f"Validate required fields like `name`, `description`, and `trigger` against {_FRONTMATTER_SCHEMA_LINK}.",

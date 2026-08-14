@@ -13,10 +13,8 @@ Three concepts kept distinct:
 - **Public**: included in the effective workflow tool set unless filtered.
   Internal helpers like ``__echo`` are registered with ``public=False`` so
   they don't leak into agent-visible plans by accident.
-- **Effective allowlist**: the set the running app actually permits in
-  plans. Computed by :mod:`.integration` per-app and stashed via
-  :func:`set_app_config`; read by ``start_workflow`` when validating
-  a plan.
+- **Effective allowlist**: retained only as a compatibility fallback for direct
+  helper callers. Production app construction passes an explicit agent policy.
 
 Reserved names (the LLM-facing workflow-management tools themselves)
 can never be registered — workflow nodes must never reach back into
@@ -26,8 +24,9 @@ the workflow control plane.
 from __future__ import annotations
 
 import inspect
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 
@@ -49,6 +48,9 @@ class WorkflowToolEntry:
     public: bool
 
 
+type WorkflowHandlerCatalog = Mapping[str, WorkflowToolEntry]
+
+
 # Names of LLM-facing workflow-management tools — these can never be
 # workflow node targets. Kept here (not in tools.py) to avoid pulling
 # the agent-facing workflow tool layer into modules that don't otherwise need it.
@@ -67,6 +69,46 @@ _REGISTRY: dict[str, WorkflowToolEntry] = {}
 _APP_ALLOWLIST: frozenset[str] | None = None
 
 
+def make_workflow_tool_entry(
+    name: str,
+    description: str,
+    handler: Callable[[dict[str, Any]], Any],
+    *,
+    public: bool = True,
+) -> WorkflowToolEntry:
+    """Validate and construct one workflow handler-catalog entry."""
+    if not isinstance(name, str) or not name:
+        raise ValueError("workflow tool name must be a non-empty string")
+    if name in RESERVED_TOOL_NAMES:
+        raise ValueError(
+            f"workflow tool name {name!r} is reserved for the workflow "
+            "control plane and cannot be used as a workflow node target"
+        )
+    if not callable(handler):
+        raise ValueError(
+            f"workflow tool {name!r}: handler must be a callable taking a "
+            "dict of args and returning a JSON-serializable value"
+        )
+    if inspect.iscoroutinefunction(handler):
+        raise ValueError(
+            f"workflow tool {name!r}: async handlers are not supported; "
+            "register a synchronous wrapper instead"
+        )
+    return WorkflowToolEntry(
+        name=name,
+        description=description,
+        handler=handler,
+        public=public,
+    )
+
+
+def build_handler_catalog(
+    entries: Mapping[str, WorkflowToolEntry],
+) -> WorkflowHandlerCatalog:
+    """Freeze a complete app-wide workflow handler inventory."""
+    return MappingProxyType(dict(entries))
+
+
 def register_workflow_tool(
     name: str,
     description: str,
@@ -81,27 +123,13 @@ def register_workflow_tool(
     an obviously-wrong handler shape (async functions are rejected so
     the orchestrator's activity can stay synchronous in M1).
     """
-    if not isinstance(name, str) or not name:
-        raise ValueError("workflow tool name must be a non-empty string")
-    if name in RESERVED_TOOL_NAMES:
-        raise ValueError(
-            f"workflow tool name {name!r} is reserved for the workflow "
-            "control plane and cannot be used as a workflow node target"
-        )
     if name in _REGISTRY:
         raise ValueError(f"workflow tool {name!r} is already registered")
-    if not callable(handler):
-        raise ValueError(
-            f"workflow tool {name!r}: handler must be a callable taking a "
-            "dict of args and returning a JSON-serializable value"
-        )
-    if inspect.iscoroutinefunction(handler):
-        raise ValueError(
-            f"workflow tool {name!r}: async handlers are not supported; "
-            "register a synchronous wrapper instead"
-        )
-    _REGISTRY[name] = WorkflowToolEntry(
-        name=name, description=description, handler=handler, public=public
+    _REGISTRY[name] = make_workflow_tool_entry(
+        name,
+        description,
+        handler,
+        public=public,
     )
 
 
@@ -130,9 +158,7 @@ def set_app_config(allowed_tools: frozenset[str]) -> None:
     :mod:`.integration`. ``start_workflow`` reads this when validating
     submitted plans.
 
-    M1 has exactly one main agent so a single module-level value is
-    sufficient. Per-agent allowlists land with the M3 registry refactor
-    — at which point this should be replaced with a per-agent lookup.
+    Production app construction does not use this fallback.
     """
     global _APP_ALLOWLIST
     _APP_ALLOWLIST = frozenset(allowed_tools)
@@ -159,11 +185,14 @@ def reset() -> None:
 
 __all__ = [
     "RESERVED_TOOL_NAMES",
+    "WorkflowHandlerCatalog",
     "WorkflowToolEntry",
     "all_registered_names",
+    "build_handler_catalog",
     "get_app_config",
     "get_entry",
     "get_handler",
+    "make_workflow_tool_entry",
     "public_tool_names",
     "register_workflow_tool",
     "reset",
