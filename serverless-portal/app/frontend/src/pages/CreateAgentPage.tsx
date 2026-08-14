@@ -5,6 +5,7 @@ import { api } from '../api'
 import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot } from '../query'
+import { Callout, DeployTargetPicker } from '../components/ui'
 
 // Regions that support Azure Functions Flex Consumption (+ the default Foundry
 // gpt-5.4 Global Standard deployment) — matches the repo's infra allow-list.
@@ -198,8 +199,6 @@ export default function CreateAgentPage() {
   const resourceGroups = rgData?.resourceGroups ?? []
 
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }))
-  const setNewApp = <K extends keyof NewApp>(key: K, value: NewApp[K]) =>
-    setDraft((d) => ({ ...d, newApp: { ...d.newApp, [key]: value } }))
 
   // Switch the Foundry subscription → clear the picked account/model.
   const selectFoundrySub = (sub: string) =>
@@ -344,10 +343,10 @@ export default function CreateAgentPage() {
   return (
     <>
       <div className="breadcrumb">
-        Home / <Link to={`/agents/${selected}`}>Agents</Link> / Create
+        Home / <Link to={`/agents/${selected}`}>AI Apps</Link> / Create
       </div>
       <div className="page-title">
-        <h1>Create agent</h1>
+        <h1>Create AI App</h1>
         <span className="badge gray">draft saved in this session</span>
       </div>
       <p className="page-sub">
@@ -355,10 +354,17 @@ export default function CreateAgentPage() {
         for this browser session.
       </p>
 
+      <Callout title="What makes this an AI App">
+        <div className="muted" style={{ fontSize: 13, maxWidth: 720 }}>
+          Deploying sets the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app setting on the Function App — the
+          marker the portal uses to discover it as an AI App.
+        </div>
+      </Callout>
+
       <div className="steps">
-        <span className={'step' + (step === 1 ? ' active' : ' done')}>1 · Foundry model</span>
+        <span className={'step' + (step === 1 ? ' active' : ' done')}>1 · Model</span>
         <span className="step-sep">→</span>
-        <span className={'step' + (step === 2 ? ' active' : '')}>2 · Configure agent</span>
+        <span className={'step' + (step === 2 ? ' active' : '')}>2 · Describe &amp; generate</span>
       </div>
 
       {step === 1 && (
@@ -590,130 +596,40 @@ export default function CreateAgentPage() {
                 ))}
               </select>
             </div>
-            <label className="check">
-              <input
-                type="radio"
-                name="target"
-                checked={draft.target === 'existing'}
-                onChange={() => set('target', 'existing')}
-              />{' '}
-              Add to an existing Function App
-            </label>
-            {draft.target === 'existing' && (
-              <div className="field" style={{ margin: '8px 0 4px 24px' }}>
-                <select value={draft.existingApp} onChange={(e) => set('existingApp', e.target.value)}>
-                  <option value="">
-                    {appsLoading
-                      ? 'Loading apps…'
-                      : apps.length
-                        ? 'Select a Function App…'
-                        : 'No agent apps in this subscription'}
-                  </option>
-                  {apps.map((a) => (
-                    <option key={a.name} value={a.name}>
-                      {a.name} ({a.resourceGroup})
-                    </option>
-                  ))}
-                </select>
-                <div className="hint">One Function App can host many agents.</div>
-              </div>
-            )}
-
-            <label className="check">
-              <input
-                type="radio"
-                name="target"
-                checked={draft.target === 'new'}
-                onChange={() => set('target', 'new')}
-              />{' '}
-              Create a new Function App (Flex Consumption)
-            </label>
-            {draft.target === 'new' && (
-              <div style={{ margin: '8px 0 0 24px' }}>
-                <div className="grid cols-2" style={{ gap: 12 }}>
-                  <div className="field">
-                    <label>Function App name</label>
-                    <input
-                      type="text"
-                      value={draft.newApp.appName}
-                      placeholder="func-my-agents"
-                      onChange={(e) => setNewApp('appName', e.target.value)}
-                    />
-                    <div className="hint">Globally unique across *.azurewebsites.net.</div>
-                  </div>
-                  <div className="field">
-                    <label>Region</label>
-                    <select
-                      value={draft.newApp.region}
-                      onChange={(e) => setNewApp('region', e.target.value)}
-                    >
-                      {FLEX_REGIONS.map((r) => (
-                        <option key={r} value={r}>
-                          {r}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-                <div className="field" style={{ marginBottom: 0 }}>
-                  <label>Resource group</label>
-                  <div style={{ display: 'flex', gap: 16, margin: '2px 0 6px' }}>
-                    <label className="check" style={{ marginBottom: 0 }}>
-                      <input
-                        type="radio"
-                        name="rgmode"
-                        checked={draft.newApp.rgMode === 'existing'}
-                        onChange={() => setNewApp('rgMode', 'existing')}
-                      />{' '}
-                      Use existing
-                    </label>
-                    <label className="check" style={{ marginBottom: 0 }}>
-                      <input
-                        type="radio"
-                        name="rgmode"
-                        checked={draft.newApp.rgMode === 'new'}
-                        onChange={() => setNewApp('rgMode', 'new')}
-                      />{' '}
-                      Create new
-                    </label>
-                  </div>
-                  {draft.newApp.rgMode === 'existing' ? (
-                    <select
-                      value={draft.newApp.resourceGroup}
-                      onChange={(e) => setNewApp('resourceGroup', e.target.value)}
-                    >
-                      <option value="">
-                        {rgLoading
-                          ? 'Loading resource groups…'
-                          : resourceGroups.length
-                            ? 'Select a resource group…'
-                            : 'No resource groups found'}
-                      </option>
-                      {resourceGroups.map((g) => (
-                        <option key={g.name} value={g.name}>
-                          {g.name} · {g.location}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      type="text"
-                      value={draft.newApp.resourceGroup}
-                      placeholder="rg-my-agents"
-                      onChange={(e) => setNewApp('resourceGroup', e.target.value)}
-                    />
-                  )}
-                </div>
-                <div className="hint" style={{ marginTop: 8 }}>
-                  Reuses the Foundry model from step 1 (
-                  <span className="mono">{draft.foundryModel || '—'}</span>) — no Foundry is provisioned.
-                </div>
-              </div>
-            )}
+            <DeployTargetPicker
+              value={{ mode: draft.target, existingApp: draft.existingApp, newApp: draft.newApp }}
+              onChange={(patch) =>
+                setDraft((d) => ({
+                  ...d,
+                  ...(patch.mode !== undefined ? { target: patch.mode } : {}),
+                  ...(patch.existingApp !== undefined ? { existingApp: patch.existingApp } : {}),
+                }))
+              }
+              onNewApp={(patch) => setDraft((d) => ({ ...d, newApp: { ...d.newApp, ...patch } }))}
+              apps={apps}
+              appsLoading={appsLoading}
+              resourceGroups={resourceGroups}
+              rgLoading={rgLoading}
+              regions={FLEX_REGIONS}
+              modelHint={draft.foundryModel}
+            />
           </div>
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div className="card">
+            <h3>Generated AI App</h3>
+            <dl className="meta-grid">
+              <dt>Model</dt>
+              <dd className="mono">{draft.foundryModel || '—'}</dd>
+              <dt>Name</dt>
+              <dd>{draft.name || slug}</dd>
+              <dt>Function App</dt>
+              <dd className="mono">
+                {draft.target === 'existing' ? draft.existingApp || '—' : draft.newApp.appName || '—'}
+              </dd>
+            </dl>
+          </div>
           <div className="card">
             <h3>✨ Describe your agent</h3>
             <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>

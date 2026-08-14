@@ -62,19 +62,6 @@
               <option value="test">Private Test Sub</option>
             </select>
           </div>
-          <div class="fl">
-            <label>Status</label>
-            <select id="statusFilter" onchange="applyFilters()">
-              <option value="all">All statuses</option>
-              <option value="running">Running</option>
-              <option value="provisioning">Provisioning</option>
-              <option value="stopped">Stopped</option>
-            </select>
-          </div>
-          <div class="fl">
-            <label>Find by name</label>
-            <input type="text" id="q" placeholder="Filter…" oninput="applyFilters()" />
-          </div>
           <div class="spacer"></div>
           <span class="count" id="resultCount"></span>
           <a class="btn primary" href="create-ai-app.html">＋ New AI App</a>
@@ -258,15 +245,10 @@
     <script>
       function applyFilters() {
         const sub = document.getElementById('subFilter').value
-        const status = document.getElementById('statusFilter').value
-        const q = document.getElementById('q').value.trim().toLowerCase()
         let shown = 0
         const cards = document.querySelectorAll('#grid .card')
         cards.forEach((c) => {
-          const okSub = sub === 'all' || c.dataset.sub === sub
-          const okStatus = status === 'all' || c.dataset.status === status
-          const okName = !q || c.dataset.name.includes(q)
-          const show = okSub && okStatus && okName
+          const show = sub === 'all' || c.dataset.sub === sub
           c.style.display = show ? '' : 'none'
           if (show) shown++
         })

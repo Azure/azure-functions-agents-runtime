@@ -56,7 +56,7 @@ export default function Shell({ children }: { children: ReactNode }) {
         <div className="appbar-spacer" />
 
         <Link to="/create-agent" className="btn primary sm">
-          ＋ New agent
+          ＋ New AI App
         </Link>
         <button
           className="icon-btn"
@@ -78,9 +78,9 @@ export default function Shell({ children }: { children: ReactNode }) {
         <aside className={'sidebar' + (collapsed ? ' collapsed' : '')}>
           <nav className="sidenav">
             <div className="group-label">Build</div>
-            <NavLink className={linkClass} to="/agents" title="Agents">
-              <span className="ico">🤖</span>
-              <span className="label">Agents</span>
+            <NavLink className={linkClass} to="/agents" title="AI Apps">
+              <span className="ico">🧩</span>
+              <span className="label">AI Apps</span>
             </NavLink>
             <NavLink className={linkClass} to="/playground" title="Playground">
               <span className="ico">💬</span>

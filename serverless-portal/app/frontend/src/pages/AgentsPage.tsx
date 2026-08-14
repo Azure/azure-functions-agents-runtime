@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
+import { AiAppCard, Callout, EmptyState, StatTiles, SubscriptionPicker } from '../components/ui'
 
 function formatCachedAt(ms: number): string {
   if (!ms) return ''
@@ -18,28 +19,10 @@ function formatCachedAt(ms: number): string {
   return `${d.toLocaleString()} (${rel})`
 }
 
-// Shorten a supporting function name for display, e.g.
-// `agent_main_builtin_chatstream` → `chatstream`. Falls back to the raw name.
-function shortSupportingLabel(agentName: string, fn: string): string {
-  const builtinPrefix = `agent_${agentName}_builtin_`
-  if (fn.startsWith(builtinPrefix)) return fn.slice(builtinPrefix.length)
-  const marker = '_builtin_'
-  const idx = fn.indexOf(marker)
-  if (fn.startsWith('agent_') && idx !== -1) return fn.slice(idx + marker.length)
-  return fn
-}
-
-// Summarise functions by trigger type, e.g. [http, connector, http] →
-// "2 http, 1 connector". First-seen trigger order is preserved.
-function summarizeByTrigger(fns: { trigger: string }[]): string {
-  const counts = new Map<string, number>()
-  for (const fn of fns) {
-    const key = fn.trigger || 'other'
-    counts.set(key, (counts.get(key) ?? 0) + 1)
-  }
-  return [...counts.entries()].map(([trigger, n]) => `${n} ${trigger}`).join(', ')
-}
-
+// The dashboard: Azure Function Apps identified as AI Apps by the
+// `AZURE_FUNCTIONS_AGENTS_PROVIDER` app setting (the backend's sole "is this an
+// agent app?" signal), scoped to the selected subscription. Each app is a card
+// listing its agents, which link through to the agent detail page.
 export default function AgentsPage() {
   const {
     subscriptions,
@@ -53,27 +36,23 @@ export default function AgentsPage() {
   const navigate = useNavigate()
 
   // Deeplink → state: adopt the subscription from the URL so a shared/reloaded
-  // `/agents/:subscriptionId` restores the exact view (even before the
-  // subscription list has loaded).
+  // `/agents/:subscriptionId` restores the exact view.
   useEffect(() => {
     if (subscriptionId && subscriptionId !== selected) {
       setSelected(subscriptionId)
     }
   }, [subscriptionId, selected, setSelected])
 
-  // State → deeplink: keep the URL in sync with the selected subscription so it
-  // is always shareable (replace so it doesn't spam browser history).
+  // State → deeplink: keep the URL in sync with the selected subscription.
   useEffect(() => {
     if (selected && selected !== subscriptionId) {
       navigate(`/agents/${selected}`, { replace: true })
     }
   }, [selected, subscriptionId, navigate])
 
-  // Live agent discovery is cached per subscription and persisted to
-  // localStorage, so a shared/reloaded deeplink hydrates instantly from cache.
-  // The data never auto-refetches (staleTime Infinity + refetchOnMount off) — a
-  // network scan only happens on the first load of a subscription with no
-  // cached snapshot, or when the user presses Hard refresh.
+  // Live discovery is cached per subscription and persisted to localStorage, so
+  // a shared/reloaded deeplink hydrates instantly. It never auto-refetches — a
+  // scan only runs on the first load of an uncached subscription or a Hard refresh.
   const snapshot = useMemo(() => readAgentsSnapshot(selected), [selected])
   const {
     data,
@@ -92,8 +71,6 @@ export default function AgentsPage() {
     initialDataUpdatedAt: snapshot?.updatedAt,
   })
 
-  // Persist each successful scan (and its timestamp) so the deeplink survives
-  // full page reloads.
   useEffect(() => {
     if (selected && data) {
       writeAgentsSnapshot(selected, data, dataUpdatedAt)
@@ -101,12 +78,9 @@ export default function AgentsPage() {
   }, [selected, data, dataUpdatedAt])
 
   const error = queryError ? (queryError as Error).message : null
+  const apps = data?.apps ?? []
   const agents = data?.agents ?? []
-  // App-level supporting (non-agent) functions, keyed by Function App name.
-  const supportingByApp = useMemo(
-    () => new Map((data?.apps ?? []).map((app) => [app.name, app.supportingFunctions ?? []])),
-    [data],
-  )
+  const builtinCount = agents.filter((a) => a.builtinEndpoints).length
   const scanning = !!selected && !data && !error
   const subName = subscriptions.find((s) => s.id === selected)?.name ?? 'the subscription'
 
@@ -117,39 +91,41 @@ export default function AgentsPage() {
 
   return (
     <>
-      <div className="breadcrumb">Home / Agents</div>
+      <div className="breadcrumb">Home / AI Apps</div>
       <div className="page-title">
-        <h1>Agents</h1>
+        <h1>AI Apps</h1>
       </div>
       <p className="page-sub">
-        Serverless agents discovered in <strong>{subName}</strong>
+        AI Apps are Azure Function Apps that run the agent runtime, discovered in <strong>{subName}</strong>
         {data
-          ? ` — ${agents.length} agent${agents.length === 1 ? '' : 's'} across ${data.apps.length} Function App${data.apps.length === 1 ? '' : 's'}`
+          ? ` — ${apps.length} app${apps.length === 1 ? '' : 's'}, ${agents.length} agent${agents.length === 1 ? '' : 's'}`
           : ''}
         .
       </p>
 
+      <Callout
+        title={
+          <>
+            Identified by the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app setting
+          </>
+        }
+      >
+        <div className="muted" style={{ fontSize: 13, maxWidth: 720 }}>
+          A Function App is an AI App when it carries the <code>AZURE_FUNCTIONS_AGENTS_PROVIDER</code> app
+          setting — its value is the model provider (e.g. <code>foundry</code>). Pick a subscription to scan.
+        </div>
+      </Callout>
+
       <div className="toolbar">
-        <label className="sub-picker" title="Azure subscription">
-          <span className="sub-picker-label">Subscription</span>
-          <select
-            value={selected}
-            onChange={(e) => onPickSubscription(e.target.value)}
-            disabled={identityLoading || !!identityError || subscriptions.length === 0}
-          >
-            {identityLoading && <option value="">Loading…</option>}
-            {identityError && <option value="">Unavailable</option>}
-            {!identityLoading &&
-              !identityError &&
-              subscriptions.map((s) => (
-                <option key={s.id} value={s.id}>
-                  {s.name}
-                </option>
-              ))}
-          </select>
-        </label>
+        <SubscriptionPicker
+          subscriptions={subscriptions}
+          value={selected}
+          onChange={onPickSubscription}
+          loading={identityLoading}
+          error={!!identityError}
+        />
         {data && (
-          <span className="cache-stamp" title="When this subscription's agents were last fetched">
+          <span className="cache-stamp" title="When this subscription's AI Apps were last fetched">
             Cached {formatCachedAt(dataUpdatedAt)}
           </span>
         )}
@@ -162,137 +138,63 @@ export default function AgentsPage() {
           {isFetching ? '⟳ Refreshing…' : '⟳ Hard refresh'}
         </button>
         <Link className="btn primary" to="/create-agent">
-          ＋ Create agent
+          ＋ New AI App
         </Link>
       </div>
 
-      {isFetching && <div className="skeleton shimmer-bar" style={{ marginBottom: 12 }} />}
+      {data && apps.length > 0 && (
+        <StatTiles
+          items={[
+            { n: apps.length, label: apps.length === 1 ? 'AI App' : 'AI Apps' },
+            { n: agents.length, label: agents.length === 1 ? 'Agent' : 'Agents' },
+            { n: builtinCount, label: 'Built-in endpoints' },
+          ]}
+        />
+      )}
 
-      <div className="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>Agent</th>
-              <th>Supporting functions</th>
-              <th>Function App</th>
-              <th>Resource group</th>
-              <th>Trigger</th>
-              <th>Built-in endpoints</th>
-            </tr>
-          </thead>
-          <tbody>
-            {scanning &&
-              Array.from({ length: 5 }).map((_, i) => (
-                <tr key={`sk-${i}`}>
-                  <td>
-                    <div className="skeleton skeleton-line" style={{ width: '58%' }} />
-                    <div className="skeleton skeleton-line sm" style={{ width: '38%' }} />
-                  </td>
-                  <td>
-                    <div className="skeleton skeleton-line" style={{ width: '50%' }} />
-                  </td>
-                  <td>
-                    <div className="skeleton skeleton-line" style={{ width: '72%' }} />
-                  </td>
-                  <td>
-                    <div className="skeleton skeleton-line" style={{ width: '56%' }} />
-                  </td>
-                  <td>
-                    <div className="skeleton skeleton-line" style={{ width: '44%' }} />
-                  </td>
-                  <td>
-                    <div className="skeleton skeleton-line" style={{ width: '64%' }} />
-                  </td>
-                </tr>
-              ))}
-            {error && (
-              <tr>
-                <td colSpan={6} className="empty">
-                  Failed to scan: {error}
-                </td>
-              </tr>
-            )}
-            {data && agents.length === 0 && (
-              <tr>
-                <td colSpan={6} className="empty">
-                  No serverless agents found in this subscription.
-                </td>
-              </tr>
-            )}
-            {agents.map((a) => (
-              <tr key={`${a.app}/${a.name}`}>
-                <td>
-                  <div className="cell-title">
-                    <Link
-                      to={`/agents/${encodeURIComponent(selected)}/${encodeURIComponent(a.app)}/${encodeURIComponent(a.name)}`}
-                    >
-                      {a.name}
-                    </Link>
-                  </div>
-                  {a.defaultHostName && (
-                    <div className="cell-sub">
-                      <a
-                        href={`https://${a.defaultHostName}/agents/${encodeURIComponent(a.name)}/`}
-                        target="_blank"
-                        rel="noreferrer"
-                      >
-                        Open chat →
-                      </a>
-                    </div>
-                  )}
-                </td>
-                <td>
-                  {(supportingByApp.get(a.app) ?? []).length ? (
-                    <span
-                      className="badge gray"
-                      title="App-level functions that aren't agents (details on the agent page)"
-                    >
-                      {summarizeByTrigger(supportingByApp.get(a.app) ?? [])}
-                    </span>
-                  ) : (
-                    <span className="muted">—</span>
-                  )}
-                </td>
-                <td className="mono">{a.app}</td>
-                <td className="muted">{a.resourceGroup}</td>
-                <td>
-                  {a.trigger === 'none' ? (
-                    <span
-                      className="badge gray"
-                      title="Defined in a .agent.md with no trigger or built-in endpoint"
-                    >
-                      no trigger
-                    </span>
-                  ) : (
-                    <span className="badge blue">{a.trigger || 'http'}</span>
-                  )}
-                </td>
-                <td>
-                  {a.supportingFunctions && a.supportingFunctions.length > 0 ? (
-                    <span className="pill-row">
-                      <span
-                        className="badge blue"
-                        title={`${a.supportingFunctions.length} supporting function${
-                          a.supportingFunctions.length === 1 ? '' : 's'
-                        }`}
-                      >
-                        {a.supportingFunctions.length}
-                      </span>
-                      {a.supportingFunctions.map((fn) => (
-                        <span key={fn} className="badge gray mono" title={fn}>
-                          {shortSupportingLabel(a.name, fn)}
-                        </span>
-                      ))}
-                    </span>
-                  ) : (
-                    <span className="muted">0</span>
-                  )}
-                </td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </div>
+      {isFetching && <div className="skeleton shimmer-bar" style={{ margin: '16px 0 12px' }} />}
+
+      {scanning && (
+        <div className="card-grid" style={{ marginTop: 16 }}>
+          {Array.from({ length: 4 }).map((_, i) => (
+            <div className="card" key={`sk-${i}`} aria-busy="true">
+              <div className="skeleton skeleton-line lg" style={{ width: '62%' }} />
+              <div className="skeleton skeleton-line sm" style={{ width: '42%' }} />
+              <div className="skeleton skeleton-line" style={{ width: '84%', marginTop: 14 }} />
+              <div className="skeleton skeleton-line" style={{ width: '70%' }} />
+            </div>
+          ))}
+        </div>
+      )}
+
+      {error && <EmptyState>Failed to scan: {error}</EmptyState>}
+      {data && apps.length === 0 && (
+        <EmptyState>
+          No AI Apps found in {subName}. Deploy one with <Link to="/create-agent">＋ New AI App</Link>, or pick
+          another subscription.
+        </EmptyState>
+      )}
+
+      {apps.length > 0 && (
+        <div className="card-grid" style={{ marginTop: 16 }}>
+          {apps.map((app) => (
+            <AiAppCard
+              key={app.name}
+              app={app}
+              renderAppLink={(children) => (
+                <Link to={`/apps/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}`}>{children}</Link>
+              )}
+              renderAgent={(a) => (
+                <Link
+                  to={`/agents/${encodeURIComponent(selected)}/${encodeURIComponent(app.name)}/${encodeURIComponent(a.name)}`}
+                >
+                  {a.name}
+                </Link>
+              )}
+            />
+          ))}
+        </div>
+      )}
     </>
   )
 }
