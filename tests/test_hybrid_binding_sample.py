@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import inspect
 import json
+import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -29,6 +30,8 @@ def _load_sample(
     monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_APP_ROOT", raising=False)
     monkeypatch.delenv("AzureWebJobsScriptRoot", raising=False)
     monkeypatch.chdir(sample_src)
+    monkeypatch.syspath_prepend(str(sample_src))
+    sys.modules.pop("order_processing", None)
     spec = importlib.util.spec_from_file_location(
         module_name,
         sample_src / "function_app.py",
@@ -87,7 +90,7 @@ def test_ai_app_sample_indexes_standard_triggers(
 
 
 @pytest.mark.asyncio
-async def test_ai_app_sample_sends_complete_order_as_text(
+async def test_ai_app_sample_preprocesses_order_before_agent_handoff(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_sample(
@@ -108,7 +111,22 @@ async def test_ai_app_sample_sends_complete_order_as_text(
     async def receive() -> dict[str, object]:
         return {
             "type": "http.request",
-            "body": b'{"items":[{"sku":"A-100","quantity":2}]}',
+            "body": json.dumps(
+                {
+                    "customer": {
+                        "id": "C-42",
+                        "email": "buyer@example.com",
+                        "name": "Example Buyer",
+                        "loyalty_tier": "gold",
+                    },
+                    "currency": "usd",
+                    "shipping": {"country": "ca", "method": "overnight"},
+                    "items": [
+                        {"sku": " a-100 ", "quantity": 2, "unit_price": "24.95"},
+                        {"sku": "b-200", "quantity": 30, "unit_price": "40.00"},
+                    ],
+                }
+            ).encode(),
             "more_body": False,
         }
 
@@ -129,10 +147,41 @@ async def test_ai_app_sample_sends_complete_order_as_text(
     [prompt] = agent.run.await_args.args
     assert isinstance(prompt, str)
     assert json.loads(prompt) == {
-        "order_id": "2",
-        "items": [{"sku": "A-100", "quantity": 2}],
-        "task": "validate",
+        "order": {
+            "order_id": "2",
+            "currency": "USD",
+            "customer": {"id": "C-42", "loyalty_tier": "gold"},
+            "shipping": {"country": "CA", "method": "overnight"},
+            "items": [
+                {
+                    "sku": "A-100",
+                    "quantity": 2,
+                    "unit_price": "24.95",
+                    "line_total": "49.90",
+                },
+                {
+                    "sku": "B-200",
+                    "quantity": 30,
+                    "unit_price": "40.00",
+                    "line_total": "1200.00",
+                },
+            ],
+            "summary": {
+                "line_items": 2,
+                "total_quantity": 32,
+                "subtotal": "1249.90",
+            },
+            "review_signals": [
+                "high_value_order",
+                "bulk_quantity",
+                "expedited_shipping",
+                "international_shipping",
+            ],
+        },
+        "task": "assess fulfillment readiness using the trusted calculated fields",
     }
+    assert "buyer@example.com" not in prompt
+    assert "Example Buyer" not in prompt
     assert response.status_code == 200
 
 
@@ -155,6 +204,7 @@ def test_durable_ai_app_sample_indexes_durable_modes(
     }
     assert functions == {
         "start_order_orchestration": ["httpTrigger", "http", "durableClient"],
+        "prepare_order_activity": ["activityTrigger"],
         "assess_order_activity": ["activityTrigger"],
         "_afa_agent_binding_run": ["activityTrigger"],
         "order_orchestrator": ["orchestrationTrigger"],

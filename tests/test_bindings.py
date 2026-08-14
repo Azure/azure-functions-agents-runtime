@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import inspect
+import weakref
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any, get_type_hints
@@ -341,6 +343,22 @@ def test_app_instances_own_separate_agent_blueprints(tmp_path: Path) -> None:
     first_blueprint = bindings_module._runtime_for(first_app)._blueprints["order_fulfillment"]
     second_blueprint = bindings_module._runtime_for(second_app)._blueprints["order_fulfillment"]
     assert first_blueprint is not second_blueprint
+
+
+def test_runtime_registry_does_not_retain_app_or_cached_runtime(tmp_path: Path) -> None:
+    _write_agent(tmp_path)
+    app = AiApp(app_root=tmp_path)
+    runtime = bindings_module._runtime_for(app, tmp_path)
+    runtime.resolve("order-fulfillment")
+    app_ref = weakref.ref(app)
+    runtime_ref = weakref.ref(runtime)
+
+    del app
+    del runtime
+    gc.collect()
+
+    assert app_ref() is None
+    assert runtime_ref() is None
 
 
 def test_concurrent_orchestrator_decorators_register_one_activity(tmp_path: Path) -> None:

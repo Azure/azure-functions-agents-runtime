@@ -71,7 +71,7 @@ class DurableAiAgent:
 
 class _BindingRuntime:
     def __init__(self, app: func.FunctionApp, app_root: Path | None) -> None:
-        self.app = app
+        self._app_ref = weakref.ref(app)
         self.app_root = Path(app_root).resolve() if app_root is not None else get_app_root()
         self._snapshot: ProjectSnapshot | None = None
         self._blueprints: dict[str, AgentBlueprint] = {}
@@ -110,7 +110,10 @@ class _BindingRuntime:
         with self._lock:
             if self._durable_activity_registered:
                 return
-            if not isinstance(self.app, df.DFApp):
+            app = self._app_ref()
+            if app is None:
+                raise RuntimeError("The FunctionApp owning this agent binding runtime was collected")
+            if not isinstance(app, df.DFApp):
                 raise TypeError(
                     "Durable agent_input modes require DurableAiApp or azure.durable_functions.DFApp"
                 )
@@ -144,7 +147,7 @@ class _BindingRuntime:
                     ) from exc
                 return result
 
-            activity_decorator = cast(Any, self.app).activity_trigger(
+            activity_decorator = cast(Any, app).activity_trigger(
                 input_name="payload",
                 activity=_DURABLE_ACTIVITY_NAME,
             )
