@@ -16,7 +16,11 @@ app deployable with [`azd up`](https://learn.microsoft.com/azure/developer/azure
 | [hybrid-function-agent](hybrid-function-agent/) | HTTP + Queue | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
 | [hybrid-durable-agent](hybrid-durable-agent/) | Durable Activity + Orchestrator | ✅ order totals | | ✅ MS Learn | ✅ order-review | | |
 
-The [hybrid-function-agent](hybrid-function-agent/) sample demonstrates `AiApp` injecting one agent into async HTTP and queue handlers. The [hybrid-durable-agent](hybrid-durable-agent/) sample demonstrates `DurableAiApp` injection into an async activity and a replay-safe orchestrator.
+The [hybrid-function-agent](hybrid-function-agent/) sample demonstrates `AiApp`
+injecting one agent into async HTTP and queue handlers after deterministic order
+validation, enrichment, and PII minimization. The
+[hybrid-durable-agent](hybrid-durable-agent/) sample applies the same preprocessing
+in an activity, then chains agent-based risk assessment and replay-safe planning.
 
 ## Design previews
 

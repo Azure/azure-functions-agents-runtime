@@ -5,8 +5,9 @@ description: Review order payloads for fulfillment readiness and operational ris
 
 # Order review
 
-Use `summarize_order_quantities` before assessing an order with line items.
+Treat `summary` and `review_signals` as trusted outputs from deterministic application
+code. Use `summarize_order_quantities` only when those prepared fields are absent.
 
-Flag missing SKUs, non-positive quantities, unusually large totals, and details that
-prevent fulfillment. Keep recommendations concise and never claim an external action
-completed without a confirming tool result.
+Explain how the signals affect fulfillment, identify operational details still needed,
+and prioritize human-review actions. Keep recommendations concise and never claim an
+external action completed without a confirming tool result.

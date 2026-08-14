@@ -186,6 +186,9 @@ Durable apps use `DurableAiApp` or a caller-owned `df.DFApp` with an explicit mo
 - `mode="orchestrator"` injects `DurableAiAgent`; `run()` returns a replay-safe Durable task backed by the generated `_afa_agent_binding_run` activity. Streaming is unsupported.
 
 See [`samples/hybrid-function-agent/`](samples/hybrid-function-agent/) for an `AiApp` with HTTP and queue handlers, and [`samples/hybrid-durable-agent/`](samples/hybrid-durable-agent/) for a `DurableAiApp` with activity and orchestrator handlers.
+Both samples demonstrate a production-oriented handoff: deterministic Python validates
+and normalizes orders, calculates trusted monetary fields, derives review signals, and
+removes unnecessary PII before the agent performs contextual assessment or planning.
 
 ## Features
 
