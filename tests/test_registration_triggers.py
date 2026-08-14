@@ -11,6 +11,7 @@ import pytest
 from azure_functions_agents.config.loader import load_agent_specs
 from azure_functions_agents.config.merge import compose
 from azure_functions_agents.config.schema import (
+    TRIGGER_TYPES,
     BuiltinEndpointsConfig,
     GlobalConfig,
     ResolvedAgent,
@@ -26,6 +27,17 @@ from azure_functions_agents.registration.triggers import (
     allocate_unique_function_name,
     register_agent,
 )
+
+
+@pytest.mark.parametrize("trigger_type", sorted(TRIGGER_TYPES))
+def test_documented_trigger_types_have_sdk_decorators(trigger_type: str) -> None:
+    decorator_name = "route" if trigger_type == "http_trigger" else trigger_type
+    supported = callable(getattr(func.FunctionApp, decorator_name, None))
+    if trigger_type == "connector_trigger":
+        supported = supported or callable(
+            getattr(func.FunctionApp, "generic_trigger", None)
+        )
+    assert supported
 
 
 class FakeFunctionApp:

@@ -1,22 +1,17 @@
-"""Per-session workflow context registry + instance-ID ownership scheme.
+"""Per-workflow-agent-session context registry and instance-ID isolation scheme.
 
 Two concerns live here:
 
-1. **Per-turn registry.** Workflow tool handlers need the Durable
-   Functions ``client`` the Functions host injected into the chat
-   handler via ``durable_client_input`` and the owning agent name.
-   The current MAF integration builds workflow tools per agent session, so this
-   registry is retained only for tests and backwards-compatible helper access.
-   Concurrent turns on the same ``session_id`` are possible; to keep a
-   late-arriving turn from evicting a newer registration,
-   :func:`register_workflow_session` returns an opaque token and
-   :func:`unregister_workflow_session` is a no-op unless that token
-   still owns the slot.
+1. **Compatibility registry.** Production workflow tools receive a request-local
+   context directly. The process-local registry remains for callers of the
+   original helper API. Its registration token is private bookkeeping and is
+   not part of workflow session state.
 
-2. **Instance-ID ownership.** Every workflow started via
+2. **Instance-ID isolation.** Every workflow started via
    ``start_workflow`` receives an instance ID whose leading
-   :data:`SESSION_PREFIX_LEN` hex characters are ``sha256(session_id)``.
-   Ownership is enforced by prefix match on the workflow ID, which is
+   :data:`AGENT_SESSION_PREFIX_LEN` hex characters are a SHA-256 prefix
+   over the workflow agent slug and session ID.
+   Isolation is enforced by prefix match on the workflow ID, which is
    stable across Durable's lifecycle and does not depend on the
    orchestration input being preserved post-completion. Hashing keeps
    the raw ``session_id`` out of Durable-visible metadata (defense in
@@ -29,57 +24,76 @@ import hashlib
 import uuid
 from dataclasses import dataclass
 from threading import Lock
-from typing import Any
 
-SESSION_PREFIX_LEN = 12
+from azure.durable_functions import DurableOrchestrationClient
+
+AGENT_SESSION_PREFIX_LEN = 32
+# Compatibility alias retained for callers that imported the original constant.
+# Its value follows the current agent/session format, not the legacy 12-hex format.
+SESSION_PREFIX_LEN = AGENT_SESSION_PREFIX_LEN
 
 
-def session_instance_prefix(session_id: str) -> str:
-    """Return the fixed-length hash prefix embedded in every workflow ID
-    started by ``session_id``.
+def session_instance_prefix(workflow_agent_slug: str, session_id: str) -> str:
+    """Return the fixed-length workflow-agent/session prefix embedded in workflow IDs.
 
-    Workflow ownership is enforced by comparing this prefix against the
+    Workflow isolation is enforced by comparing this prefix against the
     Durable instance_id: any workflow whose ID does not start with the
-    calling session's prefix is treated as nonexistent for that session.
+    calling workflow-agent/session prefix is treated as nonexistent.
     Hashing keeps the raw ``session_id`` out of Durable-visible metadata.
     """
-    return hashlib.sha256(session_id.encode("utf-8")).hexdigest()[:SESSION_PREFIX_LEN]
+    digest = hashlib.sha256()
+    for value in (workflow_agent_slug, session_id):
+        encoded = value.encode("utf-8")
+        digest.update(len(encoded).to_bytes(8, byteorder="big"))
+        digest.update(encoded)
+    return digest.hexdigest()[:AGENT_SESSION_PREFIX_LEN]
 
 
-def new_workflow_instance_id(session_id: str) -> str:
-    """Generate a fresh workflow instance ID for ``session_id``.
+def new_workflow_instance_id(workflow_agent_slug: str, session_id: str) -> str:
+    """Generate a fresh workflow instance ID for a workflow-agent/session pair.
 
-    Shape: ``{12-hex-session-hash}-{32-hex-uuid}``. The leading prefix is
-    reproducible (same session → same prefix) and is used for ownership
-    checks; the uuid suffix keeps each workflow unique.
+    Shape: ``{32-hex-agent-session-hash}-{32-hex-uuid}``.
     """
-    return f"{session_instance_prefix(session_id)}-{uuid.uuid4().hex}"
+    return f"{session_instance_prefix(workflow_agent_slug, session_id)}-{uuid.uuid4().hex}"
 
 
-def session_owns_workflow(session_id: str, workflow_id: str) -> bool:
-    if not session_id or not workflow_id:
+def workflow_matches_agent_session(
+    workflow_agent_slug: str,
+    session_id: str,
+    workflow_id: str,
+) -> bool:
+    if not workflow_agent_slug or not session_id or not workflow_id:
         return False
-    return workflow_id.startswith(session_instance_prefix(session_id) + "-")
+    return workflow_id.startswith(
+        session_instance_prefix(workflow_agent_slug, session_id) + "-"
+    )
 
 
 @dataclass(frozen=True)
 class WorkflowSessionContext:
     """Per-in-flight-request state needed by workflow tools."""
 
+    workflow_agent_slug: str
     session_id: str
     agent_name: str
-    durable_client: Any  # azure.durable_functions.DurableOrchestrationClient
+    durable_client: DurableOrchestrationClient
+
+
+@dataclass(frozen=True)
+class _WorkflowSessionRegistration:
+    context: WorkflowSessionContext
     token: str
 
 
-_registry: dict[str, WorkflowSessionContext] = {}
+_registry: dict[tuple[str, str], _WorkflowSessionRegistration] = {}
 _lock = Lock()
 
 
 def register_workflow_session(
+    workflow_agent_slug: str,
     session_id: str,
     agent_name: str,
-    durable_client: Any,
+    durable_client: DurableOrchestrationClient,
 ) -> str:
     """Register the per-session context for the duration of a chat turn.
 
@@ -87,42 +101,56 @@ def register_workflow_session(
     :func:`unregister_workflow_session` in its ``finally`` block.
     """
     token = uuid.uuid4().hex
+    context = WorkflowSessionContext(
+        workflow_agent_slug=workflow_agent_slug,
+        session_id=session_id,
+        agent_name=agent_name,
+        durable_client=durable_client,
+    )
     with _lock:
-        _registry[session_id] = WorkflowSessionContext(
-            session_id=session_id,
-            agent_name=agent_name,
-            durable_client=durable_client,
+        _registry[(workflow_agent_slug, session_id)] = _WorkflowSessionRegistration(
+            context=context,
             token=token,
         )
     return token
 
 
-def unregister_workflow_session(session_id: str, token: str) -> None:
+def unregister_workflow_session(
+    workflow_agent_slug: str,
+    session_id: str,
+    token: str,
+) -> None:
     """Remove the row for ``session_id``, but only if ``token`` still owns it.
 
     Safe to call multiple times and safe to call when a later turn has
     already replaced our slot — in both cases this is a no-op.
     """
     with _lock:
-        existing = _registry.get(session_id)
+        key = (workflow_agent_slug, session_id)
+        existing = _registry.get(key)
         if existing is not None and existing.token == token:
-            _registry.pop(session_id, None)
+            _registry.pop(key, None)
 
 
-def get_workflow_session(session_id: str | None) -> WorkflowSessionContext | None:
-    if not session_id:
+def get_workflow_session(
+    workflow_agent_slug: str | None,
+    session_id: str | None,
+) -> WorkflowSessionContext | None:
+    if not workflow_agent_slug or not session_id:
         return None
     with _lock:
-        return _registry.get(session_id)
+        registration = _registry.get((workflow_agent_slug, session_id))
+        return registration.context if registration is not None else None
 
 
 __all__ = [
+    "AGENT_SESSION_PREFIX_LEN",
     "SESSION_PREFIX_LEN",
     "WorkflowSessionContext",
     "get_workflow_session",
     "new_workflow_instance_id",
     "register_workflow_session",
     "session_instance_prefix",
-    "session_owns_workflow",
     "unregister_workflow_session",
+    "workflow_matches_agent_session",
 ]

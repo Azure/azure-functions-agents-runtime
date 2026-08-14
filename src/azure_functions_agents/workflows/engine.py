@@ -15,15 +15,15 @@ a first-class cooperative-cancel terminal state); the tool-facing
 envelope (see :mod:`.tools`) translates that to ``runtime_status="Canceled"``
 when the orchestrator's output indicates cancellation.
 
-What is intentionally still *not* here: retries / per-task timeouts and
-a per-agent workflow-safe tool registry (M3).
+What is intentionally still *not* here: retries and per-task timeouts.
 """
 
 from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
+from collections.abc import Mapping
+from typing import Any, TypedDict
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -41,6 +41,7 @@ from .schema import (
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
     TemplateResolutionError,
+    WorkflowPlanPolicy,
     parse_iso8601_datetime,
     parse_iso8601_duration,
     resolve_template_value,
@@ -52,6 +53,25 @@ _ACTIVITY_NAME = "agents_workflow_run_tool"
 SUB_AGENT_ACTIVITY_NAME = "agents_workflow_run_sub_agent"
 
 WORKFLOW_SAFE_ECHO_TOOL = ECHO_TOOL_NAME
+
+
+class _ActivityInputBase(TypedDict):
+    id: str
+    workflow_agent_slug: str
+    workflow_id: str
+
+
+class _ToolActivityInput(_ActivityInputBase):
+    tool: str
+    args: dict[str, Any]
+
+
+class _SubAgentActivityInput(_ActivityInputBase):
+    agent: str
+    task: str
+
+
+type _ActivityInput = _ToolActivityInput | _SubAgentActivityInput
 
 
 def _run_echo(args: dict[str, Any]) -> dict[str, Any]:
@@ -104,6 +124,8 @@ def register_workflows(
     app: func.FunctionApp,
     *,
     catalog: AgentCatalog | None = None,
+    handler_catalog: registry.WorkflowHandlerCatalog | None = None,
+    workflow_agent_policies: Mapping[str, WorkflowPlanPolicy] | None = None,
 ) -> None:
     """Register the workflow orchestrator + activities on ``app``.
 
@@ -113,23 +135,75 @@ def register_workflows(
     """
     bp = df.Blueprint()
 
+    def require_workflow_agent_policy(
+        task: _ActivityInput,
+    ) -> tuple[str, WorkflowPlanPolicy]:
+        workflow_agent_slug = task["workflow_agent_slug"]
+        policy = (
+            workflow_agent_policies.get(workflow_agent_slug)
+            if workflow_agent_policies is not None
+            else None
+        )
+        if not workflow_agent_slug or policy is None:
+            logger.error(
+                "workflow activity agent policy miss: "
+                "workflow_id=%s node_id=%s workflow_agent=%s",
+                task["workflow_id"],
+                task["id"],
+                workflow_agent_slug or "<missing>",
+            )
+            raise RuntimeError(
+                f"task {task['id']!r}: workflow agent policy is not available"
+            )
+        return workflow_agent_slug, policy
+
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
-    def agents_workflow_run_tool(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
+    def agents_workflow_run_tool(task: _ToolActivityInput) -> dict[str, Any]:
         task_id = task["id"]
         tool_name = task["tool"]
-        args = task.get("args") or {}
-        handler = registry.get_handler(tool_name)
-        if handler is None:
+        args = task["args"]
+        workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        workflow_id = task["workflow_id"]
+        if tool_name not in policy.allowed_tools:
+            logger.error(
+                "workflow tool authorization denied: "
+                "workflow_id=%s node_id=%s workflow_agent=%s tool=%s",
+                workflow_id,
+                task_id,
+                workflow_agent_slug,
+                tool_name,
+            )
+            raise RuntimeError(
+                f"task {task_id!r}: workflow tool {tool_name!r} is not authorized"
+            )
+        entry = (
+            handler_catalog.get(tool_name)
+            if handler_catalog is not None
+            else registry.get_entry(tool_name)
+        )
+        if entry is None:
             raise ValueError(
                 f"task {task_id!r}: tool {tool_name!r} is not registered "
                 "in the workflow-safe tool registry"
             )
-        logger.info("workflow activity running: id=%s tool=%s", task_id, tool_name)
+        logger.info(
+            "workflow activity running: "
+            "workflow_id=%s workflow_agent=%s id=%s tool=%s",
+            workflow_id,
+            workflow_agent_slug,
+            task_id,
+            tool_name,
+        )
         try:
-            result = handler(args)
+            result = entry.handler(args)
         except Exception:
             logger.exception(
-                "workflow activity failed: id=%s tool=%s", task_id, tool_name
+                "workflow activity failed: "
+                "workflow_id=%s workflow_agent=%s id=%s tool=%s",
+                workflow_id,
+                workflow_agent_slug,
+                task_id,
+                tool_name,
             )
             raise RuntimeError(
                 f"task {task_id!r}: workflow-safe tool failed"
@@ -142,15 +216,32 @@ def register_workflows(
         return {"id": task_id, "result": result}
 
     @bp.activity_trigger(input_name="task")  # type: ignore[untyped-decorator]
-    async def agents_workflow_run_sub_agent(task) -> dict[str, Any]:  # type: ignore[no-untyped-def]
-        task_id = str(task["id"])
-        agent_slug = str(task["agent"])
-        workflow_id = str(task.get("workflow_id") or "")
-        if catalog is None or agent_slug not in catalog:
+    async def agents_workflow_run_sub_agent(
+        task: _SubAgentActivityInput,
+    ) -> dict[str, Any]:
+        task_id = task["id"]
+        agent_slug = task["agent"]
+        workflow_id = task["workflow_id"]
+        workflow_agent_slug, policy = require_workflow_agent_policy(task)
+        if agent_slug not in policy.allowed_subagents:
             logger.error(
-                "workflow sub-agent catalog miss: workflow_id=%s node_id=%s agent=%s",
+                "workflow sub-agent authorization denied: "
+                "workflow_id=%s node_id=%s workflow_agent=%s agent=%s",
                 workflow_id,
                 task_id,
+                workflow_agent_slug,
+                agent_slug,
+            )
+            raise RuntimeError(
+                f"task {task_id!r}: Workflow Sub Agent {agent_slug!r} is not authorized"
+            )
+        if catalog is None or agent_slug not in catalog:
+            logger.error(
+                "workflow sub-agent catalog miss: "
+                "workflow_id=%s node_id=%s workflow_agent=%s agent=%s",
+                workflow_id,
+                task_id,
+                workflow_agent_slug,
                 agent_slug,
             )
             raise RuntimeError(
@@ -159,16 +250,18 @@ def register_workflows(
 
         entry = catalog[agent_slug]
         logger.info(
-            "workflow sub-agent activity running: workflow_id=%s node_id=%s agent=%s",
+            "workflow sub-agent activity running: "
+            "workflow_id=%s node_id=%s workflow_agent=%s agent=%s",
             workflow_id,
             task_id,
+            workflow_agent_slug,
             agent_slug,
         )
         try:
             text = await run_leaf_agent_task(
                 entry.resolved,
                 entry.capabilities,
-                str(task["task"]),
+                task["task"],
                 timeout=entry.resolved.timeout,
                 execution_role="workflow_subagent",
             )
@@ -227,6 +320,7 @@ def register_workflows(
         """
         payload: dict[str, Any] = context.get_input() or {}
         tasks: list[dict[str, Any]] = list(payload.get("tasks") or [])
+        workflow_agent_slug = str(payload.get("workflow_agent_slug") or "")
 
         by_id: dict[str, dict[str, Any]] = {t["id"]: t for t in tasks}
         deps: dict[str, set[str]] = {
@@ -283,6 +377,8 @@ def register_workflows(
                                 "id": tid,
                                 "tool": task["tool"],
                                 "args": resolved_args,
+                                "workflow_agent_slug": workflow_agent_slug,
+                                "workflow_id": context.instance_id,
                             },
                         )
                     )
@@ -306,6 +402,7 @@ def register_workflows(
                                 "agent": task["agent"],
                                 "task": resolved_task,
                                 "workflow_id": context.instance_id,
+                                "workflow_agent_slug": workflow_agent_slug,
                             },
                         )
                     )
@@ -344,8 +441,9 @@ def register_workflows(
                     f"canceled at {len(results)}/{total} tasks done"
                 )
                 logger.info(
-                    "workflow canceled: instance=%s reason=%r",
+                    "workflow canceled: instance=%s workflow_agent=%s reason=%r",
                     context.instance_id,
+                    workflow_agent_slug,
                     reason,
                 )
                 return {
@@ -357,6 +455,11 @@ def register_workflows(
                 }
 
             wave_results = wave_task.result
+            if isinstance(wave_results, BaseException):
+                for spec, task in zip(wave_specs, wave_tasks, strict=True):
+                    if spec["type"] == WAIT_TASK_TYPE and not task.is_completed:
+                        task.cancel()
+                raise wave_results
             for spec, raw in zip(wave_specs, wave_results, strict=True):
                 tid = spec["id"]
                 if spec["type"] in {TOOL_TASK_TYPE, SUB_AGENT_TASK_TYPE}:
