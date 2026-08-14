@@ -1,6 +1,8 @@
 // Controlled Azure-subscription dropdown. Fully prop-driven (no app/store
 // coupling) so it can be reused on any page or lifted into another app.
 
+import { SearchableSelect } from './SearchableSelect'
+
 export interface SubscriptionOption {
   id: string
   name: string
@@ -27,20 +29,14 @@ export const SubscriptionPicker = ({
 }: SubscriptionPickerProps) => (
   <label className="sub-picker" title="Azure subscription">
     <span className="sub-picker-label">{label}</span>
-    <select
+    <SearchableSelect
       value={value}
-      onChange={(e) => onChange(e.target.value)}
-      disabled={disabled || loading || error || subscriptions.length === 0}
-    >
-      {loading && <option value="">Loading…</option>}
-      {error && <option value="">Unavailable</option>}
-      {!loading &&
-        !error &&
-        subscriptions.map((s) => (
-          <option key={s.id} value={s.id}>
-            {s.name}
-          </option>
-        ))}
-    </select>
+      onChange={onChange}
+      options={subscriptions.map((s) => ({ value: s.id, label: s.name }))}
+      placeholder={error ? 'Unavailable' : 'Select a subscription…'}
+      loading={loading}
+      disabled={disabled || error || subscriptions.length === 0}
+      ariaLabel="Azure subscription"
+    />
   </label>
 )

@@ -6,6 +6,7 @@ import { useState } from 'react'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Modal } from './Modal'
+import { SearchableSelect } from './ui'
 import {
   TRIGGER_SPECS,
   buildTriggerYaml,
@@ -207,20 +208,17 @@ export function AddCapability({
           </p>
           <div className="field">
             <label>Trigger type</label>
-            <select
+            <SearchableSelect
               value={trigType}
-              onChange={(e) => {
-                setTrigType(e.target.value)
+              onChange={(v) => {
+                setTrigType(v)
                 setTrigValues({})
                 reset()
               }}
-            >
-              {Object.entries(TRIGGER_SPECS).map(([k, s]) => (
-                <option key={k} value={k}>
-                  {s.label}
-                </option>
-              ))}
-            </select>
+              options={Object.entries(TRIGGER_SPECS).map(([k, s]) => ({ value: k, label: s.label }))}
+              placeholder="Select a trigger type…"
+              ariaLabel="Trigger type"
+            />
           </div>
           {spec.note && (
             <p className="muted" style={{ fontSize: 12 }}>
@@ -538,15 +536,14 @@ function AiGenerate({
       </p>
       <div className="field">
         <label>Foundry model</label>
-        <select value={effectiveKey} onChange={(e) => setModelKey(e.target.value)}>
-          {isLoading && <option value="">Loading Foundry models…</option>}
-          {options.map((o) => (
-            <option key={o.key} value={o.key}>
-              {o.label}
-            </option>
-          ))}
-          {!isLoading && !options.length && <option value="">No Foundry models in this subscription</option>}
-        </select>
+        <SearchableSelect
+          value={effectiveKey}
+          onChange={setModelKey}
+          options={options.map((o) => ({ value: o.key, label: o.label }))}
+          placeholder={isLoading ? 'Loading Foundry models…' : 'No Foundry models in this subscription'}
+          loading={isLoading}
+          ariaLabel="Foundry model"
+        />
         {loadErr && (
           <div className="hint" style={{ color: 'var(--red)' }}>
             {loadErr}

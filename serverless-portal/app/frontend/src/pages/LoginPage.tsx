@@ -5,6 +5,7 @@
 import { useState } from 'react'
 import { signIn, setManualToken, validateArmToken } from '../auth'
 import { CopyButton } from '../components/SourceEditor'
+import { Icon } from '../components/ui'
 
 export default function LoginPage() {
   const [busy, setBusy] = useState(false)
@@ -38,7 +39,9 @@ export default function LoginPage() {
   return (
     <div className="login">
       <div className="login-card">
-        <div className="login-mark">⚡</div>
+        <div className="login-mark">
+          <Icon name="zap" size={24} />
+        </div>
         <h1>AI Apps</h1>
         <p>Sign in with your Microsoft account to discover serverless agents in your subscriptions.</p>
         <button className="btn primary" onClick={onSignIn} disabled={busy}>
@@ -86,8 +89,9 @@ export default function LoginPage() {
               </p>
             )}
             <p className="muted" style={{ fontSize: 11, marginTop: 10 }}>
-              ⚠️ An ARM token grants full access as you for ~1 hour. It’s kept only in this browser tab and
-              sent only to this portal’s backend. Don’t paste tokens into sites you don’t trust.
+              <Icon name="alert" size={12} style={{ verticalAlign: '-2px' }} /> An ARM token grants full access
+              as you for ~1 hour. It’s kept only in this browser tab and sent only to this portal’s backend.
+              Don’t paste tokens into sites you don’t trust.
             </p>
           </div>
         )}

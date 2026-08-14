@@ -135,6 +135,12 @@ export interface NameAvailability {
   message?: string
 }
 
+export interface CapabilitySuggestion {
+  kind: string
+  name: string
+  description: string
+}
+
 export interface GrantResult {
   granted: string[]
   failed: { role: string; error: string }[]
@@ -365,6 +371,13 @@ export const api = {
       'GET',
       `/api/check-name?subscription=${enc(p.subscription)}&name=${enc(p.name)}`,
     ),
+
+  // Infer the capabilities an agent needs from its description (skill-grounded).
+  planCapabilities: (p: {
+    subscription: string
+    description: string
+    foundry: { resourceGroup: string; account: string; openaiEndpoint: string; model: string }
+  }) => req<{ capabilities: CapabilitySuggestion[] }>('POST', '/api/plan-capabilities', p),
 
   // Grant a deployed app's identity access to a Foundry account (cross-sub OK).
   grantFoundryAccess: (p: {

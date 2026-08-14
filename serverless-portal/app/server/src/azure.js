@@ -1390,6 +1390,51 @@ export async function generateCapabilityCode(accessToken, subscriptionId, opts) 
   return { content, kind }
 }
 
+// Fallback planner guidance if the portal skill file can't be read.
+const PLANNER_SYSTEM =
+  'You are a capability planner for the azure-functions-agents-runtime. Given an agent description, ' +
+  'infer which capabilities it needs and output ONLY a JSON object: ' +
+  '{"capabilities":[{"kind":"...","name":"short-name","description":"one line"}]}. ' +
+  'kind is one of http_trigger, timer_trigger, connector_trigger, custom_tool, mcp, skill. ' +
+  'Only include capabilities clearly implied by the description; an empty list is fine. Max 6. ' +
+  'Output ONLY the JSON, no prose, no code fences.'
+
+// Infer the capabilities an agent needs from its description (skill-grounded).
+export async function planCapabilities(accessToken, subscriptionId, opts) {
+  const { resourceGroup, account, openaiEndpoint, model, description, guidance } = opts
+  const system = guidance || PLANNER_SYSTEM
+  const user = `Agent description:\n${description || '(none)'}\n\nReturn the JSON plan now.`
+  const { content } = await foundryChat(accessToken, subscriptionId, {
+    resourceGroup,
+    account,
+    openaiEndpoint,
+    model,
+    system,
+    user,
+    timeoutMs: 60000,
+  })
+  let plan = null
+  try {
+    const start = content.indexOf('{')
+    const end = content.lastIndexOf('}')
+    if (start >= 0 && end > start) plan = JSON.parse(content.slice(start, end + 1))
+  } catch {
+    plan = null
+  }
+  const caps = Array.isArray(plan?.capabilities) ? plan.capabilities : []
+  const allowed = new Set(['http_trigger', 'timer_trigger', 'connector_trigger', 'custom_tool', 'mcp', 'skill'])
+  return {
+    capabilities: caps
+      .filter((c) => c && allowed.has(c.kind) && c.name)
+      .slice(0, 6)
+      .map((c) => ({
+        kind: String(c.kind),
+        name: String(c.name).slice(0, 60),
+        description: String(c.description ?? '').slice(0, 300),
+      })),
+  }
+}
+
 // List the resource groups in a subscription (name + location), for the create
 // flow's "existing resource group" picker.
 export async function listResourceGroups(accessToken, subscriptionId) {

@@ -868,6 +868,38 @@ app.post(
   }),
 )
 
+// Read a portal authoring skill by folder slug (for the capability planner).
+async function readPortalSkillFile(slug) {
+  try {
+    return await fs.promises.readFile(path.join(PORTAL_SKILLS_DIR, slug, 'SKILL.md'), 'utf-8')
+  } catch {
+    return ''
+  }
+}
+
+// Plan the capabilities an agent needs from its description (skill-grounded).
+app.post(
+  '/api/plan-capabilities',
+  wrap(async (req, res) => {
+    const token = requireToken(req)
+    const subscription = String(req.body?.subscription ?? '').trim() || azure.DEFAULT_SUBSCRIPTION_ID
+    const description = String(req.body?.description ?? '').trim()
+    const foundry = req.body?.foundry ?? {}
+    if (!description) throw new HttpError(400, 'A description is required.')
+    const guidance = await readPortalSkillFile('authoring-capability-planner')
+    res.json(
+      await azure.planCapabilities(token, subscription, {
+        resourceGroup: String(foundry.resourceGroup ?? ''),
+        account: String(foundry.account ?? ''),
+        openaiEndpoint: String(foundry.openaiEndpoint ?? ''),
+        model: String(foundry.model ?? ''),
+        description,
+        guidance,
+      }),
+    )
+  }),
+)
+
 // Generate the code/config for an agent capability (HTTP trigger .agent.md,
 // connector trigger .agent.md, or a custom Python tool) with a Foundry model.
 app.post(

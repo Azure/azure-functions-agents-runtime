@@ -8,6 +8,8 @@ export { StatTiles, type StatTile } from './StatTiles'
 export { Chips } from './Chips'
 export { Callout } from './Callout'
 export { SubscriptionPicker, type SubscriptionOption } from './SubscriptionPicker'
+export { SearchableSelect, type SearchOption } from './SearchableSelect'
+export { Icon, type IconName } from './Icon'
 export { EmptyState } from './EmptyState'
 export { AiAppCard, type AiApp, type AiAppAgent } from './AiAppCard'
 export {

@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
-import { Callout } from '../components/ui'
+import { Callout, SearchableSelect, Icon } from '../components/ui'
 import { type Draft, loadDraft, saveDraft, clearDraft, deriveName } from '../agentDraft'
 
 export default function CreateAgentPage() {
@@ -170,35 +170,29 @@ export default function CreateAgentPage() {
               <>
                 <div className="field" style={{ marginBottom: 8 }}>
                   <label>Subscription</label>
-                  <select value={foundrySub} onChange={(e) => selectFoundrySub(e.target.value)}>
-                    {subscriptions.map((s) => (
-                      <option key={s.id} value={s.id}>
-                        {s.name}
-                      </option>
-                    ))}
-                  </select>
+                  <SearchableSelect
+                    value={foundrySub}
+                    onChange={selectFoundrySub}
+                    options={subscriptions.map((s) => ({ value: s.id, label: s.name }))}
+                    placeholder="Select a subscription…"
+                    ariaLabel="Foundry subscription"
+                  />
                 </div>
                 <div style={{ display: 'flex', gap: 8, alignItems: 'center', margin: '8px 0' }}>
-                  <select
-                    value={draft.foundryAccount}
-                    onChange={(e) => selectAccount(e.target.value)}
-                    style={{ flex: 1 }}
-                  >
-                    <option value="">
-                      {foundryLoading
-                        ? 'Loading Foundry resources…'
-                        : foundryAccounts.length
-                          ? 'Select a Foundry resource…'
-                          : 'No Foundry resources found'}
-                    </option>
-                    {foundryAccounts.map((a) => (
-                      <option key={a.name} value={a.name}>
-                        {a.name} · {a.location}
-                      </option>
-                    ))}
-                  </select>
+                  <div style={{ flex: 1 }}>
+                    <SearchableSelect
+                      value={draft.foundryAccount}
+                      onChange={selectAccount}
+                      options={foundryAccounts.map((a) => ({ value: a.name, label: a.name, sublabel: a.location }))}
+                      placeholder={
+                        foundryAccounts.length ? 'Select a Foundry resource…' : 'No Foundry resources found'
+                      }
+                      loading={foundryLoading}
+                      ariaLabel="Foundry resource"
+                    />
+                  </div>
                   <button className="btn sm" onClick={() => void refetchFoundry()} title="Refresh Foundry list">
-                    ↻
+                    <Icon name="refresh" size={14} />
                   </button>
                 </div>
 
@@ -207,28 +201,28 @@ export default function CreateAgentPage() {
                     {selectedAccount.projects.length > 0 && (
                       <div className="field" style={{ marginBottom: 0 }}>
                         <label>Project</label>
-                        <select value={draft.foundryEndpoint} onChange={(e) => set('foundryEndpoint', e.target.value)}>
-                          <option value="">Select a project…</option>
-                          {selectedAccount.projects.map((p) => (
-                            <option key={p.name} value={p.endpoint}>
-                              {p.name}
-                            </option>
-                          ))}
-                        </select>
+                        <SearchableSelect
+                          value={draft.foundryEndpoint}
+                          onChange={(v) => set('foundryEndpoint', v)}
+                          options={selectedAccount.projects.map((p) => ({ value: p.endpoint, label: p.name }))}
+                          placeholder="Select a project…"
+                          ariaLabel="Foundry project"
+                        />
                       </div>
                     )}
                     <div className="field" style={{ marginBottom: 0 }}>
                       <label>Model deployment</label>
-                      <select value={draft.foundryModel} onChange={(e) => set('foundryModel', e.target.value)}>
-                        <option value="">
-                          {selectedAccount.models.length ? 'Select a model…' : 'No chat models deployed'}
-                        </option>
-                        {selectedAccount.models.map((m) => (
-                          <option key={m.deployment} value={m.deployment}>
-                            {m.deployment} ({m.model})
-                          </option>
-                        ))}
-                      </select>
+                      <SearchableSelect
+                        value={draft.foundryModel}
+                        onChange={(v) => set('foundryModel', v)}
+                        options={selectedAccount.models.map((m) => ({
+                          value: m.deployment,
+                          label: m.deployment,
+                          sublabel: m.model,
+                        }))}
+                        placeholder={selectedAccount.models.length ? 'Select a model…' : 'No chat models deployed'}
+                        ariaLabel="Model deployment"
+                      />
                     </div>
                   </div>
                 )}
@@ -297,7 +291,9 @@ export default function CreateAgentPage() {
           </div>
 
           <div className="card" style={{ maxWidth: 760 }}>
-            <h3>✨ Describe your agent</h3>
+            <h3>
+              <Icon name="sparkles" size={15} style={{ verticalAlign: '-2px' }} /> Describe your agent
+            </h3>
             <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
               Say what the agent should do in a sentence or two. We’ll generate its{' '}
               <span className="mono">.agent.md</span> with <span className="mono">{draft.foundryModel}</span>.
@@ -314,7 +310,13 @@ export default function CreateAgentPage() {
             />
             <div className="toolbar" style={{ marginTop: 12 }}>
               <button className="btn primary" onClick={generateAndOpen} disabled={!canGenerate}>
-                {generating ? '✨ Generating…' : '✨ Generate app'}
+                {generating ? (
+                  'Generating…'
+                ) : (
+                  <>
+                    <Icon name="sparkles" size={14} /> Generate app
+                  </>
+                )}
               </button>
               <button className="btn" onClick={cancel}>
                 Cancel

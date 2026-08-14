@@ -2,6 +2,8 @@
 // or create a new Flex Consumption one. Controlled + prop-driven so the create
 // flow and any future redeploy flow can share it. Emits partial patches.
 
+import { SearchableSelect } from './SearchableSelect'
+
 export interface ExistingApp {
   name: string
   resourceGroup: string
@@ -66,20 +68,14 @@ export const DeployTargetPicker = ({
       </label>
       {mode === 'existing' && (
         <div className="field indent-field">
-          <select value={existingApp} onChange={(e) => onChange({ existingApp: e.target.value })}>
-            <option value="">
-              {appsLoading
-                ? 'Loading apps…'
-                : apps.length
-                  ? 'Select a Function App…'
-                  : 'No AI Apps in this subscription'}
-            </option>
-            {apps.map((a) => (
-              <option key={a.name} value={a.name}>
-                {a.name} ({a.resourceGroup})
-              </option>
-            ))}
-          </select>
+          <SearchableSelect
+            value={existingApp}
+            onChange={(v) => onChange({ existingApp: v })}
+            options={apps.map((a) => ({ value: a.name, label: a.name, sublabel: a.resourceGroup }))}
+            placeholder={appsLoading ? 'Loading apps…' : apps.length ? 'Select a Function App…' : 'No AI Apps in this subscription'}
+            loading={appsLoading}
+            ariaLabel="Existing Function App"
+          />
           <div className="hint">One Function App can host many agents.</div>
         </div>
       )}
@@ -113,13 +109,13 @@ export const DeployTargetPicker = ({
             </div>
             <div className="field">
               <label>Region</label>
-              <select value={newApp.region} onChange={(e) => onNewApp({ region: e.target.value })}>
-                {regions.map((r) => (
-                  <option key={r} value={r}>
-                    {r}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={newApp.region}
+                onChange={(v) => onNewApp({ region: v })}
+                options={regions.map((r) => ({ value: r, label: r }))}
+                placeholder="Select a region…"
+                ariaLabel="Region"
+              />
             </div>
           </div>
           <div className="field" style={{ marginBottom: 0 }}>
@@ -145,23 +141,14 @@ export const DeployTargetPicker = ({
               </label>
             </div>
             {newApp.rgMode === 'existing' ? (
-              <select
+              <SearchableSelect
                 value={newApp.resourceGroup}
-                onChange={(e) => onNewApp({ resourceGroup: e.target.value })}
-              >
-                <option value="">
-                  {rgLoading
-                    ? 'Loading resource groups…'
-                    : resourceGroups.length
-                      ? 'Select a resource group…'
-                      : 'No resource groups found'}
-                </option>
-                {resourceGroups.map((g) => (
-                  <option key={g.name} value={g.name}>
-                    {g.name} · {g.location}
-                  </option>
-                ))}
-              </select>
+                onChange={(v) => onNewApp({ resourceGroup: v })}
+                options={resourceGroups.map((g) => ({ value: g.name, label: g.name, sublabel: g.location }))}
+                placeholder={rgLoading ? 'Loading resource groups…' : resourceGroups.length ? 'Select a resource group…' : 'No resource groups found'}
+                loading={rgLoading}
+                ariaLabel="Resource group"
+              />
             ) : (
               <input
                 type="text"

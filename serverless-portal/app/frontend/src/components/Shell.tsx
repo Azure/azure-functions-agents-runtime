@@ -3,6 +3,7 @@ import { NavLink, Link } from 'react-router-dom'
 import { useIdentity } from '../identity'
 import { signOut } from '../auth'
 import { useTheme } from '../theme'
+import { Icon } from './ui'
 
 function initials(name: string): string {
   const parts = name.trim().split(/\s+/).filter(Boolean)
@@ -46,17 +47,19 @@ export default function Shell({ children }: { children: ReactNode }) {
           title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
           aria-label="Toggle sidebar"
         >
-          ☰
+          <Icon name="menu" size={18} />
         </button>
         <Link to="/agents" className="brand" title="AI Apps">
-          <span className="brand-mark">⚡</span>
+          <span className="brand-mark">
+            <Icon name="zap" size={18} />
+          </span>
           <span className="brand-name">AI Apps</span>
         </Link>
 
         <div className="appbar-spacer" />
 
         <Link to="/create-agent" className="btn primary sm">
-          ＋ New AI App
+          <Icon name="plus" size={14} /> New AI App
         </Link>
         <button
           className="icon-btn"
@@ -64,7 +67,7 @@ export default function Shell({ children }: { children: ReactNode }) {
           title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
           aria-label="Toggle color theme"
         >
-          {theme === 'dark' ? '☀️' : '🌙'}
+          {theme === 'dark' ? <Icon name="sun" size={17} /> : <Icon name="moon" size={17} />}
         </button>
         <div className="appbar-user" title={user ? `${user.name} · ${user.username}` : 'Not signed in'}>
           {user ? initials(user.name || user.username) : '…'}
@@ -79,11 +82,15 @@ export default function Shell({ children }: { children: ReactNode }) {
           <nav className="sidenav">
             <div className="group-label">Build</div>
             <NavLink className={linkClass} to="/agents" title="AI Apps">
-              <span className="ico">🧩</span>
+              <span className="ico">
+                <Icon name="grid" size={17} />
+              </span>
               <span className="label">AI Apps</span>
             </NavLink>
             <NavLink className={linkClass} to="/playground" title="Playground">
-              <span className="ico">💬</span>
+              <span className="ico">
+                <Icon name="message" size={17} />
+              </span>
               <span className="label">Playground</span>
             </NavLink>
           </nav>

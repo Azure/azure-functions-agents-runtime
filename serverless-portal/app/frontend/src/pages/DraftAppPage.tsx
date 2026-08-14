@@ -1,13 +1,14 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { useQuery } from '@tanstack/react-query'
-import { api } from '../api'
+import { useQuery, useQueryClient } from '@tanstack/react-query'
+import { api, type LiveAgent, type LiveAgentApp, type LiveDiscovery, type CapabilitySuggestion } from '../api'
 import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
-import { queryKeys, readAgentsSnapshot } from '../query'
-import { DeployTargetPicker } from '../components/ui'
+import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
+import { DeployTargetPicker, SearchableSelect, Icon } from '../components/ui'
 import { DraftEditor } from '../components/SourceEditor'
 import { AddCapability } from '../components/AddCapability'
+import { skillSlug } from '../capabilities'
 import {
   type Draft,
   loadDraft,
@@ -60,6 +61,9 @@ export default function DraftAppPage() {
   const [materializing, setMaterializing] = useState(false)
   const [capErr, setCapErr] = useState('')
 
+  const qc = useQueryClient()
+  const cachedRef = useRef(false)
+
   const set = <K extends keyof Draft>(key: K, value: Draft[K]) => setDraft((d) => ({ ...d, [key]: value }))
   const targetSub = draft.targetSubscription || selected
 
@@ -97,6 +101,7 @@ export default function DraftAppPage() {
   const previewMd = draft.mdOverride ?? composed
 
   const deployJob = useDeployJob()
+  const deploying = deployJob.phase === 'running'
   const deployedAppName = draft.target === 'existing' ? draft.existingApp : draft.newApp.appName
   const deployedRg =
     draft.target === 'existing'
@@ -120,6 +125,61 @@ export default function DraftAppPage() {
       setCapErr((e as Error).message)
     } finally {
       setMaterializing(false)
+    }
+  }
+
+  // Phase A: infer capabilities from the prompt (skill-grounded) once enabled.
+  const foundryForGen = {
+    resourceGroup: draft.foundryResourceGroup,
+    account: draft.foundryAccount,
+    openaiEndpoint: draft.foundryOpenaiEndpoint,
+    model: draft.foundryModel,
+  }
+  const { data: planData, isFetching: planning } = useQuery({
+    queryKey: ['plan-capabilities', targetSub, draft.name, draft.foundryModel, draft.description],
+    queryFn: () =>
+      api.planCapabilities({ subscription: targetSub, description: draft.description, foundry: foundryForGen }),
+    enabled: capsEnabled && !!draft.foundryAccount && !!draft.foundryOpenaiEndpoint && !!draft.description.trim(),
+    staleTime: Infinity,
+    refetchOnMount: false,
+  })
+  const suggestions = planData?.capabilities ?? []
+  const [genState, setGenState] = useState<Record<string, 'busy' | 'done' | 'error'>>({})
+
+  const kindLabel = (kind: string) =>
+    kind === 'custom_tool'
+      ? 'Tool'
+      : kind === 'mcp'
+        ? 'MCP'
+        : kind === 'skill'
+          ? 'Skill'
+          : kind === 'connector_trigger'
+            ? 'Connector'
+            : 'Trigger'
+
+  // One-click generate for the additive code kinds (tool + skill). Triggers and
+  // MCP servers are added via the panel below (triggers replace the agent md;
+  // MCP is config, not generated code).
+  const generateSuggestion = async (s: CapabilitySuggestion) => {
+    setGenState((m) => ({ ...m, [s.name]: 'busy' }))
+    try {
+      if (s.kind === 'custom_tool') {
+        const r = await api.generateCapability({
+          subscription: targetSub, app: capApp, kind: 'custom_tool',
+          name: s.name, description: s.description, groundInSkills: true, foundry: foundryForGen,
+        })
+        const slug = s.name.toLowerCase().replace(/[^a-z0-9]+/g, '_').replace(/^_+|_+$/g, '') || 'tool'
+        await api.saveSource({ subscription: targetSub, app: capApp, path: `tools/${slug}.py`, content: r.content })
+      } else {
+        const r = await api.generateCapability({
+          subscription: targetSub, app: capApp, kind: 'skill',
+          name: s.name, description: s.description, groundInSkills: true, foundry: foundryForGen,
+        })
+        await api.saveSource({ subscription: targetSub, app: capApp, path: `skills/${skillSlug(s.name)}/SKILL.md`, content: r.content })
+      }
+      setGenState((m) => ({ ...m, [s.name]: 'done' }))
+    } catch {
+      setGenState((m) => ({ ...m, [s.name]: 'error' }))
     }
   }
 
@@ -160,6 +220,50 @@ export default function DraftAppPage() {
       : !!draft.newApp.appName && !!draft.newApp.resourceGroup && !!draft.newApp.region
   const foundryValid = !!draft.foundryModel && (draft.target === 'existing' || !!draft.foundryEndpoint)
   const canDeploy = nameValid && targetValid && foundryValid && !!selected && deployJob.phase !== 'running'
+
+  // When a new app finishes deploying, optimistically add it to the discovery
+  // cache + snapshot so it shows on the dashboard without a manual Hard refresh.
+  useEffect(() => {
+    if (deployJob.phase !== 'deployed' || cachedRef.current || draft.target !== 'new' || !capApp) return
+    cachedRef.current = true
+    const host = (deployJob.result?.url ?? '').replace(/^https?:\/\//, '')
+    const agentInApp = {
+      name: draft.name,
+      trigger: draft.trigger,
+      builtinEndpoints: draft.builtinEndpoints,
+      routes: [] as string[],
+      supportingFunctions: [] as string[],
+    }
+    const appEntry: LiveAgentApp = {
+      name: capApp,
+      resourceGroup: draft.newApp.resourceGroup,
+      location: draft.newApp.region,
+      provider: draft.provider || 'foundry',
+      defaultHostName: host,
+      agents: [agentInApp],
+      supportingFunctions: [],
+    }
+    const agentEntry: LiveAgent = {
+      ...agentInApp,
+      app: capApp,
+      resourceGroup: draft.newApp.resourceGroup,
+      region: draft.newApp.region,
+      provider: draft.provider || 'foundry',
+      defaultHostName: host,
+    }
+    const key = queryKeys.liveAgents(targetSub)
+    const prev =
+      qc.getQueryData<LiveDiscovery>(key) ??
+      readAgentsSnapshot(targetSub)?.data ?? { subscriptionId: targetSub, apps: [], agents: [] }
+    const next: LiveDiscovery = {
+      ...prev,
+      subscriptionId: targetSub,
+      apps: [appEntry, ...prev.apps.filter((a) => a.name !== capApp)],
+      agents: [agentEntry, ...prev.agents.filter((a) => !(a.app === capApp && a.name === draft.name))],
+    }
+    qc.setQueryData(key, next)
+    writeAgentsSnapshot(targetSub, next, Date.now())
+  }, [deployJob.phase, deployJob.result, draft, capApp, targetSub, qc])
 
   // Reset the availability result whenever the app name changes.
   useEffect(() => {
@@ -220,13 +324,20 @@ export default function DraftAppPage() {
           <span className="dot" /> {draft.foundryModel || 'no model'}
         </span>
       </div>
-      <p className="page-sub">
-        Review the generated app, then deploy it to try it — or, once it’s deployed, connect a GitHub repo.
-        This draft is kept only for this browser session.
-      </p>
+      <p className="page-sub">Review, add capabilities, and deploy. Kept only in this browser session.</p>
+
+      {deploying && (
+        <div className="note" style={{ marginBottom: 12 }}>
+          <strong>Deploying…</strong> This can take a few minutes — editing is locked until it finishes.
+          <div className="deploy-shimmer" style={{ marginTop: 10, marginBottom: 0 }} />
+        </div>
+      )}
 
       <div className="grid cols-2" style={{ alignItems: 'start' }}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+        <div
+          className={deploying ? 'deploying-lock' : undefined}
+          style={{ display: 'flex', flexDirection: 'column', gap: 16 }}
+        >
           <div className="card">
             <h3>Agent</h3>
             <div className="field" style={{ marginBottom: 0 }}>
@@ -306,7 +417,13 @@ export default function DraftAppPage() {
                   disabled={materializing || !capApp || !draft.name.trim()}
                   onClick={() => void enableCapabilities()}
                 >
-                  {materializing ? 'Preparing…' : '＋ Add MCP tools & triggers'}
+                  {materializing ? (
+                    'Preparing…'
+                  ) : (
+                    <>
+                      <Icon name="plus" size={14} /> Add MCP tools & triggers
+                    </>
+                  )}
                 </button>
                 {capErr && (
                   <p className="muted" style={{ color: 'var(--red)', fontSize: 12, marginTop: 8 }}>
@@ -315,17 +432,71 @@ export default function DraftAppPage() {
                 )}
               </div>
             ) : (
-              <AddCapability
-                subscription={targetSub}
-                resourceGroup={capRg}
-                app={capApp}
-                agentName={draft.name}
-              />
+              <>
+                <div className="card">
+                  <div className="card-head">
+                    <h3 style={{ margin: 0 }}>Suggested from your prompt</h3>
+                    {planning && (
+                      <span className="muted" style={{ fontSize: 12 }}>Analyzing…</span>
+                    )}
+                  </div>
+                  {!planning && suggestions.length === 0 ? (
+                    <p className="muted" style={{ fontSize: 13, margin: 0 }}>
+                      No specific capabilities detected — add any you need below.
+                    </p>
+                  ) : (
+                    <div className="pill-row">
+                      {suggestions.map((s) => {
+                        const st = genState[s.name]
+                        const canGen = s.kind === 'custom_tool' || s.kind === 'skill'
+                        return (
+                          <div key={s.name} className="suggestion" title={s.description}>
+                            <span className="badge gray">{kindLabel(s.kind)}</span>
+                            <span className="mono">{s.name}</span>
+                            {canGen ? (
+                              st === 'done' ? (
+                                <span className="badge green">
+                                  <span className="dot" /> added
+                                </span>
+                              ) : (
+                                <button
+                                  className="btn sm"
+                                  disabled={st === 'busy'}
+                                  onClick={() => void generateSuggestion(s)}
+                                >
+                                  {st === 'busy' ? (
+                                    'Generating…'
+                                  ) : (
+                                    <>
+                                      <Icon name="sparkles" size={13} /> Generate
+                                    </>
+                                  )}
+                                </button>
+                              )
+                            ) : (
+                              <span className="muted" style={{ fontSize: 11 }}>add below</span>
+                            )}
+                            {st === 'error' && (
+                              <span className="muted" style={{ color: 'var(--red)', fontSize: 11 }}>failed</span>
+                            )}
+                          </div>
+                        )
+                      })}
+                    </div>
+                  )}
+                </div>
+                <AddCapability
+                  subscription={targetSub}
+                  resourceGroup={capRg}
+                  app={capApp}
+                  agentName={draft.name}
+                />
+              </>
             ))}
         </div>
 
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <div className="card">
+          <div className={'card' + (deploying ? ' deploying-lock' : '')}>
             <h3>Deploy to try it</h3>
             <p className="muted" style={{ fontSize: 13, marginTop: 0 }}>
               Choose where to run it. Creating a new app provisions an Azure Functions Flex Consumption app
@@ -333,13 +504,13 @@ export default function DraftAppPage() {
             </p>
             <div className="field">
               <label>Subscription</label>
-              <select value={targetSub} onChange={(e) => selectTargetSub(e.target.value)}>
-                {subscriptions.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name}
-                  </option>
-                ))}
-              </select>
+              <SearchableSelect
+                value={targetSub}
+                onChange={selectTargetSub}
+                options={subscriptions.map((s) => ({ value: s.id, label: s.name }))}
+                placeholder="Select a subscription…"
+                ariaLabel="Subscription"
+              />
             </div>
             <DeployTargetPicker
               value={{ mode: draft.target, existingApp: draft.existingApp, newApp: draft.newApp }}
@@ -394,11 +565,14 @@ export default function DraftAppPage() {
             )}
             <div className="toolbar" style={{ marginTop: 14 }}>
               <button className="btn primary" disabled={!canDeploy} onClick={runDeploy}>
-                {deployJob.phase === 'running'
-                  ? 'Deploying…'
-                  : draft.target === 'new'
-                    ? '🚀 Create app & deploy'
-                    : '🚀 Deploy to app'}
+                {deployJob.phase === 'running' ? (
+                  'Deploying…'
+                ) : (
+                  <>
+                    <Icon name="rocket" size={14} />{' '}
+                    {draft.target === 'new' ? 'Create app & deploy' : 'Deploy to app'}
+                  </>
+                )}
               </button>
               <button className="btn" onClick={startOver}>
                 Start over
@@ -416,7 +590,8 @@ export default function DraftAppPage() {
               )}
             </div>
             <p className="muted" style={{ fontSize: 12, marginTop: 10, marginBottom: 0 }}>
-              🐙 Connecting a GitHub repo becomes available here once the app is deployed.
+              <Icon name="github" size={13} style={{ verticalAlign: '-2px' }} /> Connect a GitHub repo after
+              deploying.
             </p>
           </div>
 
