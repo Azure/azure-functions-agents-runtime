@@ -258,13 +258,122 @@ hardening controls.
 }
 ```
 
+Authored task ids allow letters, numbers, underscore, and hyphen only.
+`[` and `]` are rejected — the runtime reserves the `<id>[<index>]`
+namespace for the materialized `for_each` instance ids it renders (see
+below), so you can neither author them nor reference them.
+
+### Data-driven control flow (`when` / `for_each`)
+
+Two optional fields let a plan react to data at runtime instead of the
+model enumerating every task before submission. Plans that omit both keep
+their exact prior validation, scheduling, result, and status behavior; the
+fields are dropped from serialized plans when unset.
+
+- **`when`** — a constrained predicate that decides whether a logical task
+  (or one materialized `for_each` instance) runs. It is available on every
+  task type, including `wait` and `sub_agent`.
+- **`for_each`** — a single full reference to an upstream JSON array. The
+  runtime materializes one instance of the task per element. It is available
+  on `tool` and `sub_agent` tasks only; `wait` tasks may use `when` but not
+  `for_each`.
+
+```json
+{
+  "tasks": [
+    { "id": "discover", "type": "tool", "tool": "list_services" },
+    {
+      "id": "inspect",
+      "type": "tool",
+      "tool": "inspect_service",
+      "args": {"service": "${item.name}", "position": "${index}"},
+      "depends_on": ["discover"],
+      "for_each": "${discover.result.services}",
+      "when": {"ref": "${item.in_scope}", "operator": "equals", "value": true}
+    },
+    {
+      "id": "summarize",
+      "type": "tool",
+      "tool": "summarize_scan",
+      "args": {"findings": "${inspect.result}"},
+      "depends_on": ["inspect"]
+    }
+  ]
+}
+```
+
+**`when` contract.** `when` is `{"ref", "operator", "value"}`:
+
+- `ref` is one full reference — an upstream `${node.result...}` or, inside a
+  `for_each` task, an iteration local (`${item}`, `${item.path}`, `${index}`).
+- `operator` is exactly `equals` or `not_equals`.
+- `value` is a JSON scalar (`null`, boolean, number, or string).
+- Comparison is **strict, type-sensitive JSON scalar equality** — no
+  coercion, truthiness, ordering, regex, boolean composition, or runtime
+  state access. A missing path, malformed reference, non-scalar resolved
+  value, or unsupported operator is an error; it never silently evaluates
+  to false.
+
+`when` is evaluated *before* a task's executable `args` (or a Sub Agent's
+`task`) template is resolved, so a skipped task never needs valid value
+fields. A false predicate marks the task or instance **`skipped`**,
+schedules no Activity/timer, and produces `null` for that result position.
+
+Skip does **not** propagate. A skipped task still satisfies downstream
+`depends_on` edges, and a full `${skipped.result}` reference resolves to
+`null`; a descendant that should also be conditional must declare its own
+`when`. Traversing *below* a skipped result (`${skipped.result.field}`)
+fails deterministically because `null` has no path.
+
+**`for_each` contract.** The value must resolve to a JSON array. The task's
+target (`tool` or `agent`) stays static and is validated against the owner
+policy before the workflow starts — collection data can change arguments or
+a Sub Agent instruction but never selects a different tool or specialist.
+Only value fields may use the iteration locals:
+
+- `${item}` — the current element with its native JSON type.
+- `${item.path.to.field}` — a field of the element, using the same dotted
+  traversal rules as upstream result templates.
+- `${index}` — the zero-based integer index.
+
+Iteration locals are rejected outside a `for_each` task. Nested `for_each`,
+aliases, cross-instance references, item-dependent `depends_on`, and
+templated tool/agent names are not supported.
+
+Materialized instance ids are runtime-owned and rendered as
+`<logical-id>[<index>]` (e.g. `inspect[0]`). They appear in status and
+diagnostics but cannot be authored or referenced. Scheduling always orders
+by the numeric `(logical-id, index)` tuple — never by the rendered string —
+so `inspect[10]` never jumps ahead of `inspect[2]`.
+
+**Ordered aggregation.** A `for_each` logical node completes only after all
+its instances complete or skip. Its result is one array aligned to the
+source collection — never to completion order:
+
+```json
+[
+  {"index": 0, "status": "completed", "result": {"summary": "ready"}},
+  {"index": 1, "status": "skipped", "result": null},
+  {"index": 2, "status": "completed", "result": {"summary": "degraded"}}
+]
+```
+
+A downstream task depends on the logical id (`"depends_on": ["inspect"]`)
+and consumes the whole aggregate with `${inspect.result}`, or reads a known
+position with the dotted/list-index syntax. It cannot depend on or reference
+an individual instance id. An empty array is valid: no instances run, the
+node becomes `aggregated` immediately, and its result is `[]`. This is
+aggregation of already-completed results, not a reducer language — domain
+reduction stays an ordinary tool or Sub Agent task.
+
 ### Workflow Sub Agents
 
 The author grants access in `main.agent.md` with `workflows.subagents`. Each
 frontmatter grant contains `agent` and optional `when`; it is not a DAG node.
-The model then generates a `sub_agent` DAG node with exactly `id`, `type`,
-`agent`, `task`, and optional `depends_on`. A node does not accept `when`,
-`tool`, `args`, `duration`, or `until`.
+The model then generates a `sub_agent` DAG node with `id`, `type`, `agent`,
+`task`, optional `depends_on`, and the optional data-driven `when` /
+`for_each` fields described above. A `sub_agent` node does not accept `tool`,
+`args`, `duration`, or `until`.
 The runtime validates every specialist slug against the workflow owner's
 immutable grant before any node is scheduled and fails closed if the specialist
 is unavailable.
@@ -320,6 +429,12 @@ time; if a key or list index is missing, the workflow fails with a
 deterministic template-resolution error that identifies the task and
 path segment that could not be resolved.
 
+Inside a `for_each` task, value fields may additionally use the iteration
+locals `${item}`, `${item.path.to.field}`, and `${index}` (see
+[data-driven control flow](#data-driven-control-flow-when--for_each)). Every
+other `${...}` shape is rejected, so an unmatched or malformed reference
+fails loudly rather than passing through as a literal.
+
 ### Caps
 
 Enforced during plan validation and at runtime:
@@ -332,6 +447,15 @@ Enforced during plan validation and at runtime:
 | `max_active_workflows_per_session` | 10 |
 | `max_list_workflows_results` | 25 |
 
+`max_nodes` limits authored logical tasks *and* materialized `for_each`
+instances. Every array element consumes one node — **including an element
+later skipped by `when`** — so a large collection cannot bypass the limit
+through a predicate. Before scheduling any instance, the runtime rejects a
+whole expansion atomically if it would exceed `max_nodes`
+(`workflow_node_limit_exceeded`). An empty expansion consumes no nodes. Keep
+iterated arrays bounded upstream. `max_parallelism` still caps how many ready
+instances run concurrently.
+
 Future v2 hardening adds configurable frontmatter caps, per-tool timeout
 caps, retry policy, storage hygiene, and large-output offloading.
 
@@ -339,11 +463,52 @@ caps, retry policy, storage hygiene, and large-output offloading.
 
 The orchestrator holds these invariants:
 
-- Ready tasks are scheduled in a deterministic order (sorted by task id).
+- Ready tasks are scheduled in a deterministic order. Non-iterated tasks
+  sort by task id; `for_each` instances schedule by the numeric
+  `(logical-id, index)` tuple, never by the rendered instance-id string.
+- The same persisted inputs and upstream results reproduce identical
+  instance ids, scheduling waves, skip decisions, and ordered aggregates on
+  replay.
 - Time-dependent logic uses `context.current_utc_datetime` only.
 - Activity results must be JSON-serializable; non-serializable results
   cause a hard, deterministic failure.
-- Templating is evaluated over JSON-normalized prior outputs.
+- Templating and `when` comparisons are evaluated over JSON-normalized prior
+  outputs.
+
+### Controlled runtime failures
+
+Four control-flow failures are **returned** by the orchestrator as a stable
+flat object rather than raised, so they surface as an ordinary status
+envelope. The object has `failed: true`, a human `error` message, a stable
+`error_code`, bounded context (`node_id`, `path`), and the `results`
+committed before the failure:
+
+```json
+{
+  "failed": true,
+  "error": "Task 'inspect' for_each did not resolve to an array.",
+  "error_code": "workflow_iteration_not_array",
+  "node_id": "inspect",
+  "path": "${discover.result.services}",
+  "results": {"discover": {"...": "..."}}
+}
+```
+
+| `error_code` | Meaning |
+|---|---|
+| `workflow_condition_invalid` | Malformed predicate, unsupported operator, or a resolved predicate value that is not a JSON scalar. |
+| `workflow_reference_unresolved` | Unknown/non-upstream reference, an iteration local outside `for_each`, a missing key/out-of-range index, or traversal through a scalar/`null`. |
+| `workflow_iteration_not_array` | A `for_each` value resolved to a non-array. |
+| `workflow_node_limit_exceeded` | A resolved expansion would exceed `max_nodes`. |
+
+The shared status adapter maps `output.failed is True` to
+`runtime_status: "Failed"`. Callers key on `error_code` (messages may
+change) and must check `output.failed is True` before reading `output` as
+this flat schema — other `Failed` instances keep Durable's native opaque
+output. A per-instance failure uses the runtime-owned instance id in
+`node_id` (e.g. `inspect[3]`); materialization/aggregation failures use the
+logical id. Provider, model, and tool failures keep their existing sanitized
+behavior and are tracked separately by issue #1278.
 
 ## Status envelope
 
@@ -367,6 +532,51 @@ consume a single contract:
 external poller render against. `output` is populated only when the
 workflow has reached a terminal state and (for cooperative cancel)
 includes any partial results gathered before the cancel signal landed.
+For a controlled runtime failure, `output` is the flat failure object
+documented under [controlled runtime failures](#controlled-runtime-failures)
+and `runtime_status` is `Failed`.
+
+### `custom_status` schema versions
+
+`custom_status` has two accepted shapes; clients must accept **either**
+during the experimental compatibility window:
+
+- **Schema version 1** — a free-form string, as shown above. Static plans
+  (no `when` / `for_each`) keep returning it.
+- **Schema version 2** — a structured JSON object emitted by dynamically
+  controlled workflows. The status tools and HTTP endpoint pass it through
+  unchanged; the built-in UI renders its states rather than parsing text.
+
+```json
+{
+  "schema_version": 2,
+  "counts": {
+    "logical_total": 3,
+    "materialized_total": 4,
+    "completed": 2,
+    "skipped": 1,
+    "running": 1
+  },
+  "nodes": {
+    "discover": {"state": "completed"},
+    "inspect": {
+      "state": "running",
+      "expanded_count": 3,
+      "instances": {
+        "inspect[0]": {"state": "completed"},
+        "inspect[1]": {"state": "skipped"},
+        "inspect[2]": {"state": "running"}
+      }
+    }
+  }
+}
+```
+
+Logical node states are `pending`, `running`, `skipped`, `expanded`,
+`aggregated`, `completed`, or `failed`; instance states omit `expanded` and
+`aggregated`. A `for_each` node is `expanded` after materialization,
+`running` while any instance is in flight, and `aggregated` once its ordered
+result array is committed.
 
 ## Completion delivery
 
@@ -484,8 +694,11 @@ existence cannot be probed by guessing IDs across sessions).
   `host.json` is configured with the DTS `storageProvider`, each
   workflow appears as a queryable instance with per-task state and retry
   history.
-- **`customStatus`** — the orchestration emits a concise summary
-  (`"3/7 tasks done, current=summarize"`) for low-cost polling.
+- **`custom_status`** — the orchestration emits a low-cost polling summary.
+  Static plans return a concise string (`"3/7 tasks done, current=summarize"`);
+  dynamically controlled plans return the structured `schema_version: 2`
+  snapshot (see [status envelope](#custom_status-schema-versions)) with
+  per-node and per-instance state.
 
 ## Requirements
 
@@ -505,7 +718,12 @@ v1 includes:
 - DAG execution of `@workflow_tool` calls and wait tasks;
 - deny-by-default `workflows.subagents` grants and stateless `sub_agent` tasks;
 - fan-out/fan-in via `depends_on`;
-- result templating with `${node_id.result}` and dotted paths;
+- data-driven control flow: constrained `when` predicates and bounded
+  `for_each` iteration with ordered `{index, status, result}` aggregation;
+- result templating with `${node_id.result}`, dotted paths, and the
+  `${item}` / `${item.path}` / `${index}` iteration locals;
+- structured `schema_version: 2` status snapshots alongside legacy string
+  `custom_status`;
 - cooperative cancel and hard terminate;
 - live progress in the built-in chat UI;
 - workflow starts from supported Markdown-declared triggers;

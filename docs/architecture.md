@@ -63,7 +63,7 @@ A few boundaries are worth calling out explicitly:
 | `azure_functions_agents/system_tools/web_request.py` | Builds the default-on, SSRF-guarded `web_request` outbound HTTP tool, built once per agent at registration (no Azure resource required). | `create_web_request_tools()` |
 | `azure_functions_agents/runner.py` | Executes prompts through the Microsoft Agent Framework, managing sessions, tools, and streaming; builds per-request `delegate_<slug>` tools and fresh stateless workflow leaf agents; attempts one internal token-usage record through the shared runtime logger for each actual MAF invocation attempt. | `run_agent()`, `run_agent_stream()`, `build_subagent_tools()`, `run_leaf_agent_task()` |
 | `azure_functions_agents/client_manager.py` | Defines the pluggable inference-client abstraction, immutable inference-target metadata, and the default MAF-backed implementation. | `ClientManager`, `InferenceTarget`, `get_client_manager()`, `set_client_manager()` |
-| `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool and Sub Agent execution, immutable owner policy, plan validation/schema, session ownership, and workflow-management tools. | `register_workflows()`, `build_workflow_integration()`, `WorkflowPlanPolicy` |
+| `azure_functions_agents/workflows/*` | Experimental Dynamic Workflow runtime: Durable orchestration registration, workflow tool and Sub Agent execution, immutable owner policy, plan validation/schema, session ownership, and workflow-management tools. Also owns data-driven control flow — `when` predicate evaluation and bounded `for_each` materialization, deterministic instance ordering, ordered aggregation, structured (`schema_version: 2`) status, and controlled-failure normalization to `runtime_status: "Failed"`. | `register_workflows()`, `build_workflow_integration()`, `WorkflowPlanPolicy`, `validate_plan()` |
 | `azure_functions_agents/_function_tool.py` | Thin local shim around MAF `FunctionTool` creation so project tools can use `@tool`, plus `@workflow_tool` metadata for Dynamic Workflow Activity targets. | `tool()`, `workflow_tool()` |
 | `azure_functions_agents/_logger.py` | Shared package logger used across discovery, registration, and runtime code. | `logger` |
 | `azure_functions_agents/_observability.py` | Cross-cutting OpenTelemetry bootstrap and conventions: enables MAF `gen_ai` instrumentation and, when the optional `[monitor]` extra is installed, the Azure Monitor exporter, provides the `af.*` span/attribute helpers (fault domain, lifecycle stage), the resolved sensitive-data flag from `ENABLE_SENSITIVE_DATA`, minimal dynamic-session and delegate-call metrics, and third-party log-noise control. | `configure_observability()`, `start_span()`, `current_span()`, `FaultDomain`, `LifecycleStage`, `record_delegate_call()` |
@@ -173,15 +173,53 @@ Registration does not run the agent itself. Instead, `registration/_handlers.py`
 For a workflow-enabled main agent, `workflows/integration.py` produces one
 immutable `WorkflowPlanPolicy` from the concrete workflow tools and
 `workflows.subagents` grant. The same policy instance generates model guidance
-and is captured by `start_workflow` for runtime authorization. Built-in chat/MCP
-handlers receive the chat addendum; declared-trigger handlers receive the
-trigger addendum together with `workflow_enabled=True`, the Durable client,
+and is captured by `start_workflow` for runtime authorization. The policy is
+also **persisted** with each submitted plan (it is serialized into the Durable
+client input) so the orchestrator re-validates every materialized `for_each`
+instance's static target against the identical owner boundary as defense in
+depth — dynamic control flow never broadens the capability grant. Built-in
+chat/MCP handlers receive the chat addendum; declared-trigger handlers receive
+the trigger addendum together with `workflow_enabled=True`, the Durable client,
 agent name, and policy. Registration consumes these resolved values and does not
 re-parse workflow metadata.
 
 ### Dynamic Workflow execution lifetimes
 
 A declared trigger handler is a short-lived Durable **client/starter**. The agent authors a plan, calls `start_workflow`, receives the Durable instance ID, and ends its turn without polling. The starter remains subject to the normal model-call and Function timeout, but the orchestration does not: Durable checkpoints and resumes the DAG independently across Activities and timers.
+
+### Static vs. data-driven execution
+
+The orchestrator serves two plan shapes from one Durable blueprint. A plan
+with no `when` / `for_each` fields takes the **static** scheduler path
+unchanged: wave-based `depends_on` scheduling and a legacy string
+`custom_status`, exactly as before Issue #1276. A plan using either field
+takes the **dynamic** path, which layers four deterministic stages over the
+same DAG:
+
+- **materialize** — resolve each `for_each` value to a JSON array and create
+  one instance per element as `<logical-id>[<index>]`; reject the whole
+  expansion atomically if it would exceed the materialized-node budget
+  (skipped instances still count).
+- **evaluate** — bind `${item}` / `${item.path}` / `${index}`, evaluate the
+  `when` predicate *before* resolving executable `args` / Sub Agent `task`
+  templates, and mark false predicates `skipped` with a `null` result that
+  still satisfies downstream `depends_on`.
+- **schedule** — dispatch runnable instances under `MAX_PARALLELISM`, ordered
+  by the numeric `(logical-id, index)` tuple (never the rendered string) so
+  replay reproduces identical waves.
+- **aggregate** — once every instance of a logical node is terminal, commit
+  one source-ordered array of `{index, status, result}` envelopes under the
+  logical id for downstream consumption.
+
+Progress is published as a structured `schema_version: 2` `custom_status`
+snapshot (logical node states plus per-instance state). The four controlled
+control-flow failures (`workflow_condition_invalid`,
+`workflow_reference_unresolved`, `workflow_iteration_not_array`,
+`workflow_node_limit_exceeded`) are **returned** as a flat `failed: true`
+envelope rather than raised; `status_envelope()` and `_is_active_status()`
+normalize `output.failed is True` to `runtime_status: "Failed"`, while
+unexpected engine invariants and Activity/provider errors keep Durable's
+native failure behavior.
 
 ### Registration paths in practice
 

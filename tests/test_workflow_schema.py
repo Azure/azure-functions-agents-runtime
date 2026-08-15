@@ -25,7 +25,9 @@ from azure_functions_agents.workflows.schema import (
     SUB_AGENT_TASK_TYPE,
     PlanValidationError,
     TemplateResolutionError,
+    WorkflowCondition,
     WorkflowPlanPolicy,
+    evaluate_condition,
     parse_iso8601_datetime,
     parse_iso8601_duration,
     plan_to_activity_inputs,
@@ -973,3 +975,299 @@ def test_rejects_non_string_task_id():
     raw = _plan({"id": 42, "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}})
     with pytest.raises(PlanValidationError):
         validate_plan(raw)
+
+
+# ---------------------------------------------------------------------------
+# conditional and iterative workflow tasks
+# ---------------------------------------------------------------------------
+
+
+def test_accepts_condition_and_iteration_on_tool_and_sub_agent_tasks() -> None:
+    analyze = _task(
+        "analyze",
+        depends_on=["discover"],
+        args={"url": "${item.url}", "index": "${index}"},
+    )
+    analyze["for_each"] = "${discover.result.pull_requests}"
+    analyze["when"] = {
+        "ref": "${item.open}",
+        "operator": "equals",
+        "value": True,
+    }
+    report = _subagent(
+        "report",
+        task="Review ${item.url} at ${index}: ${discover.result.title}",
+        depends_on=["discover"],
+    )
+    report["for_each"] = "${discover.result.pull_requests}"
+    report["when"] = {
+        "ref": "${item.open}",
+        "operator": "not_equals",
+        "value": False,
+    }
+
+    plan = validate_plan(_plan(_task("discover"), analyze, report))
+
+    assert plan.tasks[1].for_each == "${discover.result.pull_requests}"
+    assert plan.tasks[1].when == WorkflowCondition(
+        ref="${item.open}",
+        operator="equals",
+        value=True,
+    )
+    assert plan.tasks[2].for_each == "${discover.result.pull_requests}"
+
+
+def test_wait_accepts_condition_but_rejects_iteration() -> None:
+    conditional_wait = _wait("pause", duration="PT1S", depends_on=["source"])
+    conditional_wait["when"] = {
+        "ref": "${source.result.should_wait}",
+        "operator": "equals",
+        "value": True,
+    }
+    validate_plan(_plan(_task("source"), conditional_wait))
+
+    iterated_wait = _wait("pause", duration="PT1S", depends_on=["source"])
+    iterated_wait["for_each"] = "${source.result.items}"
+    with pytest.raises(PlanValidationError, match="'for_each' is not valid") as exc_info:
+        validate_plan(_plan(_task("source"), iterated_wait))
+    assert exc_info.value.error_code == "workflow_reference_unresolved"
+    assert exc_info.value.node_id == "pause"
+    assert exc_info.value.path == "for_each"
+
+
+@pytest.mark.parametrize("task_id", ["contains.dot", "node[0]", "space id", "café"])
+def test_rejects_authored_task_ids_outside_runtime_safe_alphabet(task_id: str) -> None:
+    with pytest.raises(PlanValidationError):
+        validate_plan(_plan(_task(task_id)))
+
+
+@pytest.mark.parametrize(
+    "condition",
+    [
+        {"ref": "${source.result.flag}", "operator": "contains", "value": True},
+        {"ref": "${source.result.flag}", "operator": "equals", "value": {"bad": True}},
+        {
+            "ref": "${source.result.flag}",
+            "operator": "equals",
+            "value": True,
+            "extra": "no",
+        },
+    ],
+)
+def test_rejects_invalid_condition_schema_with_stable_metadata(
+    condition: dict[str, object],
+) -> None:
+    node = _task("target", depends_on=["source"])
+    node["when"] = condition
+
+    with pytest.raises(PlanValidationError) as exc_info:
+        validate_plan(_plan(_task("source"), node))
+
+    assert exc_info.value.error_code == "workflow_condition_invalid"
+    assert exc_info.value.node_id == "target"
+    assert exc_info.value.path.startswith("when")
+
+
+def test_rejects_malformed_condition_reference_with_stable_metadata() -> None:
+    node = _task("target", depends_on=["source"])
+    node["when"] = {"ref": "source.result.flag", "operator": "equals", "value": True}
+
+    with pytest.raises(PlanValidationError, match=r"when\.ref") as exc_info:
+        validate_plan(_plan(_task("source"), node))
+
+    assert exc_info.value.error_code == "workflow_condition_invalid"
+    assert exc_info.value.node_id == "target"
+    assert exc_info.value.path == "when.ref"
+
+
+def test_validates_iteration_local_scope_and_upstream_references() -> None:
+    iterated = _task(
+        "target",
+        depends_on=["source"],
+        args={"item": "${item}", "source": "${source.result.name}"},
+    )
+    iterated["for_each"] = "${source.result.items}"
+    validate_plan(_plan(_task("source"), iterated))
+
+    non_iterated = _task(
+        "target",
+        depends_on=["source"],
+        args={"item": "${item.path}"},
+    )
+    with pytest.raises(PlanValidationError, match="only available on for_each") as exc_info:
+        validate_plan(_plan(_task("source"), non_iterated))
+    assert exc_info.value.error_code == "workflow_reference_unresolved"
+    assert exc_info.value.node_id == "target"
+
+
+@pytest.mark.parametrize(
+    ("node", "path"),
+    [
+        (
+            {
+                "id": "tool_target",
+                "type": "tool",
+                "tool": "${item.name}",
+                "args": {},
+                "for_each": "${source.result.items}",
+                "depends_on": ["source"],
+            },
+            "tool",
+        ),
+        (
+            {
+                "id": "agent_target",
+                "type": "sub_agent",
+                "agent": "${item.agent}",
+                "task": "Review ${item.url}",
+                "for_each": "${source.result.items}",
+                "depends_on": ["source"],
+            },
+            "agent",
+        ),
+    ],
+)
+def test_rejects_templated_iteration_targets(
+    node: dict[str, object],
+    path: str,
+) -> None:
+    with pytest.raises(PlanValidationError, match="target must be static") as exc_info:
+        validate_plan(_plan(_task("source"), node))
+
+    assert exc_info.value.error_code == "workflow_reference_unresolved"
+    assert exc_info.value.path == path
+
+
+def test_rejects_non_upstream_iteration_reference() -> None:
+    node = _task("target", depends_on=["other"])
+    node["for_each"] = "${source.result.items}"
+
+    with pytest.raises(PlanValidationError, match="not an upstream dependency") as exc_info:
+        validate_plan(_plan(_task("source"), _task("other"), node))
+
+    assert exc_info.value.error_code == "workflow_reference_unresolved"
+    assert exc_info.value.path == "for_each"
+
+
+def test_plan_to_activity_inputs_serializes_dynamic_fields_only_when_present() -> None:
+    static = validate_plan(_plan(_task("static")))
+    dynamic = _task("dynamic", depends_on=["source"], args={"value": "${item.value}"})
+    dynamic["for_each"] = "${source.result.items}"
+    dynamic["when"] = {
+        "ref": "${item.enabled}",
+        "operator": "equals",
+        "value": True,
+    }
+    dynamic_plan = validate_plan(_plan(_task("source"), dynamic))
+
+    assert plan_to_activity_inputs(static) == [
+        {"id": "static", "type": "tool", "tool": ECHO_TOOL_NAME, "args": {}, "depends_on": []}
+    ]
+    assert plan_to_activity_inputs(dynamic_plan)[1] == {
+        "id": "dynamic",
+        "type": "tool",
+        "tool": ECHO_TOOL_NAME,
+        "args": {"value": "${item.value}"},
+        "depends_on": ["source"],
+        "when": {"ref": "${item.enabled}", "operator": "equals", "value": True},
+        "for_each": "${source.result.items}",
+    }
+
+
+def test_resolve_iteration_templates_preserves_native_values_and_mixed_templates() -> None:
+    results = {"source": {"prefix": "PR"}}
+    item = {"number": 42, "labels": ["bug", "urgent"]}
+
+    assert resolve_template_value("${item}", results, item=item, index=3) == item
+    assert resolve_template_value("${item.labels.1}", results, item=item, index=3) == "urgent"
+    assert resolve_template_value("${index}", results, item=item, index=3) == 3
+    assert (
+        resolve_template_value(
+            "${source.result.prefix}-${item.number}-${index}",
+            results,
+            item=item,
+            index=3,
+        )
+        == "PR-42-3"
+    )
+
+
+def test_resolve_iteration_paths_require_bound_items_and_existing_paths() -> None:
+    with pytest.raises(TemplateResolutionError, match="no iteration item"):
+        resolve_template_value("${item}", {})
+    with pytest.raises(TemplateResolutionError, match="key not present"):
+        resolve_template_value("${item.missing}", {}, item={"present": True}, index=0)
+
+
+def test_iteration_result_field_takes_precedence_over_task_named_item() -> None:
+    plan = validate_plan(
+        _plan(
+            _task("item"),
+            _task("discover"),
+            _task(
+                "analyze",
+                depends_on=["item", "discover"],
+                args={"summary": "${item.result.summary}"},
+            )
+            | {"for_each": "${discover.result.items}"},
+        )
+    )
+
+    resolved = resolve_template_value(
+        plan.tasks[2].args,
+        {"item": {"summary": "wrong"}},
+        item={"result": {"summary": "right"}},
+        index=0,
+    )
+
+    assert resolved == {"summary": "right"}
+
+
+def test_task_named_item_remains_referenceable_outside_iteration() -> None:
+    plan = validate_plan(
+        _plan(
+            _task("item"),
+            _task(
+                "consume",
+                depends_on=["item"],
+                args={"summary": "${item.result.summary}"},
+            ),
+        )
+    )
+
+    resolved = resolve_template_value(
+        plan.tasks[1].args,
+        {"item": {"summary": "task result"}},
+    )
+
+    assert resolved == {"summary": "task result"}
+
+
+def test_evaluate_condition_is_scalar_and_type_sensitive() -> None:
+    condition = WorkflowCondition(
+        ref="${source.result.flag}",
+        operator="equals",
+        value=1,
+    )
+
+    assert evaluate_condition(condition, {"source": {"flag": 1}})
+    assert not evaluate_condition(condition, {"source": {"flag": True}})
+    assert not evaluate_condition(condition, {"source": {"flag": 1.0}})
+    assert evaluate_condition(
+        WorkflowCondition(ref="${item.active}", operator="not_equals", value=False),
+        {},
+        item={"active": True},
+        index=0,
+    )
+    with pytest.raises(TemplateResolutionError, match="non-scalar"):
+        evaluate_condition(condition, {"source": {"flag": {"nested": True}}})
+
+
+def test_authored_node_limit_has_stable_error_code() -> None:
+    tasks = [_task(f"task_{index}") for index in range(MAX_NODES + 1)]
+
+    with pytest.raises(PlanValidationError) as exc_info:
+        validate_plan(_plan(*tasks))
+
+    assert exc_info.value.error_code == "workflow_node_limit_exceeded"
+    assert exc_info.value.path == "tasks"
