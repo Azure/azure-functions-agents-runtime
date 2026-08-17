@@ -56,50 +56,10 @@ def test_provision_concurrency_cli_wins_and_local_default_is_four(
     assert support.provision_concurrency_from_option_or_environment(_config(None)) == 4
 
 
-def test_dual_runtime_pipeline_limits_shared_group_provisioning_to_one_per_leg() -> None:
-    root = Path(__file__).parent.parent
-    source = (root / "eng" / "scripts" / "aca_deployed_qualification.py").read_text()
-    runbook = (root / "tests" / "live" / "README.md").read_text()
-
-    assert "_PROVISION_CONCURRENCIES = frozenset({1, 2, 4})" in source
-    assert "provision_concurrency_requires_single_runtime" in source
-    assert "at most one session per runtime leg (two total)" in runbook
-    assert "parallel Python 3.13/3.14 validation" in runbook
-
-
 @pytest.mark.parametrize("value", ["0", "5", "three", "2.5"])
 def test_provision_concurrency_rejects_unsafe_values(value: str) -> None:
     with pytest.raises(AcaSmokeEnvironmentError, match="provision-concurrency"):
         support.provision_concurrency_from_option_or_environment(_config(value))
-
-
-def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only() -> None:
-    root = Path(__file__).parent.parent
-    runbook = (root / "tests" / "live" / "README.md").read_text()
-    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
-
-    assert "`N=5` is the sole agent/CI diagnostic validation size." in runbook
-    assert "`N=100` is formal Decision #29 acceptance and is **human-only**" in runbook
-    assert "acaLoadConcurrency=100" in runbook
-    assert "ACA_DEPLOYED_LOAD_CONCURRENCY` pipeline variable does not control this job" in runbook
-    assert "N=10/25/50/100" not in runbook
-    assert 'ACA_DEPLOYED_LOAD_CONCURRENCY="100"' not in pipeline
-    assert "command: deployed-suite" in pipeline
-    assert "--load-concurrency ${{ parameters.acaLoadConcurrency }}" in pipeline
-
-
-def test_deployed_agent_preflight_acquires_but_never_decodes_or_logs_easy_auth_tokens() -> None:
-    root = Path(__file__).parent.parent
-    preflight = (root / "eng" / "scripts" / "aca_deployed_qualification.py").read_text()
-    preflight_function = preflight.split("def preflight_auth", maxsplit=1)[1].split(
-        "def _run_pytest", maxsplit=1
-    )[0]
-
-    assert "await credential.get_token(" in preflight
-    assert 'print("Azure service connection authenticated")' in preflight_function
-    assert preflight_function.count("print(") == 1
-    for forbidden in ("base64", "json", "split(", "urlsafe_b64decode", "claim"):
-        assert forbidden not in preflight_function
 
 
 def test_load_orchestration_preserves_public_and_read_only_boundaries() -> None:
@@ -1682,43 +1642,3 @@ def test_hold_constant_and_sse_continuation_guard(load_module: object) -> None:
     assert [event.sequence for event in continued] == [1, 2, 3]
     with pytest.raises(AssertionError, match="contiguous"):
         append_contiguous_sse_events(initial, [SseEvent(3, {"type": "done"})])
-
-
-def test_deployed_job_uses_queue_parameters_for_n5_n100_and_provisioning() -> None:
-    pipeline = (
-        Path(__file__).parents[1] / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml"
-    ).read_text()
-    source = (
-        Path(__file__).parents[1] / "eng" / "scripts" / "aca_deployed_qualification.py"
-    ).read_text()
-
-    assert "$(ACA_DEPLOYED_LOAD_CONCURRENCY)" not in pipeline
-    assert "--load-concurrency ${{ parameters.acaLoadConcurrency }}" in pipeline
-    assert "--provision-concurrency ${{ parameters.acaProvisionConcurrency }}" in pipeline
-    assert "dual_runtime_load_concurrency_requires_single_runtime" in source
-    assert "provision_concurrency_requires_single_runtime" in source
-    assert "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY" in source
-    assert 'job: "ACADeployedAgentTurn"' in pipeline
-    assert "timeoutInMinutes: 360" in pipeline
-    assert "continueOnError: true" in pipeline
-
-
-def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
-    root = Path(__file__).parents[1]
-    load_source = (root / "tests" / "live" / "test_aca_deployed_load.py").read_text()
-    loss_source = (root / "tests" / "live" / "test_aca_deployed_loss.py").read_text()
-    job = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
-    runbook = (root / "tests" / "live" / "README.md").read_text()
-
-    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0" in load_source
-    assert "_SETUP_DEADLINE_ATTEMPTS = 2" in load_source
-    assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0" in loss_source
-    assert "_SETUP_RETRY_ATTEMPTS = 2" in loss_source
-    assert "_PROVISION_BATCH_TIMEOUT_SECONDS = 330.0" in load_source
-    assert "_PHASE_B_ADMISSION_TIMEOUT_SECONDS = 330.0" in load_source
-    assert "_HELD_RUN_SETUP_TIMEOUT_SECONDS = 330.0" in loss_source
-    assert "timeoutInMinutes: 360" in job
-    assert "two 105-second attempts plus one 120-second retry wait" in runbook
-    assert "1,710 seconds" in runbook
-    assert "8,310 seconds" in runbook
-    assert "optional ACA ADO job has a 360-minute safety cap" in runbook

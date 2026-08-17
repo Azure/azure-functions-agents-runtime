@@ -3,26 +3,22 @@
 from __future__ import annotations
 
 import os
-import uuid
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
 from tests.live.aca_smoke_support import (
     AcaSmokeConfig,
-    AcaSmokeModelConfig,
-    DependencyClosureArchive,
     aca_smoke_config_from_environment,
-    aca_smoke_model_config_from_environment,
-    prepare_real_agent_project,
-    provision_aca_smoke_sandbox,
+    reap_current_production_smoke_sandboxes,
 )
 
-from azure_functions_agents.execution.backend import RunContext
-from azure_functions_agents.execution.run_control import RunEnvelope, SandboxRunControl
-from azure_functions_agents.transport.ports import SandboxSessionHandle
+from azure_functions_agents.execution.aca_composition import compose_aca_application
+from azure_functions_agents.execution.aca_sandbox import AcaSandboxExecutionBackend
+from azure_functions_agents.execution.backend import RunContext, StartRunRequest
+from azure_functions_agents.session_state import FunctionAppPrincipal, resolve_function_app_identity
 
-_TURN_TIMEOUT_SECONDS = 180.0
 _AGENT_NAME = "model_turn"
 
 if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
@@ -32,74 +28,51 @@ if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
     )
 
 
+@pytest.fixture(scope="session")
+def aca_real_agent_backend(aca_materialized_app_root: Path) -> AcaSandboxExecutionBackend:
+    application = compose_aca_application(
+        aca_materialized_app_root,
+        app_identity=resolve_function_app_identity(),
+    )
+    return application.backend_for(_AGENT_NAME, owner=FunctionAppPrincipal())
+
+
+@pytest_asyncio.fixture(autouse=True)
+async def reap_current_production_smoke(
+    aca_smoke_config: AcaSmokeConfig,
+) -> AsyncIterator[None]:
+    """Observe and reap the production backend's current Function App label family."""
+
+    try:
+        yield
+    finally:
+        await reap_current_production_smoke_sandboxes(aca_smoke_config)
+
+
 @pytest.fixture
 def aca_smoke_config() -> AcaSmokeConfig:
     return aca_smoke_config_from_environment()
 
 
-@pytest.fixture
-def aca_smoke_model_config() -> AcaSmokeModelConfig:
-    return aca_smoke_model_config_from_environment()
-
-
-@pytest_asyncio.fixture
-async def aca_real_agent_handle(
-    aca_smoke_config: AcaSmokeConfig,
-    aca_smoke_model_config: AcaSmokeModelConfig,
-) -> AsyncIterator[SandboxSessionHandle]:
-    async def prepare(
-        handle: SandboxSessionHandle,
-        dependency_closure: DependencyClosureArchive,
-    ) -> None:
-        await prepare_real_agent_project(
-            handle,
-            config=aca_smoke_config,
-            dependency_closure=dependency_closure,
-        )
-
-    async with provision_aca_smoke_sandbox(
-        aca_smoke_config,
-        session_prefix="aca-real-agent-turn",
-        before_yield_with_closure=prepare,
-        model_config=aca_smoke_model_config,
-    ) as handle:
-        yield handle
-
-
 @pytest.mark.live_aca
 @pytest.mark.asyncio
-async def test_live_aca_lower_level_real_agent_turn(
-    aca_real_agent_handle: SandboxSessionHandle,
+async def test_live_aca_real_agent_turn(
+    aca_real_agent_backend: AcaSandboxExecutionBackend,
 ) -> None:
     """Require a captured catalog, ordered journal, terminal result, and real model turn."""
 
-    run_id = uuid.uuid4().hex
-    session_id = uuid.uuid4().hex
-    envelope = RunEnvelope.create(
-        run_id=run_id,
-        session_id=session_id,
-        agent_name=_AGENT_NAME,
-        prompt="Provide a short acknowledgement.",
-        timeout=120.0,
+    handle = await aca_real_agent_backend.start_run(
+        StartRunRequest(
+            prompt="Provide a short acknowledgement.",
+            timeout=120.0,
+        )
     )
-    run_control = SandboxRunControl()
-    await run_control.submit(
-        aca_real_agent_handle,
-        run_id,
-        envelope,
-        timeout_seconds=_TURN_TIMEOUT_SECONDS,
-    )
-
-    context = RunContext(run_id=run_id, session_id=session_id)
+    context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
     events = [
         event
-        async for event in run_control.read_events(
-            aca_real_agent_handle,
-            context,
-            after_sequence=0,
-        )
+        async for event in aca_real_agent_backend.read_events(context, after_sequence=0)
     ]
-    status = await run_control.get_status(aca_real_agent_handle, context)
+    status = await aca_real_agent_backend.get_run(context)
 
     assert status.state == "succeeded"
     assert status.error is None

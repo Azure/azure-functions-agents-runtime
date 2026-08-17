@@ -5,6 +5,9 @@ parameters:
   - name: PoolName
     type: string
     default: '1es-pool-azfunc'
+  - name: acaServiceConnection
+    type: string
+    default: 'larohra-sandboxgroup-test'
 
 jobs:
   - job: "E2ETests"
@@ -70,3 +73,72 @@ jobs:
           AZURE_TOKEN_CREDENTIALS: 'dev'
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
+
+  - job: "ACACurrentCheckoutSmoke"
+    displayName: 'Run current-checkout ACA model smoke'
+    continueOnError: true
+    timeoutInMinutes: 30
+    condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'), ne(variables['System.PullRequest.IsFork'], 'True'))
+    pool:
+          name: ${{ parameters.PoolName }}
+          image: 1es-ubuntu-22.04
+          os: linux
+    steps:
+          - task: PipAuthenticate@1
+            inputs:
+              artifactFeeds: ${{ parameters.artifactFeed }}
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.13'
+          - bash: |
+              docker run -d --name azurite \
+                -p 10000:10000 -p 10001:10001 -p 10002:10002 \
+                mcr.microsoft.com/azure-storage/azurite \
+                azurite --skipApiVersionCheck \
+                  --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+              python -m pip install --upgrade pip
+              python -m pip install -U -e .[dev,aca_sandbox]
+            displayName: 'Install exact checkout and start Azurite'
+          - task: AzureCLI@2
+            displayName: 'Preflight ACA guest identity and run smoke'
+            inputs:
+              azureSubscription: ${{ parameters.acaServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: >-
+                python eng/scripts/aca_pr_smoke.py &&
+                python -m pytest -m live_aca
+                tests/live/test_aca_harness_entrypoint_smoke.py
+                tests/live/test_aca_run_journal_acceptance.py
+                tests/live/test_aca_real_agent_turn.py -v
+            env:
+              AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+              FUNCTIONS_WORKER_RUNTIME: 'python'
+              AZURE_TOKEN_CREDENTIALS: 'dev'
+              AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE: '1'
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
+              AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER: $(ACA_SMOKE_MODEL_PROVIDER)
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT: $(ACA_SMOKE_AZURE_OPENAI_ENDPOINT)
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT: $(ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT)
+              AZURE_OPENAI_ENDPOINT: $(ACA_SMOKE_AZURE_OPENAI_ENDPOINT)
+              AZURE_OPENAI_DEPLOYMENT: $(ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT)
+              WEBSITE_OWNER_NAME: $(ACA_SMOKE_FUNCTION_APP_OWNER_NAME)
+              WEBSITE_SITE_NAME: aca-pr-smoke-$(Build.BuildId)
+              ACA_SMOKE_MODEL_ROLE_DEFINITION_ID: $(ACA_SMOKE_MODEL_ROLE_DEFINITION_ID)
+              ACA_SMOKE_MODEL_RESOURCE_ID: $(ACA_SMOKE_MODEL_RESOURCE_ID)
+          - task: AzureCLI@2
+            displayName: 'Reap current-run ACA smoke resources'
+            condition: always()
+            inputs:
+              azureSubscription: ${{ parameters.acaServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: python eng/scripts/reap_aca_smoke_sandboxes.py
+            env:
+              AZURE_TOKEN_CREDENTIALS: 'dev'
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
+              AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+              WEBSITE_OWNER_NAME: $(ACA_SMOKE_FUNCTION_APP_OWNER_NAME)
+              WEBSITE_SITE_NAME: aca-pr-smoke-$(Build.BuildId)

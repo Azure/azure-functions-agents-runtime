@@ -30,16 +30,18 @@ python eng/scripts/generate_config_reference.py --check
 
 ### `reap_aca_smoke_sandboxes.py`
 
-Deletes leftover ACA smoke sandboxes created by the CI-dedicated owner/app.
+Deletes leftover ACA smoke sandboxes created by the current Function App smoke
+identity and its low-level CI companion tests.
 
 **Purpose:** Cleanup safety net for the live ACA smoke job. It is label-scoped to
-the CI smoke owner/app hashes, so it only ever deletes sandboxes this pipeline
-created. The label selector is imported from the test-support module
+the BuildId-derived Function App owner/app hashes and the low-level CI
+owner/app hashes, so it only ever deletes sandboxes this pipeline created. The
+label selectors are imported from the test-support module
 (`tests/live/aca_smoke_support.py`) rather than duplicated here.
 
 **Usage:**
 ```bash
-# Reap every CI smoke sandbox in the configured Sandbox Group
+# Reap the current Function App and CI smoke sandbox families in the configured Sandbox Group
 python eng/scripts/reap_aca_smoke_sandboxes.py
 ```
 
@@ -49,22 +51,16 @@ The Sandbox Group is read from the
 **When to run:**
 - As an `always()` cleanup step after the ACA smoke job
 
-**Integration:**
-- **Optional ACA pipeline:** Runs in
-  `eng/templates/official/jobs/aca-smoke-tests.yml`, expanded by
-  `eng/ci/aca-smoke-tests.yml`.
+**Integration:** The current-checkout E2E ACA job runs it with `always()`. It
+deletes only the BuildId-derived Function App family and current-run low-level
+family, including their snapshots, then fails if either remains.
 
-### `aca_deployed_qualification.py`
+### `aca_pr_smoke.py`
 
-Runs the protected predeployed ACA smoke commands used by the optional ACA
-pipeline.
-It validates required environment variables, unresolved `$(VAR)` placeholders,
-numeric ranges, shared-Sandbox-Group limits, and the cold-start sample cap
-before invoking a live suite. It acquires an Easy Auth token through the Azure
-CLI credential without printing token material, claims, prompts, results, or
-resource IDs.
+Runs the protected current-checkout ACA smoke preflight. It uses the controller
+service connection to require exactly one guest UAMI, model-only RBAC, and
+model-host-only egress before the guest makes one real model turn. It fails
+closed when ARM/RBAC inspection permissions or evidence are unavailable.
 
-The `deployed-suite` and `cold-start` commands are smoke only: they do not
-deploy, inspect, or attest a PR artifact or remote Python runtime. Azure
-Pipelines service connections used by PR jobs must be protected by pipeline
-permissions and checks.
+The retained `aca_deployed_qualification.py` and deployed suite helpers are
+manual/local assets only pending the separate post-main qualification work.

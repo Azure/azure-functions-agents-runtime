@@ -1,7 +1,0 @@
-variables:
-  # Non-secret deployed qualification inputs. Keep these values in the protected
-  # pipeline configuration when a branch-specific override is required.
-  ACA_DEPLOYED_PY313_FUNCTION_BASE_URL: 'https://func-afar-u3q-6k9m2p7.azurewebsites.net/api'
-  ACA_DEPLOYED_PY313_APP_SITE_NAME: 'func-afar-u3q-6k9m2p7'
-  ACA_DEPLOYED_PY314_FUNCTION_BASE_URL: 'https://func-afar-u3q314-6k9m2p7.azurewebsites.net/api'
-  ACA_DEPLOYED_PY314_APP_SITE_NAME: 'func-afar-u3q314-6k9m2p7'

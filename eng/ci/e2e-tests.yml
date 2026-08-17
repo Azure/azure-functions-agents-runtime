@@ -53,3 +53,4 @@ extends:
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
+              acaServiceConnection: 'larohra-sandboxgroup-test'

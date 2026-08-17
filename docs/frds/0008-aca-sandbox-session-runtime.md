@@ -405,6 +405,8 @@ controlling amendments.
 | 162 | Runtime recovery correctness | Terminalize ambiguity / reconcile and retain / stale fallback | After create or journal invocation, preserve durable retryability on timeout/cancellation; map targeted provider authorization to redacted 503; retain authorization deletion rationale so cleanup is not idle reclaim. | Human-approved scope + Agent | 2026-08-17 | U3 corrective |
 | 163 | Predeployed PR smoke eligibility | Manual/Schedule only / PR nonblocking / PR attestation | Supersede #156/#157 only for eligibility: protected predeployed Python 3.13/3.14 smoke runs on PR, Manual, and Schedule, remains nonblocking, and attests neither the PR artifact nor formal capacity. | Human | 2026-08-17 | U3 CI |
 | 164 | ACA pipeline placement (supersedes prior placement) | Required E2E stage / optional ACA pipeline | Run predeployed ACA smoke in separate non-required **ACA Smoke Tests (Optional)**; use protected ACA-only `larohra-sandboxgroup-test`, no artifact attestation, and leave required E2E unchanged. | Human | 2026-08-17 | U3 CI |
+| 165 | PR ACA signal (supersedes #163/#164) | Predeployed app / separate pipeline / current-checkout smoke | Same-repo PRs run one nonblocking current-checkout ACA/model smoke with Azurite and `larohra-sandboxgroup-test`; protected-pipeline policy excludes forks and `System.PullRequest.IsFork != True` is defense in depth only. Normal E2E remains `saf-foundry`; no Function is deployed. | Human | 2026-08-17 | U3 CI amendment in review |
+| 166 | Post-main qualification deferral | Implement in PR #160 / defer to #166 | Keep official `pr: none`; move deploy, attestation, predeployed cold/lifecycle/loss, and N=5 qualification to issue #166. Retain deployed tests as manual/test assets for that follow-up. | Human | 2026-08-17 | U3 CI amendment in review |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -1591,3 +1593,128 @@ auth/ownership, authoring/configuration, timer behavior, or automatic
 sync-to-async conversion. Roll back by restoring the lease policy and live
 watchdog arithmetic as one change; retained operations remain safe because
 their stable labels and ETag fences are unchanged.
+
+---
+
+## 13. U3 CI deployment and qualification amendment — Finalized
+
+**Status: Finalized.** The human approved the current-checkout PR smoke and
+deferred post-main deployment/attestation to issue #166. Independent
+architecture review approved the trust, composition, packaging, identity,
+cleanup, and scope boundaries below before implementation. This amendment
+supersedes Decisions 163–164 for CI placement and changes no public product
+contract or schema.
+
+### PR #160: one current-checkout ACA/model smoke
+
+The existing internal E2E pipeline/template gains one parallel, nonblocking
+ACA smoke job. There is **no YAML-only pre-authorization fork guard**: static
+service-connection resolution can occur before a job condition is evaluated.
+The internal E2E pipeline/policy must therefore be configured not to queue fork
+PRs or fork builds, with fork builds disabled. The protected ACA service
+connection is restricted to that internal pipeline and same-repository trusted
+authors. `System.PullRequest.IsFork != True` remains defense in depth only; it
+must not be represented as running before static service-connection resolution.
+The job uses `continueOnError: true`, `always()` cleanup, bounded tests, and a
+30-minute cap.
+
+The E2E root receives an ACA connection parameter whose default is
+`larohra-sandboxgroup-test`, solely for this new job. The normal Foundry E2E
+job and template remain unchanged and explicitly use `saf-foundry-connection`;
+the ACA job must never inherit that connection. The smoke makes one real
+ACA/model turn from the current checkout; it neither deploys a Function nor
+uses a predeployed runtime.
+
+### Production composition and test boundary
+
+Add a production-owned internal composition factory and result, with no Azure
+Functions registration side effects. Both `app.py` registration and the live
+smoke use that factory/result. It resolves and returns or contains the
+`AgentBinding`, catalog, resolved profile and package inputs,
+`SessionRuntimeBinding`, and `AcaSandboxExecutionBackend`. Discovery remains
+Azure-unaware; only the later registration stage is Functions-aware and
+performs Azure Functions registration.
+
+The smoke wrapper is not a second composer. It supplies only the app
+root/config, FunctionApp identity metadata, Azurite connection, immutable
+BuildId labels, and cleanup boundary, then consumes the production composition
+result. The real turn exercises only the backend's four-method
+`start_run`/`read_events`/`get_run`/`cancel_run` path. Direct adapter and
+`SandboxRunControl` access remains limited to low-level tests and the cleanup
+observer.
+
+Retain `tests/live/test_aca_harness_entrypoint_smoke.py` and
+`tests/live/test_aca_run_journal_acceptance.py` for low-level entrypoint and
+journal assertions. Refactor `tests/live/test_aca_real_agent_turn.py` into the
+wrapper-backed assertion of an accepted journal, ordered events, terminal
+success, and a nonempty real-model response. Add a structural guard that
+forbids direct adapter or run-control use in that real-model assertion only;
+low-level tests retain their direct access.
+
+### One delivered Linux package
+
+The job materializes exactly one Linux Python 3.13 Function-app root for the
+current checkout. That root includes fixture source and
+`.python_packages/lib/site-packages` built from the exact checkout plus locked
+dependencies. Production package capture archives this same root; there is no
+test-specific dependency ZIP or upload. Build it once (or restore it from a
+job cache) and reuse it across the entrypoint, journal, and model tests.
+An editable host install may provide test tooling, but it is not the source of
+the delivered package content. This is the sole Linux Python 3.13 smoke.
+
+### Identity evidence and preflight
+
+Infrastructure/preflight verifies exactly one attached guest UAMI, with no
+system-assigned identity or competing model identity. That guest has only the
+model role, no state-store or Sandbox data-plane roles, and model-host-only
+egress. The distinct controller connection owns create, list, delete, and
+snapshot-cleanup operations.
+
+The preflight is feasible without guest credentials: a least-privilege
+audit/deployment identity checks ARM/group identity metadata and role
+assignments. The runtime request asserts that `AZURE_CLIENT_ID` is absent, then
+makes the real model turn through normal `ClientManager` and bare
+`DefaultAzureCredential`; it injects no fallback identity. Model success plus
+the preflight together prove the intended identity configuration. A failed or
+ambiguous default selection fails the job.
+
+### Leak-proof cleanup
+
+Every run uses immutable BuildId labels and records every sandbox ID created by
+that current run, including IDs exposed during partial create or timeout.
+`always()` cleanup lists and deletes every snapshot whose `sandbox_id` is in
+that recorded set before and after sandbox deletion. A final relist fails for
+either a current-run sandbox leak or a current-run snapshot leak. Cleanup
+failure itself fails the smoke after best-effort completion. There is
+deliberately no cross-pipeline environment lock: unique labels isolate runs,
+while mandatory bounded cleanup and leak proof cover normal, partial-create,
+timeout, and cleanup-failure paths.
+
+### PR #160 pipeline scope and removals
+
+Restore `eng/ci/official-build.yml` to `pr: none`. PR #160 contains no
+post-main deploy, attestation, predeployed cold-start, lifecycle/loss, or N=5
+work. Remove the optional ACA pipeline
+`eng/ci/aca-smoke-tests.yml`, its optional job template
+`eng/templates/official/jobs/aca-smoke-tests.yml`, and
+`eng/ci/variables/aca-deployed-runtime-targets.yml`. Remove their predeployed
+pipeline wiring and static/public target-URL documentation. Keep deployed
+tests and supporting assets as manual/test assets, rather than deleting them.
+
+### Deferred follow-up: issue #166
+
+Issue #166, in a separate session, owns the official post-main deployment and
+qualification design and implementation. It may reuse the retained deployed
+test assets. This deferral avoids coupling PR #160 to the in-flight
+ACA-runtime history/LRO-session work, whose lifecycle and loss behavior needs
+separate settled evidence before post-main qualification is designed.
+
+### Implementation evidence
+
+The PR E2E template contains one nonblocking, 30-minute Linux Python 3.13
+current-checkout ACA smoke alongside the normal matrix. It uses a dedicated ACA
+connection, an ARM/RBAC fail-closed preflight, one materialized Function-app
+root with production package capture, and always-on sandbox/snapshot cleanup.
+The optional predeployed pipeline, target variables, and public target
+metadata were removed; retained deployed suites are manual assets for the
+deferred work.

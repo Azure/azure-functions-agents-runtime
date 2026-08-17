@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import zipfile
+from types import SimpleNamespace
 
 import pytest
 from azure.core.exceptions import HttpResponseError
@@ -25,6 +26,12 @@ class _EmptySandboxAdapter:
         self.label_queries.append(labels)
         return ()
 
+    async def list_snapshots(self) -> tuple[object, ...]:
+        return ()
+
+    async def delete_snapshot(self, _: str) -> None:
+        return None
+
     async def close(self) -> None:
         self.closed = True
 
@@ -40,6 +47,38 @@ class _ForbiddenSandboxAdapter:
         raise error
 
 
+class _FamilySandboxAdapter:
+    def __init__(
+        self,
+        *,
+        sandbox_lists: list[tuple[SimpleNamespace, ...]],
+        snapshot_lists: list[tuple[SimpleNamespace, ...]],
+        snapshot_failures: set[str] = frozenset(),
+    ) -> None:
+        self._sandbox_lists = sandbox_lists
+        self._snapshot_lists = snapshot_lists
+        self._snapshot_failures = snapshot_failures
+        self.deleted_snapshots: list[str] = []
+        self.sandbox_list_calls = 0
+        self.snapshot_list_calls = 0
+
+    async def list_sandboxes(
+        self, *, labels: dict[str, str]
+    ) -> tuple[SimpleNamespace, ...]:
+        del labels
+        self.sandbox_list_calls += 1
+        return self._sandbox_lists.pop(0)
+
+    async def list_snapshots(self) -> tuple[SimpleNamespace, ...]:
+        self.snapshot_list_calls += 1
+        return self._snapshot_lists.pop(0)
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        self.deleted_snapshots.append(snapshot_id)
+        if snapshot_id in self._snapshot_failures:
+            raise RuntimeError(f"provider body snapshot={snapshot_id}; token=do-not-disclose")
+
+
 def _set_model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER", "azure_openai")
     monkeypatch.setenv(
@@ -49,10 +88,6 @@ def _set_model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT",
         "u3-gpt-5-6-luna-20260709",
-    )
-    monkeypatch.setenv(
-        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_UAMI_CLIENT_ID",
-        "11111111-2222-3333-4444-555555555555",
     )
 
 
@@ -125,9 +160,9 @@ def test_model_config_forwards_only_guest_safe_model_inputs(
         "AZURE_FUNCTIONS_AGENTS_PROVIDER": "azure_openai",
         "AZURE_OPENAI_ENDPOINT": "https://smoke-model.openai.azure.com",
         "AZURE_OPENAI_DEPLOYMENT": "u3-gpt-5-6-luna-20260709",
-        "AZURE_CLIENT_ID": "11111111-2222-3333-4444-555555555555",
         "AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT": "medium",
     }
+    assert "AZURE_CLIENT_ID" not in config.sandbox_environment()
 
     policy = config.sandbox_egress_policy()
     assert policy.default_action == "Deny"
@@ -151,11 +186,6 @@ def test_model_config_forwards_only_guest_safe_model_inputs(
             "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
             "http://smoke-model.openai.azure.com",
             "must be an HTTPS endpoint",
-        ),
-        (
-            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_UAMI_CLIENT_ID",
-            "not-a-client-id",
-            "must be a managed identity client ID",
         ),
         (
             "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REASONING_EFFORT",
@@ -238,7 +268,7 @@ async def test_cleanup_requires_confirmation_when_a_create_may_have_started(
         )
 
     assert adapter.closed is True
-    assert len(adapter.label_queries) == 3
+    assert len(adapter.label_queries) == 4
 
 
 @pytest.mark.asyncio
@@ -290,6 +320,131 @@ async def test_label_cleanup_aborts_immediately_on_authorization_failure(
         )
 
     assert adapter.calls == 1
+
+
+@pytest.mark.asyncio
+async def test_reaper_deletes_every_snapshot_and_sandbox_after_a_snapshot_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_sandbox = SimpleNamespace(sandbox_id="sandbox-first", labels={"run": "current"})
+    second_sandbox = SimpleNamespace(sandbox_id="sandbox-second", labels={"run": "current"})
+    first_snapshot = SimpleNamespace(
+        snapshot_id="snapshot-first", sandbox_id="sandbox-first"
+    )
+    second_snapshot = SimpleNamespace(
+        snapshot_id="snapshot-second", sandbox_id="sandbox-second"
+    )
+    adapter = _FamilySandboxAdapter(
+        sandbox_lists=[(first_sandbox, second_sandbox), ()],
+        snapshot_lists=[(first_snapshot, second_snapshot), (), ()],
+        snapshot_failures={"snapshot-first"},
+    )
+    deleted_sandboxes: list[str] = []
+
+    async def force_delete(_adapter: object, sandbox_id: str) -> None:
+        deleted_sandboxes.append(sandbox_id)
+
+    monkeypatch.setattr(aca_smoke_support, "_force_delete_by_id", force_delete)
+
+    with pytest.raises(aca_smoke_support.AcaSmokeEnvironmentError):
+        await aca_smoke_support.reap_labelled_sandbox_family(adapter, {"run": "current"})  # type: ignore[arg-type]
+
+    assert adapter.deleted_snapshots[:2] == ["snapshot-first", "snapshot-second"]
+    assert deleted_sandboxes == ["sandbox-first", "sandbox-second"]
+    assert adapter.sandbox_list_calls == 2
+    assert adapter.snapshot_list_calls == 3
+
+
+@pytest.mark.asyncio
+async def test_reaper_continues_after_sandbox_failure_and_relists(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_sandbox = SimpleNamespace(sandbox_id="sandbox-first", labels={"run": "current"})
+    second_sandbox = SimpleNamespace(sandbox_id="sandbox-second", labels={"run": "current"})
+    adapter = _FamilySandboxAdapter(
+        sandbox_lists=[(first_sandbox, second_sandbox), ()],
+        snapshot_lists=[(), (), ()],
+    )
+    deleted_sandboxes: list[str] = []
+
+    async def force_delete(_adapter: object, sandbox_id: str) -> None:
+        deleted_sandboxes.append(sandbox_id)
+        if sandbox_id == "sandbox-first":
+            raise RuntimeError("provider body sandbox=sandbox-first; token=do-not-disclose")
+
+    monkeypatch.setattr(aca_smoke_support, "_force_delete_by_id", force_delete)
+
+    with pytest.raises(aca_smoke_support.AcaSmokeEnvironmentError) as error:
+        await aca_smoke_support.reap_labelled_sandbox_family(adapter, {"run": "current"})  # type: ignore[arg-type]
+
+    assert deleted_sandboxes == ["sandbox-first", "sandbox-second"]
+    assert adapter.sandbox_list_calls == 2
+    assert adapter.snapshot_list_calls == 3
+    assert "sandbox-delete:unexpected:RuntimeError" in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_reaper_aggregate_error_redacts_provider_data_and_reports_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sandbox = SimpleNamespace(sandbox_id="sandbox-resource-id", labels={"run": "current"})
+    snapshot = SimpleNamespace(
+        snapshot_id="snapshot-resource-id", sandbox_id="sandbox-resource-id"
+    )
+    adapter = _FamilySandboxAdapter(
+        sandbox_lists=[(sandbox,), (sandbox,)],
+        snapshot_lists=[(snapshot,), (), (snapshot,)],
+        snapshot_failures={"snapshot-resource-id"},
+    )
+
+    async def force_delete(_adapter: object, _sandbox_id: str) -> None:
+        return None
+
+    monkeypatch.setattr(aca_smoke_support, "_force_delete_by_id", force_delete)
+
+    with pytest.raises(aca_smoke_support.AcaSmokeEnvironmentError) as error:
+        await aca_smoke_support.reap_labelled_sandbox_family(adapter, {"run": "current"})  # type: ignore[arg-type]
+
+    message = str(error.value)
+    assert "snapshot-delete:unexpected:RuntimeError" in message
+    assert "leaked-sandboxes=1" in message
+    assert "leaked-snapshots=1" in message
+    assert "sandbox-resource-id" not in message
+    assert "snapshot-resource-id" not in message
+    assert "provider body" not in message
+    assert "do-not-disclose" not in message
+
+
+@pytest.mark.asyncio
+async def test_reaper_returns_selected_count_after_successful_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_sandbox = SimpleNamespace(sandbox_id="sandbox-first", labels={"run": "current"})
+    second_sandbox = SimpleNamespace(sandbox_id="sandbox-second", labels={"run": "current"})
+    first_snapshot = SimpleNamespace(
+        snapshot_id="snapshot-first", sandbox_id="sandbox-first"
+    )
+    second_snapshot = SimpleNamespace(
+        snapshot_id="snapshot-second", sandbox_id="sandbox-second"
+    )
+    adapter = _FamilySandboxAdapter(
+        sandbox_lists=[(first_sandbox, second_sandbox), ()],
+        snapshot_lists=[(first_snapshot, second_snapshot), (), ()],
+    )
+    deleted_sandboxes: list[str] = []
+
+    async def force_delete(_adapter: object, sandbox_id: str) -> None:
+        deleted_sandboxes.append(sandbox_id)
+
+    monkeypatch.setattr(aca_smoke_support, "_force_delete_by_id", force_delete)
+
+    reaped = await aca_smoke_support.reap_labelled_sandbox_family(adapter, {"run": "current"})  # type: ignore[arg-type]
+
+    assert reaped == 2
+    assert adapter.deleted_snapshots == ["snapshot-first", "snapshot-second"]
+    assert deleted_sandboxes == ["sandbox-first", "sandbox-second"]
+    assert adapter.sandbox_list_calls == 2
+    assert adapter.snapshot_list_calls == 3
 
 
 def test_setup_error_renders_empty_cause_as_type_name() -> None:

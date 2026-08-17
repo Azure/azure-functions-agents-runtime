@@ -19,16 +19,8 @@ from ._logger import logger
 from ._observability import configure_observability, emit_runtime_event
 from ._source_marker import source_marker
 from .config.http_auth import resolve_aca_submission_auth
-from .config.loader import load_agent_specs, load_global_config
-from .config.merge import compose
 from .config.paths import get_app_root, set_app_root
 from .config.schema import GlobalConfig, ResolvedAgent, WorkflowConfig
-from .config.validation import (
-    validate_resolved_agent,
-    validate_session_runtime,
-    validate_subagent_references,
-    validate_workflow_subagent_references,
-)
 from .controller.package import build_expected_manifest_binding
 from .controller.readiness import (
     DEFAULT_AUTO_SUSPEND_SECONDS,
@@ -46,24 +38,19 @@ from .controller.reconciler import (
     resolve_reconciler_cadence,
 )
 from .controller.sandbox_config import SandboxCreateProfile, build_sandbox_create_profile
-from .discovery.mcp import discover_mcp_servers
-from .discovery.skills import discover_skills
-from .discovery.tools import discover_project_tools
 from .egress import build_header_transform_rule, compile_mcp_headers
+from .execution.aca_composition import compose_aca_application
 from .execution.backend import RunContext, RunStatus
 from .execution.binding import AgentBinding
 from .execution.run_control import RunControlError, SandboxRunControl
-from .harness.delegation import validate_delegation_graph
 from .journal_paths import heartbeat_path
-from .registration._handlers import build_output_validator
-from .registration.capabilities import build_capabilities, validate_subagent_tool_names
-from .registration.catalog import AgentCatalog, CatalogEntry, build_catalog
 from .registration.endpoints import (
     register_builtin_endpoints,
     register_sandbox_management_endpoints,
 )
 from .registration.triggers import register_agent
 from .session_state import (
+    AppIdentity,
     DurableRunRecord,
     DurableSessionRecord,
     OwnerPartition,
@@ -405,6 +392,8 @@ def _build_session_runtime_binding(
     *,
     terminal_bindings: Mapping[str, AgentBinding] | None = None,
     create_profile: SandboxCreateProfile | None = None,
+    app_identity: AppIdentity | None = None,
+    provider_factory: Callable[[], Awaitable[SandboxSessionProvider]] | None = None,
 ) -> SessionRuntimeBinding | None:
     session_runtime = global_config.session_runtime
     if session_runtime is None or session_runtime.aca_sandbox is None:
@@ -422,7 +411,7 @@ def _build_session_runtime_binding(
 
     validate_aca_sandbox_dependency()
 
-    async def provider_factory() -> SandboxSessionProvider:
+    async def default_provider_factory() -> SandboxSessionProvider:
         from .transport.aca_sdk import AcaSandboxAdapter
 
         return await AcaSandboxAdapter.open(aca_sandbox.sandbox_group_resource_id)
@@ -468,10 +457,10 @@ def _build_session_runtime_binding(
         await reconciler.run_once()
 
     runtime = SessionRuntimeBinding.create(
-        app_identity=resolve_function_app_identity(),
+        app_identity=app_identity or resolve_function_app_identity(),
         sandbox_group_resource_id=aca_sandbox.sandbox_group_resource_id,
         script_root=script_root,
-        provider_factory=provider_factory,
+        provider_factory=provider_factory or default_provider_factory,
         state_store_factory=state_store_factory,
         auto_suspend_seconds=auto_suspend_seconds,
         reclaim_idle_seconds=reclaim_idle_seconds,
@@ -606,19 +595,18 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         set_app_root(app_root)
     resolved_root = get_app_root()
 
-    global_config = load_global_config(resolved_root)
-
     # Bootstrap observability before anything runs so MAF gen_ai spans + runtime spans/metrics
     # flow to Application Insights with zero app code. No-op unless a telemetry provider is active.
     configure_observability()
 
-    agent_specs = load_agent_specs(resolved_root)
-    tool_result = discover_project_tools(resolved_root)
-    mcp_result = discover_mcp_servers(resolved_root)
-    skill_result = discover_skills(resolved_root)
+    aca_composition = compose_aca_application(resolved_root)
+    global_config = aca_composition.global_config
+    agent_specs = aca_composition.agent_specs
+    tool_result = aca_composition.tool_result
+    mcp_result = aca_composition.mcp_result
+    skill_result = aca_composition.skill_result
 
     user_tools = tool_result.user_tools
-    workflow_tools = tool_result.workflow_tools
     mcp_tools = mcp_result.servers
     skills = skill_result.skills
     skill_names = list(skills)
@@ -633,40 +621,7 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
         discovered_user_tool_names,
     )
 
-    resolved_agents = [
-        compose(
-            spec,
-            global_config,
-            discovered_mcp_names=mcp_names,
-            discovered_skill_names=skill_names,
-        )
-        for spec in agent_specs
-    ]
-
-    # FRD 0008: enforce the `session_runtime` startup validation matrix before
-    # any other cross-agent validation/registration runs. A no-op (returns
-    # immediately) unless `session_runtime` is configured at all; configuring
-    # `aca_sandbox` always fails here (capability gate), never at request time.
-    validate_session_runtime(global_config, resolved_agents)
-
-    # --- Two-pass composition, pass 1a: app-wide identity index (FRD 0007 §4.2). ---
-    # Must run before any other cross-agent validation: `validate_subagent_references`
-    # needs a collision-free slug set, and nothing below may assume slugs are unique
-    # until this has actually verified it.
-    known_slugs = _fail_on_duplicate_slugs(resolved_agents)
-
-    referenced_slugs: set[str] = set()
-    for resolved in resolved_agents:
-        validate_subagent_references(resolved, known_slugs=known_slugs)
-        validate_workflow_subagent_references(resolved, known_slugs=known_slugs)
-        referenced_slugs.update(ref.agent for ref in resolved.subagents)
-        if resolved.workflows is not None:
-            referenced_slugs.update(ref.agent for ref in resolved.workflows.subagents)
-    if (
-        global_config.session_runtime is not None
-        and global_config.session_runtime.aca_sandbox is not None
-    ):
-        validate_delegation_graph(resolved_agents)
+    resolved_agents = aca_composition.resolved_agents
 
     workflows_requested = any(
         resolved.is_main and _workflows_requested(resolved.workflows)
@@ -691,50 +646,9 @@ def create_function_app(app_root: Path | None = None) -> func.FunctionApp:
     if not (global_config.system_tools and global_config.system_tools.web_request is False):
         system_tools_used.add("web_request")
 
-    # --- Two-pass composition, pass 1b (FRD 0007 §4.2): validate + build capabilities ---
-    # for every agent and freeze the result into a read-only AgentCatalog. Nothing here
-    # touches `app` — a coordinator's `delegate_<slug>` tools must be able to resolve
-    # *any* specialist by slug at request time, including ones registered later in
-    # `resolved_agents` than the coordinator itself, so the full catalog has to exist
-    # before pass 2 (FunctionApp registration) begins.
-    catalog_entries: dict[str, CatalogEntry] = {}
-    for resolved in resolved_agents:
-        # Validation is owned by the app factory; compose() stays a pure translation step.
-        validate_resolved_agent(
-            resolved,
-            discovered_mcp_names=mcp_names,
-            discovered_skills=skill_names,
-            is_referenced_as_subagent=resolved.slug in referenced_slugs,
-        )
-        capabilities = build_capabilities(
-            resolved,
-            discovered_user_tools=user_tools,
-            discovered_workflow_tools=workflow_tools,
-            discovered_mcp_tools=mcp_tools,
-            discovered_skills=skills,
-        )
-        validate_subagent_tool_names(resolved, capabilities)
-        catalog_entries[resolved.slug] = CatalogEntry(resolved, capabilities)
-
-    catalog: AgentCatalog = build_catalog(catalog_entries)
-    terminal_bindings = {
-        resolved.slug: AgentBinding(
-            agent_name=resolved.slug,
-            output_validator=build_output_validator(resolved),
-        )
-        for resolved in resolved_agents
-    }
-    create_profile = _build_sandbox_create_profile(
-        global_config,
-        resolved_agents,
-        mcp_result,
-    )
-    session_runtime = _build_session_runtime_binding(
-        global_config,
-        resolved_root,
-        terminal_bindings=terminal_bindings,
-        create_profile=create_profile,
-    )
+    catalog = aca_composition.catalog
+    terminal_bindings = aca_composition.bindings
+    session_runtime = aca_composition.session_runtime
 
     # --- Two-pass composition, pass 2 (FRD 0007 §4.2): mutate `app` --------------------
     for resolved in resolved_agents:

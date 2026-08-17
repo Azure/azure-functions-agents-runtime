@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import AsyncIterator
+from pathlib import Path
 
 import pytest
 import pytest_asyncio
@@ -31,10 +32,12 @@ def aca_smoke_config() -> AcaSmokeConfig:
 @pytest_asyncio.fixture
 async def aca_harness_smoke_handle(
     aca_smoke_config: AcaSmokeConfig,
+    aca_materialized_app_root: Path,
 ) -> AsyncIterator[SandboxSessionHandle]:
     async with provision_aca_smoke_sandbox(
         aca_smoke_config,
         session_prefix="aca-harness-smoke",
+        materialized_app_root=aca_materialized_app_root,
     ) as handle:
         yield handle
 
