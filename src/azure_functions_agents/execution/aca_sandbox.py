@@ -460,6 +460,8 @@ class AcaSandboxExecutionBackend:
                 ),
             )
         except SessionActivationAuthorizationError:
+            # Deterministic RBAC failure must reach the management 503 instead of
+            # the durable-state fallback used for other activation failures.
             raise
         except SessionActivationError:
             await self._runtime.reconcile_session(partition, context.session_id)
@@ -517,6 +519,8 @@ class AcaSandboxExecutionBackend:
                     allow_create=False,
                 )
             except SessionActivationAuthorizationError:
+                # Let event preflight surface the same management 503 rather than
+                # silently ending the stream through the broad fallback below.
                 raise
             except SessionActivationError:
                 return

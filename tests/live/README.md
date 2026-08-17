@@ -171,9 +171,10 @@ python -m pytest -m live_aca tests/live/test_aca_deployed_agent_turn.py -v
 
 The test acquires its token only through
 `azure.identity.aio.DefaultAzureCredential`; it rejects a bearer-token
-environment variable. The shared `saf-foundry-connection` remains the pipeline
-default. A dedicated ACA service connection is supplied explicitly for the
-Manual/Scheduled configuration that needs it; it must hold **U3.TestInvoker**.
+environment variable. The optional ACA pipeline defaults to the dedicated
+`larohra-sandboxgroup-test` service connection; the required Foundry E2E
+pipeline remains on `saf-foundry-connection`. The ACA connection must hold
+**U3.TestInvoker**.
 Any service connection enabled for pull requests must be protected with Azure
 Pipelines permissions and checks. The predeployed-environment smoke runs on
 pull requests, manually queued builds, and scheduled builds, and remains
@@ -366,8 +367,8 @@ az pipelines run --id 1777 --branch larohra-u3-ga-gate \
   --parameters acaRuntimeTarget=python313 acaLoadConcurrency=100 acaProvisionConcurrency=4
 ```
 
-The `ACADeployedAgentTurn` ADO job runs on PR, Manual, and Schedule with
-`continueOnError`. The `acaLoadConcurrency` queue-time **number** parameter
+The optional ACA pipeline's `ACADeployedAgentTurn` job runs on PR, Manual, and
+Schedule with `continueOnError`. The `acaLoadConcurrency` queue-time **number** parameter
 defaults to `5` and accepts integer values from `1` through `100`; that range
 does not authorize an automated N=100 run. An existing
 `ACA_DEPLOYED_LOAD_CONCURRENCY` pipeline variable does not control this job.
@@ -391,7 +392,7 @@ Do not add individual client or stream timeouts to that bound: the batch
 deadline is outermost. Phase B setup is concurrent before its 300-second formal hold and event
 bound. The load-only agent has a
 900-second authored timeout; plan for batch provisioning plus the hold, and use
-a CI-dedicated Sandbox Group. The Manual/Scheduled ADO job has a 360-minute safety cap;
+a CI-dedicated Sandbox Group. The optional ACA ADO job has a 360-minute safety cap;
 the remaining 85m cover Phase B, the other deployed qualifications,
 bounded 900-second failure settlement, controller cleanup, and job overhead.
 Do not run N=100 from PR, default, or scheduled jobs. `N=100` refers only to the
@@ -420,8 +421,8 @@ for **PullRequest**, **Manual**, and **Schedule** reasons and stay nonblocking
 with `continueOnError`. They are protected predeployed-environment smoke, not
 deployment, digest, PR-artifact, or remote-Python attestation.
 
-The checked-in non-secret target variables are available to both scheduled
-pipelines through `eng/ci/variables/aca-deployed-runtime-targets.yml`:
+The checked-in non-secret target variables are available only to the optional
+ACA pipeline through `eng/ci/variables/aca-deployed-runtime-targets.yml`:
 
 | Runtime target | Function URL input | Site-name input |
 | --- | --- | --- |
@@ -535,13 +536,16 @@ shells out to `pip`, so run `python -m ensurepip` once in such an environment;
 the failure surfaces pip's own message, so this is self-explanatory the first
 time it happens.
 
-## Enable the scheduled CI job
+## Register the optional ACA smoke pipeline
 
-The job already exists — it is `ACAHarnessEntrypointSmoke` in
-`eng/templates/official/jobs/e2e-tests.yml`, which the existing
-`eng/ci/e2e-tests.yml` pipeline expands. **No new pipeline needs to be
-created or registered.** It runs only on `Schedule` or `Manual` builds, never on
-pull requests, and carries `continueOnError: true`.
+`eng/ci/aca-smoke-tests.yml` is a separate optional pipeline named
+**ACA Smoke Tests (Optional)**. YAML alone does not create an Azure Pipeline
+definition or a branch policy. Register it, authorize its protected ACA service
+connection, and leave it out of required build validation and required status
+checks. The pipeline runs its deployed cold-start and agent-turn jobs on pull
+requests, manual runs, and schedules; all ACA jobs use `continueOnError: true`.
+`ACAHarnessEntrypointSmoke` remains Manual/Schedule-only to retain its
+lower-level quota policy.
 
 Azure sign-in is handled by the `AzureCLI@2` task, exactly as the Foundry E2E
 job does: the task performs `az login` as the service connection's identity, and
@@ -629,16 +633,16 @@ must never be reused for non-CI sandboxes.
 
 ## CI prerequisites
 
-The ACA smoke job is in `eng/templates/official/jobs/e2e-tests.yml`. It runs
-only for scheduled and manually started builds and is currently
-`continueOnError`, avoiding a permanently red pull-request check while the
-entrypoint change lands.
+The ACA smoke jobs are in
+`eng/templates/official/jobs/aca-smoke-tests.yml`, expanded only by
+`eng/ci/aca-smoke-tests.yml`. They are not part of either required E2E
+pipeline and do not delay or change required E2E outcomes.
 
 Ops must provide:
 
 1. A CI-dedicated ACA Sandbox Group in the intended region.
-2. A federated Azure service connection, selected at queue time through the
-   `acaServiceConnection` runtime parameter.
+2. The protected, federated `larohra-sandboxgroup-test` service connection
+   (or an explicitly selected authorized ACA connection).
 3. `Container Apps SandboxGroup Data Owner` (role id
    `c24cf47c-5077-412d-a19c-45202126392c`) for that identity, scoped to the CI
    Sandbox Group.

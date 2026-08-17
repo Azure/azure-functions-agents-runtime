@@ -404,6 +404,7 @@ controlling amendments.
 | 161 | U3 setup deadline | 30s/60s / 90s/120s | Use a 90s setup budget, one renewable 120s lease for every durable operation, and 120s retry; retain the 180s sync cap. Supersedes timing in #79/#100. | Human | 2026-08-13 | U3 |
 | 162 | Runtime recovery correctness | Terminalize ambiguity / reconcile and retain / stale fallback | After create or journal invocation, preserve durable retryability on timeout/cancellation; map targeted provider authorization to redacted 503; retain authorization deletion rationale so cleanup is not idle reclaim. | Human-approved scope + Agent | 2026-08-17 | U3 corrective |
 | 163 | Predeployed PR smoke eligibility | Manual/Schedule only / PR nonblocking / PR attestation | Supersede #156/#157 only for eligibility: protected predeployed Python 3.13/3.14 smoke runs on PR, Manual, and Schedule, remains nonblocking, and attests neither the PR artifact nor formal capacity. | Human | 2026-08-17 | U3 CI |
+| 164 | ACA pipeline placement (supersedes prior placement) | Required E2E stage / optional ACA pipeline | Run predeployed ACA smoke in separate non-required **ACA Smoke Tests (Optional)**; use protected ACA-only `larohra-sandboxgroup-test`, no artifact attestation, and leave required E2E unchanged. | Human | 2026-08-17 | U3 CI |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -1516,7 +1517,7 @@ live-helper contract tests in `test_aca_deployed_agent_turn.py`,
 `aca_deployed_cold_start_support.py`, `test_aca_deployed_cold_start.py`,
 `test_aca_deployed_load.py`, `test_aca_deployed_loss.py`, and
 `test_aca_deployed_lifecycle.py`; update
-`eng/templates/official/jobs/e2e-tests.yml`. Enforce a dedicated 105-second
+`eng/templates/official/jobs/aca-smoke-tests.yml`. Enforce a dedicated 105-second
 per-request **admission watchdog** (90 setup + 15 network allowance) in the
 helper, its unit contract, and CI. It starts at admission and expires
 independently of any longer SSE stream or terminal-result window; neither

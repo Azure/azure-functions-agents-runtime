@@ -1,29 +1,3 @@
-parameters:
-  - name: acaServiceConnection
-    displayName: 'ACA smoke: Azure service connection'
-    type: string
-    default: 'saf-foundry-connection'
-  - name: acaRuntimeTarget
-    displayName: 'Deployed ACA runtime target'
-    type: string
-    default: both
-    values:
-      - both
-      - python313
-      - python314
-  - name: acaLoadConcurrency
-    displayName: 'Deployed ACA load concurrency'
-    type: number
-    default: 5
-  - name: acaProvisionConcurrency
-    displayName: 'Deployed ACA provisioning concurrency'
-    type: string
-    default: '1'
-    values:
-      - '1'
-      - '2'
-      - '4'
-
 trigger:
   batch: true
   branches:
@@ -56,7 +30,6 @@ resources:
       ref: refs/tags/release
 
 variables:
-  - template: variables/aca-deployed-runtime-targets.yml
   - template: ci/variables/build.yml@eng
   - template: ci/variables/cfs.yml@eng
 
@@ -80,7 +53,3 @@ extends:
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
-              acaServiceConnection: ${{ parameters.acaServiceConnection }}
-              acaRuntimeTarget: ${{ parameters.acaRuntimeTarget }}
-              acaLoadConcurrency: ${{ parameters.acaLoadConcurrency }}
-              acaProvisionConcurrency: ${{ parameters.acaProvisionConcurrency }}

@@ -76,7 +76,7 @@ def test_provision_concurrency_rejects_unsafe_values(value: str) -> None:
 def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only() -> None:
     root = Path(__file__).parent.parent
     runbook = (root / "tests" / "live" / "README.md").read_text()
-    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
 
     assert "`N=5` is the sole agent/CI diagnostic validation size." in runbook
     assert "`N=100` is formal Decision #29 acceptance and is **human-only**" in runbook
@@ -1686,7 +1686,7 @@ def test_hold_constant_and_sse_continuation_guard(load_module: object) -> None:
 
 def test_deployed_job_uses_queue_parameters_for_n5_n100_and_provisioning() -> None:
     pipeline = (
-        Path(__file__).parents[1] / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml"
+        Path(__file__).parents[1] / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml"
     ).read_text()
     source = (
         Path(__file__).parents[1] / "eng" / "scripts" / "aca_deployed_qualification.py"
@@ -1707,7 +1707,7 @@ def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
     root = Path(__file__).parents[1]
     load_source = (root / "tests" / "live" / "test_aca_deployed_load.py").read_text()
     loss_source = (root / "tests" / "live" / "test_aca_deployed_loss.py").read_text()
-    job = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    job = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
     runbook = (root / "tests" / "live" / "README.md").read_text()
 
     assert "_SETUP_HTTP_ATTEMPT_TIMEOUT_SECONDS = 105.0" in load_source
@@ -1721,4 +1721,4 @@ def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:
     assert "two 105-second attempts plus one 120-second retry wait" in runbook
     assert "1,710 seconds" in runbook
     assert "8,310 seconds" in runbook
-    assert "360-minute safety cap" in runbook
+    assert "optional ACA ADO job has a 360-minute safety cap" in runbook

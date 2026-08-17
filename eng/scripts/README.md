@@ -50,11 +50,14 @@ The Sandbox Group is read from the
 - As an `always()` cleanup step after the ACA smoke job
 
 **Integration:**
-- **CI pipeline:** Runs in `eng/templates/official/jobs/e2e-tests.yml`
+- **Optional ACA pipeline:** Runs in
+  `eng/templates/official/jobs/aca-smoke-tests.yml`, expanded by
+  `eng/ci/aca-smoke-tests.yml`.
 
 ### `aca_deployed_qualification.py`
 
-Runs the protected predeployed ACA smoke commands used by the official pipeline.
+Runs the protected predeployed ACA smoke commands used by the optional ACA
+pipeline.
 It validates required environment variables, unresolved `$(VAR)` placeholders,
 numeric ranges, shared-Sandbox-Group limits, and the cold-start sample cap
 before invoking a live suite. It acquires an Easy Auth token through the Azure

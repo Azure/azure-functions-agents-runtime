@@ -418,7 +418,7 @@ async def test_later_sample_failure_preserves_partial_metrics_and_retries(
 
 def test_timeout_budget_and_manual_job_cap_are_aligned() -> None:
     root = Path(__file__).parent.parent
-    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
     runbook = (root / "tests" / "live" / "README.md").read_text()
 
     assert support.ADMISSION_WINDOW_SECONDS == 2 * 105 + 120
@@ -438,7 +438,8 @@ def test_timeout_budget_and_manual_job_cap_are_aligned() -> None:
 def test_cold_start_runtime_matrix_and_boundaries_are_explicit() -> None:
     root = Path(__file__).parent.parent
     source = (root / "tests" / "live" / "test_aca_deployed_cold_start.py").read_text()
-    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
+    pipeline_entrypoint = (root / "eng" / "ci" / "aca-smoke-tests.yml").read_text()
     qualification = (root / "eng" / "scripts" / "aca_deployed_qualification.py").read_text()
 
     assert '_COLD_START_AGENT_SLUG = "deployed_turn"' in source
@@ -456,9 +457,9 @@ def test_cold_start_runtime_matrix_and_boundaries_are_explicit() -> None:
     assert "tests/live/test_aca_deployed_cold_start.py" not in load_job
     assert "command: deployed-suite" in load_job
     assert "timeoutInMinutes: 60" in cold_job
-    assert "PullRequest" in cold_job
-    assert "Manual" in cold_job
-    assert "Schedule" in cold_job
+    assert "Build.Reason" not in cold_job
+    assert "pr:" in pipeline_entrypoint
+    assert "- feature/*" in pipeline_entrypoint
     assert "maxParallel: 2" in cold_job
     assert "Python313:" in cold_job
     assert "Python314:" in cold_job

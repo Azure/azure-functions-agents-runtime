@@ -195,7 +195,7 @@ def test_all_ci_yaml_is_parseable_and_deployed_jobs_use_the_shared_steps_templat
     for path in root.glob("**/*.y*ml"):
         yaml.safe_load(path.read_text())
 
-    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "aca-smoke-tests.yml").read_text()
     steps_template = (
         root / "eng" / "templates" / "official" / "steps" / "aca-deployed-qualification.yml"
     ).read_text()
