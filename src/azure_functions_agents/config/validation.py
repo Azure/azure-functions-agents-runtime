@@ -91,7 +91,6 @@ def validate_resolved_agent(
                     "#trigger",
                 )
             )
-
     known_mcp = set(discovered_mcp_names)
     for name in resolved.mcp_exclude_names:
         if name not in known_mcp:
@@ -149,7 +148,7 @@ def validate_workflow_subagent_references(
     *,
     known_slugs: set[str],
 ) -> None:
-    """Reject invalid owner-specific ``workflows.subagents`` grants."""
+    """Reject invalid agent-specific ``workflows.subagents`` grants."""
     refs = resolved.workflows.subagents if resolved.workflows is not None else ()
     _validate_references(
         resolved,

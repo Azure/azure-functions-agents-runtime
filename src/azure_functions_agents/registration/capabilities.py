@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from .._function_tool import WorkflowTool
+from .._logger import logger
 from .._slug import delegate_tool_name
 from ..config import ResolvedAgent
 from ..discovery.mcp import MCPTool
@@ -79,6 +80,14 @@ def build_capabilities(
     workflow_tools = list(discovered_workflow_tools or [])
     if _workflows_enabled(resolved):
         workflow_exclude_names = _workflow_exclude_names(resolved)
+        known_workflow_names = {tool.name for tool in workflow_tools}
+        unknown_workflow_names = workflow_exclude_names - known_workflow_names
+        if unknown_workflow_names:
+            logger.warning(
+                "%s: workflows.exclude contains unknown workflow tool name(s): %s",
+                resolved.source_file or "<unknown>",
+                sorted(unknown_workflow_names),
+            )
         filtered_workflow_tools = [
             tool for tool in workflow_tools if tool.name not in workflow_exclude_names
         ]

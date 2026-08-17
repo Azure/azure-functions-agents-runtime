@@ -5,8 +5,8 @@ status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
 updated: 2026-08-14
-issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
-pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
+issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
+pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
 
 # FRD 0004 — Dynamic workflows
@@ -14,19 +14,30 @@ pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77,
 ## 1. Summary
 
 Add experimental Dynamic Workflows support to the markdown-first Azure Functions
-Agents Runtime. A workflow-enabled main agent can ask the runtime to launch a
+Agents Runtime. Any workflow-enabled agent can ask the runtime to launch a
 Durable Functions-backed DAG of tool and wait tasks, observe progress through
 built-in endpoints/UI, and receive final workflow notifications in the chat
 session. Workflow task tools are authored under the existing `tools/` directory
 but opt into Durable Activity execution explicitly with a new `@workflow_tool`
 decorator; normal plain-function tool discovery remains backward compatible.
-Workflow-enabled main agents can also start the same Durable workflows from any
+Workflow-enabled agents can also start the same Durable workflows from any
 supported Markdown-declared trigger; the trigger starts the workflow
 asynchronously and does not wait for it to finish.
 The next evolution adds deterministic, data-driven control flow: a task can be
 skipped by a constrained `when` predicate or expanded over a bounded JSON array
 with `for_each`, while preserving Durable replay safety, owner authorization,
 resource limits, deterministic fan-in, and observable node state.
+
+## Evolution
+
+This FRD evolves with the experimental Dynamic Workflows surface. The initial
+design assumed one workflow-enabled `main.agent.md` and session-only workflow
+identity. PR #112 added Markdown-declared trigger starters, PR #117 added
+Workflow Sub Agents, and PR #151 extends the same feature to every
+workflow-enabled agent with agent/session isolation. The
+[multi-agent addendum](#multi-agent-workflow-isolation-addendum-pr-151)
+records only that extension's behavioral and architectural delta instead of
+repeating the base workflow design.
 
 ## 2. Motivation / problem
 
@@ -52,12 +63,12 @@ explicitly opt a function into the Durable Activity execution path.
 
 **Goals**
 
-- Enable `workflows.enabled: true` for `main.agent.md` to register Durable
+- Enable `workflows.enabled: true` for any agent to register Durable
   workflow management tools and a Durable orchestrator/activity engine.
 - Add `workflows.exclude` so workflow filtering matches existing exclude-style
   capability UX (`tools.exclude`, `mcp.exclude`, `skills.exclude`).
 - Keep sample `function_app.py` minimal so workflow authoring is expressed
-  through `main.agent.md` plus `tools/`.
+  through agent markdown plus `tools/`.
 - Add `@workflow_tool` as an explicit workflow authoring decorator for functions
   placed in `tools/`.
 - Preserve existing normal `tools/` behavior: public plain functions and `@tool`
@@ -72,8 +83,8 @@ explicitly opt a function into the Durable Activity execution path.
   warning rather than failing startup when safe to do so.
 - Keep discovery read-only and keep Azure Functions/Durable registration in the
   registration/integration stage.
-- Enable every supported Markdown-declared trigger on a workflow-enabled
-  `main.agent.md` to start Dynamic Workflows through the existing runner.
+- Enable every supported Markdown-declared trigger on a workflow-enabled agent
+  to start Dynamic Workflows through the existing runner.
 - Document the workflow authoring surface in `docs/workflows.md`,
   `docs/front-matter-spec.md`, and `docs/architecture.md`.
 - Add constrained conditional execution without embedding a general-purpose
@@ -87,7 +98,6 @@ explicitly opt a function into the Durable Activity execution path.
 
 **Non-goals**
 
-- Enabling workflows for non-main agents in v1.
 - Hand-authored workflow YAML/markdown templates; workflow plans remain
   LLM-authored through `start_workflow`.
 - Per-task retry/timeout/concurrency settings in v1, beyond reserving
@@ -108,15 +118,15 @@ explicitly opt a function into the Durable Activity execution path.
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
 | discover | `discovery/tools.py`, `_function_tool.py` | Load `tools/*.py` once, preserving normal `FunctionTool` discovery while also discovering explicit workflow tool declarations. Add a public `workflow_tool` decorator that records workflow metadata without making the function a normal MAF tool by itself. |
-| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled`, optional `exclude`, and independent `subagents`) and compute concrete capabilities without hard-coding the v1 owner. Unknown workflow excludes warn, mirroring `tools.exclude`. |
-| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | The app composition root selects `main.agent.md` as the v1 owner. Integration consumes its filtered workflow tools and Sub Agent grants, builds one immutable owner policy, registers the Durable blueprint and catalog-backed Sub Agent Activity, and threads the policy plus Durable client through endpoints and declared triggers. |
-| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Runtime validation uses the same policy that generated prompt guidance. Durable Activities invoke registered workflow tools or fresh stateless leaf specialists. Trigger handlers pass the bound Durable client and trigger-specific workflow guidance to the runner. UI polls workflow status and injects terminal notifications. |
+| translate | `config/schema.py`, `config/merge.py`, `registration/capabilities.py` | Parse and validate the public workflow config shape (`enabled`, optional `exclude`, and independent `subagents`) and compute concrete capabilities without hard-coding the v1 workflow agent. Unknown workflow excludes warn, mirroring `tools.exclude`. |
+| register | `app.py`, `workflows/integration.py`, `workflows/registry.py`, `workflows/engine.py`, `registration/endpoints.py`, `registration/triggers.py` | The app composition root freezes one immutable policy per workflow-enabled agent, registers one app-wide Durable blueprint and complete execution catalogs, then threads the matching policy and Durable client through each agent's endpoints and declared triggers. |
+| execute | `workflows/tools.py`, `workflows/engine.py`, `runner.py`, `registration/_handlers.py`, `public/index.html` | MAF invokes workflow management tools (`start_workflow`, status/list/cancel/terminate). Runtime validation uses the same agent policy that generated prompt guidance. Durable Activities reauthorize against the currently deployed policy before invoking registered workflow tools or fresh stateless leaf specialists. UI polls workflow status and injects terminal notifications. |
 
 ### Authoring / API surface
 
 #### Frontmatter
 
-Workflow enablement remains explicit on the main agent:
+Workflow enablement remains explicit on each participating agent:
 
 ```yaml
 ---
@@ -130,23 +140,21 @@ workflows:
 ---
 ```
 
-- `workflows.enabled`: `bool`; `true` enables Dynamic Workflows for
-  `main.agent.md`.
+- `workflows.enabled`: `bool`; `true` enables Dynamic Workflows for that agent.
 - `workflows.exclude`: optional `list[str]`; filters discovered workflow tool
   names out of the effective workflow tool set.
 - Durable backend and task hub configuration stay in `host.json` and app
   settings, not frontmatter.
-- If `workflows.enabled: true` is set on a non-main agent in v1, the runtime
-  logs a startup warning and ignores the workflows block for that agent. This
-  matches the current v1 constraint without failing unrelated agents.
+- No separate workflow-agent, role, or starter field is required. Invocation remains
+  controlled independently by the agent's trigger and built-in endpoints.
 
 #### Markdown-declared trigger starters
 
-When a supported Markdown-declared trigger belongs to a workflow-enabled
-`main.agent.md`, registration adds a Durable client input to that generated
-Function. The handler passes the bound client, workflow enablement, the agent
-identity slug, and trigger-specific system guidance to the existing runner.
-Workflow-disabled and non-main handlers retain their original signatures.
+When a supported Markdown-declared trigger belongs to a workflow-enabled agent,
+registration adds a Durable client input to that generated Function. The handler
+passes the bound client, workflow enablement, the agent identity slug, and
+trigger-specific system guidance to the existing runner. Workflow-disabled
+handlers retain their original signatures.
 
 `start_workflow` schedules the orchestration and returns a `workflow_id` to the
 agent. The initial trigger Function ends after that agent turn instead of
@@ -291,14 +299,13 @@ execution.
 ### Workflow Sub Agents
 
 > [!IMPORTANT]
-> This extension is approved for the Dynamic Workflows v1 surface. Its first
-> implementation is limited to the workflow-enabled `main.agent.md`; issue #109
-> will apply the same contract to non-main workflow owners. The
-> `samples/workflow-subagents-preview/` directory becomes a runnable sample as
-> part of this implementation.
+> This extension is part of the Dynamic Workflows v1 surface. PR #151 applies
+> the same contract to every workflow-enabled agent. The
+> `samples/workflow-subagents-preview/` directory is the runnable single-agent
+> Workflow Sub Agent sample.
 
-The extension lets the workflow-enabled main agent authorize existing Markdown
-agents as DAG nodes:
+The extension lets a workflow-enabled agent authorize existing Markdown agents
+as DAG nodes:
 
 ```yaml
 ---
@@ -328,10 +335,10 @@ The static grant and every runtime plan are enforced independently. Before a
 plan starts, each `sub_agent.agent` must be present in the owning agent's
 `workflows.subagents` grant. An unauthorized or unknown slug rejects the plan;
 the Activity also fails closed if its catalog lookup cannot resolve the
-already-authorized slug. The immutable owner-specific policy used for prompt
-guidance is the same policy used for plan validation. v1 constructs that policy
-only for `main.agent.md`; issue #109 can construct the same value per owner
-without changing the node or Activity contract.
+already-authorized slug. The immutable agent-specific policy used for prompt
+guidance is the same policy used for plan validation. Composition constructs one
+independent immutable policy per workflow-enabled agent without changing the
+node or Activity contract.
 
 The Workflow plan uses a `sub_agent` task:
 
@@ -426,6 +433,113 @@ mcp:
 This syntax is illustrative only and is not accepted as part of the Workflow Sub
 Agent contract in this draft. Review should decide whether positive allowlists
 are a prerequisite, a parallel feature, or a later hardening step.
+
+### Multi-agent workflow isolation addendum (PR #151)
+
+This addendum supersedes the original `main.agent.md`-only assumption. It does
+not introduce new frontmatter or DAG syntax: every agent with
+`workflows.enabled: true` receives the existing workflow tools and may start
+workflows through whichever triggers or built-in endpoints it independently
+exposes.
+
+The implementation calls such an agent a *workflow-enabled agent*. Its
+`workflow_agent_slug` defines the authorization namespace but is not an
+authoring keyword.
+
+#### App-wide execution and per-agent authorization
+
+One Function App registers one Durable orchestrator, one copy of each Activity,
+one complete workflow-handler catalog, and the existing immutable
+`AgentCatalog`. Registering that engine once prevents duplicate Azure Functions
+when several agents enable workflows. Complete catalogs answer what exists; they
+do not grant access.
+
+Composition separately freezes one `WorkflowPlanPolicy` per workflow-enabled
+agent. That policy contains only the agent's workflow tools after
+`workflows.exclude` and its deny-by-default `workflows.subagents` grants. The
+same value drives prompt guidance, start-time plan validation, and
+defense-in-depth Activity authorization. One agent's exclusions cannot
+unregister a handler another agent may use.
+
+#### Agent and session isolation
+
+`ResolvedAgent.slug` is the stable agent identity on chat, MCP, HTTP-trigger, and
+non-HTTP-trigger paths. Workflow management is scoped by
+`(workflow_agent_slug, session_id)` internally. Durable instance IDs begin with a
+32-hex-character (128-bit) truncated SHA-256 digest over an unambiguous
+length-delimited encoding of both values, followed by the existing random UUID
+suffix. Raw slugs and session IDs are not exposed in instance IDs.
+
+Active-workflow limits, list, status, cancel, terminate, and HTTP polling all
+require both components. A mismatched agent or session returns the same
+not-found/empty result as an unknown workflow, so two agents remain isolated even
+when a caller deliberately reuses one session ID.
+
+This intentionally changes the experimental workflow-ID prefix from the legacy
+session-only 48-bit digest. New application tools and routes do not manage
+pre-upgrade IDs. Operators must drain or terminate legacy instances through
+Durable Functions or DTS tooling before upgrading.
+
+#### Activity-time reauthorization
+
+Capability-bearing Activities carry `workflow_agent_slug` and check the currently
+deployed policy immediately before shared-catalog dispatch:
+
+- tool Activities require the task tool in `policy.allowed_tools`;
+- Workflow Sub Agent Activities require the specialist in
+  `policy.allowed_subagents`; and
+- a missing policy, handler, or Agent catalog entry fails closed with a
+  non-sensitive error and correlated logs.
+
+Persisting the start-time policy as indefinitely authoritative would defeat
+revocation. Removing a workflow-enabled agent while another remains, or
+tightening its grants, therefore makes a pending disallowed Activity fail rather
+than continue with stale authorization. Durable orchestrator replay performs no
+mutable policy lookup.
+
+#### Final-agent removal lifecycle
+
+The last workflow-enabled agent is a special deployment edge case. With no agent
+policy, normal composition intentionally returns to a plain `FunctionApp` to
+avoid Durable overhead in apps that do not use workflows. A plain
+`FunctionApp`, however, has no registered workflow orchestrator or Activities.
+
+Consider an instance whose next Activity has been scheduled but has not yet
+executed:
+
+```mermaid
+sequenceDiagram
+    participant H as Task Hub
+    participant A as Deployment with final workflow agent
+    participant P as Plain FunctionApp after agent removal
+    H->>A: Activity work item is pending
+    Note over A,P: Final workflow-enabled agent is removed
+    H--xP: No Activity Function is registered to receive the work item
+    Note over H: Instance remains non-terminal instead of reaching policy rejection
+```
+
+This differs from ordinary policy revocation: the work item cannot reach
+`require_workflow_agent_policy()` and fail because the Function that executes
+that check is absent. The application does not expose a drain-mode environment
+variable for this edge case. Publishing such a switch would create a durable
+customer compatibility commitment without resolving privileged direct Durable
+starts or establishing whether lifecycle ownership belongs in this runtime or
+Durable itself.
+
+Before removing the final workflow-enabled agent, operators should stop new
+starters and use Task Hub tooling to let existing instances finish or terminate
+them. The supported long-term behavior is deferred to
+[issue #161](https://github.com/Azure/azure-functions-agents-runtime/issues/161),
+which tracks runtime/Durable ownership and a remediation that does not
+prematurely add public surface.
+
+#### Runnable proof
+
+`samples/per-agent-workflows/` contains two non-main workflow-enabled agents with
+different workflow-tool exclusions and Workflow Sub Agent grants. Repository E2E
+automation starts both with the same session ID against Azure Storage and DTS,
+proves each reaches a terminal state using only its own capabilities, and checks
+that cross-agent status access returns 404.
 
 ### Data-driven control flow (Issue #1276; in review)
 
@@ -795,19 +909,37 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 21 | Dependency on per-agent Workflows (#109) | Wait for #109 / ship main-only then extend | Ship the existing `main.agent.md` owner scope now, while keeping engine and policy boundaries reusable by #109 | Human | 2026-07-24 |
 | 22 | Documentation audiences | Explain internals in every document / separate maintainer and customer surfaces | Keep decisions and Durable internals in the FRD/architecture; make samples and authoring docs independently understandable to customers | Human + Chris Gillum | 2026-07-24 |
 | 23 | Sub Agent failure diagnostics | Expose provider errors / one generic message / bounded error code plus correlated logs | Keep provider details out of Durable history, expose a stable non-sensitive error code, and correlate detailed logs by Workflow ID, node ID, and specialist slug | Human + Laveesh Rohra | 2026-08-03 |
-| 24 | Record dynamic control flow | Create a separate FRD / evolve FRD 0004 | Evolve FRD 0004 because conditions and iteration extend the existing workflow plan and engine contract | Human | 2026-08-13 |
-| 25 | Condition surface | General expression string / JSON predicate object / boolean-only reference | Use a constrained JSON predicate with scalar `equals` / `not_equals`; reject missing paths and type mismatches | Agent | 2026-08-13 |
-| 26 | Iteration surface | Embedded loop expression / `for_each` full array reference / generated child plan | Use one `for_each` upstream-array reference with fixed `${item}` and `${index}` locals | Agent | 2026-08-13 |
-| 27 | Dynamic instance identity | Value hash / random id / source index | Derive runtime-only `<logical-id>[<index>]` ids from source order | Agent | 2026-08-13 |
-| 28 | Fan-in result | Completion-order list / keyed object / source-aligned envelopes | Aggregate source-ordered `{index, status, result}` envelopes under the logical node id | Agent | 2026-08-13 |
-| 29 | Skipped dependency behavior | Auto-propagate / block descendants / explicit descendant conditions | Do not auto-propagate; satisfy dependencies with `null`, require each conditional descendant to declare `when`, and fail controlled dotted traversal below `null` | Agent | 2026-08-13 |
-| 30 | Dynamic resource accounting | Count only executed Activities / count every materialized item / separate unlimited expansion | Count every materialized item, including skipped items, against `MAX_NODES`; retain `MAX_PARALLELISM` | Agent | 2026-08-13 |
-| 31 | Dynamic status contract | Continue free-form strings / event log / versioned structured snapshot | Add a versioned `custom_status` object while accepting legacy strings for static plans | Agent | 2026-08-13 |
-| 32 | Controlled error compatibility | Replace the error shape / messages only / stable code alongside existing shape | Preserve the existing error message field and add stable codes plus bounded context | Agent | 2026-08-13 |
-| 33 | Iterated wait tasks | Permit identical timers / template deadlines / reject iteration | Reject `for_each` on `wait`; keep `when` available for conditional waits | Agent | 2026-08-13 |
-| 34 | Controlled runtime failure provenance | Raise native Durable failure / return envelope and status-map / Activity wrapper | Return one stable envelope and map `output.failed` to `Failed`; reserve native raises for unexpected and Activity failures | Agent | 2026-08-13 |
-| 35 | Dynamic instance namespace | Permit all authored ids / escape collisions / reserve bracket suffixes | Restrict authored ids to letters, numbers, underscore, and hyphen; reserve `[index]` suffixes for runtime instances | Agent | 2026-08-13 |
-| 36 | Dynamic control-flow design approval | Revise individual Decisions 25-35 / approve the proposed set | Approve Decisions 25-35 as proposed and advance to implementation | Human (TsuyoshiUshio) | 2026-08-14 |
+| 24 | Record multi-agent support | Create FRD 0009 / evolve this FRD | Keep the change as an addendum to FRD 0004 because it extends the existing experimental feature without adding a new authoring contract | Human + Laveesh Rohra | 2026-08-12 |
+| 25 | Workflow agent identity | Display name / source path / endpoint-specific name / canonical slug | Use app-wide unique `ResolvedAgent.slug` on every channel as `workflow_agent_slug` inside the authorization implementation | Agent | 2026-08-10 |
+| 26 | Workflow isolation scope | Session only / agent only / agent plus session | Scope application management by `(workflow_agent_slug, session_id)` so equal session IDs across agents remain isolated | Human | 2026-08-10 |
+| 27 | Existing workflow IDs | Dual-format fallback / migration map / no application fallback | Accept the experimental ID change, preserve Durable/DTS operator access, and require upgrade drain guidance | Human | 2026-08-10 |
+| 28 | Durable registration lifetime | Once per agent / once per app | Register the Durable engine and complete execution catalogs exactly once per app | Agent | 2026-08-10 |
+| 29 | Per-agent policy | Mutable process global / request-time reconstruction / immutable slug-keyed catalog | Freeze one independent `WorkflowPlanPolicy` per workflow-enabled agent during composition | Agent | 2026-08-10 |
+| 30 | Activity authorization | Trust start-time validation / persist start-time policy / reauthorize deployed policy | Reauthorize tool and Sub Agent Activities against the currently deployed agent policy so restrictive changes fail closed | Human | 2026-08-10 |
+| 31 | Non-HTTP trigger management | Add an app-wide index / share one synthetic session / generated invocation session | Keep generated sessions and no new application index; use Durable/DTS tooling for app-wide operations | Human | 2026-08-10 |
+| 32 | Authoring schema | Add owner/config fields / reuse current workflow config | Reuse existing fields; derive identity from the canonical agent slug | Agent | 2026-08-10 |
+| 33 | Ownership digest width | Keep 48 bits / store literal identity / increase digest | Use a 128-bit truncated SHA-256 prefix over length-delimited agent/session input | Human | 2026-08-10 |
+| 34 | Workflow agent eligibility | Require a dedicated starter and fail composition / allow every enabled agent | Treat every agent with `workflows.enabled: true` as workflow-enabled; invocation surfaces remain independent. This supersedes the earlier provisional fail-composition rule. | Human | 2026-08-11 |
+| 35 | Customer sample boundary | Put sender/verifier helpers in the sample / separate internal automation | Keep the sample documentation-led and directly runnable; keep E2E automation under `tests/scripts` | Human | 2026-08-11 |
+| 36 | Final-agent removal | Always register Durable / documentation-only drain / explicit runtime retention | Add opt-in drain mode that blocks application starts and retains Durable registration until Task Hub tooling confirms no non-terminal instances; ordinary non-workflow apps remain plain `FunctionApp` | Human | 2026-08-12 |
+| 37 | Exported compatibility helpers | Remove production-dead helpers / retain shared state / isolate compatibility state | Retain exported registry and one-shot integration helpers without an unrelated breaking change, but keep their registration token out of production `WorkflowSessionContext` and never authorize production execution from the singleton fallback | Agent | 2026-08-11 |
+| 38 | Trigger decorator resolution | Add a shared resolver / duplicate capability validation / retain registration-local fallback | Keep the registration-local `connector_trigger` to `generic_trigger` fallback and avoid an unrelated hard failure for non-workflow agents | Agent | 2026-08-11 |
+| 39 | Activity-wave failure propagation | Rely on Durable wrapper behavior / explicitly rethrow the failed wave result | Explicitly rethrow failed `task_all` results so policy denials retain their actionable error instead of degrading to a secondary `TypeError` | Agent | 2026-08-11 |
+| 40 | Internal workflow-agent terminology | `owner_slug` / `agent_slug` / `workflow_agent_slug` | Use `workflow_agent_slug` throughout workflow plumbing and persisted payloads: it identifies the top-level agent that starts, authorizes, and namespaces the workflow without colliding conceptually with a delegated Sub Agent | Human | 2026-08-12 |
+| 41 | Final-agent lifecycle public surface | Keep `AZURE_FUNCTIONS_AGENTS_WORKFLOW_DRAIN_MODE` / remove it and track the lifecycle gap / always register Durable | Remove the environment variable before release and track the edge case in #161; publishing an operational switch would create a customer compatibility commitment before runtime versus Durable ownership is resolved. This supersedes Decision #36. | Human + Laveesh Rohra | 2026-08-13 |
+| 42 | Record dynamic control flow | Create a separate FRD / evolve FRD 0004 | Evolve FRD 0004 because conditions and iteration extend the existing workflow plan and engine contract | Human | 2026-08-13 |
+| 43 | Condition surface | General expression string / JSON predicate object / boolean-only reference | Use a constrained JSON predicate with scalar `equals` / `not_equals`; reject missing paths and type mismatches | Agent | 2026-08-13 |
+| 44 | Iteration surface | Embedded loop expression / `for_each` full array reference / generated child plan | Use one `for_each` upstream-array reference with fixed `${item}` and `${index}` locals | Agent | 2026-08-13 |
+| 45 | Dynamic instance identity | Value hash / random id / source index | Derive runtime-only `<logical-id>[<index>]` ids from source order | Agent | 2026-08-13 |
+| 46 | Fan-in result | Completion-order list / keyed object / source-aligned envelopes | Aggregate source-ordered `{index, status, result}` envelopes under the logical node id | Agent | 2026-08-13 |
+| 47 | Skipped dependency behavior | Auto-propagate / block descendants / explicit descendant conditions | Do not auto-propagate; satisfy dependencies with `null`, require each conditional descendant to declare `when`, and fail controlled dotted traversal below `null` | Agent | 2026-08-13 |
+| 48 | Dynamic resource accounting | Count only executed Activities / count every materialized item / separate unlimited expansion | Count every materialized item, including skipped items, against `MAX_NODES`; retain `MAX_PARALLELISM` | Agent | 2026-08-13 |
+| 49 | Dynamic status contract | Continue free-form strings / event log / versioned structured snapshot | Add a versioned `custom_status` object while accepting legacy strings for static plans | Agent | 2026-08-13 |
+| 50 | Controlled error compatibility | Replace the error shape / messages only / stable code alongside existing shape | Preserve the existing error message field and add stable codes plus bounded context | Agent | 2026-08-13 |
+| 51 | Iterated wait tasks | Permit identical timers / template deadlines / reject iteration | Reject `for_each` on `wait`; keep `when` available for conditional waits | Agent | 2026-08-13 |
+| 52 | Controlled runtime failure provenance | Raise native Durable failure / return envelope and status-map / Activity wrapper | Return one stable envelope and map `output.failed` to `Failed`; reserve native raises for unexpected and Activity failures | Agent | 2026-08-13 |
+| 53 | Dynamic instance namespace | Permit all authored ids / escape collisions / reserve bracket suffixes | Restrict authored ids to letters, numbers, underscore, and hyphen; reserve `[index]` suffixes for runtime instances | Agent | 2026-08-13 |
+| 54 | Dynamic control-flow design approval | Revise individual Decisions 43-53 / approve the proposed set | Approve Decisions 43-53 as proposed and advance to implementation | Human (TsuyoshiUshio) | 2026-08-14 |
 
 ## 6. Test plan
 
@@ -829,9 +961,6 @@ The Dynamic Workflow sample for this extension must demonstrate:
   - `@workflow_tool` using a reserved runtime management name such as
     `start_workflow` is rejected;
   - effective workflow tool set respects `workflows.exclude`.
-- [ ] Unit: non-main workflow config
-  - non-main `workflows.enabled: true` logs a warning and does not inject
-    workflow tools.
 - [ ] Unit: `tests/test_workflow_integration_validation.py`
   - `workflows.exclude` shape validation;
   - unknown workflow keys fail with actionable messages.
@@ -846,7 +975,7 @@ The Dynamic Workflow sample for this extension must demonstrate:
 - [ ] E2E: run the `workflow-incident-triage` sample locally with Azurite/Durable
   storage and confirm a workflow can start, execute sample tools, and complete.
 - [x] Evolution #112: workflow-enabled HTTP and non-HTTP handlers receive the
-  Durable client and trigger addendum while disabled/non-main handlers keep
+  Durable client and trigger addendum while workflow-disabled handlers keep
   their existing signatures.
 - [x] Evolution #112: timer and queue samples index their trigger, Durable
   client, orchestrator, and Activity bindings and complete model-backed local
@@ -863,6 +992,20 @@ The Dynamic Workflow sample for this extension must demonstrate:
     end through Queue, Durable execution, fake PR tools, HTML reduction, and
     Blob publication, including convergence on the same Blob after repeated
     publication.
+- [x] Evolution #151: multi-agent workflows
+  - compose every workflow-enabled agent with an independent immutable policy;
+  - register one app-wide Durable engine and complete execution catalogs;
+  - isolate IDs and management by agent plus session and return non-existence
+    semantics for cross-agent access;
+  - reauthorize capability-bearing Activities against the deployed policy;
+  - keep an ordinary app with no workflow-enabled agents on plain
+    `FunctionApp`;
+  - document and track the unresolved final-agent lifecycle edge case without
+    exposing a drain-mode environment variable;
+  - treat legacy session-only IDs as not-found without deleting or mutating
+    their Durable instances;
+  - prove independent agents and same-session isolation against Azure Storage
+    and DTS.
 - [ ] Evolution #1276: schema and validation
   - accept optional `when` on every task type and `for_each` on tool/Sub Agent
     tasks;
@@ -931,6 +1074,11 @@ The Dynamic Workflow sample for this extension must demonstrate:
   `docs/front-matter-spec.md`, `docs/workflows.md`, and `docs/architecture.md`;
   keep the sample customer-facing and free of FRD/Durable implementation
   details.
+- [x] Evolution #151: document multi-agent policy isolation, workflow-ID
+  migration, final-agent drain operations, and the runnable
+  `samples/per-agent-workflows/` app.
+- [x] Evolution #151: update `samples/README.md` with the multi-agent runnable
+  sample while keeping internal verifier details outside the customer app.
 - [ ] Evolution #1276: update `docs/workflows.md` with `when`, `for_each`,
   iteration locals, fan-in, limits, stable failures, and status examples.
 - [ ] Evolution #1276: update `docs/architecture.md` for runtime materialization,
@@ -956,8 +1104,23 @@ The Dynamic Workflow sample for this extension must demonstrate:
   authorization enforcement, explicit at-least-once semantics, and an
   Activity-owned timeout boundary; those findings are incorporated above.
 - **Workflow Sub Agent human sign-off:** TsuyoshiUshio, 2026-07-24. Approved
-  Activity-only execution, `{agent, text}` results, main-only v1 ownership, and
+  Activity-only execution, `{agent, text}` results, main-only v1 scope, and
   implementation using TDD followed by sample E2E validation.
+- **Multi-agent workflow sign-off:** TsuyoshiUshio, 2026-08-10. Approved
+  app-wide Durable registration, immutable per-agent policies, agent/session
+  isolation, deployed-policy Activity reauthorization, the experimental
+  workflow-ID migration, and Storage/DTS E2E validation.
+- **Multi-agent architecture review:** An independent rubber-duck review on
+  2026-08-10 evaluated the extension against `main`,
+  `docs/architecture.md`, FRDs 0004 and 0007, issues #1274/#1275, and the
+  existing trigger and Workflow Sub Agent implementation. Findings on digest
+  strength, provisional decisions, legacy-ID behavior, and verifier
+  prerequisites were incorporated with no remaining blockers. The human
+  sign-off ratified the resulting authorization, non-HTTP management, and
+  digest decisions before implementation.
+- **Final-agent drain sign-off:** TsuyoshiUshio, 2026-08-12. Approved explicit
+  runtime retention so pending work reaches Activity reauthorization instead of
+  being stranded after the last workflow-enabled agent is removed.
 - **Dynamic control flow extension:** Drafted for planning issue #1276 on
   2026-08-13. An independent architecture review identified skip propagation,
   numeric instance ordering, and controlled-failure provenance as blocking
@@ -966,5 +1129,5 @@ The Dynamic Workflow sample for this extension must demonstrate:
   waits. A final independent review found no blocking issues and deemed the
   extension ready for human review.
 - **Dynamic control flow human sign-off:** TsuyoshiUshio, 2026-08-14. Approved
-  Decisions 25-35 as proposed and authorized implementation and testing. FRD
+  Decisions 43-53 as proposed and authorized implementation and testing. FRD
   status returned to `Finalized`.

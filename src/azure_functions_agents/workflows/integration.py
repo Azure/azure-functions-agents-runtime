@@ -8,31 +8,37 @@ describe polling and synthetic completion notifications; declared triggers
 describe short-lived starter behavior and terminal result sinks. Both cover
 when to reach for a workflow and which tools the workflow can call.
 
-``build_workflow_integration`` is the one call the app factory makes
-to turn on workflows for the main agent: it registers the Durable
-engine on the app, registers the discovered ``@workflow_tool`` inventory,
-applies the optional ``workflows.exclude`` filter, stashes the effective
-tool set on the workflows registry for ``start_workflow`` to read, and
-returns the management tools plus both channel addenda.
+The app factory builds one complete handler catalog and one immutable
+workflow-agent-policy catalog, registers the Durable engine once, then builds each
+workflow-enabled agent's tools and addenda without mutating the app.
+``build_workflow_integration``
+retains the original direct-helper behavior for compatibility tests and callers.
 """
 
 from __future__ import annotations
 
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from types import MappingProxyType
 from typing import Any
 
 import azure.functions as func
 
 from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents._logger import logger
-from azure_functions_agents.config.schema import WorkflowSubagentRef
+from azure_functions_agents.config.schema import (
+    TRIGGER_TYPES,
+    ResolvedAgent,
+    WorkflowSubagentRef,
+)
 from azure_functions_agents.registration.catalog import AgentCatalog
 
 from . import registry
 from .engine import register_workflows
 from .schema import WorkflowPlanPolicy
 from .tools import build_workflow_tools
+
+type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
 # other key is rejected at app start so typos (``enabld``, ``allow_tools``)
@@ -99,13 +105,7 @@ _SHARED_ADDENDUM = (
     "limits.\n\n"
 )
 
-_CHAT_ADDENDUM = (
-    "`start_workflow` is fire-and-forget. It returns a `workflow_id` immediately "
-    "and the orchestration runs in the background. After it returns, briefly "
-    "tell the user that work is in flight (include the `workflow_id`) and end "
-    "your turn — **do not call `get_workflow_status` to wait for completion.** "
-    "The chat client renders live per-task progress next to the conversation "
-    "and will notify you when the workflow reaches a terminal state.\n\n"
+_CHAT_NOTIFICATION_ADDENDUM = (
     "When a workflow you started reaches a terminal state, the chat client "
     "injects a synthetic user message containing one or more "
     "`<workflow-notification>` envelopes — one per finished workflow. Each "
@@ -128,7 +128,18 @@ _CHAT_ADDENDUM = (
     "exists. If `get_workflow_status` happens to return a non-terminal "
     "status (a brief race between the chat client and the management "
     "API), tell the user the detailed result isn't available yet and end "
-    "the turn — do not poll again.\n\n"
+    "the turn — do not poll again."
+)
+
+_CHAT_ADDENDUM = (
+    "`start_workflow` is fire-and-forget. It returns a `workflow_id` immediately "
+    "and the orchestration runs in the background. After it returns, briefly "
+    "tell the user that work is in flight (include the `workflow_id`) and end "
+    "your turn — **do not call `get_workflow_status` to wait for completion.** "
+    "The chat client renders live per-task progress next to the conversation "
+    "and will notify you when the workflow reaches a terminal state.\n\n"
+    + _CHAT_NOTIFICATION_ADDENDUM
+    + "\n\n"
     "Outside of `<workflow-notification>` turns, only call "
     "`get_workflow_status` "
     "(or `list_workflows`) when the user explicitly asks about a previously-"
@@ -157,7 +168,6 @@ _TRIGGER_ADDENDUM = (
     "example. Include `workflow_id` in the HTTP response only when that authored "
     "response format permits it."
 )
-
 
 @dataclass(frozen=True)
 class WorkflowIntegrationResult:
@@ -284,8 +294,11 @@ def _workflows_enabled(metadata: dict[str, Any]) -> bool:
     return bool(block.get("enabled", False))
 
 
-def _register_workflow_tools(workflow_tools: Sequence[WorkflowTool]) -> frozenset[str]:
-    effective: set[str] = set()
+def build_workflow_handler_catalog(
+    workflow_tools: Sequence[WorkflowTool],
+) -> registry.WorkflowHandlerCatalog:
+    """Build the immutable, unfiltered app-wide workflow handler catalog."""
+    entries: dict[str, registry.WorkflowToolEntry] = {}
     for workflow_tool in workflow_tools:
         if workflow_tool.handler is None:
             logger.warning(
@@ -294,7 +307,7 @@ def _register_workflow_tools(workflow_tools: Sequence[WorkflowTool]) -> frozense
             )
             continue
         try:
-            registry.register_workflow_tool(
+            entry = registry.make_workflow_tool_entry(
                 workflow_tool.name,
                 workflow_tool.description,
                 workflow_tool.handler,
@@ -303,8 +316,35 @@ def _register_workflow_tools(workflow_tools: Sequence[WorkflowTool]) -> frozense
         except ValueError as exc:
             logger.warning("Skipping workflow tool %r: %s", workflow_tool.name, exc)
             continue
-        if workflow_tool.public:
-            effective.add(workflow_tool.name)
+        if entry.name in entries:
+            logger.warning(
+                "Skipping workflow tool %r: workflow tool is already discovered",
+                entry.name,
+            )
+            continue
+        entries[entry.name] = entry
+    return registry.build_handler_catalog(entries)
+
+
+def _register_workflow_tools(
+    workflow_tools: Sequence[WorkflowTool],
+) -> frozenset[str]:
+    """Compatibility-only registration for direct helper callers."""
+    catalog = build_workflow_handler_catalog(workflow_tools)
+    effective: set[str] = set()
+    for entry in catalog.values():
+        try:
+            registry.register_workflow_tool(
+                entry.name,
+                entry.description,
+                entry.handler,
+                public=entry.public,
+            )
+        except ValueError as exc:
+            logger.warning("Skipping workflow tool %r: %s", entry.name, exc)
+            continue
+        if entry.public:
+            effective.add(entry.name)
     return frozenset(effective)
 
 
@@ -325,7 +365,10 @@ def _apply_workflow_exclude(
     return tuple(tool for tool in workflow_tools if tool.name not in excluded)
 
 
-def _build_tool_section(allowed_tools: frozenset[str]) -> str:
+def _build_tool_section(
+    allowed_tools: frozenset[str],
+    handler_catalog: registry.WorkflowHandlerCatalog | None = None,
+) -> str:
     """Return the dynamic workflow-tool section shared by both channels.
 
     Lists each allowed tool's name and engine-owned description. This is the
@@ -347,7 +390,11 @@ def _build_tool_section(allowed_tools: frozenset[str]) -> str:
     else:
         lines = ["\n\n### Available workflow tools\n"]
         for name in sorted(allowed_tools):
-            entry = registry.get_entry(name)
+            entry = (
+                handler_catalog.get(name)
+                if handler_catalog is not None
+                else registry.get_entry(name)
+            )
             description = entry.description if entry is not None else ""
             lines.append(f"- `{name}` — {description}")
         tool_section = "\n".join(lines)
@@ -374,12 +421,17 @@ def _build_subagent_section(policy: WorkflowPlanPolicy) -> str:
     return "\n".join(lines)
 
 
-def _build_addendum(policy: WorkflowPlanPolicy, *, trigger_invocation: bool) -> str:
+def _build_addendum(
+    policy: WorkflowPlanPolicy,
+    *,
+    trigger_invocation: bool,
+    handler_catalog: registry.WorkflowHandlerCatalog | None = None,
+) -> str:
     channel_addendum = _TRIGGER_ADDENDUM if trigger_invocation else _CHAT_ADDENDUM
     return (
         _SHARED_ADDENDUM
         + channel_addendum
-        + _build_tool_section(policy.allowed_tools)
+        + _build_tool_section(policy.allowed_tools, handler_catalog)
         + _build_subagent_section(policy)
     )
 
@@ -405,6 +457,86 @@ def _build_plan_policy(
     )
 
 
+def validate_workflow_agent_trigger(resolved: ResolvedAgent) -> None:
+    """Reject unsupported declared triggers for a workflow-enabled agent."""
+    if (
+        resolved.workflows is None
+        or not resolved.workflows.enabled
+        or resolved.trigger is None
+    ):
+        return
+    trigger_type = str(resolved.trigger.type or "").strip()
+    if trigger_type not in TRIGGER_TYPES:
+        raise ValueError(
+            f"{resolved.source_file or '<unknown>'}: field `trigger.type`: "
+            f"Unknown or unsupported trigger type `{trigger_type}`. "
+            "See docs/front-matter-spec.md#trigger."
+        )
+
+
+def build_workflow_agent_policy_catalog(
+    catalog: AgentCatalog,
+    handler_catalog: registry.WorkflowHandlerCatalog,
+) -> WorkflowAgentPolicyCatalog:
+    """Freeze one independent workflow policy per workflow-enabled agent."""
+    policies: dict[str, WorkflowPlanPolicy] = {}
+    for workflow_agent_slug, entry in catalog.items():
+        resolved = entry.resolved
+        if resolved.workflows is None or not resolved.workflows.enabled:
+            continue
+        allowed_tools = frozenset(
+            tool.name
+            for tool in entry.capabilities.filtered_workflow_tools
+            if (
+                (handler := handler_catalog.get(tool.name)) is not None
+                and handler.public
+            )
+        )
+        policies[workflow_agent_slug] = _build_plan_policy(
+            allowed_tools,
+            resolved.workflows.subagents,
+            catalog,
+        )
+    return MappingProxyType(policies)
+
+
+def build_workflow_agent_integration(
+    policy: WorkflowPlanPolicy,
+    handler_catalog: registry.WorkflowHandlerCatalog,
+) -> WorkflowIntegrationResult:
+    """Build one workflow-enabled agent's tools and prompt guidance without app mutation."""
+    return WorkflowIntegrationResult(
+        workflow_tools=build_workflow_tools(policy=policy),
+        chat_system_addendum=_build_addendum(
+            policy,
+            trigger_invocation=False,
+            handler_catalog=handler_catalog,
+        ),
+        trigger_system_addendum=_build_addendum(
+            policy,
+            trigger_invocation=True,
+            handler_catalog=handler_catalog,
+        ),
+        plan_policy=policy,
+    )
+
+
+def register_workflow_runtime(
+    app: func.FunctionApp,
+    *,
+    handler_catalog: registry.WorkflowHandlerCatalog,
+    catalog: AgentCatalog,
+    workflow_agent_policies: WorkflowAgentPolicyCatalog,
+) -> None:
+    """Register the app-wide Durable engine exactly once."""
+    register_workflows(
+        app,
+        catalog=catalog,
+        handler_catalog=handler_catalog,
+        workflow_agent_policies=workflow_agent_policies,
+    )
+
+
 def build_workflow_integration(
     app: func.FunctionApp,
     metadata: dict[str, Any],
@@ -413,7 +545,7 @@ def build_workflow_integration(
     workflow_subagents: Sequence[WorkflowSubagentRef] = (),
     catalog: AgentCatalog | None = None,
 ) -> WorkflowIntegrationResult:
-    """Enable workflows for the app if the main agent opted in.
+    """Compatibility helper that enables one agent's workflows on ``app``.
 
     Returns a :class:`WorkflowIntegrationResult` containing management tools
     plus chat and declared-trigger system addenda. The tools are empty and both
@@ -432,10 +564,16 @@ def build_workflow_integration(
         # so this function is safe to call multiple times in test
         # scenarios that toggle metadata.
         return WorkflowIntegrationResult([], None, None, None)
-    register_workflows(app, catalog=catalog)
     filtered_workflow_tools = _apply_workflow_exclude(tuple(workflow_tools or ()), metadata)
+    handler_catalog = build_workflow_handler_catalog(filtered_workflow_tools)
     effective = _register_workflow_tools(filtered_workflow_tools)
     policy = _build_plan_policy(effective, workflow_subagents, catalog)
+    register_workflows(
+        app,
+        catalog=catalog,
+        handler_catalog=handler_catalog,
+        workflow_agent_policies=MappingProxyType({"main": policy}),
+    )
     registry.set_app_config(effective)
     logger.info(
         "workflows enabled: %d tool(s) and %d Sub Agent(s) allowed (%s)",
@@ -443,15 +581,16 @@ def build_workflow_integration(
         len(policy.allowed_subagents),
         ", ".join(sorted(effective)) or "<none>",
     )
-    return WorkflowIntegrationResult(
-        workflow_tools=build_workflow_tools(policy=policy),
-        chat_system_addendum=_build_addendum(policy, trigger_invocation=False),
-        trigger_system_addendum=_build_addendum(policy, trigger_invocation=True),
-        plan_policy=policy,
-    )
+    return build_workflow_agent_integration(policy, handler_catalog)
 
 
 __all__ = [
+    "WorkflowAgentPolicyCatalog",
     "WorkflowIntegrationResult",
+    "build_workflow_agent_integration",
+    "build_workflow_agent_policy_catalog",
+    "build_workflow_handler_catalog",
     "build_workflow_integration",
+    "register_workflow_runtime",
+    "validate_workflow_agent_trigger",
 ]

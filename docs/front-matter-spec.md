@@ -26,7 +26,7 @@ Each agent is defined in a `.agent.md` file with YAML front matter followed by m
 - **Inherits all discovered capabilities by default**
 - Can apply **exclude lists** to filter out unwanted MCP servers, skills, or tools
 - Can **override** runtime settings (model, timeout)
-- Can enable Dynamic Workflows on `main.agent.md`
+- Can enable Dynamic Workflows on any agent
 - Must define **trigger** (how the agent is invoked)
 - Can enable **HTTP/MCP endpoints** for testing and composition
 
@@ -90,7 +90,7 @@ YAML front matter at the top of each agent file.
 - `mcp` — Boolean or object to inherit, disable, or exclude MCP servers
 - `skills` — Object with exclude lists or false to filter skills
 - `tools` — Object with exclude lists or false to filter tools
-- `workflows` — Object to enable Dynamic Workflows on `main.agent.md`
+- `workflows` — Object to enable Dynamic Workflows on an agent
 - `subagents` — Array of `{agent, when?}` references to specialist agents this agent may delegate to at chat time
 - `input_schema` — Object, JSON Schema for HTTP request validation
 - `response_schema` — Object, JSON Schema for response validation
@@ -111,7 +111,27 @@ YAML front matter at the top of each agent file.
   ...
 ```
 
-Agent markdown files (`*.agent.md`) can be placed at the app root or in an `agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`). Files from both locations are combined and sorted by path for deterministic ordering. `main.agent.md` in either location is marked as the main agent.
+Agent markdown files (`*.agent.md`) can be placed at the app root or in an
+`agents/` folder. The folder name is case-insensitive (`agents/` or `Agents/`).
+Files from both locations are combined and sorted by path for deterministic
+ordering. `main.agent.md` in either location is marked as the main agent for
+compatibility, but neither its filename nor its directory determines whether an
+agent is directly invokable, a coordinator, workflow-enabled, or a specialist.
+
+### Agent roles and reachability
+
+Roles come from invocation surfaces and references, not file placement:
+
+| Role | How it is identified |
+| --- | --- |
+| Directly invokable agent | Defines a `trigger` or enables at least one `builtin_endpoints` value. |
+| Chat coordinator | Declares top-level `subagents`; each reference becomes a `delegate_<slug>` tool during direct invocation. |
+| Chat Sub Agent | Is referenced by another agent's top-level `subagents`. It may omit its own trigger/endpoints when it is internal-only. |
+| Workflow-enabled agent | Sets `workflows.enabled: true`. |
+| Workflow Sub Agent | Is referenced by a workflow-enabled agent's `workflows.subagents`. It does not need `workflows.enabled` and may omit its own trigger/endpoints when it is internal-only. |
+
+These roles can overlap. For example, an agent can have its own HTTP trigger and
+also be referenced as another agent's Chat or Workflow Sub Agent.
 
 ---
 
@@ -125,7 +145,7 @@ Fields are organized into categories based on how they can be used:
 - `mcp` — MCP servers discovered from `mcp.json`, filtered in agents
 - `skills` — Auto-discovered from `skills/` directory, exclude lists (agent only)
 - `tools` — Auto-discovered from `tools/` directory, exclude lists (agent only)
-- `workflows` — Dynamic Workflow enablement and workflow-tool excludes (`main.agent.md` only)
+- `workflows` — Dynamic Workflow enablement, workflow-tool excludes, and workflow Sub Agent grants
 - `system_tools` — System-level tools and capabilities (global configuration, agent opt-out)
   - `dynamic_sessions_code_interpreter` — ACA Dynamic Sessions code interpreter
   - `web_request` — Built-in outbound HTTP request tool (default-on, SSRF-guarded)
@@ -136,7 +156,7 @@ Fields are organized into categories based on how they can be used:
 
 **Agent-Specific (Agent front matter only):**
 - `name`, `description` — Agent identity (required)
-- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced only as an internal specialist via another agent's `subagents:`)
+- `trigger` — Invocation method (required unless at least one built-in endpoint is enabled, or the agent is referenced as an internal specialist via another agent's `subagents` or `workflows.subagents`)
 - `builtin_endpoints` — Built-in chat UI, chat API, and MCP tool endpoints
 - `subagents` — Chat-time delegation to specialist agents (`delegate_<slug>` tools; see [`subagents`](#subagents))
 - `logger`, `substitute_variables` — Agent runtime behavior switches
@@ -147,7 +167,10 @@ Fields are organized into categories based on how they can be used:
 
 ### Required Fields (Agent Front Matter Only)
 
-**Summary:** Every `.agent.md` file must have `name` and `description`. It must also have either a `trigger` or at least one enabled `builtin_endpoints` value.
+**Summary:** Every `.agent.md` file must have `name` and `description`. It must
+also have either a `trigger` or at least one enabled `builtin_endpoints` value,
+unless another agent references it through `subagents` or
+`workflows.subagents` as an internal specialist.
 
 #### `name`
 - **Type:** `string`
@@ -567,7 +590,7 @@ tools: false
 
 #### `workflows`
 - **Type:** `object`
-- **Location:** Agent front matter (`main.agent.md` only in v1)
+- **Location:** Agent front matter (any agent)
 - **Description:** Enables Dynamic Workflows, filters discovered workflow tools, and
   grants access to leaf specialists for workflow tasks.
 
@@ -584,8 +607,10 @@ workflows:
 
 `workflows.enabled` is a strict boolean. When true, it injects
 workflow-management tools (`start_workflow`, `get_workflow_status`,
-`list_workflows`, `cancel_workflow`, `terminate_workflow`) and registers public
-`@workflow_tool` handlers discovered from `tools/*.py` as workflow task targets.
+`list_workflows`, `cancel_workflow`, `terminate_workflow`) and exposes the
+agent-allowed public `@workflow_tool` handlers discovered from `tools/*.py` as
+workflow task targets. No new role or starter fields are required; workflow
+identity comes from the agent's canonical slug.
 The v1 runtime currently requires workflow tool handlers to be synchronous,
 accept one dictionary argument, and return JSON-serializable values. This is an
 implementation constraint of the v1 registry and Activity runner, not a Durable
@@ -593,7 +618,13 @@ Functions requirement.
 
 Normal custom tools keep their existing behavior. Plain public functions and `@tool`/`FunctionTool` values in `tools/*.py` are normal MAF tools; `@workflow_tool` marks a callable for workflow execution. Use both decorators when a callable should be available both directly in chat and inside workflow tasks. Use `_`-prefixed helpers for functions that should be neither normal tools nor workflow tools.
 
-`workflows.exclude` filters only workflow Activity targets; it does not affect normal tools. Conversely, `tools.exclude` filters normal MAF tools and does not hide workflow tools. In v1, setting `workflows.enabled: true` outside `main.agent.md` logs a warning and is ignored.
+`workflows.exclude` filters only that agent's workflow Activity targets; it does
+not affect normal tools or another agent's workflow policy. Conversely,
+`tools.exclude` filters normal MAF tools and does not hide workflow tools.
+
+Any agent may enable workflows. Invocation remains governed independently by its
+configured trigger and built-in endpoints. `builtin_endpoints.debug_chat_ui`
+automatically enables its backing chat API.
 
 `workflows.subagents` is independent from top-level [`subagents`](#subagents).
 It is deny-by-default: only listed specialist slugs can appear in a workflow
@@ -654,7 +685,7 @@ relevant, then give the customer a single consolidated answer.
 
 **Delegated execution ("runs as itself"):** A specialist invoked through delegation uses its own instructions, model, and static tools (its own user tools, MCP servers, and skills) exactly as if it had been triggered directly — same identity, same configuration. What differs is context and role:
 - **Context isolation:** the specialist receives a single self-contained string argument, `task` (`propagate_session=False`) — it does not see the coordinator's conversation history or share session state.
-- **No per-request sandbox or Dynamic Workflow tools:** these are naturally absent for a delegated specialist (not stripped — they were never part of its own static configuration to begin with, since sandbox sessions are per-request and `workflows` only applies to `main.agent.md`).
+- **No per-request sandbox or Dynamic Workflow tools:** these are naturally absent for a delegated specialist (not stripped) because both capabilities belong to the top-level direct invocation, not the delegated execution role.
 - **No recursive delegation:** delegation is single-level. A specialist invoked through `subagents:` never gets its own `delegate_*` tools, even if it declares `subagents:` of its own — its references are simply not wired for that call. This is enforced structurally (the specialist-building code path never reads a delegated agent's own `subagents`), not with a runtime depth counter, so mutual `A` ↔ `B` references are harmless.
 
 **Trust boundary:** `subagents` is an explicit **capability grant** from the app author. A delegated call runs in-process and does not pass through the specialist's own endpoint authorization (`auth_level`, etc.) — treat one deployed app as one trust domain, and only delegate to specialists you are comfortable exposing to anyone who can reach the coordinator.
@@ -1228,7 +1259,7 @@ step-by-step answers.
 **Agent Front Matter (`.agent.md`):**
 1. **`name`** — Must always be present (string)
 2. **`description`** — Must always be present (string)
-3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled, **or** the agent is referenced only as an internal specialist via another agent's `subagents:` (see "Internal specialist agents" under [File Naming Conventions](#file-naming-conventions) below)
+3. **`trigger` or `builtin_endpoints`** — A trigger is required unless at least one built-in endpoint is enabled, **or** the agent is referenced as an internal specialist through another agent's `subagents` or `workflows.subagents` (see "Internal specialist agents" under [File Naming Conventions](#file-naming-conventions) below)
 
 **Global Configuration (`agents.config.yaml`):**
 - **No required properties** — The entire file is optional
@@ -1322,9 +1353,18 @@ In other words, the display `name:` field is never used to derive registered Azu
 **Endpoint-only agents:**
 Any `.agent.md` file, including `main.agent.md`, may omit `trigger` when at least one built-in endpoint is enabled. For example, `main.agent.md` with `builtin_endpoints: true` is available at `/agents/main/`, `/agents/main/chat`, and `/agents/main/chatstream`, and registers an MCP tool named `main` on the shared runtime MCP transport.
 
-**Internal specialist agents:** An agent may also omit both `trigger` and `builtin_endpoints` if — and only if — another agent's `subagents:` references it. Such an agent has no endpoint of its own and is reachable only through delegation; see [`subagents`](#subagents) and [Example 6](#example-6-coordinator-with-delegated-specialists) above.
+**Internal specialist agents:** An agent may also omit both `trigger` and
+`builtin_endpoints` if — and only if — another agent references it through
+top-level `subagents` or `workflows.subagents`. Such an agent has no endpoint of
+its own. A top-level reference makes it reachable through a `delegate_<slug>`
+tool; a workflow reference makes it reachable as a workflow `sub_agent` node.
+See [`subagents`](#subagents),
+[`workflows`](#workflows), and
+[Example 6](#example-6-coordinator-with-delegated-specialists) above.
 
-Agents with neither `trigger` nor enabled `builtin_endpoints`, and that are not referenced by any other agent's `subagents:`, are invalid.
+Agents with neither `trigger` nor enabled `builtin_endpoints`, and that are not
+referenced by any other agent's `subagents` or `workflows.subagents`, are
+invalid.
 
 **Example project structure:**
 ```
