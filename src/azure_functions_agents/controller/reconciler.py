@@ -1510,22 +1510,30 @@ class SessionReconciler:
                 deleted_snapshot_count += 1
         latest = await self._store.get_session(session.owner_partition, session.session_id)
         if latest.record.status == "deleting" and latest.record.active_run_id is None:
+            tombstone_reason = latest.record.tombstone_reason or "reclaimed_idle_session"
             await self._store.tombstone_session(
                 previous=latest.record,
                 etag=latest.etag,
-                tombstone_reason="reclaimed_idle_session",
+                tombstone_reason=tombstone_reason,
                 updated_at=now,
             )
             report = _replace_report(
                 report,
                 tombstoned_sessions=report.tombstoned_sessions + 1,
             )
-            _log_session_reclaimed(
-                session_id=latest.record.session_id,
-                sandbox_id=latest.record.sandbox_id,
-                backing_deleted=backing_deleted,
-                deleted_snapshot_count=deleted_snapshot_count,
-            )
+            if tombstone_reason == "reclaimed_idle_session":
+                _log_session_reclaimed(
+                    session_id=latest.record.session_id,
+                    sandbox_id=latest.record.sandbox_id,
+                    backing_deleted=backing_deleted,
+                    deleted_snapshot_count=deleted_snapshot_count,
+                )
+            else:
+                _log_session_cleanup(
+                    session_id=latest.record.session_id,
+                    sandbox_id=latest.record.sandbox_id,
+                    tombstone_reason=tombstone_reason,
+                )
         return report
 
     async def reconcile_session(
@@ -2362,5 +2370,36 @@ def _log_session_reclaimed(
             "af.sandbox.session_id": session_id,
             "af.sandbox.sandbox_id": sandbox_id,
             "af.sandbox.tombstone_reason": "reclaimed_idle_session",
+        },
+    )
+
+
+def _log_session_cleanup(
+    *,
+    session_id: str,
+    sandbox_id: str | None,
+    tombstone_reason: str,
+) -> None:
+    """Record a non-idle deletion without misclassifying it as reclaim."""
+    logger.info(
+        "%s",
+        json.dumps(
+            {
+                "event_name": "sandbox_session_cleanup",
+                "sandbox_id": sandbox_id,
+                "session_id": session_id,
+                "tombstone_reason": tombstone_reason,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    emit_runtime_event(
+        "af.sandbox.session.cleaned_up",
+        {
+            "af.sandbox.session_id": session_id,
+            "af.sandbox.sandbox_id": sandbox_id,
+            "af.sandbox.tombstone_reason": tombstone_reason,
         },
     )

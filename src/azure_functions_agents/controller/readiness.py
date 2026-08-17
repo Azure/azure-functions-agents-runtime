@@ -389,12 +389,17 @@ class SessionRuntimeBinding:
     ) -> None:
         """Run the shared targeted lifecycle reconciliation when configured."""
         if self._targeted_reconciler is not None:
-            if setup_deadline is None:
-                await self._targeted_reconciler(  # type: ignore[misc, call-arg]
-                    partition, session_id
-                )
-            else:
-                await self._targeted_reconciler(partition, session_id, setup_deadline)
+            try:
+                if setup_deadline is None:
+                    await self._targeted_reconciler(  # type: ignore[misc, call-arg]
+                        partition, session_id
+                    )
+                else:
+                    await self._targeted_reconciler(partition, session_id, setup_deadline)
+            except SandboxGroupAuthorizationError:
+                raise SessionActivationAuthorizationError(
+                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                ) from None
 
     async def reconcile_after_create(self) -> None:
         """Run the awaited bounded post-create cleanup when configured."""
@@ -1491,7 +1496,7 @@ async def _fail_reserved_provision_authorization(
         region=current.record.region,
         state_store_fingerprint=current.record.state_store_fingerprint,
         quarantine_reason=current.record.quarantine_reason,
-        tombstone_reason=current.record.tombstone_reason,
+        tombstone_reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
         created_at=current.record.created_at,
         updated_at=updated_at,
         active_operation_id=None,
@@ -1613,10 +1618,13 @@ async def _provision_reserved_session_inner(
         ),
     )
     try:
-        handle = await _within_setup_budget(
-            provider.create(create_request, persisted_group=group),
+        handle = await _create_reserved_sandbox(
+            state_binding.store,
+            provider,
+            create_request,
+            group,
+            fence,
             setup_deadline,
-            phase=SetupPhase.PROVISION_CREATE,
         )
     except SandboxCapacityError:
         await _within_setup_budget(
@@ -1628,10 +1636,13 @@ async def _provision_reserved_session_inner(
                 phase=SetupPhase.PROVISION_CREATE
             ),
         )
-        handle = await _within_setup_budget(
-            provider.create(create_request, persisted_group=group),
+        handle = await _create_reserved_sandbox(
+            state_binding.store,
+            provider,
+            create_request,
+            group,
+            fence,
             setup_deadline,
-            phase=SetupPhase.PROVISION_CREATE,
         )
     try:
         try:
@@ -1667,6 +1678,27 @@ async def _provision_reserved_session_inner(
             await handle.close()
         except Exception:
             logger.exception("Could not close sandbox handle after provisioning failure")
+        raise
+
+
+async def _create_reserved_sandbox(
+    store: SessionStateStore,
+    provider: SandboxSessionProvider,
+    request: SandboxCreateRequest,
+    group: SandboxGroupBinding,
+    fence: SessionOperationFence,
+    setup_deadline: SetupDeadline,
+) -> SandboxSessionHandle:
+    """Preserve an invoked create as reconcile-only when its outcome is ambiguous."""
+    try:
+        return await _within_setup_budget(
+            provider.create(request, persisted_group=group),
+            setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    except (asyncio.CancelledError, SessionActivationSetupTimeoutError):
+        with suppress(StaleOperationTokenError):
+            await _preserve_indeterminate_provision(store, fence)
         raise
 
 

@@ -171,9 +171,14 @@ python -m pytest -m live_aca tests/live/test_aca_deployed_agent_turn.py -v
 
 The test acquires its token only through
 `azure.identity.aio.DefaultAzureCredential`; it rejects a bearer-token
-environment variable. The protected `larohra-sandboxgroup-test` ADO service
-connection holds **U3.TestInvoker**. The `ACADeployedAgentTurn` runs this qualification only for manually queued or
-scheduled builds, never pull requests. It remains nonblocking.
+environment variable. The shared `saf-foundry-connection` remains the pipeline
+default. A dedicated ACA service connection is supplied explicitly for the
+Manual/Scheduled configuration that needs it; it must hold **U3.TestInvoker**.
+Any service connection enabled for pull requests must be protected with Azure
+Pipelines permissions and checks. The predeployed-environment smoke runs on
+pull requests, manually queued builds, and scheduled builds, and remains
+nonblocking. It does not attest the pull request artifact or remote Python runtime;
+deployment and digest attestation remain deferred.
 Missing URL/configuration, token acquisition, or unavailable-app failures are
 reported as `ACA-SMOKE-ENV` pytest errors; public response and protocol
 assertions remain pytest failures. Never log prompt or model-result content.
@@ -232,8 +237,8 @@ for that cleanup boundary.
 The separate nonblocking `ACADeployedColdStart` job runs this test independently
 of `ACADeployedAgentTurn` and its optional load concurrency. The load job keeps
 its 360-minute cap and remains the sole human N=100 path.
-`ACA_DEPLOYED_COLD_START_SAMPLES` is an optional, non-secret Manual/Scheduled pipeline
-variable mapped only when provided; the default is three. The pipeline accepts
+`ACA_DEPLOYED_COLD_START_SAMPLES` is an optional, non-secret pipeline variable
+mapped only when provided; the default is three. The pipeline accepts
 only integer values **1..3**. Its enforced three-sample maximum is
 **3 x 615 + 60 final recovery + 3 x 240 cleanup = 2,625 seconds**,
 leaving **975 seconds** of the 60-minute cap for job overhead. All job
@@ -334,9 +339,9 @@ deployed-smoke opt-in is set.
 **`N=5` is the sole agent/CI diagnostic validation size.** It verifies the
 public orchestration, bounded common-active interval, replay/`409` behavior,
 and controller cleanup path; it is not a capacity or formal acceptance claim.
-Agents and CI must run only this diagnostic size, including the persistent
-pipeline default. Both Python runtime legs run in parallel for Manual/Scheduled
-diagnostics:
+The persistent pipeline default is the sole automated N=5 diagnostic. Both
+Python runtime legs run in parallel for the protected predeployed-environment
+smoke:
 
 ```bash
 export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
@@ -361,14 +366,15 @@ az pipelines run --id 1777 --branch larohra-u3-ga-gate \
   --parameters acaRuntimeTarget=python313 acaLoadConcurrency=100 acaProvisionConcurrency=4
 ```
 
-The `ACADeployedAgentTurn` ADO job remains Manual/Scheduled plus
-`continueOnError`. The `acaLoadConcurrency` queue-time parameter defaults to
-`5` and accepts only `5` or `100`; an existing
+The `ACADeployedAgentTurn` ADO job runs on PR, Manual, and Schedule with
+`continueOnError`. The `acaLoadConcurrency` queue-time **number** parameter
+defaults to `5` and accepts integer values from `1` through `100`; that range
+does not authorize an automated N=100 run. An existing
 `ACA_DEPLOYED_LOAD_CONCURRENCY` pipeline variable does not control this job.
-The N=100 parameter value is human-only and requires
-`acaRuntimeTarget=python313` or `acaRuntimeTarget=python314`. The preflight
-rejects N=100 with the default `both` target before pytest starts, so no
-dual-runtime N=100 run is launched.
+N=100 remains human-only and requires `acaRuntimeTarget=python313` or
+`acaRuntimeTarget=python314`. The centralized preflight rejects all values
+above N=5 with the default `both` target because the runtime legs share one
+Sandbox Group; it also rejects provisioning concurrency above one for `both`.
 
 This run can consume at least 500 sandbox-minutes at `N=100`, plus model and
 storage costs, and needs ACA and model quota for all sessions. The fixed
@@ -410,8 +416,9 @@ before either deployed/load leg starts. Within each phase, `Python313` and
 `Python314` run in parallel (`maxParallel: 2`). `acaRuntimeTarget` accepts
 `both` (the default), `python313`, or `python314`; compile-time matrix inclusion
 creates two legs for `both` and one for either selected runtime. Both jobs run
-only for **Manual** and **Schedule** reasons, stay nonblocking with
-`continueOnError`, and are excluded from pull requests.
+for **PullRequest**, **Manual**, and **Schedule** reasons and stay nonblocking
+with `continueOnError`. They are protected predeployed-environment smoke, not
+deployment, digest, PR-artifact, or remote-Python attestation.
 
 The checked-in non-secret target variables are available to both scheduled
 pipelines through `eng/ci/variables/aca-deployed-runtime-targets.yml`:
@@ -434,7 +441,9 @@ uses the runtime-specific inputs above.
 provisions at most one session per runtime leg (two total) against the shared
 Sandbox Group. The preflight rejects a `both` run above `1`; it preserves
 parallel Python 3.13/3.14 validation rather than serializing the matrix. A
-human-selected single runtime may use `4`, including the N=100 formal path.
+human-selected single runtime may use `2` or `4`, including the N=100 formal
+path. The same shared-group limit rejects dual-runtime load values above N=5;
+those values are not safe with the current two-leg group limits.
 Direct/local pytest accepts
 `--aca-provision-concurrency` or
 `AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY` in `1..4` and defaults to

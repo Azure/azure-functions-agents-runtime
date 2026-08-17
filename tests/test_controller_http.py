@@ -396,6 +396,32 @@ async def test_cancel_sandbox_group_authorization_failure_returns_actionable_non
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("reader", [read_status, read_result])
+async def test_status_and_result_authorization_failures_are_redacted(
+    reader,
+) -> None:  # type: ignore[no-untyped-def]
+    backend = FakeBackend(_status())
+    backend.raise_on_get = SessionActivationAuthorizationError("provider body: secret")
+
+    response = await reader(
+        backend,  # type: ignore[arg-type]
+        RunContext(run_id="run-1", session_id="session-1"),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert "secret" not in str(response.body)
+
+
+@pytest.mark.asyncio
 async def test_evicted_idempotent_result_returns_gone() -> None:
     backend = FakeBackend(_status())
     backend.raise_on_start = IdempotencyResultUnavailableError("evicted")

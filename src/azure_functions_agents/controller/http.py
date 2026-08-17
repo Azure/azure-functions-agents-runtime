@@ -175,6 +175,8 @@ async def read_status(
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
     except SessionActivationGoneError:
         return ControllerResponse(status_code=410, body={"error": "session_gone"})
+    except SessionActivationAuthorizationError:
+        return _sandbox_group_authorization_response()
 
 
 async def read_result(
@@ -190,6 +192,12 @@ async def read_result(
         status = await backend.get_run(context)
     except (RunRowNotFoundError, SessionRowNotFoundError):
         return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+    except SessionActivationNotFoundError:
+        return ControllerResponse(status_code=404, body={"error": "run_not_found"})
+    except SessionActivationGoneError:
+        return ControllerResponse(status_code=410, body={"error": "session_gone"})
+    except SessionActivationAuthorizationError:
+        return _sandbox_group_authorization_response()
     if (
         status.error is not None
         and status.error.code == SESSION_TOMBSTONED_ERROR_CODE

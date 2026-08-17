@@ -17,6 +17,7 @@ from tests.live.aca_deployed_agent_support import (
     json_request,
     parse_accepted_run,
     read_sse_events,
+    setup_retry_after_seconds,
     submission_payload,
 )
 from tests.live.aca_deployed_lifecycle_support import (
@@ -36,7 +37,6 @@ from tests.live.aca_deployed_lifecycle_support import (
 )
 
 _SETUP_RETRY_ATTEMPTS = 4
-_SETUP_RETRY_DELAY_SECONDS = 5.0
 
 if not deployed_aca_smoke_enabled():
     pytest.skip(
@@ -193,7 +193,7 @@ async def _submit_and_wait(
                 "The resumed public session did not become ready within the bounded "
                 "setup-deadline retry window."
             )
-        await asyncio.sleep(_SETUP_RETRY_DELAY_SECONDS)
+        await asyncio.sleep(setup_retry_after_seconds(response_headers))
     if accepted_status in {401, 403, 404}:
         raise AcaSmokeEnvironmentError(
             "The protected deployed chat route rejected the app-only token or is missing."

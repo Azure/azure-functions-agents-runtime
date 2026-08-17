@@ -2,7 +2,7 @@ parameters:
   - name: acaServiceConnection
     displayName: 'ACA smoke: Azure service connection'
     type: string
-    default: 'larohra-sandboxgroup-test'
+    default: 'saf-foundry-connection'
   - name: acaRuntimeTarget
     displayName: 'Deployed ACA runtime target'
     type: string
@@ -13,11 +13,8 @@ parameters:
       - python314
   - name: acaLoadConcurrency
     displayName: 'Deployed ACA load concurrency'
-    type: string
-    default: '5'
-    values:
-      - '5'
-      - '100'
+    type: number
+    default: 5
   - name: acaProvisionConcurrency
     displayName: 'Deployed ACA provisioning concurrency'
     type: string
@@ -34,8 +31,11 @@ trigger:
       - main
       - release/*
 
-# CI only, does not trigger on PRs.
-pr: none
+pr:
+  branches:
+    include:
+      - main
+      - feature/*
 
 schedules:
   - cron: '0 0 * * MON'

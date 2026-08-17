@@ -58,12 +58,11 @@ def test_provision_concurrency_cli_wins_and_local_default_is_four(
 
 def test_dual_runtime_pipeline_limits_shared_group_provisioning_to_one_per_leg() -> None:
     root = Path(__file__).parent.parent
-    source = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
+    source = (root / "eng" / "scripts" / "aca_deployed_qualification.py").read_text()
     runbook = (root / "tests" / "live" / "README.md").read_text()
 
-    assert "default: '1'" in source
-    assert 'ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY}" -gt 1' in source
-    assert "acaProvisionConcurrency above 1 requires acaRuntimeTarget=python313 or python314." in source
+    assert "_PROVISION_CONCURRENCIES = frozenset({1, 2, 4})" in source
+    assert "provision_concurrency_requires_single_runtime" in source
     assert "at most one session per runtime leg (two total)" in runbook
     assert "parallel Python 3.13/3.14 validation" in runbook
 
@@ -85,23 +84,22 @@ def test_agent_and_ci_load_policy_keeps_n5_diagnostic_and_human_n100_formal_only
     assert "ACA_DEPLOYED_LOAD_CONCURRENCY` pipeline variable does not control this job" in runbook
     assert "N=10/25/50/100" not in runbook
     assert 'ACA_DEPLOYED_LOAD_CONCURRENCY="100"' not in pipeline
-    assert "ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY: ${{ parameters.acaLoadConcurrency }}" in pipeline
-    assert "acaLoadConcurrency=100 requires acaRuntimeTarget" in pipeline
+    assert "command: deployed-suite" in pipeline
+    assert "--load-concurrency ${{ parameters.acaLoadConcurrency }}" in pipeline
 
 
 def test_deployed_agent_preflight_acquires_but_never_decodes_or_logs_easy_auth_tokens() -> None:
     root = Path(__file__).parent.parent
-    pipeline = (root / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml").read_text()
-    agent_job = pipeline.split('- job: "ACADeployedAgentTurn"', maxsplit=1)[1].split(
-        '- job: "ACADeployedColdStart"', maxsplit=1
+    preflight = (root / "eng" / "scripts" / "aca_deployed_qualification.py").read_text()
+    preflight_function = preflight.split("def preflight_auth", maxsplit=1)[1].split(
+        "def _run_pytest", maxsplit=1
     )[0]
-    preflight = agent_job.split("python - <<'PY'", maxsplit=1)[1].split("\n            PY", maxsplit=1)[0]
 
     assert "await credential.get_token(" in preflight
-    assert 'print("Easy Auth token acquired")' in preflight
-    assert preflight.count("print(") == 1
-    for forbidden in ("base64", "json", "split(", "urlsafe_b64decode", "claim", "token.token"):
-        assert forbidden not in preflight
+    assert 'print("Azure service connection authenticated")' in preflight_function
+    assert preflight_function.count("print(") == 1
+    for forbidden in ("base64", "json", "split(", "urlsafe_b64decode", "claim"):
+        assert forbidden not in preflight_function
 
 
 def test_load_orchestration_preserves_public_and_read_only_boundaries() -> None:
@@ -1687,21 +1685,22 @@ def test_hold_constant_and_sse_continuation_guard(load_module: object) -> None:
 
 
 def test_deployed_job_uses_queue_parameters_for_n5_n100_and_provisioning() -> None:
-    source = (
+    pipeline = (
         Path(__file__).parents[1] / "eng" / "templates" / "official" / "jobs" / "e2e-tests.yml"
     ).read_text()
+    source = (
+        Path(__file__).parents[1] / "eng" / "scripts" / "aca_deployed_qualification.py"
+    ).read_text()
 
-    assert 'ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY:-' in source
-    assert "$(ACA_DEPLOYED_LOAD_CONCURRENCY)" not in source
-    assert "sole automated N=5 diagnostic" in source
-    assert "ACA_DEPLOYED_CONFIGURED_LOAD_CONCURRENCY: ${{ parameters.acaLoadConcurrency }}" in source
-    assert "ACA_DEPLOYED_CONFIGURED_PROVISION_CONCURRENCY: ${{ parameters.acaProvisionConcurrency }}" in source
-    assert "acaLoadConcurrency=100 requires acaRuntimeTarget=python313 or python314." in source
-    assert "acaProvisionConcurrency above 1 requires acaRuntimeTarget=python313 or python314." in source
+    assert "$(ACA_DEPLOYED_LOAD_CONCURRENCY)" not in pipeline
+    assert "--load-concurrency ${{ parameters.acaLoadConcurrency }}" in pipeline
+    assert "--provision-concurrency ${{ parameters.acaProvisionConcurrency }}" in pipeline
+    assert "dual_runtime_load_concurrency_requires_single_runtime" in source
+    assert "provision_concurrency_requires_single_runtime" in source
     assert "AZURE_FUNCTIONS_AGENTS_ACA_PROVISION_CONCURRENCY" in source
-    assert 'job: "ACADeployedAgentTurn"' in source
-    assert "timeoutInMinutes: 360" in source
-    assert "continueOnError: true" in source
+    assert 'job: "ACADeployedAgentTurn"' in pipeline
+    assert "timeoutInMinutes: 360" in pipeline
+    assert "continueOnError: true" in pipeline
 
 
 def test_setup_attempt_and_job_bounds_match_the_runbook() -> None:

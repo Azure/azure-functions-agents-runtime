@@ -994,6 +994,50 @@ async def test_finish_deleting_logs_already_absent_backing(
     ]
 
 
+@pytest.mark.asyncio
+async def test_finish_authorization_deletion_preserves_reason_without_reclaim_telemetry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = replace(
+        _session(now, status="deleting"),
+        tombstone_reason="sandbox_group_authorization_failed",
+    )
+    store = FakeSessionStateStore(session)
+    reconciler = SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=()),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await reconciler._finish_deleting(  # type: ignore[attr-defined]
+            session,
+            {},
+            {},
+            now,
+            ReconcileReport(),
+        )
+
+    assert report.tombstoned_sessions == 1
+    assert store.session is not None
+    assert store.session.tombstone_reason == "sandbox_group_authorization_failed"
+    payloads = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith("{")
+    ]
+    assert payloads == [
+        {
+            "event_name": "sandbox_session_cleanup",
+            "sandbox_id": "sandbox-1",
+            "session_id": "session-1",
+            "tombstone_reason": "sandbox_group_authorization_failed",
+        }
+    ]
+
+
 def test_reclaim_emits_a_customer_queryable_telemetry_contract(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -53,6 +53,7 @@ from azure_functions_agents.session_state import (
 )
 from azure_functions_agents.transport.manifest import SandboxManifestMismatchError
 from azure_functions_agents.transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     DiskSource,
     SandboxCreateOutcomeUnknownError,
     SandboxFileOperationError,
@@ -288,6 +289,7 @@ async def test_reserved_provision_authorization_failure_terminalizes_durable_sta
 
     assert store.session is not None
     assert store.session.status == "deleting"
+    assert store.session.tombstone_reason == "sandbox_group_authorization_failed"
     assert store.session.active_run_id is None
     assert store.session.active_operation_id is None
     assert store.runs["run-1"].status == "failed"
@@ -295,6 +297,24 @@ async def test_reserved_provision_authorization_failure_terminalizes_durable_sta
     [operation] = store.durable_operations.values()
     assert operation.state == "completed"
     assert operation.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_targeted_reconciliation_authorization_is_redacted(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    store = _FakeStore()
+
+    async def reconciliation(*_args: object) -> None:
+        raise SandboxGroupAuthorizationError()
+
+    runtime = _runtime(script_root, provider, store)
+    runtime = replace(runtime, _targeted_reconciler=reconciliation)
+
+    with pytest.raises(SessionActivationAuthorizationError) as caught:
+        await runtime.reconcile_session(owner_partition(_owner()), "session-1", SetupBudget.start())
+
+    assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
 
 
 @pytest.mark.asyncio

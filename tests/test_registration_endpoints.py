@@ -286,6 +286,51 @@ async def test_sandbox_events_preflight_returns_non_streaming_not_found(
 
 
 @pytest.mark.asyncio
+async def test_sandbox_events_preflight_returns_redacted_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    app = FakeFunctionApp()
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.create_execution_backend",
+        lambda **_kwargs: object(),
+    )
+
+    async def authorization_failure(*_args: Any, **_kwargs: Any) -> ControllerResponse:
+        return ControllerResponse(
+            status_code=503,
+            body={"error": "sandbox_group_authorization_failed"},
+        )
+
+    def unexpected_stream(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("SSE must not start after authorization failure")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_status",
+        authorization_failure,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.render_events",
+        unexpected_stream,
+    )
+    register_sandbox_management_endpoints(
+        app,  # type: ignore[arg-type]
+        slug="test-agent",
+        auth=EndpointAuthConfig(mode="function"),
+        session_runtime=_runtime(tmp_path),
+        binding=AgentBinding(agent_name="test-agent"),
+    )
+    route = next(route for route in app.routes if route["route"].endswith("/events"))
+    request = DummyRequest({})
+    request.path_params = {"session_id": "session-1", "run_id": "run-1"}
+
+    response = await route["handler"](request)
+
+    assert response.status_code == 503
+    assert json.loads(response.body) == {"error": "sandbox_group_authorization_failed"}
+
+
+@pytest.mark.asyncio
 async def test_sandbox_events_preflight_returns_the_gone_status_without_sse(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

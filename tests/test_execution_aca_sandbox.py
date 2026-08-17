@@ -25,6 +25,7 @@ from azure_functions_agents.controller.package import ContentDeliveryVerificatio
 from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     ProvisionedSubmission,
+    SessionActivationAuthorizationError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
     SessionRunOwnershipChangedError,
@@ -55,7 +56,13 @@ from azure_functions_agents.execution.run_control import (
     RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
-from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.execution.setup_budget import (
+    SetupBudget,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.journal_paths import (
     inbox_path,
     process_path,
@@ -84,6 +91,7 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     DiskSource,
     SandboxCapacityError,
     SandboxCreateOutcomeUnknownError,
@@ -658,6 +666,93 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
 
     assert replay.state == "accepted"
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_run_propagates_provider_authorization_without_table_fallback(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session)
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.attach_error = SandboxGroupAuthorizationError()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionActivationAuthorizationError) as caught:
+        await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+    assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_journal_acceptance_timeout_remains_a_typed_resumable_setup_timeout(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    metadata = SetupTimeoutMetadata.create(
+        phase=SetupPhase.JOURNAL,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        configured_budget_seconds=90.0,
+        elapsed_seconds=90.0,
+        remaining_seconds=0.0,
+    )
+
+    class TimeoutAfterAcceptanceRunControl(SandboxRunControl):
+        async def submit(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            await super().submit(*args, **kwargs)
+            raise SessionActivationSetupTimeoutError(metadata)
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        run_control=TimeoutAfterAcceptanceRunControl(),
+    )
+
+    response = await submit_run(
+        backend,
+        StartRunRequest(
+            prompt="hello",
+            session_id=session.session_id,
+            idempotency_key="journal-timeout",
+        ),
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    assert response.status_code == 504
+    assert response.headers["Retry-After"] == "120"
+    assert response.timeout_metadata is not None
+    assert response.timeout_metadata.phase == SetupPhase.JOURNAL
+    assert response.timeout_metadata.reason == SetupTimeoutReason.OPERATION_TIMEOUT
+    assert response.timeout_metadata.request_mode == "respond_async"
+    assert response.timeout_metadata.session_present
+    [run] = store.runs.values()
+    [operation] = store.durable_operations.values()
+    assert run.status == "accepted"
+    assert operation.phase == "submit_launching"
 
 
 @pytest.mark.asyncio
@@ -1277,7 +1372,7 @@ async def test_backend_retains_admitted_slot_when_acceptance_times_out(
         run_control=SandboxRunControl(event_poll_interval_seconds=0.001),
     )
 
-    with pytest.raises(RunSubmissionIndeterminateError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
 
     operations = [call.operation for call in handle.calls]
@@ -2421,6 +2516,7 @@ async def test_canceled_provision_replay_waits_for_lease_then_resumes_same_run(
     with pytest.raises(asyncio.CancelledError):
         await first
 
+    assert store.durable_operations[operation.operation_id].phase == "provision_reconcile"
     with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(request)
     assert provider.create_attempts == 1

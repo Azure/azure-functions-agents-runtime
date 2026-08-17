@@ -52,3 +52,16 @@ The Sandbox Group is read from the
 **Integration:**
 - **CI pipeline:** Runs in `eng/templates/official/jobs/e2e-tests.yml`
 
+### `aca_deployed_qualification.py`
+
+Runs the protected predeployed ACA smoke commands used by the official pipeline.
+It validates required environment variables, unresolved `$(VAR)` placeholders,
+numeric ranges, shared-Sandbox-Group limits, and the cold-start sample cap
+before invoking a live suite. It acquires an Easy Auth token through the Azure
+CLI credential without printing token material, claims, prompts, results, or
+resource IDs.
+
+The `deployed-suite` and `cold-start` commands are smoke only: they do not
+deploy, inspect, or attest a PR artifact or remote Python runtime. Azure
+Pipelines service connections used by PR jobs must be protected by pipeline
+permissions and checks.

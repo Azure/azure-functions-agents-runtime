@@ -1,0 +1,63 @@
+parameters:
+  - name: artifactFeed
+    type: string
+  - name: pythonVersion
+    type: string
+  - name: packageExtras
+    type: string
+    default: '.[dev,aca_sandbox]'
+  - name: serviceConnection
+    type: string
+  - name: displayName
+    type: string
+  - name: command
+    type: string
+  - name: commandArguments
+    type: string
+    default: ''
+  - name: condition
+    type: string
+    default: succeeded()
+
+steps:
+  - task: PipAuthenticate@1
+    displayName: 'Pip Authenticate'
+    condition: ${{ parameters.condition }}
+    inputs:
+      artifactFeeds: ${{ parameters.artifactFeed }}
+  - task: UsePythonVersion@0
+    condition: ${{ parameters.condition }}
+    inputs:
+      versionSpec: ${{ parameters.pythonVersion }}
+  - bash: |
+      python --version
+      python -m pip install --upgrade pip
+      python -m pip install -U -e "${{ parameters.packageExtras }}"
+    displayName: 'Install ACA qualification dependencies'
+    condition: ${{ parameters.condition }}
+  - task: AzureCLI@2
+    displayName: ${{ parameters.displayName }}
+    condition: ${{ parameters.condition }}
+    inputs:
+      azureSubscription: ${{ parameters.serviceConnection }}
+      scriptType: bash
+      scriptLocation: inlineScript
+      inlineScript: >-
+        python eng/scripts/aca_deployed_qualification.py ${{ parameters.command }} ${{ parameters.commandArguments }}
+    env:
+      AZURE_TOKEN_CREDENTIALS: 'dev'
+      AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE: '1'
+      AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE: '1'
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL: $(ACA_DEPLOYED_FUNCTION_BASE_URL)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG: $(ACA_DEPLOYED_AGENT_SLUG)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_DEPLOYED_EASY_AUTH_AUDIENCE)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS: $(ACA_DEPLOYED_TIMEOUT_SECONDS)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI: $(ACA_DEPLOYED_TABLE_SERVICE_URI)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME: $(ACA_DEPLOYED_TABLE_NAME)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_DEPLOYED_APP_SUBSCRIPTION_ID)
+      AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: $(ACA_DEPLOYED_APP_SITE_NAME)
+      AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+      AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
+      AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
+      BUILD_REASON: $(Build.Reason)

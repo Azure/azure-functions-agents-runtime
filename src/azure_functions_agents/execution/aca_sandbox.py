@@ -20,10 +20,10 @@ from ..controller.journal_integrity import (
 )
 from ..controller.readiness import (
     ActivatedSession,
+    SessionActivationAuthorizationError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
-    SessionActivationSetupTimeoutError,
     SessionRuntimeBinding,
     _within_setup_budget,
     abort_submit_operation,
@@ -69,7 +69,6 @@ from .run_control import (
     RunEnvelope,
     RunJournalProtocolError,
     RunSubmissionDefinitiveFailureError,
-    RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
 from .setup_budget import SetupBudget, SetupPhase
@@ -365,10 +364,6 @@ class AcaSandboxExecutionBackend:
                 setup_budget,
                 phase=SetupPhase.JOURNAL,
             )
-        except SessionActivationSetupTimeoutError as exc:
-            raise RunSubmissionIndeterminateError(
-                "Run launch may have started but journal acceptance was not confirmed."
-            ) from exc
         except RunJournalProtocolError:
             await self._handle_runtime_journal_corruption(
                 activated,
@@ -464,6 +459,8 @@ class AcaSandboxExecutionBackend:
                     fault_domain="sandbox",
                 ),
             )
+        except SessionActivationAuthorizationError:
+            raise
         except SessionActivationError:
             await self._runtime.reconcile_session(partition, context.session_id)
             refreshed = await state_binding.store.get_run(
@@ -519,6 +516,8 @@ class AcaSandboxExecutionBackend:
                     SetupBudget.start(),
                     allow_create=False,
                 )
+            except SessionActivationAuthorizationError:
+                raise
             except SessionActivationError:
                 return
             try:

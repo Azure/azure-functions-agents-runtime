@@ -333,6 +333,11 @@ class AcaSandboxAdapter:
                 )
             raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            if stable_attempt and create_accepted:
+                return await self._recover_stable_accepted_create(
+                    provisioning_attempt_id,
+                    request.labels.to_provider_labels(),
+                )
             if stable_attempt:
                 existing = await self._find_failed_create_sandboxes(
                     provisioning_attempt_id,

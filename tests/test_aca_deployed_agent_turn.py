@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import base64
+import importlib.util
 import inspect
 import json
+import sys
 import time
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -48,6 +50,65 @@ def test_setup_retry_after_uses_only_a_bounded_lease_delay(
     headers: dict[str, str], expected: float
 ) -> None:
     assert support.setup_retry_after_seconds(headers) == expected
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_submission_honors_the_setup_retry_after_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE", "1")
+    module_path = Path(__file__).parent / "live" / "test_aca_deployed_lifecycle.py"
+    spec = importlib.util.spec_from_file_location("_lifecycle_retry_regression", module_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
+    spec.loader.exec_module(module)
+    sleeps: list[float] = []
+    responses = iter(
+        [
+            (504, {"error": "setup_deadline_exceeded"}, {"Retry-After": "120"}),
+            (
+                202,
+                {"session_id": "session-1", "run_id": "run-1"},
+                {"x-ms-session-id": "session-1"},
+            ),
+            (200, {"state": "succeeded"}, {}),
+            (200, {"result": {"content": "ok"}}, {}),
+        ]
+    )
+
+    async def request(*_args: object, **_kwargs: object) -> tuple[int, dict[str, object], dict[str, str]]:
+        return next(responses)
+
+    async def read_events(*_args: object, **_kwargs: object) -> tuple[int, list[object], dict[str, str]]:
+        return 200, [SimpleNamespace(payload={"type": "done"})], {}
+
+    async def record_sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    accepted = SimpleNamespace(
+        session_id="session-1",
+        run_id="run-1",
+        management_urls={
+            "events_url": "events",
+            "status_url": "status",
+            "result_url": "result",
+        },
+    )
+    monkeypatch.setattr(module, "json_request", request)
+    monkeypatch.setattr(module, "read_sse_events", read_events)
+    monkeypatch.setattr(module, "parse_accepted_run", lambda *_args: accepted)
+    monkeypatch.setattr(module.asyncio, "sleep", record_sleep)
+
+    result = await module._submit_and_wait(
+        object(),
+        SimpleNamespace(deployed=SimpleNamespace(chat_url="chat")),
+        {"Authorization": "Bearer redacted"},
+        session_id=None,
+    )
+
+    assert result is accepted
+    assert sleeps == [120.0]
 
 
 def _set_deployed_environment(monkeypatch: pytest.MonkeyPatch) -> None:

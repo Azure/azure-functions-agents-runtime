@@ -717,8 +717,16 @@ async def test_stable_create_recovers_labeled_sandbox_after_poller_authorization
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "poll_failure",
+    [
+        TimeoutError("sensitive poll timeout"),
+        RuntimeError("sensitive poll failure"),
+    ],
+)
 async def test_stable_create_keeps_post_acceptance_authorization_failure_indeterminate(
     monkeypatch: pytest.MonkeyPatch,
+    poll_failure: Exception,
 ) -> None:
     environment = FakeSdkEnvironment()
     _install_fake_adapter_boundary(monkeypatch, environment)
@@ -733,7 +741,7 @@ async def test_stable_create_keeps_post_acceptance_authorization_failure_indeter
     )
     rejection = HttpResponseError("sensitive provider response")
     rejection.status_code = 403
-    environment.group_client.create_result_error = rejection
+    environment.group_client.create_result_error = poll_failure
     original_list = environment.group_client.list_sandboxes
 
     def list_before_create_then_forbid(**kwargs: Any):
@@ -751,6 +759,7 @@ async def test_stable_create_keeps_post_acceptance_authorization_failure_indeter
         await adapter.create(_request(labels=labels), persisted_group=_binding())
 
     assert "sensitive provider response" not in str(caught.value)
+    assert "sensitive poll" not in str(caught.value)
     assert caught.value.__suppress_context__
     assert len(environment.group_client.create_calls) == 1
     assert "created-1" in environment.sandboxes
