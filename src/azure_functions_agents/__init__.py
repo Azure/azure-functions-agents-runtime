@@ -112,7 +112,6 @@ from ._function_tool import tool, workflow_tool  # noqa: E402
 from .app import create_function_app  # noqa: E402
 from .bindings import (  # noqa: E402
     AiApp,
-    DurableAiAgent,
     DurableAiApp,
     agent_input,
 )
@@ -140,7 +139,6 @@ __all__ = [
     "AgentResult",
     "AiApp",
     "ClientManager",
-    "DurableAiAgent",
     "DurableAiApp",
     "MAFClientManager",
     "__version__",

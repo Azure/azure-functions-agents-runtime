@@ -94,12 +94,6 @@ name — for example `server.address` for the session-pool host. MAF keeps emitt
 
 One span surrounds each async smart-binding handler invocation, including fresh Agent hydration, all customer-controlled calls on the raw Agent, and Agent closure. MAF model and tool spans inherit the active Functions trace context. Attributes include `gen_ai.agent.name`, the configured `gen_ai.request.model`, `faas.name` and `faas.invocation_id` when a Functions `Context` is present, `af.lifecycle_stage=agent_run`, and `af.binding.outcome` (`success`, `cancelled`, or `error`). Async customer code owns model-call timeout policy, so the binding does not emit a timeout outcome for raw Agent calls.
 
-### Span `agent.binding.run <slug>`
-
-One span is emitted when the generated Durable activity performs its runtime-managed Agent call. It includes the binding identity attributes above, `durable.instance_id`, and `af.binding.outcome` (`success`, `timeout`, `cancelled`, or `error`).
-
-Orchestrator replay emits no binding or model span because `DurableAiAgent.run()` only schedules an activity. The generated activity emits the span when it actually performs model/tool work.
-
 ### Cross-cutting `af.*` (any runtime span)
 
 | Attribute | Meaning |

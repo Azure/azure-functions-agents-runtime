@@ -6,7 +6,7 @@ import json
 import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -185,7 +185,7 @@ async def test_ai_app_sample_preprocesses_order_before_agent_handoff(
     assert response.status_code == 200
 
 
-def test_durable_ai_app_sample_indexes_durable_modes(
+def test_durable_ai_app_sample_indexes_explicit_agent_activities(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     module = _load_sample(
@@ -206,7 +206,7 @@ def test_durable_ai_app_sample_indexes_durable_modes(
         "start_order_orchestration": ["httpTrigger", "http", "durableClient"],
         "prepare_order_activity": ["activityTrigger"],
         "assess_order_activity": ["activityTrigger"],
-        "_afa_agent_binding_run": ["activityTrigger"],
+        "plan_fulfillment_activity": ["activityTrigger"],
         "order_orchestrator": ["orchestrationTrigger"],
     }
     starter = next(
@@ -223,3 +223,90 @@ def test_durable_ai_app_sample_indexes_durable_modes(
         if function.get_function_name() == "assess_order_activity"
     ).get_user_function()
     assert activity.__annotations__["order"] is dict
+
+
+@pytest.mark.asyncio
+async def test_durable_sample_keeps_agent_transcripts_out_of_activity_results(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_sample(
+        DURABLE_SAMPLE_SRC,
+        "hybrid_durable_agent_compact_results_sample",
+        monkeypatch,
+    )
+    handlers = {
+        function.get_function_name(): inspect.unwrap(function.get_user_function())
+        for function in module.app.get_functions()
+    }
+    response = SimpleNamespace(
+        text="Review required",
+        messages=[{"role": "assistant", "text": "sensitive transcript"}],
+        response_id="response-123",
+        usage_details={"input_token_count": 100, "output_token_count": 20},
+    )
+    agent = SimpleNamespace(run=AsyncMock(return_value=response))
+
+    assessment = await handlers["assess_order_activity"]({"order_id": "D-2048"}, agent)
+    plan = await handlers["plan_fulfillment_activity"](
+        {"order": {"order_id": "D-2048"}, "risk_assessment": assessment},
+        agent,
+    )
+
+    assert assessment == "Review required"
+    assert plan == {"text": "Review required"}
+    assert "sensitive transcript" not in json.dumps([assessment, plan])
+    assert [json.loads(awaited.args[0]) for awaited in agent.run.await_args_list] == [
+        {
+            "order": {"order_id": "D-2048"},
+            "task": "assess fulfillment risk using the trusted calculated fields",
+        },
+        {
+            "order": {"order_id": "D-2048"},
+            "risk_assessment": "Review required",
+            "task": "create a fulfillment plan with prioritized human-review actions",
+        },
+    ]
+
+
+def test_durable_sample_orchestrator_owns_agent_activity_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = _load_sample(
+        DURABLE_SAMPLE_SRC,
+        "hybrid_durable_agent_contract_sample",
+        monkeypatch,
+    )
+    orchestrator = next(
+        function
+        for function in module.app.get_functions()
+        if function.get_function_name() == "order_orchestrator"
+    ).get_user_function()
+    source_orchestrator = orchestrator.orchestrator_function
+    context = Mock(spec=df.DurableOrchestrationContext)
+    context.get_input.return_value = {"order_id": "D-2048"}
+    context.call_activity.side_effect = ["prepare-task", "assess-task"]
+    context.call_activity_with_retry.return_value = "plan-task"
+
+    generator = source_orchestrator(context)
+    assert next(generator) == "prepare-task"
+    assert generator.send({"order_id": "D-2048", "summary": {}}) == "assess-task"
+    assert generator.send("Review required") == "plan-task"
+    with pytest.raises(StopIteration) as completed:
+        generator.send({"text": "Route to a fulfillment specialist."})
+
+    context.call_activity_with_retry.assert_called_once()
+    activity_name, retry_options, payload = context.call_activity_with_retry.call_args.args
+    assert activity_name == "plan_fulfillment_activity"
+    assert retry_options.to_json() == {
+        "firstRetryIntervalInMilliseconds": 5_000,
+        "maxNumberOfAttempts": 3,
+    }
+    assert payload == {
+        "order": {"order_id": "D-2048", "summary": {}},
+        "risk_assessment": "Review required",
+    }
+    assert completed.value.value == {
+        "order_id": "D-2048",
+        "risk_assessment": "Review required",
+        "fulfillment_plan": "Route to a fulfillment specialist.",
+    }

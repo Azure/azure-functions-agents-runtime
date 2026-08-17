@@ -176,14 +176,22 @@ async def process_order(
 
 Existing `func.FunctionApp()` instances can use `agent_input(app, ...)` instead. `create_function_app()` now returns an enhanced `AiApp` or `DurableAiApp`, preserving its existing declarative routes and triggers while allowing hybrid handlers to be added.
 
-`agent_name` is the source filename stem or normalized slug, not the front-matter display name. For bindings, the agent file requires only string `name` and `description` fields; its markdown body supplies instructions and follows the standard environment-substitution behavior, including `substitute_variables: false`. Other per-agent front-matter fields are ignored. Model, timeout, system tools, discovered tools, skills, and MCP servers come from app-level configuration.
+`agent_name` is the source filename stem or normalized slug, not the front-matter display name. For bindings, the agent file requires only string `name` and `description` fields; those fields and the markdown instructions follow the standard environment-substitution behavior, including `substitute_variables: false`. Other per-agent front-matter fields are ignored. Model, timeout, system tools, discovered tools, skills, and MCP servers come from app-level configuration.
+
+Capability assets are discovered app-wide before global tool exclusions are applied.
+Because smart-binding front matter has no per-agent capability filters, any malformed
+tool, skill, or MCP definition prevents all smart bindings in that app from
+registering. Fix or remove the failing asset rather than starting with a silently
+partial capability inventory.
 
 Function and activity handlers using `agent_input` must be declared with `async def`. They receive a raw `agent_framework.Agent` that is built and entered for that Function invocation, then closed when the handler returns, raises, or is cancelled. The app caches only an immutable blueprint and reusable dependency descriptions, never the live Agent or its MCP tools. These handlers control sessions, run options, middleware, streaming, and model-call timeouts; the Azure Functions invocation timeout remains the outer bound. Do not retain the Agent after the handler returns.
 
 Durable apps use `DurableAiApp` or a caller-owned `df.DFApp` with an explicit mode:
 
 - `mode="activity"` injects a raw Agent into an `async def` activity handler.
-- `mode="orchestrator"` injects `DurableAiAgent`; `run()` returns a replay-safe Durable task backed by the generated `_afa_agent_binding_run` activity. Streaming is unsupported.
+- Orchestrators do not support `agent_input`; they call an explicit customer-owned
+  activity that uses `mode="activity"`. The application owns that activity's name,
+  payload/result schemas, retry and idempotency policy, and Durable history boundary.
 
 See [`samples/hybrid-function-agent/`](samples/hybrid-function-agent/) for an `AiApp` with HTTP and queue handlers, and [`samples/hybrid-durable-agent/`](samples/hybrid-durable-agent/) for a `DurableAiApp` with activity and orchestrator handlers.
 Both samples demonstrate a production-oriented handoff: deterministic Python validates

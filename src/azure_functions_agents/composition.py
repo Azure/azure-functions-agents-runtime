@@ -11,7 +11,7 @@ from agent_framework import FunctionTool
 
 from ._function_tool import WorkflowTool
 from ._slug import _function_name_from_source
-from .config.env import _to_bool, substitute_env_vars_in_text
+from .config.env import _to_bool, substitute_env_vars_in_text, substitute_env_vars_in_value
 from .config.loader import (
     _collect_agent_files,
     _resolve_agents_dir,
@@ -110,9 +110,14 @@ def load_binding_definition(source_file: Path) -> BindingAgentDefinition:
         raise ValueError(f"{resolved_source}: failed to parse frontmatter: {exc}") from exc
 
     metadata: dict[str, object] = dict(post.metadata or {})
+    substitute_variables = _to_bool(metadata.get("substitute_variables", True), default=True)
+    if substitute_variables:
+        for field in ("name", "description"):
+            value = metadata.get(field)
+            if isinstance(value, str):
+                metadata[field] = substitute_env_vars_in_value(value)
     name = _required_string(metadata, "name", resolved_source)
     description = _required_string(metadata, "description", resolved_source)
-    substitute_variables = _to_bool(metadata.get("substitute_variables", True), default=True)
     instructions = str(post.content)
     if substitute_variables:
         instructions = substitute_env_vars_in_text(instructions)

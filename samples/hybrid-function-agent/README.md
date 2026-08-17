@@ -42,4 +42,4 @@ curl -X POST http://localhost:7071/orders/42 \
 Add the same JSON shape with an `order_id` field to the `orders` queue to invoke
 the event-driven handler.
 
-For Durable activity and orchestrator bindings, see the sibling [`hybrid-durable-agent`](../hybrid-durable-agent/) sample.
+For explicit Durable activities using the binding, see the sibling [`hybrid-durable-agent`](../hybrid-durable-agent/) sample.

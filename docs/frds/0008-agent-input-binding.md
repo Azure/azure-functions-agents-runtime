@@ -4,7 +4,7 @@ title: Python agent input binding
 status: Finalized
 author: hallvictoria
 created: 2026-08-11
-updated: 2026-08-14
+updated: 2026-08-17
 issues: [#1163, #1175, #1284]
 pull_requests: []
 branch: hallvictoria/agent-binding
@@ -20,9 +20,10 @@ markdown agent definition and receive a fresh, hydrated Microsoft Agent Framewor
 application logic; the runtime resolves and caches an immutable hydration blueprint at
 indexing time, then constructs and closes a new MAF Agent for every invocation.
 
-This v1 is Python-side dependency injection integrated with the Azure Functions
-decorator pipeline. It is not a host-recognized custom input binding and requires no
-.NET host extension or extension-bundle change.
+This v1 is Python-side dependency injection for Functions and customer-owned Durable
+activities, integrated with the Azure Functions decorator pipeline. It is not a
+host-recognized custom input binding and requires no .NET host extension or
+extension-bundle change.
 
 ## 2. Motivation / problem
 
@@ -46,8 +47,8 @@ host round trip.
 
 **Goals**
 
-- Let async Python v2 Functions and Durable activities declare a raw injected Agent by
-  logical agent name, while Durable orchestrators receive a replay-safe scheduling proxy.
+- Let async Python v2 Functions and customer-owned Durable activities declare a raw
+  injected Agent by logical agent name.
 - Support both a concise `AiApp.agent_input()` API and existing caller-owned
   `FunctionApp` objects through the same free `agent_input(app, ...)` implementation.
 - Resolve the supported `agent.md` / `.agent.md` convention. For smart bindings,
@@ -65,8 +66,8 @@ host round trip.
   configuration through model and tool calls.
 - Preserve all existing `create_function_app()` behavior and ordinary Functions
   binding metadata.
-- Preserve Durable replay determinism by scheduling orchestrator agent calls through a
-  generated activity, while allowing direct activity and entity injection.
+- Preserve Durable replay determinism by requiring orchestrators to schedule explicit
+  customer-owned activities for Agent work.
 - Demonstrate HTTP, event-driven, and Durable hybrid handlers in samples and tests.
 
 **Non-goals**
@@ -76,8 +77,10 @@ host round trip.
 - Synchronous Function or activity handlers and Durable Entity injection. MAF's Python
   Agent execution, streaming, and owned-resource lifecycle are asynchronous; v1 does
   not add a blocking compatibility facade or process executor.
-- Executing model or tool I/O directly in orchestrator replay code; orchestrator
-  injection is a replay-safe scheduling facade.
+- Executing model or tool I/O directly in orchestrator replay code.
+- An orchestrator Agent proxy or generated internal activity. V1 leaves activity
+  naming, payload/result schemas, retry and idempotency policy, and Durable history
+  contents under application ownership.
 - Per-agent binding overrides for model, timeout, tools, skills, MCP, system tools,
   subagents, workflows, schemas, triggers, or built-in endpoints. These front-matter
   properties remain available to the declarative `create_function_app()` path but are
@@ -95,8 +98,8 @@ host round trip.
 | --- | --- | --- |
 | discover | `composition.py`, existing `config/loader.py`, `discovery/*` | Build one app-root snapshot of binding definitions and app-level tools, skills, and MCP servers. |
 | translate | `composition.py` | Project each binding target to required name/description, markdown instructions, and app-level capabilities; ignore other per-agent front matter. |
-| register | `bindings.py`, `app.py` | Add `AiApp`, the free decorator, and one internal Durable activity without copying Azure Functions binding classes. |
-| execute | `hydration.py`, `runner.py`, `client_manager.py` | Build and enter a fresh MAF Agent from a cached blueprint per invocation; route orchestrator calls through the internal activity. |
+| register | `bindings.py`, `app.py` | Add `AiApp`, `DurableAiApp`, and the free decorator without copying Azure Functions binding classes or generating activities. |
+| execute | `hydration.py`, `runner.py`, `client_manager.py` | Build and enter a fresh MAF Agent from a cached blueprint per Function or activity invocation. |
 
 ### 4.1 Authoring and public API
 
@@ -178,8 +181,8 @@ slugs side by side.
 A definition referenced by at least one `agent_input` decorator is reachable and may
 omit a standalone trigger and built-in endpoints. The binding projection requires only
 string `name` and `description` values and treats the markdown body as instructions.
-It honors `substitute_variables` only to control standard environment substitution in
-that body. All other front-matter keys are ignored without validation or warnings, including
+It honors `substitute_variables` to control standard environment substitution in those
+recognized fields and the markdown body. All other front-matter keys are ignored without validation or warnings, including
 `trigger`, `builtin_endpoints`, model/tool/skill/MCP filters, schemas, workflows, and
 subagents. The customer's Function owns triggering, request/response adaptation, and
 Durable behavior. Invalid values in ignored keys are silently discarded and cannot
@@ -188,35 +191,39 @@ configuration. The existing declarative loader continues to recognize and valida
 the complete front-matter schema unchanged. Lookup errors explicitly state that
 `agent_name` is a filename stem or normalized slug, not the front-matter display name.
 
-Durable handlers select an explicit mode because `agent_input` is applied before the
-outer Azure decorator and cannot inspect binding metadata without private SDK state:
+Durable activities select an explicit mode because `agent_input` is applied before
+the outer Azure decorator and cannot inspect binding metadata without private SDK
+state. Orchestrators call those customer-owned activities explicitly:
 
 ```python
 import json
 
 import azure.durable_functions as df
 
-from azure_functions_agents import DurableAiAgent, DurableAiApp
+from agent_framework import Agent
+from azure_functions_agents import DurableAiApp
 
 app = DurableAiApp()
 
 
-@app.orchestration_trigger(context_name="context")
+@app.activity_trigger(input_name="request")
 @app.agent_input(
   arg_name="planner",
   agent_name="order-fulfillment",
-  mode="orchestrator",
+  mode="activity",
 )
-def order_orchestrator(
-  context: df.DurableOrchestrationContext,
-  planner: DurableAiAgent,
-):
-  plan = yield planner.run(json.dumps(context.get_input()))
-  return plan["text"]
+async def plan_order_activity(request: dict, planner: Agent) -> dict[str, str]:
+  plan = await planner.run(json.dumps(request))
+  return {"text": plan.text}
+
+
+@app.orchestration_trigger(context_name="context")
+def order_orchestrator(context: df.DurableOrchestrationContext):
+  return (yield context.call_activity("plan_order_activity", context.get_input()))
 ```
 
-`mode` is one of `"function"` (default), `"activity"`, or `"orchestrator"`.
-Functions and activities must be coroutine functions and receive the fresh raw MAF
+`mode` is either `"function"` (default) or `"activity"`. Functions and activities
+must be coroutine functions and receive the fresh raw MAF
 `Agent`. Synchronous Functions and activities fail during decorator application with
 an actionable error directing the author to use `async def`. This is a MAF protocol
 requirement, not only a wrapper implementation choice: MAF Python is async-first.
@@ -224,16 +231,16 @@ Non-streaming `Agent.run()` returns an awaitable, streaming returns an async res
 stream, and Agent context entry and exit are asynchronous. MAF exposes no blocking
 Agent execution or lifecycle protocol for a synchronous Function or activity handler.
 
-Orchestrators remain synchronous generators and receive `DurableAiAgent`; `run()`
-returns a Durable `TaskBase`, which the handler yields exactly once. `DurableAiAgent`
-is required because Durable orchestrator code must be deterministic and replay-safe:
-it cannot directly perform model calls, network I/O, or tool execution. The proxy is
-therefore deliberately not a MAF Agent. It only validates deterministic,
-JSON-serializable input and schedules the runtime-owned activity where Agent hydration
-and all external I/O occur. The yielded result is a JSON dictionary containing `text`,
-`messages`, `response_id`, and `usage` fields rather than a live MAF response. Durable
-Entity injection is outside v1 because entity handlers are synchronous and MAF exposes
-no blocking Agent execution or lifecycle protocol.
+Orchestrators remain synchronous generators and receive no injected Agent or proxy.
+They explicitly schedule an application activity whose async handler uses
+`mode="activity"`. This keeps Durable concepts visible: the customer owns the activity
+name, JSON payload and result contracts, retries, idempotency behavior, and which
+response or transcript fields enter Durable history. The library owns Agent hydration
+and lifecycle only within the activity invocation. A standardized one-line proxy is
+deferred until usage evidence shows that its reduced call-site boilerplate outweighs
+the second abstraction and library-owned Durable semantics. Durable Entity injection
+is outside v1 because entity handlers are synchronous and MAF exposes no blocking
+Agent execution or lifecycle protocol.
 
 ### 4.2 SDK integration
 
@@ -250,10 +257,9 @@ import with an actionable error.
 the Durable SDK's activity and orchestration decorators while adding the bound
 `@app.agent_input(...)` method and explicit `app_root` configuration. A caller-owned
 `azure.durable_functions.DFApp` used with the free `agent_input(app, ...)` decorator
-has equivalent binding behavior. Registration of the generated
-`_afa_agent_binding_run` activity is triggered by the first orchestrator binding, not
-by constructing or subclassing `DurableAiApp`. Non-Durable applications can continue
-to use `AiApp` or a caller-owned `azure.functions.FunctionApp`.
+has equivalent binding behavior. No generated activity is registered by constructing
+or subclassing `DurableAiApp`. Non-Durable applications can continue to use `AiApp` or
+a caller-owned `azure.functions.FunctionApp`.
 
 The smart decorator accepts a plain callable and returns a wrapped callable. It does
 not create, copy, inspect, or mutate `FunctionBuilder` or binding objects. The wrapper
@@ -269,14 +275,11 @@ plain function, coroutine function, or generator function, which rejects a
 `FunctionBuilder` without importing or inspecting its private class. There is no SDK
 compatibility adapter and no `_configure_function_builder` access.
 
-The wrapper form follows `mode`:
-
-- `function` and `activity`: async wrapper for required coroutine handlers;
-- `orchestrator`: synchronous generator wrapper that delegates with `yield from`.
+Both supported modes use an async wrapper for required coroutine handlers.
 
 Runtime probes against the supported `azure-functions>=2.1.0,<3` and
 `azure-functions-durable>=1.2.10,<2` ranges verify callable recognition, public
-`inspect.signature()` behavior, and generated binding metadata.
+`inspect.signature()` behavior, and binding metadata.
 
 ### 4.3 Composition, validation, and caching
 
@@ -316,7 +319,12 @@ Shared loading:
 `DiscoveryInventory` is an immutable projection of existing `ProjectTools`,
 `SkillDiscoveryResult`, and `MCPDiscoveryResult` outputs. It introduces no second
 discovery mechanism. Names are retained for skill/MCP diagnostics and deterministic
-ordering; all discovery failures are normalized to `(source, reason)` pairs.
+ordering; all discovery failures are normalized to `(source, reason)` pairs. Because
+v1 discovers app-level assets before global tool exclusions and binding definitions
+cannot filter capabilities per agent, any tool, skill, or MCP discovery failure rejects
+binding registration for the app. This coupling is intentional: continuing with a
+partial inventory would silently change the bound Agent's capabilities. The diagnostic
+lists each failed source and requires the asset to be fixed or removed.
 
 Full declarative composition remains owned by `create_function_app()` and continues
 to use `AgentSpec`, `compose()`, complete validation, and `CatalogEntry` exactly as
@@ -417,19 +425,12 @@ async def wrapped_handler(*args, **kwargs):
     return await user_handler(*args, **kwargs)
 ```
 
-For orchestrators, `DurableAiAgent.run()` performs no model, tool, environment, cache,
-or network access. It synchronously validates JSON-serializable input and returns
-`context.call_activity("_afa_agent_binding_run", payload)`. The payload contains the
-normalized slug, messages/options, and orchestration instance ID. No generated UUID,
-wall-clock value, process cache value, or mutable call counter enters the payload; the
-Durable history's activity schedule order is the call sequence. A single internal
-async activity is registered once per `DurableAiApp` when its first orchestrator
-binding is decorated. It hydrates a fresh Agent from the blueprint, performs one
-runtime-managed call, closes the Agent, and returns the documented JSON dictionary. On
-replay, the generator schedules the same activity at the same history
-position and `yield` receives the recorded result; the activity and model call are not
-re-executed. Two source calls produce two ordered history actions without a custom
-sequence field. Streaming is unsupported in orchestrators.
+For orchestrators, the customer declares and schedules a normal Durable activity. Its
+payload must satisfy the application's own JSON contract, and its result determines
+what Durable records in orchestration history. Retry options, idempotency behavior,
+activity naming, and any transcript projection are likewise application decisions.
+The activity's async handler can use `mode="activity"` to receive a fresh Agent without
+moving those Durable semantics into the binding library.
 
 Cancellation of an async handler naturally cancels its current-loop work and still
 exits the Agent context. No binding-specific executor or shutdown API is required;
@@ -450,9 +451,9 @@ Function name, invocation ID when available, outcome, and fault domain. MAF mode
 tool spans inherit this active context. Prompt and response content remain governed by
 the existing sensitive-data setting.
 
-An orchestrator emits no model span during replay. Its generated activity creates the
-`agent.binding.run <slug>` span with Durable instance ID; the durable task/activity
-trace context provides correlation with the orchestration.
+An orchestrator emits no model span during replay. A customer-owned Agent activity
+creates the normal `agent.binding.invoke <slug>` span around its handler invocation;
+the Durable task/activity trace context provides correlation with the orchestration.
 
 Model, storage, MCP, and system tools continue to use the Function App's configured
 managed identity and existing client-ID precedence. Caller bearer tokens are neither
@@ -466,12 +467,9 @@ Binding parsing fails only for invalid YAML, missing/non-string `name` or
 shape incompatible with its declared mode. Ignored front-matter fields never make a
 binding target invalid.
 
-`function` and `activity` modes require coroutine functions. `orchestrator` mode
-requires a synchronous generator function and a runtime
-`DurableOrchestrationContext`. Durable proxy messages and options must be
-JSON-serializable. Orchestrator streaming and raw Agent access are unsupported. Async
-`function` and `activity` handlers receive raw MAF Agents and support the complete MAF
-API. `entity` is not a valid mode.
+`function` and `activity` modes require coroutine functions. Async handlers receive
+raw MAF Agents and support the complete MAF API. `orchestrator` and `entity` are not
+valid modes; orchestrators call explicit activities instead.
 
 Subagent, workflow, trigger, endpoint, schema, and per-agent capability declarations
 are ignored by the binding projection rather than rejected. They continue to affect
@@ -539,6 +537,8 @@ shims for MAF 1.3 are not part of v1.
 | 28 | Revised public surface | retain cache-era names / aliases / clean replacement | Remove preview-only `AiAgent` and `shutdown_agent_cache`; customers annotate async injection with `agent_framework.Agent`, while `shutdown_agent_runtime()` names the remaining sync-executor/client-manager cleanup | Agent | 2026-08-12 |
 | 29 | Synchronous handler scope | blocking facade / per-call `asyncio.run()` / async-only | Supersedes the sync and entity portions of #15, #19, #25, and #28: require coroutine Functions and activities, retain only the synchronous replay-safe orchestrator proxy, exclude entity injection, and remove `SyncAiAgent`, `AgentExecutor`, and `shutdown_agent_runtime` | Human | 2026-08-12 |
 | 30 | Binding instruction substitution | raw markdown / unconditional substitution / standard per-agent control | Narrowly supersedes #16: apply the standard markdown environment substitution behavior and honor `substitute_variables`; continue ignoring all capability and runtime fields | Agent | 2026-08-14 |
+| 31 | Durable orchestrator ownership | generated proxy/activity / explicit customer activity / exclude Durable | Supersedes the orchestrator portions of #15, #21, #25, #26, and #29: v1 supports raw Agent injection in customer-owned async activities only. Orchestrators call those activities explicitly so the application owns naming, payload/results, retries, idempotency, and Durable history contents; defer a standardized proxy until usage evidence justifies library ownership of those semantics | Human | 2026-08-17 |
+| 32 | Capability discovery failures | fail app-wide / omit failed assets / scope by selected agent | Fail binding registration app-wide because v1 bindings inherit every discovered app-level capability and have no per-agent filters; silently omitting a failed asset would produce an unexpected partial Agent. Diagnostics identify failed sources and require repair or removal | Agent | 2026-08-17 |
 
 ## 6. Test plan
 
@@ -558,18 +558,17 @@ shims for MAF 1.3 are not part of v1.
 - [ ] Unit: synchronous Function/activity handlers and `mode="entity"` fail during
   decorator application with actionable async-only diagnostics.
 - [ ] Indexing: real `FunctionApp.get_functions()` coverage for `AiApp`, caller-owned
-  `FunctionApp`, `DurableAiApp`, caller-owned `DFApp`, and `create_function_app()`.
+  `FunctionApp`, `DurableAiApp`, caller-owned `DFApp`, and `create_function_app()`;
+  verify no hidden Agent activity is registered.
 - [ ] Indexing: the supported innermost decorator order, actionable rejection of the
   reverse order, worker-facing signature, unchanged trigger/output binding JSON,
   duplicate argument errors, mode/app mismatch, and handler-shape validation.
 - [ ] Indexing: SDK probes run against `azure-functions` 2.1 and the resolved upper
   supported release plus Durable 1.2.10 without importing or mutating
   `FunctionBuilder` internals.
-- [ ] Durable: async activities receive fresh raw Agents; orchestrator replay
-  schedules the same internal activity at the same history position and never repeats
-  model I/O; two calls preserve order; payload and result serialization are stable.
-- [ ] Durable: `stream=True` on `DurableAiAgent.run()` fails before activity scheduling
-  with an actionable non-streaming error.
+- [ ] Durable: async customer-owned activities receive fresh raw Agents;
+  `mode="orchestrator"` is rejected, and samples/tests show orchestrators scheduling
+  explicit activities with application-owned payload, result, and retry contracts.
 - [ ] Observability: active-parent correlation, nested MAF spans, outcomes, invocation
   attributes, current-loop propagation, Durable correlation/replay, sensitive-data
   gating, and managed-identity client selection.
@@ -590,14 +589,14 @@ shims for MAF 1.3 are not part of v1.
 ## 7. Docs impact
 
 - [ ] `docs/architecture.md` — `composition.py` module ownership, unchanged full
-  declarative pass, minimal binding projection, blueprint ownership, and
-  Durable smart-invocation pipeline.
+  declarative pass, minimal binding projection, blueprint ownership, and explicit
+  customer-owned Durable activity boundary.
 - [ ] `docs/front-matter-spec.md` — binding projection recognizes only name,
   description, and markdown instructions; all other fields are ignored.
-- [ ] `docs/observability.md` — binding invocation/activity spans and Durable
-  correlation/replay.
-- [ ] `docs/workflows.md` — async Durable activity, orchestrator proxy, and internal
-  activity behavior.
+- [ ] `docs/observability.md` — binding invocation spans and Durable activity
+  correlation.
+- [ ] `docs/workflows.md` — async Durable activity and explicit orchestrator activity
+  scheduling.
 - [ ] `README.md` — normal and Durable hybrid APIs, Agent lifecycle, and migration from
   `FunctionApp`, `DFApp`, and `create_function_app()`.
 - [ ] `samples/README.md`, `samples/hybrid-function-agent/`, and
@@ -620,6 +619,10 @@ not expected.
   the amendment preserves Durable proxies and invocation-owned sync facades.
 - **Async-only amendment:** Approved by hallvictoria on 2026-08-12. V1 now follows
   MAF's native async protocol for Functions and activities, removes the blocking sync
-  facade/executor, and excludes Durable Entity injection while preserving the
-  replay-safe synchronous orchestrator proxy.
+  facade/executor, and excludes Durable Entity injection. Its original orchestrator
+  proxy scope is superseded by the explicit-activity amendment below.
+- **Explicit-activity amendment:** Approved on 2026-08-17. V1 defers the orchestrator
+  proxy and generated activity. Orchestrators schedule customer-owned activities so
+  Durable naming, serialization, retry/idempotency, and history semantics remain
+  explicit application concerns.
 - **Human sign-off:** Approved by hallvictoria on 2026-08-12. Status set to `Finalized`.

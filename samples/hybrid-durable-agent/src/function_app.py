@@ -6,7 +6,7 @@ from agent_framework import Agent
 from azurefunctions.extensions.http.fastapi import Request, Response
 from order_processing import prepare_order_for_agent
 
-from azure_functions_agents import DurableAiAgent, DurableAiApp
+from azure_functions_agents import DurableAiApp
 
 app = DurableAiApp()
 
@@ -57,15 +57,31 @@ async def assess_order_activity(order: dict, order_agent: Agent) -> str:
     return response.text
 
 
-@app.orchestration_trigger(context_name="context")
+@app.activity_trigger(input_name="request")
 @app.agent_input(
-    arg_name="planner",
+    arg_name="order_agent",
     agent_name="order-fulfillment",
-    mode="orchestrator",
+    mode="activity",
 )
+async def plan_fulfillment_activity(
+    request: dict,
+    order_agent: Agent,
+) -> dict[str, str]:
+    response = await order_agent.run(
+        json.dumps(
+            {
+                "order": request["order"],
+                "risk_assessment": request["risk_assessment"],
+                "task": "create a fulfillment plan with prioritized human-review actions",
+            }
+        )
+    )
+    return {"text": response.text}
+
+
+@app.orchestration_trigger(context_name="context")
 def order_orchestrator(
     context: df.DurableOrchestrationContext,
-    planner: DurableAiAgent,
 ):
     prepared_order = yield context.call_activity(
         "prepare_order_activity",
@@ -75,14 +91,16 @@ def order_orchestrator(
         "assess_order_activity",
         prepared_order,
     )
-    plan = yield planner.run(
-        json.dumps(
-            {
-                "order": prepared_order,
-                "risk_assessment": assessment,
-                "task": "create a fulfillment plan with prioritized human-review actions",
-            }
-        )
+    plan = yield context.call_activity_with_retry(
+        "plan_fulfillment_activity",
+        df.RetryOptions(
+            first_retry_interval_in_milliseconds=5_000,
+            max_number_of_attempts=3,
+        ),
+        {
+            "order": prepared_order,
+            "risk_assessment": assessment,
+        },
     )
     return {
         "order_id": prepared_order["order_id"],
