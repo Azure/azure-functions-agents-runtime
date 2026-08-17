@@ -20,6 +20,15 @@ def test_app_registration_and_live_turn_share_the_production_composition_facade(
     assert "AZURE_CLIENT_ID" not in live_turn
 
 
+def test_low_level_smoke_uses_the_production_setup_budget_and_manifest_gate() -> None:
+    support = (Path(__file__).parents[1] / "tests/live/aca_smoke_support.py").read_text()
+
+    assert "setup_deadline = SetupBudget.start()" in support
+    assert "remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(" in support
+    assert "_wait_for_created_manifest(" in support
+    assert "remaining_setup_budget_seconds=30.0" not in support
+
+
 def test_snapshot_cleanup_precedes_and_follows_sandbox_deletion() -> None:
     root = Path(__file__).parents[1]
     support = (root / "tests/live/aca_smoke_support.py").read_text()

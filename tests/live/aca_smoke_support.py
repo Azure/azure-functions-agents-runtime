@@ -35,7 +35,12 @@ from azure_functions_agents.controller.package import (
     get_content_package,
     read_live_manifest_binding,
 )
+from azure_functions_agents.controller.readiness import (
+    _wait_for_created_manifest,
+    _within_setup_budget,
+)
 from azure_functions_agents.egress.policy import compile_egress_policy
+from azure_functions_agents.execution.setup_budget import SetupBudget, SetupPhase
 from azure_functions_agents.journal_paths import (
     JOURNAL_ROOT_PATH,
     SANDBOX_APPLICATION_PATH,
@@ -72,7 +77,6 @@ _ZIP_SPEC_VERSION = 20
 _STANDARD_FILE_UNIX_MODE = 0o100644 << 16
 _DIRECTORY_UNIX_MODE = 0o40755 << 16
 _DELIVERED_SITE_PACKAGES_PREFIX = ".python_packages/lib/site-packages/"
-_CREATE_TIMEOUT_SECONDS = 90.0
 _COMMAND_TIMEOUT_SECONDS = 60.0
 CI_OWNER_KIND = "aca_smoke_ci"
 CI_OWNER_HASH = "o1-" + ("c" * 52)
@@ -689,6 +693,7 @@ async def prepare_materialized_application(
     *,
     application_root: Path,
     config: AcaSmokeConfig,
+    setup_deadline: SetupBudget,
 ) -> None:
     """Deliver a production-captured materialized Function-app root."""
 
@@ -707,8 +712,16 @@ async def prepare_materialized_application(
         digest=package.digest,
         state_store_fingerprint=_SMOKE_STATE_STORE_FINGERPRINT,
     )
-    await deliver_content_and_bootstrap(handle, package, expected, handle.identity)
-    await read_live_manifest_binding(handle, expected, handle.identity)
+    await _within_setup_budget(
+        deliver_content_and_bootstrap(handle, package, expected, handle.identity),
+        setup_deadline,
+        phase=SetupPhase.CONTENT,
+    )
+    await _wait_for_created_manifest(
+        handle,
+        expected=expected,
+        setup_deadline=setup_deadline,
+    )
 
 
 async def _preflight_sandbox_model_access(handle: SandboxSessionHandle) -> None:
@@ -1041,15 +1054,24 @@ async def provision_aca_smoke_sandbox(
     sandbox_id: str | None = None
     labels: dict[str, str] = {}
     creation_attempted = False
+    setup_deadline = SetupBudget.start()
 
     try:
         closure: DependencyClosureArchive | None = None
         if materialized_app_root is None:
             with tempfile.TemporaryDirectory(prefix=".aca-smoke-", dir=REPOSITORY_ROOT) as temporary:
-                closure = await asyncio.to_thread(build_dependency_closure, Path(temporary))
+                closure = await _within_setup_budget(
+                    asyncio.to_thread(build_dependency_closure, Path(temporary)),
+                    setup_deadline,
+                    phase=SetupPhase.PACKAGE_CAPTURE,
+                )
             _enforce_archive_budget(len(closure.payload))
 
-        adapter = await AcaSandboxAdapter.open(config.group_resource_id)
+        adapter = await _within_setup_budget(
+            AcaSandboxAdapter.open(config.group_resource_id),
+            setup_deadline,
+            phase=SetupPhase.PROVIDER_BIND,
+        )
         group_binding = SandboxGroupBinding.create(
             resource_id=adapter.group.resource_id,
             region=adapter.group.region,
@@ -1071,38 +1093,56 @@ async def provision_aca_smoke_sandbox(
         request = SandboxCreateRequest.create(
             source=DiskSource.create(config.disk),
             labels=labels_model,
-            remaining_setup_budget_seconds=30.0,
+            remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+                phase=SetupPhase.PROVISION_CREATE
+            ),
             environment=environment,
             egress_policy=egress_policy,
         )
         creation_attempted = True
-        async with asyncio.timeout(_CREATE_TIMEOUT_SECONDS):
-            handle = await adapter.create(request, persisted_group=group_binding)
+        handle = await _within_setup_budget(
+            adapter.create(request, persisted_group=group_binding),
+            setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
         sandbox_id = handle.identity.sandbox_id
 
-        await handle.set_lifecycle_policy(
-            SandboxLifecyclePolicy.create(
-                auto_suspend_seconds=60,
-                auto_delete_seconds=3_960,
-            )
+        await _within_setup_budget(
+            handle.set_lifecycle_policy(
+                SandboxLifecyclePolicy.create(
+                    auto_suspend_seconds=60,
+                    auto_delete_seconds=3_960,
+                )
+            ),
+            setup_deadline,
+            phase=SetupPhase.LIFECYCLE,
         )
         if materialized_app_root is not None:
             await prepare_materialized_application(
                 handle,
                 application_root=materialized_app_root,
                 config=config,
+                setup_deadline=setup_deadline,
             )
         elif closure is not None:
             sandbox_root = f"/tmp/{session_id}"
             closure_archive_path = f"{sandbox_root}/dependency-closure.zip"
             closure_directory = f"{sandbox_root}/site-packages"
-            await handle.write_file(closure_archive_path, closure.payload, create_dirs=True)
-            extraction = await handle.exec(
-                _python_command(
-                    f"import zipfile; zipfile.ZipFile({closure_archive_path!r}).extractall("
-                    f"{closure_directory!r})"
+            await _within_setup_budget(
+                handle.write_file(closure_archive_path, closure.payload, create_dirs=True),
+                setup_deadline,
+                phase=SetupPhase.CONTENT,
+            )
+            extraction = await _within_setup_budget(
+                handle.exec(
+                    _python_command(
+                        f"import zipfile; zipfile.ZipFile({closure_archive_path!r}).extractall("
+                        f"{closure_directory!r})"
+                    ),
+                    timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
                 ),
-                timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
+                setup_deadline,
+                phase=SetupPhase.CONTENT,
             )
             _require_successful_setup_command(
                 description="dependency closure extraction failed",
@@ -1111,7 +1151,11 @@ async def provision_aca_smoke_sandbox(
                 stderr=extraction.stderr,
             )
         if before_yield is not None:
-            await before_yield(handle)
+            await _within_setup_budget(
+                before_yield(handle),
+                setup_deadline,
+                phase=SetupPhase.JOURNAL,
+            )
     except asyncio.CancelledError:
         await _cleanup_sandbox_shielded(
             adapter=adapter,
