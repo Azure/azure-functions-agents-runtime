@@ -176,10 +176,61 @@ def test_build_harness_agent_session_forces_provider_managed_history(
     assert captured[0]["default_options"] == {"store": False}
 
 
+def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
+    """Markdown and runtime instructions remain separate from harness-level instructions."""
+    captured: list[dict[str, Any]] = []
+
+    def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
+        captured.append(kwargs)
+        return _FakeAgent()
+
+    import agent_framework
+
+    monkeypatch.setattr(
+        agent_framework,
+        "create_harness_agent",
+        fake_create_harness_agent,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        runner.get_client_manager(),
+        "build_chat_client_with_target",
+        lambda _model: (object(), InferenceTarget()),
+    )
+    monkeypatch.setattr(runner, "_build_history_provider", lambda: object())
+
+    asyncio.run(
+        runner._build_harness_agent_session(
+            instructions="Markdown system prompt.",
+            session_id="instruction-session",
+            tools=[],
+            mcp_tools=[],
+            skill_paths=None,
+            model=None,
+            sandbox_tools=None,
+            system_addendum=" Runtime system addendum.",
+            workflow_enabled=False,
+            workflow_durable_client=None,
+            agent_name=None,
+            web_request_tools=None,
+            harness_config=HarnessAgentConfig(harness_instructions="Harness guidance."),
+        )
+    )
+
+    assert captured[0]["agent_instructions"] == (
+        "Markdown system prompt. Runtime system addendum."
+    )
+    assert captured[0]["harness_instructions"] == "Harness guidance."
+
+
 def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:
-    """Harness agents expose delegation tools and return their error tracker."""
+    """Harness agents receive all shared tools and return their delegation error tracker."""
     captured_agent_options: list[dict[str, Any]] = []
     captured_delegate_options: list[tuple[Any, Any, float]] = []
+    local_tool = SimpleNamespace(name="local_tool")
+    mcp_tool = SimpleNamespace(name="mcp_tool")
+    sandbox_tool = SimpleNamespace(name="sandbox_tool")
+    web_request_tool = SimpleNamespace(name="web_request_tool")
     delegate_tool = SimpleNamespace(name="delegate_billing")
     delegate_tracker = runner._DelegateErrorTracker()
     subagents = [SimpleNamespace(agent="billing")]
@@ -220,16 +271,16 @@ def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) ->
         runner._build_harness_agent_session(
             instructions="coordinate specialists",
             session_id="shared-session",
-            tools=[SimpleNamespace(name="local_tool")],
-            mcp_tools=[],
+            tools=[local_tool],
+            mcp_tools=[mcp_tool],
             skill_paths=None,
             model=None,
-            sandbox_tools=None,
+            sandbox_tools=[sandbox_tool],
             system_addendum=None,
             workflow_enabled=False,
             workflow_durable_client=None,
             agent_name="coordinator",
-            web_request_tools=None,
+            web_request_tools=[web_request_tool],
             harness_config=HarnessAgentConfig(),
             subagents=subagents,
             catalog=catalog,
@@ -240,6 +291,9 @@ def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) ->
     assert captured_delegate_options == [(subagents, catalog, 123.0)]
     assert [tool.name for tool in captured_agent_options[0]["tools"]] == [
         "local_tool",
+        "sandbox_tool",
+        "web_request_tool",
+        "mcp_tool",
         "delegate_billing",
     ]
     assert returned_tracker is delegate_tracker
@@ -295,8 +349,10 @@ def test_fresh_harness_agents_reload_history_for_same_session(monkeypatch: Any) 
     ]
 
 
-def test_fresh_harness_agents_compact_externally_loaded_history(monkeypatch: Any) -> None:
-    """A fresh harness compacts loaded history while retaining the current prompt."""
+def test_harness_compacts_model_context_without_rewriting_stored_history(
+    monkeypatch: Any,
+) -> None:
+    """Compaction trims model context while provider storage retains the full conversation."""
     response_text = "prior response detail " * 80
     first_prompt = "first-turn context " * 80
     second_prompt = "current-turn question " * 80
@@ -352,7 +408,7 @@ def test_fresh_harness_agents_compact_externally_loaded_history(monkeypatch: Any
         response_text,
         second_prompt,
         response_text,
-    ]
+    ], "expected provider storage to retain the full, uncompacted conversation"
 
 
 # ---------------------------------------------------------------------------

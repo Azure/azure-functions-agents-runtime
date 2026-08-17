@@ -204,11 +204,14 @@ to the caller and supplied on later turns. In Azure, `BlobHistoryProvider` store
 Function App's configured storage account, so a request handled by another worker can reload the
 same conversation. The `FileHistoryProvider` fallback is for local development and does not provide
 cross-worker sharing. Harness runs force provider-managed history (`store=false`) because the runtime
-creates a fresh `AgentSession` for every request; Blob/File history, rather than a provider-side
-conversation ID, remains authoritative. Cross-worker turn ordering is not coordinated, so callers
-must still avoid concurrent turns for the same session ID. With both harness token limits configured,
-MAF compacts the externally loaded conversation history immediately before each model call. Agent
-instructions remain part of every call; compaction controls accumulated message-history growth.
+creates a new in-memory `AgentSession` object for every request, including later requests that supply
+the same session ID. Those objects represent the same logical conversation: each is initialized with
+the supplied ID, and the Blob/File provider reloads the history stored under that ID. Blob/File
+history, rather than a provider-side conversation ID retained on an earlier object, therefore remains
+authoritative. Cross-worker turn ordering is not coordinated, so callers must still avoid concurrent
+turns for the same session ID. With both harness token limits configured, MAF compacts the externally
+loaded conversation history immediately before each model call. Agent instructions remain part of
+every call; compaction controls accumulated message-history growth.
 
 For each workflow-enabled agent, `workflows/integration.py` uses the cataloged immutable
 `WorkflowPlanPolicy` to generate model guidance and agent-scoped management
@@ -250,7 +253,13 @@ By the time a handler calls `runner.run_agent()` or `runner.run_agent_stream()`,
 - `ResolvedAgent.instructions` becomes the per-agent instruction block.
 - `ResolvedAgent.timeout` and `ResolvedAgent.model` become execution settings.
 - `ResolvedAgent.harness_config` selects plain or harness construction and carries optional
-  context-compaction limits.
+  context-compaction limits. Harness mode remains explicit because the runtime cannot infer safe
+  context/output limits for every model; without both limits it provides no default compaction.
+  It also installs harness-specific persistence and middleware, so making it unconditional would
+  change existing agents even when no token reduction is possible. Plain mode preserves the direct
+  MAF `Agent` behavior for short-lived/stateless workloads, custom clients, and applications that
+  require complete uncompressed history; apps can enable harness mode globally and opt individual
+  agents out with `harness: false`.
 - `AgentCapabilities.filtered_user_tools` becomes the concrete user-tool list.
 - `AgentCapabilities.filtered_workflow_tools` contributes to that agent's
   `WorkflowPlanPolicy`; it does not shrink the complete Activity handler catalog.

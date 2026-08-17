@@ -397,6 +397,63 @@ class _DelegateErrorTracker:
         self.count += 1
 
 
+def _assemble_agent_inputs(
+    *,
+    instructions: str | None,
+    tools: list[Any] | None,
+    mcp_tools: list[Any] | None,
+    sandbox_tools: list[Any] | None,
+    web_request_tools: list[Any] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    workflow_agent_slug: str | None,
+    agent_name: str | None,
+    resolved_id: str | None,
+    delegate_tools: list[FunctionTool] | None,
+    workflow_policy: WorkflowPlanPolicy | None,
+) -> tuple[list[Any], str | None]:
+    """Assemble tools and system instructions shared by plain and harness agents."""
+    app_root = get_app_root()
+    resolved_tools: list[Any] = (
+        discover_user_tools(app_root).tools if tools is None else list(tools)
+    )
+
+    if sandbox_tools:
+        resolved_tools.extend(sandbox_tools)
+
+    if web_request_tools:
+        resolved_tools.extend(web_request_tools)
+
+    if workflow_enabled:
+        from .workflows.tools import build_workflow_tools
+
+        resolved_tools.extend(
+            build_workflow_tools(
+                session_id=resolved_id or "",
+                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
+                agent_name=agent_name or "main",
+                durable_client=workflow_durable_client,
+                policy=workflow_policy,
+            )
+        )
+
+    resolved_mcp_tools = (
+        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
+    )
+    if resolved_mcp_tools:
+        resolved_tools.extend(resolved_mcp_tools)
+
+    if delegate_tools:
+        resolved_tools.extend(delegate_tools)
+
+    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
+    if system_addendum:
+        effective_instructions = (effective_instructions or "") + system_addendum
+
+    return resolved_tools, effective_instructions
+
+
 def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
@@ -429,39 +486,21 @@ def _build_role_agent(
       (see :func:`_build_delegated_agent`), so they're naturally absent
       rather than stripped from a shared list.
     """
-    app_root = get_app_root()
-    resolved_tools: list[Any] = (
-        discover_user_tools(app_root).tools if tools is None else list(tools)
+    resolved_tools, effective_instructions = _assemble_agent_inputs(
+        instructions=instructions,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        sandbox_tools=sandbox_tools,
+        web_request_tools=web_request_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        resolved_id=resolved_id,
+        delegate_tools=delegate_tools,
+        workflow_policy=workflow_policy,
     )
-
-    if sandbox_tools:
-        resolved_tools.extend(sandbox_tools)
-
-    if web_request_tools:
-        resolved_tools.extend(web_request_tools)
-
-    if workflow_enabled:
-        from .workflows.tools import build_workflow_tools
-
-        resolved_tools.extend(
-            build_workflow_tools(
-                session_id=resolved_id or "",
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
-                durable_client=workflow_durable_client,
-                policy=workflow_policy,
-            )
-        )
-
-    resolved_mcp_tools = (
-        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
-    )
-    if resolved_mcp_tools:
-        # MAF's Agent.tools accepts a heterogeneous list of FunctionTool and MCP tools.
-        resolved_tools.extend(resolved_mcp_tools)
-
-    if delegate_tools:
-        resolved_tools.extend(delegate_tools)
 
     context_providers: list[ContextProvider] = []
     if history_provider is not None:
@@ -469,10 +508,6 @@ def _build_role_agent(
     skills_provider = _build_skills_provider(skill_paths)
     if skills_provider is not None:
         context_providers.append(skills_provider)
-
-    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
-    if system_addendum:
-        effective_instructions = (effective_instructions or "") + system_addendum
 
     from agent_framework import Agent
 
@@ -931,37 +966,7 @@ async def _build_harness_agent_session(
 
     history_provider = _build_history_provider()
 
-    # Tool list: identical assembly logic to _build_agent_session_history.
-    app_root = get_app_root()
-    resolved_tools: list[Any] = (
-        discover_user_tools(app_root).tools if tools is None else list(tools)
-    )
-
-    if sandbox_tools:
-        resolved_tools.extend(sandbox_tools)
-
-    if web_request_tools:
-        resolved_tools.extend(web_request_tools)
-
-    if workflow_enabled:
-        from .workflows.tools import build_workflow_tools
-
-        resolved_tools.extend(
-            build_workflow_tools(
-                session_id=resolved_id,
-                workflow_agent_slug=workflow_agent_slug or agent_name or "main",
-                agent_name=agent_name or "main",
-                durable_client=workflow_durable_client,
-                policy=workflow_policy,
-            )
-        )
-
-    resolved_mcp_tools = (
-        list(discover_mcp_servers(app_root).servers.values()) if mcp_tools is None else list(mcp_tools)
-    )
-    if resolved_mcp_tools:
-        resolved_tools.extend(resolved_mcp_tools)
-
+    delegate_tools: list[FunctionTool] | None = None
     delegate_error_tracker: _DelegateErrorTracker | None = None
     if subagents:
         effective_deadline = (
@@ -972,11 +977,22 @@ async def _build_harness_agent_session(
         delegate_tools, delegate_error_tracker = await build_subagent_tools(
             subagents, catalog, coordinator_deadline=effective_deadline
         )
-        resolved_tools.extend(delegate_tools)
 
-    effective_instructions = instructions.strip() if instructions and instructions.strip() else None
-    if system_addendum:
-        effective_instructions = (effective_instructions or "") + system_addendum
+    resolved_tools, effective_instructions = _assemble_agent_inputs(
+        instructions=instructions,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        sandbox_tools=sandbox_tools,
+        web_request_tools=web_request_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        resolved_id=resolved_id,
+        delegate_tools=delegate_tools,
+        workflow_policy=workflow_policy,
+    )
 
     # create_harness_agent takes skills_paths natively; no SkillsProvider in context_providers.
     # history_provider is passed directly (not via context_providers) so that the harness can
@@ -1006,6 +1022,71 @@ async def _build_harness_agent_session(
         )
 
     return agent, session, resolved_id, delegate_error_tracker, inference_target
+
+
+async def _build_agent_session(
+    *,
+    instructions: str | None,
+    session_id: str | None,
+    tools: list[Any] | None,
+    mcp_tools: list[Any] | None,
+    skill_paths: list[Path] | None,
+    model: str | None,
+    sandbox_tools: list[Any] | None,
+    system_addendum: str | None,
+    workflow_enabled: bool,
+    workflow_durable_client: Any | None,
+    workflow_agent_slug: str | None = None,
+    agent_name: str | None,
+    web_request_tools: list[Any] | None = None,
+    harness_config: HarnessAgentConfig | None = None,
+    subagents: list[SubagentRef] | None = None,
+    catalog: AgentCatalog | None = None,
+    coordinator_deadline: float | None = None,
+    workflow_policy: WorkflowPlanPolicy | None = None,
+) -> tuple[Any, Any, str, _DelegateErrorTracker | None, InferenceTarget]:
+    """Build the selected plain or harness agent-session implementation."""
+    if harness_config is not None:
+        return await _build_harness_agent_session(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            harness_config=harness_config,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
+            workflow_policy=workflow_policy,
+        )
+
+    return await _build_agent_session_history(
+        instructions=instructions,
+        session_id=session_id,
+        tools=tools,
+        mcp_tools=mcp_tools,
+        skill_paths=skill_paths,
+        model=model,
+        sandbox_tools=sandbox_tools,
+        system_addendum=system_addendum,
+        workflow_enabled=workflow_enabled,
+        workflow_durable_client=workflow_durable_client,
+        workflow_agent_slug=workflow_agent_slug,
+        agent_name=agent_name,
+        web_request_tools=web_request_tools,
+        subagents=subagents,
+        catalog=catalog,
+        coordinator_deadline=coordinator_deadline,
+        workflow_policy=workflow_policy,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1158,51 +1239,28 @@ async def run_agent(
     loop = asyncio.get_running_loop()
     coordinator_deadline = loop.time() + timeout
 
-    if harness_config is not None:
-        agent, session, resolved_id, delegate_error_tracker, inference_target = (
-            await _build_harness_agent_session(
-                instructions=instructions,
-                session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
-                model=model,
-                sandbox_tools=sandbox_tools,
-                system_addendum=system_addendum,
-                workflow_enabled=workflow_enabled,
-                workflow_durable_client=workflow_durable_client,
-                workflow_agent_slug=workflow_agent_slug,
-                agent_name=agent_name,
-                web_request_tools=web_request_tools,
-                harness_config=harness_config,
-                subagents=subagents,
-                catalog=catalog,
-                coordinator_deadline=coordinator_deadline,
-                workflow_policy=workflow_policy,
-            )
+    agent, session, resolved_id, delegate_error_tracker, inference_target = (
+        await _build_agent_session(
+            instructions=instructions,
+            session_id=session_id,
+            tools=tools,
+            mcp_tools=mcp_tools,
+            skill_paths=skill_paths,
+            model=model,
+            sandbox_tools=sandbox_tools,
+            system_addendum=system_addendum,
+            workflow_enabled=workflow_enabled,
+            workflow_durable_client=workflow_durable_client,
+            workflow_agent_slug=workflow_agent_slug,
+            agent_name=agent_name,
+            web_request_tools=web_request_tools,
+            harness_config=harness_config,
+            subagents=subagents,
+            catalog=catalog,
+            coordinator_deadline=coordinator_deadline,
+            workflow_policy=workflow_policy,
         )
-    else:
-        agent, session, resolved_id, delegate_error_tracker, inference_target = (
-            await _build_agent_session_history(
-                instructions=instructions,
-                session_id=session_id,
-                tools=tools,
-                mcp_tools=mcp_tools,
-                skill_paths=skill_paths,
-                model=model,
-                sandbox_tools=sandbox_tools,
-                system_addendum=system_addendum,
-                workflow_enabled=workflow_enabled,
-                workflow_durable_client=workflow_durable_client,
-                workflow_agent_slug=workflow_agent_slug,
-                agent_name=agent_name,
-                web_request_tools=web_request_tools,
-                subagents=subagents,
-                catalog=catalog,
-                coordinator_deadline=coordinator_deadline,
-                workflow_policy=workflow_policy,
-            )
-        )
+    )
 
     try:
         async with _session_lock_bounded_by(resolved_id, coordinator_deadline):
@@ -1360,51 +1418,28 @@ async def run_agent_stream(
     deadline = loop.time() + timeout
 
     try:
-        if harness_config is not None:
-            agent, session, resolved_id, delegate_error_tracker, inference_target = (
-                await _build_harness_agent_session(
-                    instructions=instructions,
-                    session_id=session_id,
-                    tools=tools,
-                    mcp_tools=mcp_tools,
-                    skill_paths=skill_paths,
-                    model=model,
-                    sandbox_tools=sandbox_tools,
-                    system_addendum=system_addendum,
-                    workflow_enabled=workflow_enabled,
-                    workflow_durable_client=workflow_durable_client,
-                    workflow_agent_slug=workflow_agent_slug,
-                    agent_name=agent_name,
-                    web_request_tools=web_request_tools,
-                    harness_config=harness_config,
-                    subagents=subagents,
-                    catalog=catalog,
-                    coordinator_deadline=deadline,
-                    workflow_policy=workflow_policy,
-                )
+        agent, session, resolved_id, delegate_error_tracker, inference_target = (
+            await _build_agent_session(
+                instructions=instructions,
+                session_id=session_id,
+                tools=tools,
+                mcp_tools=mcp_tools,
+                skill_paths=skill_paths,
+                model=model,
+                sandbox_tools=sandbox_tools,
+                system_addendum=system_addendum,
+                workflow_enabled=workflow_enabled,
+                workflow_durable_client=workflow_durable_client,
+                workflow_agent_slug=workflow_agent_slug,
+                agent_name=agent_name,
+                web_request_tools=web_request_tools,
+                harness_config=harness_config,
+                subagents=subagents,
+                catalog=catalog,
+                coordinator_deadline=deadline,
+                workflow_policy=workflow_policy,
             )
-        else:
-            agent, session, resolved_id, delegate_error_tracker, inference_target = (
-                await _build_agent_session_history(
-                    instructions=instructions,
-                    session_id=session_id,
-                    tools=tools,
-                    mcp_tools=mcp_tools,
-                    skill_paths=skill_paths,
-                    model=model,
-                    sandbox_tools=sandbox_tools,
-                    system_addendum=system_addendum,
-                    workflow_enabled=workflow_enabled,
-                    workflow_durable_client=workflow_durable_client,
-                    workflow_agent_slug=workflow_agent_slug,
-                    agent_name=agent_name,
-                    web_request_tools=web_request_tools,
-                    subagents=subagents,
-                    catalog=catalog,
-                    coordinator_deadline=deadline,
-                    workflow_policy=workflow_policy,
-                )
-            )
+        )
     except Exception as exc:
         logger.error("Failed to build agent session: %s", exc, exc_info=True)
         yield f"data: {json.dumps({'type': 'error', 'content': str(exc)})}\n\n"
