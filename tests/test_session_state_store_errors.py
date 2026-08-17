@@ -196,6 +196,7 @@ def _session(
         digest_kind="funcs_zip",
         digest="sha256:" + ("b" * 64),
         protocol="1",
+        checkpoint_expectation="required" if active_run_id is not None else "none",
         status=status,  # type: ignore[arg-type]
         last_activity_at=_NOW,
         expires_at=_NOW + timedelta(hours=24),
@@ -386,6 +387,39 @@ async def test_update_session_rejects_generation_rollback_but_allows_equal() -> 
 
 
 @pytest.mark.asyncio
+async def test_checkpoint_expectation_can_advance_but_never_downgrades() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    initial = _session(status="ready", active_run_id=None)
+    etag = await store.create_session(initial)
+    required = replace(initial, checkpoint_expectation="required")
+
+    etag = await store.update_session(previous=initial, updated=required, etag=etag)
+    with pytest.raises(SessionStateStoreError, match="checkpoint expectation"):
+        await store.update_session(
+            previous=required,
+            updated=replace(required, checkpoint_expectation="none"),
+            etag=etag,
+        )
+
+
+@pytest.mark.asyncio
+async def test_terminal_run_release_preserves_required_checkpoint_expectation() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    active_session = _session(status="running", active_run_id="run-1")
+    await store.create_session(active_session)
+    await store.create_run(_run(status="running"))
+
+    await store.adopt_terminal_run(_run(status="failed"))
+
+    released = await store.get_session(_partition(), active_session.session_id)
+    assert released.record.status == "ready"
+    assert released.record.active_run_id is None
+    assert released.record.checkpoint_expectation == "required"
+
+
+@pytest.mark.asyncio
 async def test_tombstone_session_preserves_historical_fields() -> None:
     fake = _FakeTableClient()
     store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
@@ -401,6 +435,7 @@ async def test_tombstone_session_preserves_historical_fields() -> None:
     assert read.record.tombstone_reason == "owner_deleted"
     assert read.record.digest == session.digest  # historical field preserved
     assert read.record.generation == session.generation
+    assert read.record.checkpoint_expectation == session.checkpoint_expectation
 
 
 # ---------------------------------------------------------------------------

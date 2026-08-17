@@ -18,6 +18,9 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
+from urllib.request import Request, urlopen
 
 from tests.aca_smoke_diagnostics import (
     AcaSmokeEnvironmentError,
@@ -59,6 +62,28 @@ class AcaSmokeConfig:
 
     group_resource_id: str
     disk: str
+
+
+@dataclass(frozen=True, slots=True)
+class AcaHistorySmokeConfig:
+    """Inputs for an operator-provisioned deployed ACA history scenario."""
+
+    aca: AcaSmokeConfig
+    base_url: str
+    agent_slug: str
+    function_key: str
+    resumed_session_id: str
+    gone_session_id: str
+    unavailable_session_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class AcaHistorySmokeResponse:
+    """One deployed Function response captured without interpreting its body."""
+
+    status_code: int
+    headers: Mapping[str, str]
+    body: bytes
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,6 +132,80 @@ def aca_smoke_config_from_environment() -> AcaSmokeConfig:
     disk = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK")
     require_sandbox_compatible_host(disk)
     return AcaSmokeConfig(group_resource_id=group_resource_id, disk=disk)
+
+
+def aca_history_smoke_config_from_environment() -> AcaHistorySmokeConfig:
+    """Read the deployed history fixture's endpoint and prepared-session inputs."""
+
+    aca = aca_smoke_config_from_environment()
+    base_url = _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_BASE_URL")
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise AcaSmokeEnvironmentError(
+            "AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_BASE_URL must be an absolute HTTP URL."
+        )
+    return AcaHistorySmokeConfig(
+        aca=aca,
+        base_url=base_url.rstrip("/"),
+        agent_slug=_required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_AGENT_SLUG"),
+        function_key=_required_environment_value(
+            "AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_FUNCTION_KEY"
+        ),
+        resumed_session_id=_required_environment_value(
+            "AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_RESUMED_SESSION_ID"
+        ),
+        gone_session_id=_required_environment_value(
+            "AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_GONE_SESSION_ID"
+        ),
+        unavailable_session_id=_required_environment_value(
+            "AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_UNAVAILABLE_SESSION_ID"
+        ),
+    )
+
+
+async def request_aca_history_smoke(
+    config: AcaHistorySmokeConfig,
+    *,
+    method: str,
+    path: str,
+    session_id: str | None = None,
+    body: bytes | None = None,
+) -> AcaHistorySmokeResponse:
+    """Call the configured Function endpoint and classify transport failures as setup errors."""
+
+    headers = {"x-functions-key": config.function_key}
+    if session_id is not None:
+        headers["x-ms-session-id"] = session_id
+    if body is not None:
+        headers["content-type"] = "application/json"
+    request = Request(
+        f"{config.base_url}{path}",
+        data=body,
+        headers=headers,
+        method=method,
+    )
+    try:
+        return await asyncio.to_thread(_request_aca_history_smoke, request)
+    except URLError as error:
+        raise AcaSmokeEnvironmentError(
+            f"deployed ACA history endpoint could not be reached: {_error_reason(error)}"
+        ) from error
+
+
+def _request_aca_history_smoke(request: Request) -> AcaHistorySmokeResponse:
+    try:
+        with urlopen(request, timeout=_COMMAND_TIMEOUT_SECONDS) as response:
+            return AcaHistorySmokeResponse(
+                status_code=response.status,
+                headers=dict(response.headers.items()),
+                body=response.read(),
+            )
+    except HTTPError as error:
+        return AcaHistorySmokeResponse(
+            status_code=error.code,
+            headers=dict(error.headers.items()),
+            body=error.read(),
+        )
 
 
 def require_sandbox_compatible_host(disk: str) -> None:

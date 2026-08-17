@@ -258,6 +258,7 @@ class AcaSandboxExecutionBackend:
                         etag=outcome.session_etag or current.etag,
                         partition=prepared.partition,
                         store=prepared.store,
+                        checkpoint_name=prepared.checkpoint_name,
                     )
 
                 assert activated is not None

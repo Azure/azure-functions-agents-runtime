@@ -13,9 +13,9 @@ normative design rationale and durable contracts, see
 
 Configure `session_runtime.aca_sandbox` only for HTTP-triggered MAF agents.
 While the capability gate is closed, enabling it fails startup rather than
-silently falling back to another backend. When the gate opens, ordinary chat
-remains synchronous and `Prefer: respond-async` opts into the durable
-run-management URLs.
+silently falling back to another backend. When the gate opens, ordinary chat remains synchronous and `Prefer: respond-async`
+opts into the durable run-management URLs. A built-in chat API also exposes
+`GET /agents/{slug}/history` for a selected session.
 
 The sandbox has no public inbound port. The Functions app remains the
 authenticated entry point and controller.
@@ -77,7 +77,8 @@ is intended.
 ## Identity and RBAC
 
 Attach a dedicated, least-privileged managed identity to the customer-owned
-Sandbox Group. Guest code can acquire tokens through the platform identity
+Sandbox Group through customer IaC. The runtime neither attaches nor strips
+that identity. Guest code can acquire tokens through the platform identity
 endpoint; egress policy limits where a token is used, not whether it can be
 acquired.
 
@@ -86,6 +87,10 @@ Sandbox Group management, Storage, or Service Bus permissions unless workload
 code genuinely needs them. Native `DefaultAzureCredential` handles Foundry,
 Azure OpenAI, and authenticated MCP calls. Missing or incorrectly selected
 identities fail when the outbound credential or request is used.
+
+The group identity is not used to read history. ACA history is read by the
+Functions controller through the existing authenticated ACA transport; the
+sandbox receives no state-store credential for this feature.
 
 ## Egress and credentials
 
@@ -107,6 +112,37 @@ provider.
 Policy and credential changes are create-time-only. Drain or replace a session
 to apply them. Rotate a group secret the same way; active streams do not
 update in place.
+
+## Checkpoint history
+
+For an enabled ACA session runtime, `GET /agents/{slug}/history` reads only the
+latest complete conversation checkpoint selected inside the owner-authorized
+sandbox. It does not use the default in-language Blob history provider and
+does not copy transcript content to Blob Storage, Tables, controller
+memory/disk, logs, another sandbox, or external storage.
+
+Reading history verifies the durable owner/session binding and live sandbox
+binding before it reads the immutable checkpoint. A retained stopped or
+suspended sandbox is resumed through the normal activation handshake so its
+history remains available. This can add wake latency and ACA cost. A history
+read does **not** extend idle retention, touch activity, or immediately stop
+the sandbox; normal lifecycle policy re-suspends it when idle.
+
+The response retains the normal presentation rules: ordered user/assistant
+messages only, with at most the latest 200 after filtering. A session with no
+admitted turn returns an empty `200`. The remaining outcomes are deliberately
+typed:
+
+| Condition | Response |
+| --- | --- |
+| Retained sandbox was resumed for this read | `200` with `x-ms-aca-history-resumed: true` |
+| Caller has no matching owner/session binding | `404 session_not_found` |
+| Confirmed reclaim, sandbox loss, tombstone, deletion, or deployment-epoch retirement | `410 history_gone` |
+| Required/legacy checkpoint is missing, corrupt, unsafe, or temporarily unreadable; or its binding cannot be trusted | `503 history_unavailable` |
+
+`410` is permanent for the retained row's history horizon; after normal row
+pruning the same request becomes `404`. Neither outcome falls back to Blob
+history or a reconstructed transcript.
 
 ## Lifecycle, recovery, and troubleshooting
 

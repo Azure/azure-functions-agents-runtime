@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from urllib.error import URLError
 
 import pytest
 from azure.core.exceptions import HttpResponseError
@@ -171,3 +172,64 @@ def test_session_belongs_to_run_matches_only_its_own_run() -> None:
         {"session_id": "1234567-aca-harness-smoke-0011223344556677"}, "123456"
     )
     assert not aca_smoke_support.session_belongs_to_run({}, "123456")
+
+
+def test_history_smoke_config_rejects_missing_endpoint_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        aca_smoke_support,
+        "aca_smoke_config_from_environment",
+        lambda: aca_smoke_support.AcaSmokeConfig(group_resource_id="group", disk="python-3.13"),
+    )
+    monkeypatch.delenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_BASE_URL", raising=False)
+
+    with pytest.raises(aca_smoke_support.AcaSmokeEnvironmentError, match="BASE_URL"):
+        aca_smoke_support.aca_history_smoke_config_from_environment()
+
+
+def test_history_smoke_config_validates_and_normalizes_deployed_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    aca = aca_smoke_support.AcaSmokeConfig(group_resource_id="group", disk="python-3.13")
+    monkeypatch.setattr(aca_smoke_support, "aca_smoke_config_from_environment", lambda: aca)
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_BASE_URL", "https://example.test/")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_AGENT_SLUG", "test-agent")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_FUNCTION_KEY", "key")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_RESUMED_SESSION_ID", "resumed")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_GONE_SESSION_ID", "gone")
+    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_UNAVAILABLE_SESSION_ID", "unavailable")
+
+    config = aca_smoke_support.aca_history_smoke_config_from_environment()
+
+    assert config.aca is aca
+    assert config.base_url == "https://example.test"
+    assert config.agent_slug == "test-agent"
+    assert config.resumed_session_id == "resumed"
+
+
+@pytest.mark.asyncio
+async def test_history_smoke_transport_failure_is_an_environment_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = aca_smoke_support.AcaHistorySmokeConfig(
+        aca=aca_smoke_support.AcaSmokeConfig(group_resource_id="group", disk="python-3.13"),
+        base_url="https://example.test",
+        agent_slug="test-agent",
+        function_key="key",
+        resumed_session_id="resumed",
+        gone_session_id="gone",
+        unavailable_session_id="unavailable",
+    )
+
+    def fail_request(_request: object) -> aca_smoke_support.AcaHistorySmokeResponse:
+        raise URLError("network unavailable")
+
+    monkeypatch.setattr(aca_smoke_support, "_request_aca_history_smoke", fail_request)
+
+    with pytest.raises(aca_smoke_support.AcaSmokeEnvironmentError, match="could not be reached"):
+        await aca_smoke_support.request_aca_history_smoke(
+            config,
+            method="GET",
+            path="/agents/test-agent/history",
+        )

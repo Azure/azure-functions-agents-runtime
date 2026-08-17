@@ -21,6 +21,12 @@ from azure_functions_agents.config.schema import (
     ResolvedAgent,
     ToolsFilter,
 )
+from azure_functions_agents.controller.history_reader import (
+    SessionHistoryGoneError,
+    SessionHistoryNotFoundError,
+    SessionHistoryRead,
+    SessionHistoryUnavailableError,
+)
 from azure_functions_agents.controller.http import ControllerResponse
 from azure_functions_agents.controller.readiness import (
     SessionActivationNotFoundError,
@@ -1887,6 +1893,243 @@ def test_history_endpoint_returns_500_on_provider_error(
 
     assert response.status_code == 500
     assert json.loads(_response_text(response)) == {"error": "failed to load history"}
+
+
+def test_aca_history_endpoint_uses_owner_checkpoint_reader_without_blob(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    runtime = _runtime(tmp_path)
+    calls: dict[str, Any] = {}
+
+    async def fake_read_history(
+        actual_runtime: SessionRuntimeBinding,
+        owner: Any,
+        session_id: str,
+        setup_deadline: Any,
+    ) -> SessionHistoryRead:
+        calls["runtime"] = actual_runtime
+        calls["owner"] = owner
+        calls["session_id"] = session_id
+        calls["setup_deadline"] = setup_deadline
+        return SessionHistoryRead(
+            messages=[{"role": "user", "text": "checkpoint"}],
+            truncated=False,
+            resumed=True,
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_session_history",
+        fake_read_history,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda: pytest.fail("ACA history must not construct a Blob provider"),
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app,
+        _chat_api_agent(tmp_path, EndpointAuthConfig()),
+        AgentCapabilities(),
+        session_runtime=runtime,
+    )
+
+    response = asyncio.run(
+        _history_route(app)["handler"](DummyRequest({}, headers={"x-ms-session-id": "abc123"}))
+    )
+
+    assert response.status_code == 200
+    assert json.loads(_response_text(response)) == {
+        "messages": [{"role": "user", "text": "checkpoint"}],
+        "truncated": False,
+    }
+    assert response.headers["x-ms-aca-history-resumed"] == "true"
+    assert calls["runtime"] is runtime
+    assert calls["session_id"] == "abc123"
+    assert calls["owner"].kind == "function_app"
+    assert calls["owner"].app_identity == runtime.app_identity
+    assert calls["owner"].agent_slug == "test_agent"
+    assert calls["setup_deadline"].remaining_setup_seconds() > 0
+
+
+@pytest.mark.parametrize(
+    ("reader_error", "status_code", "error_code"),
+    [
+        (SessionHistoryNotFoundError, 404, "session_not_found"),
+        (SessionHistoryGoneError, 410, "history_gone"),
+        (SessionHistoryUnavailableError, 503, "history_unavailable"),
+    ],
+)
+def test_aca_history_endpoint_maps_typed_reader_errors(
+    monkeypatch: Any,
+    tmp_path: Path,
+    reader_error: type[Exception],
+    status_code: int,
+    error_code: str,
+) -> None:
+    async def fake_read_history(*args: Any) -> SessionHistoryRead:
+        raise reader_error("expected")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_session_history",
+        fake_read_history,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda: pytest.fail("ACA history must not construct a Blob provider"),
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app,
+        _chat_api_agent(tmp_path, EndpointAuthConfig()),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+
+    response = asyncio.run(
+        _history_route(app)["handler"](DummyRequest({}, headers={"x-ms-session-id": "abc123"}))
+    )
+
+    assert response.status_code == status_code
+    assert json.loads(_response_text(response)) == {"error": error_code}
+    assert response.headers.get("x-ms-aca-history-resumed") is None
+
+
+def test_aca_history_endpoint_preserves_empty_and_safe_session_id_behavior(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    reader_calls = {"count": 0}
+    blob_calls = {"count": 0}
+
+    async def fake_read_history(*args: Any) -> SessionHistoryRead:
+        reader_calls["count"] += 1
+        return SessionHistoryRead(messages=[], truncated=False, resumed=False)
+
+    def fake_build_blob_provider() -> None:
+        blob_calls["count"] += 1
+        return None
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_session_history",
+        fake_read_history,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        fake_build_blob_provider,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app,
+        _chat_api_agent(tmp_path, EndpointAuthConfig()),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+
+    no_session = asyncio.run(_history_route(app)["handler"](DummyRequest({}, headers={})))
+    invalid_session = asyncio.run(
+        _history_route(app)["handler"](DummyRequest({}, headers={"x-ms-session-id": "bad id!"}))
+    )
+
+    assert no_session.status_code == 200
+    assert json.loads(_response_text(no_session)) == {"messages": [], "truncated": False}
+    assert invalid_session.status_code == 400
+    assert json.loads(_response_text(invalid_session)) == {"error": "invalid session id"}
+    assert reader_calls["count"] == 0
+    assert blob_calls["count"] == 0
+
+
+def test_aca_history_endpoint_resolves_entra_owner_from_easy_auth(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    import base64
+
+    runtime = _runtime(tmp_path)
+    captured_owner: dict[str, Any] = {}
+
+    async def fake_read_history(
+        actual_runtime: SessionRuntimeBinding,
+        owner: Any,
+        session_id: str,
+        setup_deadline: Any,
+    ) -> SessionHistoryRead:
+        captured_owner["owner"] = owner
+        return SessionHistoryRead(messages=[], truncated=False, resumed=False)
+
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_session_history",
+        fake_read_history,
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app,
+        _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra")),
+        AgentCapabilities(),
+        session_runtime=runtime,
+    )
+    principal = base64.b64encode(
+        json.dumps(
+            {
+                "auth_typ": "aad",
+                "claims": [
+                    {"typ": "tid", "val": "11111111-2222-3333-4444-555555555555"},
+                    {"typ": "oid", "val": "66666666-7777-8888-9999-aaaaaaaaaaaa"},
+                ],
+            }
+        ).encode("utf-8")
+    ).decode("ascii")
+
+    response = asyncio.run(
+        _history_route(app)["handler"](
+            DummyRequest(
+                {},
+                headers={
+                    "x-ms-session-id": "abc123",
+                    "x-ms-client-principal": principal,
+                },
+            )
+        )
+    )
+
+    assert response.status_code == 200
+    assert captured_owner["owner"].kind == "entra_user"
+    assert captured_owner["owner"].tenant_id == "11111111-2222-3333-4444-555555555555"
+    assert captured_owner["owner"].object_id == "66666666-7777-8888-9999-aaaaaaaaaaaa"
+    assert captured_owner["owner"].agent_slug == "test_agent"
+
+
+def test_aca_history_endpoint_rejects_unauthenticated_entra_before_reader_or_blob(
+    monkeypatch: Any, tmp_path: Path
+) -> None:
+    reader_calls = 0
+
+    async def fake_read_history(*args: Any) -> SessionHistoryRead:
+        nonlocal reader_calls
+        reader_calls += 1
+        return SessionHistoryRead(messages=[], truncated=False, resumed=False)
+
+    monkeypatch.setenv("WEBSITE_AUTH_ENABLED", "True")
+    monkeypatch.setattr(
+        "azure_functions_agents.registration.endpoints.read_session_history",
+        fake_read_history,
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents._blob_history.build_blob_provider_from_environment",
+        lambda: pytest.fail("ACA history must not construct a Blob provider"),
+    )
+    app = FakeFunctionApp()
+    register_builtin_endpoints(
+        app,
+        _chat_api_agent(tmp_path, EndpointAuthConfig(mode="entra")),
+        AgentCapabilities(),
+        session_runtime=_runtime(tmp_path),
+    )
+
+    response = asyncio.run(
+        _history_route(app)["handler"](DummyRequest({}, headers={"x-ms-session-id": "abc123"}))
+    )
+
+    assert response.status_code == 401
+    assert reader_calls == 0
 
 
 def test_chat_routes_default_to_function_auth_level(tmp_path: Path) -> None:

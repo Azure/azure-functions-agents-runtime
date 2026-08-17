@@ -68,6 +68,7 @@ type DurableOperationPhase = Literal[
     "aborted",
 ]
 type DurableOperationState = Literal["active", "completed", "aborted"]
+type CheckpointExpectation = Literal["unknown", "none", "required"]
 type TableEntityValue = str | int | bool | datetime
 type TableEntity = dict[str, TableEntityValue]
 
@@ -103,6 +104,7 @@ _OPERATION_KINDS: frozenset[str] = frozenset(
     {"provision_submit", "submit_run", "reclaim_backing"}
 )
 _OPERATION_STATES: frozenset[str] = frozenset({"active", "completed", "aborted"})
+_CHECKPOINT_EXPECTATIONS: frozenset[str] = frozenset({"unknown", "none", "required"})
 _OPERATION_PHASES: frozenset[str] = frozenset(
     {
         "provision_create",
@@ -844,6 +846,7 @@ class DurableSessionRecord:
     updated_at: datetime
     active_operation_id: str | None
     operation_sequence: int
+    checkpoint_expectation: CheckpointExpectation
 
     @classmethod
     def create(
@@ -870,6 +873,7 @@ class DurableSessionRecord:
         updated_at: datetime,
         active_operation_id: str | None,
         operation_sequence: int,
+        checkpoint_expectation: CheckpointExpectation = "unknown",
     ) -> DurableSessionRecord:
         if status not in _SESSION_STATUSES:
             raise SessionStateContractError("unsupported session status")
@@ -906,6 +910,8 @@ class DurableSessionRecord:
             raise SessionStateContractError(
                 "operation_sequence must cover active_operation_id"
             )
+        if checkpoint_expectation not in _CHECKPOINT_EXPECTATIONS:
+            raise SessionStateContractError("unsupported checkpoint_expectation")
         normalized_snapshots = tuple(snapshot_ids)
         encode_snapshot_ids(normalized_snapshots)
         state_store_fingerprint = validate_state_store_fingerprint(state_store_fingerprint)
@@ -943,6 +949,7 @@ class DurableSessionRecord:
             updated_at=updated_at_n,
             active_operation_id=normalized_operation_id,
             operation_sequence=operation_sequence,
+            checkpoint_expectation=checkpoint_expectation,
         )
 
     @property
@@ -970,6 +977,7 @@ class DurableSessionRecord:
                 "tombstone_reason": self.tombstone_reason or "",
                 "active_operation_id": self.active_operation_id or "",
                 "operation_sequence": self.operation_sequence,
+                "checkpoint_expectation": self.checkpoint_expectation,
                 "created_at": self.created_at,
                 "updated_at": self.updated_at,
             }
@@ -1011,6 +1019,12 @@ class DurableSessionRecord:
             updated_at=_require_datetime(entity, "updated_at"),
             active_operation_id=_optional_entity_str(entity, "active_operation_id"),
             operation_sequence=_require_int(entity, "operation_sequence"),
+            checkpoint_expectation=cast(
+                CheckpointExpectation,
+                "unknown"
+                if "checkpoint_expectation" not in entity
+                else _require_str(entity, "checkpoint_expectation"),
+            ),
         )
 
 
@@ -1531,6 +1545,10 @@ class AdmissionRecords:
             raise SessionStateContractError(
                 "admitted session active_run_id must identify the admitted run"
             )
+        if session.checkpoint_expectation != "required":
+            raise SessionStateContractError(
+                "admitted session must require a checkpoint"
+            )
         if idempotency is not None:
             if idempotency.owner_partition.partition_key != partition_key:
                 raise SessionStateContractError(
@@ -1582,6 +1600,10 @@ class NewSessionAdmissionRecords:
             raise SessionStateContractError(
                 "new-session admission records must preserve the candidate binding"
             )
+        if session.checkpoint_expectation != "required":
+            raise SessionStateContractError(
+                "new-session admission must require a checkpoint"
+            )
         return cls(session=session, run=run, owner_idempotency=owner_idempotency)
 
 
@@ -1628,6 +1650,7 @@ class ProvisionSubmitRecords:
             or operation.target.digest_kind != session.digest_kind
             or operation.target.digest != session.digest
             or (operation.agent_slug and operation.agent_slug != run.agent_slug)
+            or session.checkpoint_expectation != "required"
         ):
             raise SessionStateContractError(
                 "provision submit rows must reserve one creating session binding"

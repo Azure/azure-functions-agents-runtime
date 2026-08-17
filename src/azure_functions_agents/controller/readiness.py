@@ -71,6 +71,7 @@ from ..transport.transport_models import (
     SandboxCreateRequest,
     SandboxCreateSource,
     SandboxFileNotFoundError,
+    SandboxFileOperationError,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
@@ -128,6 +129,14 @@ class SessionActivationError(RuntimeError):
 
 class SessionActivationNotFoundError(SessionActivationError):
     """The requested owner/session binding is absent or cannot be trusted."""
+
+
+class SessionActivationUntrustedError(SessionActivationNotFoundError):
+    """A verified owner-bound session has an untrusted sandbox binding."""
+
+
+class SessionActivationUnavailableError(SessionActivationNotFoundError):
+    """A verified owner-bound session has no usable sandbox binding."""
 
 
 class SessionActivationGoneError(SessionActivationError):
@@ -392,6 +401,8 @@ class ActivatedSession:
     etag: str
     partition: OwnerPartition
     store: SessionStateStore
+    checkpoint_name: str | None = None
+    resumed: bool = False
 
     @classmethod
     def create(
@@ -402,6 +413,8 @@ class ActivatedSession:
         etag: str,
         partition: OwnerPartition,
         store: SessionStateStore,
+        checkpoint_name: str | None = None,
+        resumed: bool = False,
     ) -> ActivatedSession:
         if not etag:
             raise ValueError("etag must be non-empty")
@@ -411,6 +424,8 @@ class ActivatedSession:
             etag=etag,
             partition=partition,
             store=store,
+            checkpoint_name=checkpoint_name,
+            resumed=resumed,
         )
 
 
@@ -463,9 +478,9 @@ async def activate_session(
     if session.status in {"tombstoned", "deleted"}:
         raise SessionActivationGoneError("Session has been retired.")
     if session.status == "quarantined":
-        raise SessionActivationNotFoundError("Session routing binding cannot be trusted.")
+        raise SessionActivationUntrustedError("Session routing binding cannot be trusted.")
     if session.sandbox_id is None:
-        raise SessionActivationNotFoundError("Session has no usable sandbox binding.")
+        raise SessionActivationUnavailableError("Session has no usable sandbox binding.")
 
     expected = build_expected_manifest_binding(
         session,
@@ -478,6 +493,7 @@ async def activate_session(
     )
     provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
     handle: SandboxSessionHandle | None = None
+    resumed = session.status == "suspended"
     try:
         if session.status == "suspended":
             handle = await _within_setup_budget(
@@ -497,14 +513,19 @@ async def activate_session(
                 ),
                 setup_deadline,
             )
-        await _within_setup_budget(
-            _verify_optional_harness_artifacts(
-                handle,
-                session,
-                require_protocol=True,
-            ),
-            setup_deadline,
-        )
+        try:
+            checkpoint_name = await _within_setup_budget(
+                _verify_optional_harness_artifacts(
+                    handle,
+                    session,
+                    require_protocol=True,
+                ),
+                setup_deadline,
+            )
+        except SandboxFileOperationError as exc:
+            raise SessionActivationUnavailableError(
+                "Session sandbox readiness artifacts are temporarily unavailable."
+            ) from exc
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -513,13 +534,10 @@ async def activate_session(
             reason="sandbox_manifest_mismatch",
         )
         _record_security_event("sandbox_manifest_mismatch", frozenset({"manifest"}))
-        raise SessionActivationNotFoundError(
+        raise SessionActivationUntrustedError(
             "Session sandbox binding cannot be trusted."
         ) from None
     except SessionReadinessArtifactError as exc:
-        if handle is not None:
-            with suppress(Exception):
-                await handle.close()
         await _quarantine_detected_binding(
             store,
             session,
@@ -527,17 +545,25 @@ async def activate_session(
             reason=exc.reason,
         )
         _record_security_event(exc.reason, frozenset({"harness_artifact"}))
-        raise SessionActivationNotFoundError(
+        raise SessionActivationUntrustedError(
             "Session sandbox readiness artifacts cannot be trusted."
         ) from None
-    assert handle is not None
-    return ActivatedSession.create(
-        handle=handle,
-        session=session,
-        etag=session_read.etag,
-        partition=partition,
-        store=store,
-    )
+    else:
+        assert handle is not None
+        activated = ActivatedSession.create(
+            handle=handle,
+            session=session,
+            etag=session_read.etag,
+            partition=partition,
+            store=store,
+            checkpoint_name=checkpoint_name,
+            resumed=resumed,
+        )
+        handle = None
+        return activated
+    finally:
+        if handle is not None:
+            await handle.close()
 
 
 async def revalidate_before_submit(
@@ -592,6 +618,7 @@ def session_with_admitted_run(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation="required",
         status="running",
         last_activity_at=updated_at,
         expires_at=session.expires_at,
@@ -729,6 +756,7 @@ def _session_with_touched_activity(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status=session.status,
         last_activity_at=updated_at,
         expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
@@ -818,6 +846,8 @@ async def begin_submit_operation(
             etag=current_prepared.etag,
             partition=activated.partition,
             store=activated.store,
+            checkpoint_name=activated.checkpoint_name,
+            resumed=activated.resumed,
         ),
         fence,
     )
@@ -862,6 +892,8 @@ async def disarm_submit_lifecycle(
             etag=current_session.etag,
             partition=activated.partition,
             store=activated.store,
+            checkpoint_name=activated.checkpoint_name,
+            resumed=activated.resumed,
         ),
         advanced,
     )
@@ -1012,6 +1044,7 @@ def _session_with_active_operation(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status=session.status,
         last_activity_at=session.last_activity_at,
         expires_at=session.expires_at,
@@ -1042,6 +1075,7 @@ def _session_before_submit_rearm(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="quarantined" if session.status == "quarantined" else "ready",
         last_activity_at=session.last_activity_at,
         expires_at=session.expires_at,
@@ -1073,6 +1107,7 @@ def _session_after_submit_rearm(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status=session.status,
         last_activity_at=updated_at,
         expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
@@ -1104,6 +1139,7 @@ def _session_after_missing_submit_run(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="quarantined" if session.status == "quarantined" else "ready",
         last_activity_at=updated_at,
         expires_at=updated_at + timedelta(seconds=reclaim_idle_seconds),
@@ -1175,6 +1211,7 @@ async def provision_new_session_submit(
         digest_kind=package.digest_kind,
         digest=package.digest,
         protocol=runtime.protocol_version,
+        checkpoint_expectation="required",
         status="creating",
         last_activity_at=now,
         expires_at=now + timedelta(seconds=runtime.reclaim_idle_seconds),
@@ -1370,12 +1407,35 @@ async def _provision_reserved_session(
             ),
             setup_deadline,
         )
+        try:
+            checkpoint_name = await _within_setup_budget(
+                _verify_optional_harness_artifacts(
+                    handle,
+                    current.record,
+                    require_protocol=True,
+                ),
+                setup_deadline,
+            )
+        except SessionReadinessArtifactError as exc:
+            with suppress(Exception):
+                await handle.close()
+            await _quarantine_detected_binding(
+                state_binding.store,
+                current.record,
+                current.etag,
+                reason=exc.reason,
+            )
+            _record_security_event(exc.reason, frozenset({"harness_artifact"}))
+            raise SessionActivationUntrustedError(
+                "Session sandbox readiness artifacts cannot be trusted."
+            ) from None
         return ActivatedSession.create(
             handle=handle,
             session=current.record,
             etag=current.etag,
             partition=session.owner_partition,
             store=state_binding.store,
+            checkpoint_name=checkpoint_name,
         )
     if phase == "provision_create":
         fence = await _within_setup_budget(
@@ -1422,7 +1482,7 @@ async def _provision_reserved_session(
                 reason=exc.reason,
             )
             _record_security_event(exc.reason, frozenset({"harness_artifact"}))
-            raise SessionActivationNotFoundError(
+            raise SessionActivationUntrustedError(
                 "Session sandbox readiness artifacts cannot be trusted."
             ) from None
     except BaseException:
@@ -1514,7 +1574,7 @@ async def _finish_created_provision(
             expected=expected,
             setup_deadline=setup_deadline,
         )
-        await _within_setup_budget(
+        checkpoint_name = await _within_setup_budget(
             _verify_optional_harness_artifacts(
                 handle,
                 bound_session,
@@ -1559,6 +1619,7 @@ async def _finish_created_provision(
         etag=current.etag,
         partition=session.owner_partition,
         store=state_binding.store,
+        checkpoint_name=checkpoint_name,
     )
 
 
@@ -1576,6 +1637,7 @@ def _session_with_sandbox_for_operation(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="creating",
         last_activity_at=session.last_activity_at,
         expires_at=session.expires_at,
@@ -1606,6 +1668,7 @@ def _running_provisioned_session(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="running",
         last_activity_at=updated_at,
         expires_at=session.expires_at,
@@ -1647,6 +1710,7 @@ async def _create_and_activate_session(
         digest_kind=package.digest_kind,
         digest=package.digest,
         protocol=runtime.protocol_version,
+        checkpoint_expectation="none",
         status="creating",
         last_activity_at=now,
         expires_at=now + timedelta(seconds=runtime.reclaim_idle_seconds),
@@ -1729,7 +1793,7 @@ async def _create_and_activate_session(
             expected=expected,
             setup_deadline=setup_deadline,
         )
-        await _within_setup_budget(
+        checkpoint_name = await _within_setup_budget(
             _verify_optional_harness_artifacts(
                 handle,
                 persisted_session,
@@ -1753,6 +1817,7 @@ async def _create_and_activate_session(
             etag=etag,
             partition=partition,
             store=state_binding.store,
+            checkpoint_name=checkpoint_name,
         )
         succeeded = True
         return activated
@@ -1765,7 +1830,7 @@ async def _create_and_activate_session(
                 reason="sandbox_manifest_mismatch",
             )
         _record_security_event("sandbox_manifest_mismatch", frozenset({"manifest"}))
-        raise SessionActivationNotFoundError(
+        raise SessionActivationUntrustedError(
             "Session sandbox binding cannot be trusted."
         ) from None
     except SessionReadinessArtifactError as exc:
@@ -1777,7 +1842,7 @@ async def _create_and_activate_session(
                 reason=exc.reason,
             )
         _record_security_event(exc.reason, frozenset({"harness_artifact"}))
-        raise SessionActivationNotFoundError(
+        raise SessionActivationUntrustedError(
             "Session sandbox readiness artifacts cannot be trusted."
         ) from None
     except ContentPackagingError:
@@ -1889,7 +1954,7 @@ async def _verify_optional_harness_artifacts(
     session: DurableSessionRecord,
     *,
     require_protocol: bool,
-) -> None:
+) -> str | None:
     """Validate mandatory protocol capabilities and an optional checkpoint pointer."""
     try:
         protocol_payload = await handle.read_file(HARNESS_PROTOCOL_PATH)
@@ -1925,6 +1990,8 @@ async def _verify_optional_harness_artifacts(
             validate_checkpoint_name(pointer)
         except ValueError:
             raise SessionReadinessArtifactError("checkpoint_corrupt") from None
+        return pointer
+    return None
 
 
 async def _read_optional_file(
@@ -2000,6 +2067,7 @@ def _session_with_sandbox(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="creating",
         last_activity_at=session.last_activity_at,
         expires_at=session.expires_at,
@@ -2026,6 +2094,7 @@ def _ready_session(session: DurableSessionRecord, *, updated_at: datetime) -> Du
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="ready",
         last_activity_at=updated_at,
         expires_at=session.expires_at,
@@ -2058,6 +2127,7 @@ def _quarantined_session(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="quarantined",
         last_activity_at=session.last_activity_at,
         expires_at=session.expires_at,

@@ -103,6 +103,7 @@ def _journal_corrupt_session(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="quarantined",
         last_activity_at=session.last_activity_at,
         expires_at=session.expires_at,
