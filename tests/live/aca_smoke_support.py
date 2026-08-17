@@ -42,9 +42,10 @@ from azure_functions_agents.journal_paths import (
     SESSION_PATH,
 )
 from azure_functions_agents.session_state import (
+    AppIdentity,
     FunctionAppOwnerContext,
+    SessionStateContractError,
     owner_partition,
-    resolve_function_app_identity,
 )
 from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 from azure_functions_agents.transport.manifest import ExpectedSandboxManifestBinding
@@ -54,8 +55,10 @@ from azure_functions_agents.transport.transport_models import (
     SandboxCreateRequest,
     SandboxEgressPolicy,
     SandboxGroupBinding,
+    SandboxGroupBindingError,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
+    parse_sandbox_group_resource_id,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -105,7 +108,6 @@ class AcaSmokeConfig:
 class AcaSmokeModelConfig:
     """Credential-free Azure OpenAI inputs forwarded only to the sandbox guest."""
 
-    provider: str
     endpoint: str
     deployment: str
     reasoning_effort: str | None
@@ -114,7 +116,7 @@ class AcaSmokeModelConfig:
         """Return the narrow model configuration available to the sandbox process."""
 
         environment = {
-            "AZURE_FUNCTIONS_AGENTS_PROVIDER": self.provider,
+            "AZURE_FUNCTIONS_AGENTS_PROVIDER": "azure_openai",
             "AZURE_OPENAI_ENDPOINT": self.endpoint,
             "AZURE_OPENAI_DEPLOYMENT": self.deployment,
         }
@@ -153,7 +155,7 @@ def production_smoke_reaper_labels() -> dict[str, str]:
     """Return the exact stable labels created by the Function App smoke backend."""
 
     owner = FunctionAppOwnerContext.create(
-        app_identity=resolve_function_app_identity(),
+        app_identity=production_smoke_app_identity(),
         agent_slug=_PRODUCTION_SMOKE_AGENT_SLUG,
     )
     partition = owner_partition(owner)
@@ -163,6 +165,25 @@ def production_smoke_reaper_labels() -> dict[str, str]:
         "owner_hash": partition.owner_hash,
         "app_hash": partition.app_hash,
     }
+
+
+def production_smoke_app_identity() -> AppIdentity:
+    """Derive the synthetic smoke app identity from the configured group and BuildId."""
+
+    group_resource_id = _required_environment_value(
+        "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID"
+    )
+    build_id = _required_environment_value(ACA_SMOKE_RUN_ID_ENV_VAR)
+    try:
+        group = parse_sandbox_group_resource_id(group_resource_id)
+        return AppIdentity.create(
+            subscription_id=group.subscription_id,
+            site_name=f"aca-pr-smoke-{build_id}",
+        )
+    except (SandboxGroupBindingError, SessionStateContractError) as error:
+        raise AcaSmokeEnvironmentError(
+            "ACA smoke synthetic Function App identity inputs are invalid."
+        ) from error
 
 
 def aca_smoke_run_id() -> str:
@@ -207,13 +228,6 @@ def aca_smoke_config_from_environment() -> AcaSmokeConfig:
 def aca_smoke_model_config_from_environment() -> AcaSmokeModelConfig:
     """Read and validate the credential-free model inputs for the real-turn smoke."""
 
-    provider = _required_environment_value(
-        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER"
-    ).casefold()
-    if provider != "azure_openai":
-        raise AcaSmokeEnvironmentError(
-            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER must be azure_openai."
-        )
     endpoint = _required_https_endpoint(
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT"
     )
@@ -224,7 +238,6 @@ def aca_smoke_model_config_from_environment() -> AcaSmokeModelConfig:
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_REASONING_EFFORT"
     )
     return AcaSmokeModelConfig(
-        provider=provider,
         endpoint=endpoint,
         deployment=deployment,
         reasoning_effort=reasoning_effort,
@@ -283,7 +296,7 @@ def _target_disk_python_version(disk: str) -> tuple[int, int] | None:
 
 def _required_environment_value(name: str) -> str:
     value = os.environ.get(name)
-    if value is None or not value.strip():
+    if value is None or not value.strip() or "$(" in value:
         raise AcaSmokeEnvironmentError(f"{name} must be set to a non-blank value.")
     return value.strip()
 

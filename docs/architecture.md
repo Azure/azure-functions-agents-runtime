@@ -43,6 +43,8 @@ A few boundaries are worth calling out explicitly:
 - **Sandbox identity is workload-scoped.** A Sandbox Group's attached managed identity is directly
   usable by guest code; egress constrains token-use destinations rather than token acquisition.
   It is separate from the controller identity and should be dedicated and least-privileged.
+  Protected IaC or operations verifies model-only, no-state/no-group RBAC; the CI smoke verifies
+  one attached UAMI and positive model access, not absence of every role assignment.
 
 ## 3. Module map
 

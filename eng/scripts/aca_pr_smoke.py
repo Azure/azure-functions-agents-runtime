@@ -8,15 +8,14 @@ import os
 import subprocess
 import sys
 from collections.abc import Mapping, Sequence
-from urllib.parse import urlparse
 
 _REQUIRED = (
     "AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID",
-    "ACA_SMOKE_MODEL_RESOURCE_ID",
-    "ACA_SMOKE_MODEL_ROLE_DEFINITION_ID",
+    "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK",
     "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
+    "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT",
 )
-_DATA_PLANE_ROLE_MARKERS = ("storage", "table", "blob", "queue", "sandbox")
+_FORBIDDEN = ("AZURE_CLIENT_ID",)
 
 
 class PreflightError(Exception):
@@ -27,90 +26,32 @@ def required(environment: Mapping[str, str], name: str) -> str:
     """Read a configured value without accepting unresolved pipeline variables."""
 
     value = environment.get(name, "").strip()
-    if not value or value.startswith("$("):
+    if not value or "$(" in value:
         raise PreflightError(f"required_environment_invalid:{name}")
     return value
 
 
-def guest_identity_principal_id(group: Mapping[str, object]) -> str:
-    """Require precisely one guest user-assigned identity and no system identity."""
+def forbidden(environment: Mapping[str, str], name: str) -> None:
+    """Reject an explicit host identity that would mask the guest identity."""
+
+    if environment.get(name, "").strip():
+        raise PreflightError(f"forbidden_environment_set:{name}")
+
+
+def assert_guest_identity(group: Mapping[str, object]) -> None:
+    """Require exactly one user-assigned identity and no system-assigned identity."""
 
     identity = group.get("identity")
     if not isinstance(identity, dict):
         raise PreflightError("sandbox_group_identity_missing")
-    identity_type = identity.get("type")
     identities = identity.get("userAssignedIdentities")
-    if identity_type != "UserAssigned" or not isinstance(identities, dict) or len(identities) != 1:
-        raise PreflightError("sandbox_group_identity_ambiguous")
-    resource_id = next(iter(identities))
-    if not isinstance(resource_id, str) or not resource_id:
-        raise PreflightError("sandbox_group_identity_ambiguous")
-    principal_id = identities[resource_id].get("principalId")
-    if not isinstance(principal_id, str) or not principal_id:
-        raise PreflightError("sandbox_group_guest_principal_id_missing")
-    return principal_id
-
-
-def model_host(endpoint: str) -> str:
-    """Normalize the one permitted model host."""
-
-    host = urlparse(endpoint).hostname
-    if host is None:
-        raise PreflightError("model_endpoint_invalid")
-    return host.casefold()
-
-
-def _strings(value: object) -> set[str]:
-    if isinstance(value, str):
-        return {value.casefold()}
-    if isinstance(value, dict):
-        return set().union(*(_strings(item) for item in value.values()))
-    if isinstance(value, list):
-        return set().union(*(_strings(item) for item in value))
-    return set()
-
-
-def assert_model_only_egress(group: Mapping[str, object], endpoint: str) -> None:
-    """Reject missing or broader-than-model-host egress policy evidence."""
-
-    properties = group.get("properties")
-    if not isinstance(properties, dict):
-        raise PreflightError("sandbox_group_egress_not_model_only")
-    policy = properties.get("egressPolicy", properties)
-    if not isinstance(policy, dict):
-        raise PreflightError("sandbox_group_egress_not_model_only")
-    allowed_hosts = policy.get("allowedHosts")
-    if not isinstance(allowed_hosts, list) or not all(
-        isinstance(host, str) for host in allowed_hosts
+    if (
+        identity.get("type") != "UserAssigned"
+        or not isinstance(identities, dict)
+        or len(identities) != 1
+        or not all(isinstance(resource_id, str) and resource_id for resource_id in identities)
     ):
-        raise PreflightError("sandbox_group_egress_not_model_only")
-    hosts = {host.casefold().rstrip(".") for host in allowed_hosts}
-    expected = model_host(endpoint)
-    if hosts != {expected}:
-        raise PreflightError("sandbox_group_egress_not_model_only")
-
-
-def assert_model_only_roles(
-    assignments: Sequence[Mapping[str, object]],
-    model_role_definition_id: str,
-    model_resource_id: str,
-) -> None:
-    """Require one model role and reject any state or Sandbox data-plane role."""
-
-    expected_role = model_role_definition_id.casefold()
-    expected_scope = model_resource_id.rstrip("/").casefold()
-    if len(assignments) != 1:
-        raise PreflightError("guest_role_assignment_ambiguous")
-    assignment = assignments[0]
-    role_id = assignment.get("roleDefinitionId")
-    scope = assignment.get("scope")
-    if not isinstance(role_id, str) or role_id.casefold() != expected_role:
-        raise PreflightError("guest_model_role_missing")
-    if not isinstance(scope, str) or scope.rstrip("/").casefold() != expected_scope:
-        raise PreflightError("guest_role_assignment_ambiguous")
-    names = " ".join(sorted(_strings(assignment)))
-    if any(marker in names for marker in _DATA_PLANE_ROLE_MARKERS):
-        raise PreflightError("guest_data_plane_role_forbidden")
+        raise PreflightError("sandbox_group_identity_ambiguous")
 
 
 def az_json(arguments: Sequence[str]) -> object:
@@ -131,9 +72,11 @@ def az_json(arguments: Sequence[str]) -> object:
 
 
 def preflight(environment: Mapping[str, str] = os.environ) -> None:
-    """Verify guest identity, RBAC, and egress using the controller connection."""
+    """Verify environment and the sole guest UAMI through the controller connection."""
 
     values = {name: required(environment, name) for name in _REQUIRED}
+    for name in _FORBIDDEN:
+        forbidden(environment, name)
     group = az_json(
         [
             "rest",
@@ -145,26 +88,7 @@ def preflight(environment: Mapping[str, str] = os.environ) -> None:
     )
     if not isinstance(group, dict):
         raise PreflightError("sandbox_group_arm_response_invalid")
-    guest_principal_id = guest_identity_principal_id(group)
-    assert_model_only_egress(group, values["AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT"])
-    assignments = az_json(
-        [
-            "role",
-            "assignment",
-            "list",
-            "--assignee-object-id",
-            guest_principal_id,
-            "--all",
-            "--include-inherited",
-        ]
-    )
-    if not isinstance(assignments, list) or not all(isinstance(item, dict) for item in assignments):
-        raise PreflightError("guest_role_assignments_unavailable")
-    assert_model_only_roles(
-        assignments,
-        values["ACA_SMOKE_MODEL_ROLE_DEFINITION_ID"],
-        values["ACA_SMOKE_MODEL_RESOURCE_ID"],
-    )
+    assert_guest_identity(group)
 
 
 def main() -> int:

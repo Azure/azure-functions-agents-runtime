@@ -96,8 +96,11 @@ MCP access where needed, but never controller, Sandbox Group management, or
 state-store rights. The controller managed identity is the sole Table writer.
 Native `DefaultAzureCredential` can use that workload identity for its
 authorized workload calls. The U3 qualification grants the group identity model
-inference only, with no MCP or state-store permissions. OBO is reserved and
-inert: do not expect user-token forwarding.
+inference only, with no MCP or state-store permissions. This model-only,
+no-state/no-group RBAC is a protected infrastructure prerequisite verified by
+customer IaC or operations. CI verifies the sole attached UAMI and a successful
+model turn; it does not attest the absence of every role assignment. OBO is
+reserved and inert: do not expect user-token forwarding.
 
 The Function controller identity separately requires `Container Apps
 SandboxGroup Data Owner` on the configured Sandbox Group. `Container Apps

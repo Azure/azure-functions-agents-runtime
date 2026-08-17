@@ -11,13 +11,14 @@ import pytest_asyncio
 from tests.live.aca_smoke_support import (
     AcaSmokeConfig,
     aca_smoke_config_from_environment,
+    production_smoke_app_identity,
     reap_current_production_smoke_sandboxes,
 )
 
 from azure_functions_agents.execution.aca_composition import compose_aca_application
 from azure_functions_agents.execution.aca_sandbox import AcaSandboxExecutionBackend
 from azure_functions_agents.execution.backend import RunContext, StartRunRequest
-from azure_functions_agents.session_state import FunctionAppPrincipal, resolve_function_app_identity
+from azure_functions_agents.session_state import FunctionAppPrincipal
 
 _AGENT_NAME = "model_turn"
 
@@ -32,7 +33,7 @@ if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
 def aca_real_agent_backend(aca_materialized_app_root: Path) -> AcaSandboxExecutionBackend:
     application = compose_aca_application(
         aca_materialized_app_root,
-        app_identity=resolve_function_app_identity(),
+        app_identity=production_smoke_app_identity(),
     )
     return application.backend_for(_AGENT_NAME, owner=FunctionAppPrincipal())
 

@@ -14,7 +14,7 @@ def test_app_registration_and_live_turn_share_the_production_composition_facade(
     assert "AcaSandboxExecutionBackend" in facade
     assert "compose_aca_application(" in live_turn
     assert "FunctionAppPrincipal()" in live_turn
-    assert "app_identity=resolve_function_app_identity()" in live_turn
+    assert "app_identity=production_smoke_app_identity()" in live_turn
     assert "AcaSandboxAdapter" not in live_turn
     assert "SandboxRunControl" not in live_turn
     assert "AZURE_CLIENT_ID" not in live_turn
@@ -30,3 +30,21 @@ def test_snapshot_cleanup_precedes_and_follows_sandbox_deletion() -> None:
     assert "production_smoke_reaper_labels" in reaper
     assert "ci_smoke_reaper_labels" in reaper
     assert "reap_labelled_sandbox_family" in reaper
+
+
+def test_current_checkout_aca_smoke_uses_only_protected_model_endpoint_variables() -> None:
+    root = Path(__file__).parents[1]
+    e2e = (root / "eng/templates/official/jobs/e2e-tests.yml").read_text()
+
+    assert "ACA_SMOKE_AZURE_OPENAI_ENDPOINT" in e2e
+    assert "ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT" in e2e
+    assert "AZURE_FUNCTIONS_AGENTS_PROVIDER: 'azure_openai'" in e2e
+    for removed in (
+        "ACA_SMOKE_MODEL_PROVIDER",
+        "ACA_SMOKE_MODEL_RESOURCE_ID",
+        "ACA_SMOKE_MODEL_ROLE_DEFINITION_ID",
+        "ACA_SMOKE_FUNCTION_APP_OWNER_NAME",
+        "WEBSITE_OWNER_NAME",
+        "WEBSITE_SITE_NAME",
+    ):
+        assert removed not in e2e

@@ -80,7 +80,6 @@ class _FamilySandboxAdapter:
 
 
 def _set_model_environment(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER", "azure_openai")
     monkeypatch.setenv(
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
         "https://smoke-model.openai.azure.com",
@@ -177,11 +176,6 @@ def test_model_config_forwards_only_guest_safe_model_inputs(
 @pytest.mark.parametrize(
     ("name", "value", "message"),
     [
-        (
-            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_MODEL_PROVIDER",
-            "foundry",
-            "must be azure_openai",
-        ),
         (
             "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT",
             "http://smoke-model.openai.azure.com",

@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-12
+updated: 2026-08-17
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -407,6 +407,7 @@ controlling amendments.
 | 164 | ACA pipeline placement (supersedes prior placement) | Required E2E stage / optional ACA pipeline | Run predeployed ACA smoke in separate non-required **ACA Smoke Tests (Optional)**; use protected ACA-only `larohra-sandboxgroup-test`, no artifact attestation, and leave required E2E unchanged. | Human | 2026-08-17 | U3 CI |
 | 165 | PR ACA signal (supersedes #163/#164) | Predeployed app / separate pipeline / current-checkout smoke | Same-repo PRs run one nonblocking current-checkout ACA/model smoke with Azurite and `larohra-sandboxgroup-test`; protected-pipeline policy excludes forks and `System.PullRequest.IsFork != True` is defense in depth only. Normal E2E remains `saf-foundry`; no Function is deployed. | Human | 2026-08-17 | U3 CI amendment in review |
 | 166 | Post-main qualification deferral | Implement in PR #160 / defer to #166 | Keep official `pr: none`; move deploy, attestation, predeployed cold/lifecycle/loss, and N=5 qualification to issue #166. Retain deployed tests as manual/test assets for that follow-up. | Human | 2026-08-17 | U3 CI amendment in review |
+| 167 | PR smoke identity evidence | All-scope RBAC audit / protected IaC + positive turn | Protected IaC/ops guarantees the sole guest UAMI has model-only, no-state/no-group RBAC. CI verifies only group identity shape, runtime egress, and positive model access because its controller connection cannot enumerate guest model-scope roles. | Human | 2026-08-17 | U3 CI corrective |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
@@ -1664,19 +1665,22 @@ the delivered package content. This is the sole Linux Python 3.13 smoke.
 
 ### Identity evidence and preflight
 
-Infrastructure/preflight verifies exactly one attached guest UAMI, with no
-system-assigned identity or competing model identity. That guest has only the
-model role, no state-store or Sandbox data-plane roles, and model-host-only
-egress. The distinct controller connection owns create, list, delete, and
-snapshot-cleanup operations.
+Infrastructure/preflight verifies exactly one attached guest UAMI with no
+system-assigned identity. Protected IaC or operations guarantees that guest has
+model-only, no-state/no-group RBAC. The controller connection has Sandbox Group
+Data Owner/Reader but cannot enumerate guest model-scope role assignments, so
+the smoke does not attempt an all-scope negative-RBAC proof or model-resource,
+role, or group-egress ARM assertions. The distinct controller connection owns
+create, list, delete, and snapshot-cleanup operations.
 
-The preflight is feasible without guest credentials: a least-privilege
-audit/deployment identity checks ARM/group identity metadata and role
-assignments. The runtime request asserts that `AZURE_CLIENT_ID` is absent, then
-makes the real model turn through normal `ClientManager` and bare
-`DefaultAzureCredential`; it injects no fallback identity. Model success plus
-the preflight together prove the intended identity configuration. A failed or
-ambiguous default selection fails the job.
+The preflight requires protected group, disk, Azure OpenAI endpoint, and
+deployment variables, rejects unresolved pipeline syntax, and asserts
+`AZURE_CLIENT_ID` is absent. The runtime composition creates its own
+deny-by-default egress policy that permits the configured model host and hard
+denies. It then makes one real model turn through normal `ClientManager` and
+bare `DefaultAzureCredential`, injecting no fallback identity. That success is
+positive model-access evidence only; it is not an attestation that no other
+guest role assignment exists.
 
 ### Leak-proof cleanup
 
@@ -1713,8 +1717,9 @@ separate settled evidence before post-main qualification is designed.
 
 The PR E2E template contains one nonblocking, 30-minute Linux Python 3.13
 current-checkout ACA smoke alongside the normal matrix. It uses a dedicated ACA
-connection, an ARM/RBAC fail-closed preflight, one materialized Function-app
-root with production package capture, and always-on sandbox/snapshot cleanup.
+connection, an identity-shape and protected-environment fail-closed preflight,
+one materialized Function-app root with production package capture, and
+always-on sandbox/snapshot cleanup.
 The optional predeployed pipeline, target variables, and public target
 metadata were removed; retained deployed suites are manual assets for the
 deferred work.

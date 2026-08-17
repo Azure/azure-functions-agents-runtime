@@ -58,9 +58,11 @@ family, including their snapshots, then fails if either remains.
 ### `aca_pr_smoke.py`
 
 Runs the protected current-checkout ACA smoke preflight. It uses the controller
-service connection to require exactly one guest UAMI, model-only RBAC, and
-model-host-only egress before the guest makes one real model turn. It fails
-closed when ARM/RBAC inspection permissions or evidence are unavailable.
+service connection to require exactly one guest UAMI with no system-assigned
+identity and validates the protected group, disk, endpoint, and deployment
+inputs. Guest model-only, no-state/no-group RBAC is an IaC/operations
+prerequisite; the real model turn is positive access proof, not a negative
+role-assignment attestation.
 
 The retained `aca_deployed_qualification.py` and deployed suite helpers are
 manual/local assets only pending the separate post-main qualification work.
