@@ -150,7 +150,8 @@ Restart `func start` after any swap so the host reloads `host.json`.
 `src/tools/incident_tools.py` defines four synthetic-but-realistic
 handlers decorated with `@workflow_tool`. `create_function_app()`
 discovers them from the normal `tools/` directory and registers them with
-the workflows engine when `main.agent.md` sets `workflows.enabled: true`.
+the app-wide workflow engine; this sample's workflow-enabled agent enables them
+in `main.agent.md`.
 They are workflow-only tools because the sample does not also decorate
 them with `@tool` and does not expose plain public normal-tool functions
 from that module:

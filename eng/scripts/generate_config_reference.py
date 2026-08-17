@@ -348,7 +348,7 @@ AGENT_TOOLS_FILTER_DESCRIPTIONS = {
 }
 
 WORKFLOW_CONFIG_DESCRIPTIONS = {
-    "enabled": "Enable Dynamic Workflows for this agent. In v1, only `main.agent.md` is honored.",
+    "enabled": "Enable Dynamic Workflows for this agent. The agent must have a supported trigger, chat API, or MCP endpoint.",
     "exclude": "Discovered `@workflow_tool` names to withhold from workflow plans.",
     "subagents": "Independent, deny-by-default leaf-specialist grants. [Details](#agent-workflows-subagents)",
 }
@@ -667,7 +667,8 @@ def generate_markdown() -> str:
         "- `name` (always required)",
         "- `description` (always required)",
         "- `trigger` (required unless at least one `builtin_endpoints` value is enabled, "
-        "or the agent is referenced only as an internal specialist via another agent's `subagents:`)",
+        "or the agent is referenced as an internal specialist via another agent's "
+        "`subagents` or `workflows.subagents`)",
         "",
         "**Global Configuration:**",
         "- No required properties (entire file is optional)",

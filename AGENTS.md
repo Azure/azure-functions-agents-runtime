@@ -179,6 +179,13 @@ Grounded in `pyproject.toml` and current code:
 - `docs/triggers.md` documents trigger types. Update when trigger surface changes.
 - `README.md` is the user-facing quickstart — update examples when public
   behavior changes.
+- The published [GitHub Pages docs site](https://azure.github.io/azure-functions-agents-runtime/)
+  is built from `docs/` with MkDocs (`mkdocs.yml`, `.github/workflows/docs.yml`).
+  `docs/index.md` (landing/feature bullets) and `docs/getting-started.md`
+  (quickstart walkthrough) are the site's onboarding pages and duplicate parts
+  of `README.md` — the `update-schema-docs` skill also keeps these in sync
+  when a schema change adds a new user-facing capability. Preview locally with
+  `mkdocs serve`; see [`CONTRIBUTING.md`](CONTRIBUTING.md#documentation-site).
 
 ### Schema change workflow
 
@@ -186,7 +193,9 @@ When modifying `src/azure_functions_agents/config/schema.py`:
 
 1. Make schema changes (new fields, models, validators)
 2. Run `python eng/scripts/generate_config_reference.py` → regenerates reference
-3. Use the **`update-schema-docs` skill** → adds examples to spec, reviews architecture
+3. Use the **`update-schema-docs` skill** → adds examples to spec, reviews
+   architecture, and syncs `docs/index.md` / `docs/getting-started.md` when the
+   change is user-facing
 4. Human review of architectural concerns and PR checklist
 5. Commit all doc updates together with implementation
 

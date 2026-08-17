@@ -440,3 +440,5 @@ __blobstorage__/
 .tmp-validation/
 
 samples/harness-chat/*
+# MkDocs build output
+site/

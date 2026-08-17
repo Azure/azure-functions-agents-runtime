@@ -5,6 +5,7 @@ from typing import Any
 
 import pytest
 
+from azure_functions_agents._function_tool import WorkflowTool
 from azure_functions_agents.config.schema import (
     BuiltinEndpointsConfig,
     ResolvedAgent,
@@ -12,8 +13,12 @@ from azure_functions_agents.config.schema import (
 )
 from azure_functions_agents.registration.capabilities import AgentCapabilities
 from azure_functions_agents.registration.catalog import CatalogEntry, build_catalog
-from azure_functions_agents.workflows import engine
-from azure_functions_agents.workflows.schema import SUB_AGENT_TASK_TYPE
+from azure_functions_agents.workflows import engine, integration
+from azure_functions_agents.workflows.schema import (
+    SUB_AGENT_TASK_TYPE,
+    TOOL_TASK_TYPE,
+    WorkflowPlanPolicy,
+)
 
 
 class _FakeApp:
@@ -56,9 +61,20 @@ def _catalog(*slugs: str):
     )
 
 
-def _registered_function(name: str, *, catalog=None) -> Callable[..., Any]:
+def _registered_function(
+    name: str,
+    *,
+    catalog=None,
+    workflow_agent_policies=None,
+    handler_catalog=None,
+) -> Callable[..., Any]:
     app = _FakeApp()
-    engine.register_workflows(app, catalog=catalog)
+    engine.register_workflows(
+        app,
+        catalog=catalog,
+        workflow_agent_policies=workflow_agent_policies,
+        handler_catalog=handler_catalog,
+    )
     [blueprint] = app.blueprints
     for builder in blueprint._function_builders:
         function = builder._function
@@ -92,6 +108,12 @@ async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
     activity = _registered_function(
         engine.SUB_AGENT_ACTIVITY_NAME,
         catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
     )
 
     result = await activity(
@@ -100,6 +122,7 @@ async def test_sub_agent_activity_uses_catalog_timeout_and_result_envelope(
             "agent": "pr_status_analyst",
             "task": "Analyze PR 117.",
             "workflow_id": "workflow-1",
+            "workflow_agent_slug": "coordinator",
         }
     )
 
@@ -125,6 +148,12 @@ async def test_sub_agent_activity_fails_closed_on_catalog_miss() -> None:
     activity = _registered_function(
         engine.SUB_AGENT_ACTIVITY_NAME,
         catalog=_catalog("known"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"missing"}),
+            )
+        },
     )
 
     with pytest.raises(RuntimeError, match="not available"):
@@ -134,6 +163,55 @@ async def test_sub_agent_activity_fails_closed_on_catalog_miss() -> None:
                 "agent": "missing",
                 "task": "Analyze PR 117.",
                 "workflow_id": "workflow-1",
+                "workflow_agent_slug": "coordinator",
+            }
+        )
+
+
+@pytest.mark.asyncio
+async def test_sub_agent_activity_rejects_revoked_owner_grant() -> None:
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset(),
+            )
+        },
+    )
+
+    with pytest.raises(RuntimeError, match="not authorized"):
+        await activity(
+            {
+                "id": "analyze_pr",
+                "agent": "pr_status_analyst",
+                "task": "Analyze PR 117.",
+                "workflow_id": "workflow-1",
+                "workflow_agent_slug": "coordinator",
+            }
+        )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("workflow_agent_policies", [None, {}])
+async def test_sub_agent_activity_missing_agent_policy_fails_closed(
+    workflow_agent_policies,
+) -> None:
+    activity = _registered_function(
+        engine.SUB_AGENT_ACTIVITY_NAME,
+        catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies=workflow_agent_policies,
+    )
+
+    with pytest.raises(RuntimeError, match="agent policy"):
+        await activity(
+            {
+                "id": "analyze_pr",
+                "agent": "pr_status_analyst",
+                "task": "Analyze PR 117.",
+                "workflow_id": "workflow-1",
+                "workflow_agent_slug": "missing",
             }
         )
 
@@ -151,6 +229,12 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
     activity = _registered_function(
         engine.SUB_AGENT_ACTIVITY_NAME,
         catalog=_catalog("pr_status_analyst"),
+        workflow_agent_policies={
+            "coordinator": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset({"pr_status_analyst"}),
+            )
+        },
     )
 
     with pytest.raises(RuntimeError) as exc_info:
@@ -160,6 +244,7 @@ async def test_sub_agent_activity_sanitizes_leaf_failure(
                 "agent": "pr_status_analyst",
                 "task": "Analyze PR 117.",
                 "workflow_id": "workflow-1",
+                "workflow_agent_slug": "coordinator",
             }
         )
 
@@ -187,7 +272,7 @@ class _FakeOrchestrationContext:
         result_for: Callable[[str, dict[str, Any]], dict[str, Any]],
     ) -> None:
         self.instance_id = "workflow-parent"
-        self._input = {"tasks": tasks}
+        self._input = {"workflow_agent_slug": "coordinator", "tasks": tasks}
         self._result_for = result_for
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.last_wave = _Task([])
@@ -227,6 +312,30 @@ def _run_orchestrator(
             generator.send(context.last_wave)
     except StopIteration as stop:
         return stop.value
+
+
+def test_orchestrator_preserves_activity_failure() -> None:
+    class _FailedWaveContext(_FakeOrchestrationContext):
+        def task_all(self, tasks: list[_Task]) -> _Task:
+            self.last_wave = _Task(RuntimeError("activity authorization failed"))
+            return self.last_wave
+
+    context = _FailedWaveContext(
+        [
+            {
+                "id": "publish",
+                "type": TOOL_TASK_TYPE,
+                "tool": "publish",
+                "args": {},
+                "depends_on": [],
+            }
+        ],
+        lambda name, payload: {"id": payload["id"], "result": {"ok": True}},
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="activity authorization failed"):
+        _run_orchestrator(orchestrator, context)
 
 
 def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> None:
@@ -295,9 +404,110 @@ def test_orchestrator_fans_out_sub_agents_and_reduces_templated_results() -> Non
         payload["workflow_id"] == "workflow-parent"
         for _, payload in context.calls
     )
+    assert all(
+        payload["workflow_agent_slug"] == "coordinator"
+        for _, payload in context.calls
+    )
     assert context.statuses == [
         "0/3 tasks done, running=analyze_117,analyze_118",
         "2/3 tasks done, next=report",
         "2/3 tasks done, running=report",
         "3/3 tasks done",
     ]
+
+
+def test_orchestrator_threads_workflow_agent_slug_to_tool_activity() -> None:
+    tasks = [
+        {
+            "id": "publish",
+            "type": TOOL_TASK_TYPE,
+            "tool": "publish",
+            "args": {},
+            "depends_on": [],
+        }
+    ]
+    context = _FakeOrchestrationContext(
+        tasks,
+        lambda name, payload: {"id": payload["id"], "result": {"ok": True}},
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    _run_orchestrator(orchestrator, context)
+
+    assert context.calls == [
+        (
+            "agents_workflow_run_tool",
+            {
+                "id": "publish",
+                "tool": "publish",
+                "args": {},
+                "workflow_agent_slug": "coordinator",
+                "workflow_id": "workflow-parent",
+            },
+        )
+    ]
+
+
+def test_tool_activity_reauthorizes_current_agent_policy() -> None:
+    handler_catalog = integration.build_workflow_handler_catalog(
+        [WorkflowTool("publish", "Publish", lambda args: {"published": args})]
+    )
+    allowed = _registered_function(
+        "agents_workflow_run_tool",
+        handler_catalog=handler_catalog,
+        workflow_agent_policies={
+            "workflow-agent": WorkflowPlanPolicy(
+                allowed_tools=frozenset({"publish"}),
+                allowed_subagents=frozenset(),
+            )
+        },
+    )
+    revoked = _registered_function(
+        "agents_workflow_run_tool",
+        handler_catalog=handler_catalog,
+        workflow_agent_policies={
+            "workflow-agent": WorkflowPlanPolicy(
+                allowed_tools=frozenset(),
+                allowed_subagents=frozenset(),
+            )
+        },
+    )
+    payload = {
+        "id": "publish",
+        "tool": "publish",
+        "args": {"value": 1},
+        "workflow_agent_slug": "workflow-agent",
+        "workflow_id": "workflow-1",
+    }
+
+    assert allowed(payload) == {
+        "id": "publish",
+        "result": {"published": {"value": 1}},
+    }
+    with pytest.raises(RuntimeError, match="not authorized"):
+        revoked(payload)
+
+
+@pytest.mark.parametrize("workflow_agent_policies", [None, {}])
+def test_tool_activity_missing_agent_policy_fails_closed(
+    workflow_agent_policies,
+) -> None:
+    handler_catalog = integration.build_workflow_handler_catalog(
+        [WorkflowTool("publish", "Publish", lambda args: args)]
+    )
+    activity = _registered_function(
+        "agents_workflow_run_tool",
+        handler_catalog=handler_catalog,
+        workflow_agent_policies=workflow_agent_policies,
+    )
+
+    with pytest.raises(RuntimeError, match="agent policy"):
+        activity(
+            {
+                "id": "publish",
+                "tool": "publish",
+                "args": {},
+                "workflow_agent_slug": "missing",
+                "workflow_id": "workflow-1",
+            }
+        )

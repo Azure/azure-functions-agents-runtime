@@ -620,6 +620,38 @@ def test_non_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
     assert captured["agent_name"] != resolved.name
 
 
+def test_non_http_workflow_handler_threads_workflow_agent_slug(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(
+            content="ok",
+            session_id=kwargs["session_id"],
+            tool_calls=[],
+        )
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    resolved = _resolved_agent(response_schema=None, slug="queue-owner")
+    handler = make_agent_handler(
+        resolved,
+        "queue_trigger",
+        AgentCapabilities(),
+        workflows_enabled=True,
+    )
+    durable_client = object()
+
+    asyncio.run(handler({"message": "hello"}, client=durable_client))
+
+    assert captured["workflow_agent_slug"] == "queue-owner"
+    assert captured["workflow_durable_client"] is durable_client
+
+
 def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
     monkeypatch: Any,
 ) -> None:
@@ -642,6 +674,39 @@ def test_http_handler_passes_resolved_slug_not_display_name_as_agent_name(
 
     assert captured["agent_name"] == "report-slug"
     assert captured["agent_name"] != resolved.name
+
+
+def test_http_workflow_handler_threads_workflow_agent_slug(
+    monkeypatch: Any,
+) -> None:
+    captured: dict[str, Any] = {}
+
+    async def fake_run_agent(*args: Any, **kwargs: Any) -> Any:
+        captured.update(kwargs)
+        return SimpleNamespace(content="ok", session_id=kwargs["session_id"])
+
+    monkeypatch.setattr(
+        "azure_functions_agents.registration._handlers._run_agent",
+        fake_run_agent,
+    )
+    resolved = _resolved_agent(response_schema=None, slug="http-owner")
+    handler = make_http_agent_handler(
+        resolved,
+        AgentCapabilities(),
+        workflows_enabled=True,
+    )
+    durable_client = object()
+
+    response = asyncio.run(
+        handler(
+            DummyRequest({"hello": "world"}),
+            client=durable_client,
+        )
+    )
+
+    assert response.status_code == 200
+    assert captured["workflow_agent_slug"] == "http-owner"
+    assert captured["workflow_durable_client"] is durable_client
 
 
 def _principal_header(claims: list[dict[str, str]], *, auth_typ: str = "aad") -> str:

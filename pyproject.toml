@@ -56,6 +56,9 @@ dev = [
     "azure-storage-queue==12.13.*,<13",
     "jmespath>=1.0.1,<2",
 ]
+docs = [
+    "mkdocs-material==9.7.7",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

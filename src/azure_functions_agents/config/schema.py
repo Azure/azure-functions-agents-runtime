@@ -160,11 +160,11 @@ class SubagentRef(_SubagentRefBase):
     """
 
 class WorkflowSubagentRef(_SubagentRefBase):
-    """A workflow owner's authorization grant for one leaf specialist."""
+    """A workflow-enabled agent's authorization grant for one leaf specialist."""
 
 
 class WorkflowConfig(BaseModel):
-    """Dynamic Workflow enablement and owner-specific capability grants."""
+    """Dynamic Workflow enablement and agent-specific capability grants."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
