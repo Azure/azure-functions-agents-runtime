@@ -10,6 +10,7 @@ SANDBOX_PYTHONPATH = f"{SANDBOX_APPLICATION_PATH}:{SANDBOX_SITE_PACKAGES_PATH}"
 SANDBOX_ROOT_PATH = "/var/lib/azurefunctions-agents-runtime"
 JOURNAL_ROOT_PATH = SANDBOX_ROOT_PATH
 SESSION_PATH = f"{SANDBOX_ROOT_PATH}/session"
+CHECKPOINTS_PATH = f"{SESSION_PATH}/checkpoints"
 CONTENT_PATH = f"{SESSION_PATH}/content"
 CONTENT_ARCHIVE_PATH = f"{CONTENT_PATH}/app.zip"
 CONTENT_DIGEST_SIDECAR_PATH = f"{CONTENT_PATH}/app.sha256"
@@ -115,3 +116,8 @@ def validate_checkpoint_name(value: str) -> str:
     if checkpoint_name(token) != value:
         raise ValueError("checkpoint name must be canonical")
     return value
+
+
+def checkpoint_conversation_path(checkpoint: str) -> str:
+    """Return the canonical conversation path for one validated checkpoint."""
+    return f"{CHECKPOINTS_PATH}/{validate_checkpoint_name(checkpoint)}/conversation.json"

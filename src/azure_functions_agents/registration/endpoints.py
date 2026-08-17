@@ -13,12 +13,20 @@ from typing import TYPE_CHECKING, Any
 import azure.functions as func
 from azurefunctions.extensions.http.fastapi import Request, Response, StreamingResponse
 
+from .._history_presentation import MAX_HISTORY_REPLAY_MESSAGES as _MAX_HISTORY_REPLAY_MESSAGES
+from .._history_presentation import present_history_messages
 from .._logger import logger
 from .._observability import FaultDomain, LifecycleStage, start_span
 from .._session_id import SESSION_ID_PATTERN
 from .._source_marker import source_marker
 from ..config import EndpointAuthConfig, ResolvedAgent
 from ..controller.budget import RequestBudget
+from ..controller.history_reader import (
+    SessionHistoryGoneError,
+    SessionHistoryNotFoundError,
+    SessionHistoryUnavailableError,
+    read_session_history,
+)
 from ..controller.http import (
     cancel_run as cancel_controller_run,
 )
@@ -153,7 +161,6 @@ _SAFE_SESSION_ID_PATTERN = SESSION_ID_PATTERN
 _PROVIDER_LABEL_VALUE_PATTERN = re.compile(
     r"^[A-Za-z0-9](?:[A-Za-z0-9._-]{0,61}[A-Za-z0-9])?$"
 )
-_MAX_HISTORY_REPLAY_MESSAGES = 200
 
 
 def _extract_mcp_session_id(payload: dict[str, Any]) -> str | None:
@@ -902,13 +909,15 @@ def _register_history_endpoint(
     slug: str,
     base_function_name: str,
     auth: EndpointAuthConfig,
+    session_runtime: SessionRuntimeBinding | None,
+    authored_timeout: float | None,
 ) -> None:
     """Register a read-only endpoint that returns a session's persisted transcript.
 
     The built-in chat UI calls this to repaint prior user/assistant messages when a
-    user resumes an older session. It reads the same blob history the runtime writes
-    each turn; when no storage is configured it degrades to an empty transcript so
-    older deployments (and local runs without storage) keep working.
+    user resumes an older session. In-language-worker sessions read Blob history;
+    ACA sessions read only their owner-authorized sandbox checkpoint and never fall
+    back to Blob. Unconfigured in-language-worker storage remains an empty result.
     """
     auth_level = resolve_endpoint_auth_level(auth)
 
@@ -928,6 +937,35 @@ def _register_history_endpoint(
                 json.dumps({"error": "invalid session id"}),
                 status_code=400,
                 media_type="application/json",
+            )
+
+        if session_runtime is not None:
+            owner, owner_error = _resolve_session_owner(req.headers.get, auth, session_runtime)
+            if owner_error is not None:
+                return _json_error(owner_error.message, status_code=owner_error.status_code)
+            if owner is None:
+                return _json_error("Persistent sessions require authenticated endpoint auth.", 401)
+            owner_context = resolve_owner_context(session_runtime.app_identity, slug, owner)
+            budget = RequestBudget.start(authored_timeout=authored_timeout)
+            try:
+                history = await read_session_history(
+                    session_runtime,
+                    owner_context,
+                    session_id,
+                    budget.setup,
+                )
+            except SessionHistoryNotFoundError:
+                return _json_error("session_not_found", status_code=404)
+            except SessionHistoryGoneError:
+                return _json_error("history_gone", status_code=410)
+            except SessionHistoryUnavailableError:
+                return _json_error("history_unavailable", status_code=503)
+
+            headers = {"x-ms-aca-history-resumed": "true"} if history.resumed else None
+            return Response(
+                json.dumps({"messages": history.messages, "truncated": history.truncated}),
+                media_type="application/json",
+                headers=headers,
             )
 
         from .._blob_history import build_blob_provider_from_environment
@@ -950,19 +988,10 @@ def _register_history_endpoint(
                 media_type="application/json",
             )
 
-        rendered: list[dict[str, str]] = []
-        for message in messages:
-            role = str(getattr(message, "role", "") or "").strip().lower()
-            if role not in ("user", "assistant"):
-                continue
-            text = getattr(message, "text", "")
-            if not isinstance(text, str) or not text:
-                continue
-            rendered.append({"role": role, "text": text})
-
-        truncated = len(rendered) > _MAX_HISTORY_REPLAY_MESSAGES
-        if truncated:
-            rendered = rendered[-_MAX_HISTORY_REPLAY_MESSAGES:]
+        rendered, truncated = present_history_messages(
+            messages,
+            limit=_MAX_HISTORY_REPLAY_MESSAGES,
+        )
         return Response(
             json.dumps({"messages": rendered, "truncated": truncated}),
             media_type="application/json",
@@ -1041,6 +1070,8 @@ def register_builtin_endpoints(
             slug=slug,
             base_function_name=base_function_name,
             auth=auth,
+            session_runtime=session_runtime,
+            authored_timeout=resolved.timeout,
         )
         if workflows_enabled:
             _register_workflow_status_endpoints(

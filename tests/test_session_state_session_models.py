@@ -13,12 +13,15 @@ from azure_functions_agents.session_state import (
     AdmissionRecords,
     AppIdentity,
     DurableIdempotencyRecord,
+    DurableOwnerIdempotencyRecord,
     DurableRunRecord,
     DurableSessionOperation,
     DurableSessionRecord,
     FunctionAppOwnerContext,
+    NewSessionAdmissionRecords,
     OperationRowKey,
     OwnerPartition,
+    ProvisionSubmitRecords,
     SessionOperationTarget,
     SessionStateContractError,
     SessionStatus,
@@ -60,6 +63,7 @@ def _session(
         digest_kind="funcs_zip",
         digest="sha256:" + ("b" * 64),
         protocol="1",
+        checkpoint_expectation="required" if active_run_id is not None else "none",
         status=status,  # type: ignore[arg-type]
         last_activity_at=_NOW,
         expires_at=_NOW + timedelta(hours=24),
@@ -100,12 +104,18 @@ def _operation(
     kind: str = "reclaim_backing",
 ) -> DurableSessionOperation:
     run_id = _RUN_ID
-    phase = "reclaim_fenced" if kind == "reclaim_backing" else "submit_disarm"
+    phase = (
+        "reclaim_fenced"
+        if kind == "reclaim_backing"
+        else "provision_create"
+        if kind == "provision_submit"
+        else "submit_disarm"
+    )
     return DurableSessionOperation.create(
         owner_partition=partition or _partition(),
         target=SessionOperationTarget.create(
             session_id=_SESSION_ID,
-            sandbox_id="sandbox-1",
+            sandbox_id=None if kind == "provision_submit" else "sandbox-1",
             generation=1,
             digest_kind="funcs_zip",
             digest="sha256:" + ("b" * 64),
@@ -143,6 +153,18 @@ def _idempotency(
     )
 
 
+def _owner_idempotency() -> DurableOwnerIdempotencyRecord:
+    return DurableOwnerIdempotencyRecord.create(
+        owner_partition=_partition(),
+        idempotency_hash="c" * 64,
+        request_hash="d" * 64,
+        session_id=_SESSION_ID,
+        run_id=_RUN_ID,
+        expires_at=_NOW + timedelta(hours=1),
+        created_at=_NOW,
+    )
+
+
 def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
     record = _session()
     entity = record.to_table_entity()
@@ -171,10 +193,73 @@ def test_durable_table_name_and_session_entity_schema_are_exact() -> None:
         "tombstone_reason": "",
         "active_operation_id": "",
         "operation_sequence": 0,
+        "checkpoint_expectation": "required",
         "created_at": _NOW,
         "updated_at": _NOW,
     }
     assert DurableSessionRecord.from_table_entity(entity) == record
+
+
+def test_session_checkpoint_expectation_defaults_legacy_rows_to_unknown() -> None:
+    entity = _session().to_table_entity()
+    entity.pop("checkpoint_expectation")
+
+    assert DurableSessionRecord.from_table_entity(entity).checkpoint_expectation == "unknown"
+
+
+@pytest.mark.parametrize("value", ("none", "required"))
+def test_session_checkpoint_expectation_round_trips(value: str) -> None:
+    record = replace(_session(), checkpoint_expectation=value)  # type: ignore[arg-type]
+
+    assert record.to_table_entity()["checkpoint_expectation"] == value
+    assert DurableSessionRecord.from_table_entity(record.to_table_entity()) == record
+
+
+@pytest.mark.parametrize("expectation", ("unknown", "none"))
+def test_every_admission_record_requires_a_checkpoint_before_execution(
+    expectation: str,
+) -> None:
+    required = _session()
+    assert AdmissionRecords.create(required, _run()).session.checkpoint_expectation == "required"
+    assert (
+        NewSessionAdmissionRecords.create(required, _run(), _owner_idempotency())
+        .session.checkpoint_expectation
+        == "required"
+    )
+    operation = _operation(kind="provision_submit")
+    reserved_required = replace(
+        required,
+        sandbox_id=None,
+        status="creating",
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    assert (
+        ProvisionSubmitRecords.create(
+            reserved_required,
+            _run(),
+            operation,
+            _owner_idempotency(),
+        ).session.checkpoint_expectation
+        == "required"
+    )
+
+    admitted = replace(_session(), checkpoint_expectation=expectation)  # type: ignore[arg-type]
+    with pytest.raises(SessionStateContractError, match="checkpoint"):
+        AdmissionRecords.create(admitted, _run())
+
+    with pytest.raises(SessionStateContractError, match="checkpoint"):
+        NewSessionAdmissionRecords.create(admitted, _run(), _owner_idempotency())
+
+    reserved = replace(
+        admitted,
+        sandbox_id=None,
+        status="creating",
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    with pytest.raises(SessionStateContractError):
+        ProvisionSubmitRecords.create(reserved, _run(), operation, _owner_idempotency())
 
 
 def test_session_rows_without_app_hash_remain_readable() -> None:

@@ -582,6 +582,7 @@ class AzureTableSessionStateStore:
         _validate_generation_or_raise(
             previous.generation, updated.generation, backing_rebind=backing_rebind
         )
+        _validate_checkpoint_expectation_transition(previous, updated)
         if (
             previous.active_operation_id != updated.active_operation_id
             or previous.operation_sequence != updated.operation_sequence
@@ -618,6 +619,7 @@ class AzureTableSessionStateStore:
             digest_kind=previous.digest_kind,
             digest=previous.digest,
             protocol=previous.protocol,
+            checkpoint_expectation=previous.checkpoint_expectation,
             status="tombstoned",
             last_activity_at=previous.last_activity_at,
             expires_at=previous.expires_at,
@@ -2137,6 +2139,7 @@ def _release_active_run(
         digest_kind=session.digest_kind,
         digest=session.digest,
         protocol=session.protocol,
+        checkpoint_expectation=session.checkpoint_expectation,
         status="ready",
         last_activity_at=updated_at,
         expires_at=session.expires_at,
@@ -2257,6 +2260,7 @@ def _validate_operation_begin(
     operation: DurableSessionOperation,
 ) -> None:
     _require_operation_matches_session(previous, operation)
+    _validate_checkpoint_expectation_transition(previous, updated)
     if previous.active_operation_id is not None:
         raise SessionStateStoreError("session already has an active durable operation")
     if operation.sequence != previous.operation_sequence + 1:
@@ -2304,6 +2308,7 @@ def _validate_operation_advance_session(
     updated: DurableSessionRecord,
     target: SessionOperationTarget,
 ) -> None:
+    _validate_checkpoint_expectation_transition(previous, updated)
     if (
         updated.owner_partition.partition_key != previous.owner_partition.partition_key
         or updated.session_id != previous.session_id
@@ -2329,6 +2334,7 @@ def _validate_operation_completion(
     allow_active_run_abort: bool,
 ) -> None:
     _require_operation_matches_session(current_session, operation)
+    _validate_checkpoint_expectation_transition(current_session, updated_session)
     if (
         updated_session.owner_partition.partition_key
         != current_session.owner_partition.partition_key
@@ -2370,6 +2376,17 @@ def _validate_operation_completion(
         or updated_session.active_run_id is not None
     ):
         raise SessionStateStoreError("operation terminal transition does not match its run target")
+
+
+def _validate_checkpoint_expectation_transition(
+    previous: DurableSessionRecord,
+    updated: DurableSessionRecord,
+) -> None:
+    if (
+        previous.checkpoint_expectation != updated.checkpoint_expectation
+        and updated.checkpoint_expectation != "required"
+    ):
+        raise SessionStateStoreError("checkpoint expectation may only advance to required")
 
 
 def _terminal_run_for_operation(

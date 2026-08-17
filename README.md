@@ -444,7 +444,7 @@ The chat UI manages the session id for you. The active id is shown beneath the s
 
 The settings dialog also keeps a **Recent sessions** list (most-recent first, up to 8 per base URL and agent). Each turn adds or updates an entry, auto-titling it with your first message (renameable via **Rename**); pick one to fill the Session ID field and **Save** to resume it, or use **Remove** / **Clear recent** to prune the list. This list is a per-browser convenience stored in local storage — it is **not** synced across devices or browsers, and it does not include sessions created through the raw HTTP API from other clients.
 
-When you resume a session — whether by pasting an id or picking one from **Recent sessions** — the chat window reloads that conversation's earlier messages from the server (via a `GET /agents/{slug}/history` endpoint) so its history is visible right away, not just carried invisibly into your next turn. The replay is capped at the 200 most recent user and assistant messages; the UI shows a notice when older messages were omitted. Intermediate tool activity is not replayed. This requires the app's blob-backed [session storage](#session-storage) to be configured; without it — or on an older runtime that predates the history endpoint — the window simply starts empty and the resumed session still continues on your next message.
+When you resume a session — whether by pasting an id or picking one from **Recent sessions** — the chat window reloads that conversation's earlier messages from the server (via a `GET /agents/{slug}/history` endpoint) so its history is visible right away, not just carried invisibly into your next turn. The replay is capped at the 200 most recent user and assistant messages; the UI shows a notice when older messages were omitted. Intermediate tool activity is not replayed. The default in-language worker reads the app's blob-backed [session storage](#session-storage). The experimental ACA runtime instead reads only the owner-authorized checkpoint in its sandbox; a retained stopped or suspended sandbox may resume for this read, adding wake latency and ACA cost, without extending its retention. ACA history never falls back to Blob Storage or an external transcript copy. Without Blob storage on the default backend — or on an older runtime that predates the history endpoint — the window simply starts empty and the resumed session still continues on your next message.
 
 ### HTTP Chat API
 
@@ -465,6 +465,14 @@ until live end-to-end and load acceptance. Enabling
 identity, egress, lifecycle, and troubleshooting guidance; see
 [architecture.md](docs/architecture.md) and
 [FRD 0008](docs/frds/0008-aca-sandbox-session-runtime.md) for internal design.
+
+ACA history is sandbox-only: it uses the validated session checkpoint, never
+the default `BlobHistoryProvider`, external transcript storage, or sandbox
+state-storage credentials. Missing or unowned sessions return `404`; confirmed
+reclaim/loss/tombstones return `410`; and unreadable or untrusted checkpoints
+return `503`, rather than an empty transcript. The customer-attached Sandbox
+Group identity remains available to guest code, but the runtime neither
+attaches nor strips it and does not use it for history.
 
 When enabled, ordinary chat calls remain synchronous. Send
 `Prefer: respond-async` on either built-in chat surface or a custom
@@ -573,6 +581,7 @@ By default, MCP auth follows the app-wide identity selection: `AZURE_CLIENT_ID` 
 
 ## Session storage
 
+The following storage behavior is for the default in-language worker.
 Multi-turn conversations are persisted as JSON Lines, one record per message:
 
 - **Deployed apps (recommended).** When `AzureWebJobsStorage` is configured —
@@ -594,6 +603,11 @@ Multi-turn conversations are persisted as JSON Lines, one record per message:
   defaulting to `~/.azure-functions-agents/agent-sessions/`.
 
 Session ids must match `^[A-Za-z0-9._-]{1,128}$` — anything else is rejected at the API boundary.
+
+The experimental ACA session runtime is an explicit opt-in and does not change
+this default. Its transcript remains in the session sandbox's validated
+checkpoint and is available only for as long as that retained sandbox history
+exists; it is not mirrored to this Blob location.
 
 > **Single-process scope**: A per-session `asyncio.Lock` serializes concurrent turns within a single Function instance. The contract is "one active turn per session id". Multi-instance distributed locking is intentionally out of scope.
 

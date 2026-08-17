@@ -20,6 +20,8 @@ from azure_functions_agents.controller.readiness import (
     SessionActivationGoneError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
+    SessionActivationUnavailableError,
+    SessionActivationUntrustedError,
     SessionBindingChangedError,
     SessionRuntimeBinding,
     StateStoreBinding,
@@ -218,6 +220,7 @@ async def test_reserved_provision_keeps_successful_created_handle_open(tmp_path:
 
     assert provisioned.activated is not None
     assert provisioned.activated.handle is handle
+    assert provisioned.activated.session.checkpoint_expectation == "required"
     assert handle.close_calls == 0
 
 
@@ -513,6 +516,113 @@ async def test_attach_requires_the_provider_handshake_and_protocol_capabilities(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_attach_calls", "expected_resume_calls"),
+    [("ready", 1, 0), ("suspended", 0, 1)],
+)
+async def test_activation_closes_untransferred_handle_after_harness_file_failure(
+    tmp_path: Path,
+    status: str,
+    expected_attach_calls: int,
+    expected_resume_calls: int,
+) -> None:
+    class _ArtifactFailureHandle(_CountingHandle):
+        async def read_file(self, path: str) -> bytes:
+            if path == ATOMIC_CHECKPOINT_POINTER_PATH:
+                raise SandboxFileOperationError("file plane unavailable")
+            return await super().read_file(path)
+
+    script_root = _script_root(tmp_path)
+    handle = _ArtifactFailureHandle()
+    provider = _FakeProvider(handle)
+    session = _session(script_root, status=status)
+    store = _FakeStore(session)
+
+    with pytest.raises(SessionActivationUnavailableError):
+        await activate_session(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    assert provider.attach_calls == expected_attach_calls
+    assert provider.resume_calls == expected_resume_calls
+    assert handle.close_calls == 1
+    assert store.session == session
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status", "expected_attach_calls", "expected_resume_calls"),
+    [("ready", 1, 0), ("suspended", 0, 1)],
+)
+async def test_activation_closes_untransferred_handle_when_harness_read_is_cancelled(
+    tmp_path: Path,
+    status: str,
+    expected_attach_calls: int,
+    expected_resume_calls: int,
+) -> None:
+    class _CancelledArtifactHandle(_CountingHandle):
+        async def read_file(self, path: str) -> bytes:
+            if path == ATOMIC_CHECKPOINT_POINTER_PATH:
+                raise asyncio.CancelledError
+            return await super().read_file(path)
+
+    script_root = _script_root(tmp_path)
+    handle = _CancelledArtifactHandle()
+    provider = _FakeProvider(handle)
+    session = _session(script_root, status=status)
+
+    with pytest.raises(asyncio.CancelledError):
+        await activate_session(
+            _runtime(script_root, provider, _FakeStore(session)),
+            _owner(),
+            session.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    assert provider.attach_calls == expected_attach_calls
+    assert provider.resume_calls == expected_resume_calls
+    assert handle.close_calls == 1
+
+
+@pytest.mark.asyncio
+async def test_verified_quarantined_and_unbound_sessions_have_narrow_not_found_subtypes(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+
+    quarantined = replace(
+        _session(script_root),
+        status="quarantined",
+        quarantine_reason="checkpoint_corrupt",
+    )
+    runtime = _runtime(script_root, _FakeProvider(_FakeHandle()), _FakeStore(quarantined))
+    with pytest.raises(SessionActivationUntrustedError):
+        await activate_session(
+            runtime,
+            _owner(),
+            quarantined.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+    unbound = _session(script_root, sandbox_id=None)
+    runtime = _runtime(script_root, _FakeProvider(_FakeHandle()), _FakeStore(unbound))
+    with pytest.raises(SessionActivationUnavailableError):
+        await activate_session(
+            runtime,
+            _owner(),
+            unbound.session_id,
+            SetupBudget.start(),
+            allow_create=False,
+        )
+
+
+@pytest.mark.asyncio
 async def test_resume_requires_the_provider_handshake_and_protocol_capabilities(
     tmp_path: Path,
 ) -> None:
@@ -532,6 +642,7 @@ async def test_resume_requires_the_provider_handshake_and_protocol_capabilities(
 
     assert provider.attach_calls == 0
     assert provider.resume_calls == 1
+    assert activated.resumed is True
     assert [call.path for call in handle.calls] == [
         HARNESS_PROTOCOL_PATH,
         ATOMIC_CHECKPOINT_POINTER_PATH,
@@ -547,7 +658,7 @@ async def test_manifest_mismatch_quarantines_without_deleting_state(tmp_path: Pa
     session = _session(script_root)
     store = _FakeStore(session)
 
-    with pytest.raises(SessionActivationNotFoundError):
+    with pytest.raises(SessionActivationUntrustedError):
         await activate_session(
             _runtime(script_root, provider, store),
             _owner(),
@@ -640,9 +751,10 @@ async def test_optional_checkpoint_pointer_requires_a_canonical_uuid_name(tmp_pa
 async def test_optional_checkpoint_pointer_accepts_a_canonical_uuid_name(tmp_path: Path) -> None:
     script_root = _script_root(tmp_path)
     handle = _FakeHandle("new-sandbox")
+    checkpoint_name = f"checkpoint_{uuid4().hex}"
     handle.seed_file(
         ATOMIC_CHECKPOINT_POINTER_PATH,
-        f"checkpoint_{uuid4().hex}\n".encode("ascii"),
+        f"{checkpoint_name}\n".encode("ascii"),
     )
     provider = _FakeProvider(handle)
     store = _FakeStore()
@@ -656,6 +768,8 @@ async def test_optional_checkpoint_pointer_accepts_a_canonical_uuid_name(tmp_pat
     )
 
     assert activated.session.status == "ready"
+    assert activated.checkpoint_name == checkpoint_name
+    assert [call.path for call in handle.calls].count(ATOMIC_CHECKPOINT_POINTER_PATH) == 1
     await activated.handle.close()
 
 
@@ -922,6 +1036,7 @@ async def test_creation_reserves_the_row_then_proves_the_live_manifest(tmp_path:
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.session.sandbox_id == "new-sandbox"
+    assert store.session.checkpoint_expectation == "none"
     assert not handle.closed
     assert handle.lifecycle_policy.auto_suspend_seconds == 300
     assert handle.lifecycle_policy.auto_delete_seconds == 90_300

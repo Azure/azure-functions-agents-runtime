@@ -49,12 +49,16 @@ import contextlib
 import hashlib
 import json
 import os
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any, ClassVar
 
 from agent_framework import HistoryProvider, Message
 from azure.core.exceptions import ResourceExistsError, ResourceNotFoundError
 
+from ._history_presentation import (
+    decode_history_jsonl,
+    filter_excluded_history_messages,
+)
 from ._logger import logger
 
 # ---------------------------------------------------------------------------
@@ -160,31 +164,13 @@ class BlobHistoryProvider(HistoryProvider):
         except ResourceNotFoundError:
             return []
 
-        text = content if isinstance(content, str) else content.decode("utf-8")
-        messages: list[Message] = []
-        for line_number, raw in enumerate(text.splitlines(), start=1):
-            line = raw.strip()
-            if not line:
-                continue
-            try:
-                payload = json.loads(line)
-            except ValueError as exc:
-                raise ValueError(
-                    f"Failed to deserialize history line {line_number} from blob "
-                    f"'{self._container_name}/{self._blob_name(session_id)}'."
-                ) from exc
-            if not isinstance(payload, Mapping):
-                raise ValueError(
-                    f"History line {line_number} in blob "
-                    f"'{self._container_name}/{self._blob_name(session_id)}' "
-                    "did not deserialize to a mapping."
-                )
-            messages.append(Message.from_dict(dict(payload)))
+        messages = decode_history_jsonl(
+            content,
+            source=f"blob '{self._container_name}/{self._blob_name(session_id)}'",
+        )
 
         if self.skip_excluded:
-            messages = [
-                m for m in messages if not m.additional_properties.get("_excluded", False)
-            ]
+            messages = filter_excluded_history_messages(messages)
         return messages
 
     async def save_messages(

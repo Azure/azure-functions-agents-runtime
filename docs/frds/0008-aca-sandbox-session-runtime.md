@@ -4,7 +4,7 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-07
+updated: 2026-08-17
 issues: []
 pull_requests: []
 branch: feature/aca-sandboxes
@@ -389,6 +389,18 @@ controlling amendments.
 | 150 | Identity and headers | No group identity / group identity | Guest credentials use the dedicated Sandbox Group identity; static proxy headers are default and optional `secretRef` remains customer-provisioned. | Human | 2026-08-07 | U2 |
 | 151 | Egress lifecycle | Legacy inspection or mutable policy / Full create-time policy | Use explicit Deny plus Full inspection, ordered rules, capped policy, and drain/new session for policy or credential rotation. | Human | 2026-08-07 | U2 |
 | Meta | Implementation compaction | 30 event rows / 8 durable rows | Historical pre-merge editing compacted the then-unmerged rows 119-148; later merged and appended rows remain append-only. | Human | 2026-08-03 | 0008.6 |
+| 152 | ACA history durable source | External projection / sandbox checkpoint | Keep transcript only in the pointer-selected sandbox checkpoint; Decisions #53/#54 remain unchanged. | Human | 2026-08-17 | ACA history amendment |
+| 153 | History activation | No wake / resume-on-read | Resume retained stopped or suspended backing through normal activation so history remains available; accept wake cost and latency. | Human | 2026-08-17 | ACA history amendment |
+| 154 | History authorization | Session ID / owner partition plus live binding | Require authenticated owner partition, durable row, and live binding before checkpoint access. | Human | 2026-08-17 | ACA history amendment |
+| 155 | Checkpoint read protocol | Copy / reread pointer / validated pointer | Reuse activation's validated `current` value, then stat and read its immutable conversation file with 4 MiB pre/post checks. | Human | 2026-08-17 | ACA history amendment |
+| 156 | Empty-history marker | Infer clocks / non-content marker | Persist `unknown`/`none`/`required`; every admission atomically advances to `required`, so lost history cannot silently become empty. | Human | 2026-08-17 | ACA history amendment |
+| 157 | History outcomes | Empty fallback / typed outcomes | Use 404 for unowned/unknown, 410 for confirmed loss, and 503 for verified-but-unreadable or untrusted history; no ACA fallback. | Human | 2026-08-17 | ACA history amendment |
+| 158 | History lifecycle touch | Extend retention / no touch | Resume when needed but do not touch idle retention or immediately stop; normal lifecycle policy re-suspends idle compute. | Human | 2026-08-17 | ACA history amendment |
+| 159 | History compatibility | Shared behavior change / ACA-only | Preserve Blob-backed in-language history and the four-method backend seam; add no sandbox state credential or SDK-import spread. | Human | 2026-08-17 | ACA history amendment |
+| 160 | History presentation | Separate parsers / shared pure codec | Share strict JSONL parsing and existing presentation rules without sharing storage behavior. | Human | 2026-08-17 | ACA history amendment |
+| 161 | History evidence | Doubles only / deployed proof | Require unit/controller coverage plus deployed two-turn, resume, loss/tombstone, and no-external-copy proof. | Human | 2026-08-17 | ACA history amendment |
+| 162 | Activation error mapping | Pre-read row / collapse to 404 / typed subtype | After owner binding, map narrow untrusted or unavailable activation failures to history 503 while existing callers retain base 404 behavior. | Human | 2026-08-17 | ACA history amendment |
+| 163 | ACA history architecture review | Pending / approve | Human architecture sign-off granted; this amendment is finalized for implementation. | Human | 2026-08-17 | ACA history amendment |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -450,6 +462,10 @@ sandbox, confines preview SDK usage to the adapter, and requires real ACA
 smoke and load acceptance before the capability gate opens. The append-only
 Decisions log records the sign-off, amendments, and historical provenance for
 these controlling contracts.
+
+**2026-08-17 human architecture sign-off.** The sandbox-local ACA history
+amendment in §12 is approved. Its scope is additive to this finalized record;
+it does not reopen the v1 durability, identity, or egress decisions.
 
 ## 8. SDK-verified ACA platform contract
 
@@ -1255,3 +1271,160 @@ Every capability requires a runtime-produced semantic trace. Hand-authored
 fixtures remain expectations rather than acceptance evidence. The startup
 availability gate remains closed until the subsequent live service and load
 acceptance work completes.
+
+## 12. ACA sandbox-local history amendment
+
+### Problem and simple explanation
+
+ACA writes a conversation only to its session sandbox, but the existing
+`GET /agents/{slug}/history` path always uses the in-language-worker
+`BlobHistoryProvider`. A live successful ACA turn on
+`func-agent-func-twm2hp52kchdm` returned `HISTORY_PROBE`; an immediate history
+read for that exact session returned `{"messages":[],"truncated":false}`. This
+is an ACA-only false-empty response.
+
+This amendment does **not** add a history file. The harness already commits a
+whole turn atomically: `session/current` names the latest complete checkpoint,
+and `session/checkpoints/<checkpoint_name>/conversation.json` holds that
+checkpoint's JSONL conversation. The controller will safely read those two
+existing artifacts. It will not create a latest copy, Blob/Table transcript,
+controller cache, or any other transcript projection.
+
+### Goals and non-goals
+
+**Goals**
+
+- Return ordered canonical ACA user/assistant history, retaining the existing
+  filtering and latest-200 truncation behavior after filtering.
+- Authorize every read through the authenticated owner partition, durable
+  session row, and validated live binding; a session ID never authorizes access.
+- Resume retained stopped or suspended backing on history GET, as approved, so
+  sandbox-only history remains retrievable while accepting its cost and latency.
+- Distinguish a no-turn session from unreadable/lost history without persisting
+  any transcript outside the sandbox.
+- Return typed not-found, unavailable, and gone outcomes rather than a silent
+  empty success.
+
+**Non-goals**
+
+- Persisting ACA transcript content in `AzureWebJobsStorage`, Tables, Blob
+  Storage, controller memory/disk, logs, another sandbox, or the reserved but
+  unpopulated external history path.
+- Changing the Blob-backed in-language-worker history path, authoring/schema
+  surface, default backend, or the exact four-method `AgentExecutionBackend`.
+- Giving the sandbox state-storage credentials or using a sandbox identity for
+  history. Decision #150 remains controlling: a customer-attached Sandbox
+  Group identity is usable by guest code, but the runtime neither attaches nor
+  strips it and does not use it for history.
+- Rebuilding history after reclaim, deletion, snapshot loss, tombstoning,
+  deployment-epoch retirement, or owner-binding expiry.
+
+### Durable source, activation, and parsing contract
+
+The sole transcript source is the immutable checkpoint selected by
+`/var/lib/azurefunctions-agents-runtime/session/current`. `AtomicCommitStore`
+stages and fsyncs a complete turn, makes its checkpoint directory immutable,
+then atomically replaces that pointer. A concurrent read therefore observes
+the prior complete turn or the new complete turn, never partial state. No new
+CAS, sequence, lock, or clock comparison is required.
+
+Authenticated activation already validates the protocol and `current` pointer.
+It must return the validated checkpoint name on `ActivatedSession`; history
+must not reread `current`. The reader performs exactly two further file calls:
+
+1. `stat_file()` the canonical
+   `session/checkpoints/{validated_name}/conversation.json`; require a regular
+   known-size file at or below 4 MiB.
+2. `read_file()` once, recheck the returned byte length is at or below 4 MiB,
+   then strictly parse JSONL.
+
+Together with protocol and pointer verification, this is four file-plane calls.
+The preview SDK offers only whole-file reads, so stat/read is an explicit TOCTOU
+mitigation, not a pre-allocation bound. Under the atomic harness contract the
+selected directory is immutable; a malicious mutation that changes the returned
+bytes is detected after allocation, causes checkpoint-corruption quarantine,
+and returns unavailable. Streaming/range reads and a copied latest file are out
+of scope.
+
+The session row gains a monotonic non-content checkpoint-expectation marker:
+legacy rows decode as `unknown`, new no-run sessions store `none`, and every
+initial or subsequent run-admission transaction atomically advances it to
+`required` before guest execution. The marker carries no content, role, count,
+size, checkpoint name, or status. A readable checkpoint is authoritative
+regardless of it; an absent pointer is empty only for `none`. `required` and
+`unknown` make absent, first-active, and failed-first-turn history explicitly
+unavailable rather than falsely empty. Lifecycle and terminal rewrites preserve
+the marker.
+
+Use a shared pure codec for both storage paths: strict UTF-8; one mapping per
+non-empty JSONL line; existing MAF `Message.from_dict` behavior; excluded-message
+filtering; only `user`/`assistant` non-empty string text; source order; and the
+200-message cap after filtering. The Blob provider retains its current storage
+behavior and names.
+
+### Owner authorization, lifecycle, and typed outcomes
+
+The ACA branch resolves the normal Functions/Easy Auth principal, derives
+`OwnerContext` and its canonical partition from the route slug and app identity,
+then targeted-reconciles that owner/session. It calls
+`activate_session(..., allow_create=False)` and relies on activation to verify
+the owner/app row, state-store fingerprint, generation, digest, sandbox/group,
+live manifest, protocol, and readiness. Only the returned provider-neutral
+`SandboxSessionHandle` may read the canonical checkpoint path, and it is always
+closed in `finally`. Wrong owner, slug, or unknown session receives not-found
+semantics before a provider/file call.
+
+After owner binding is verified, narrow
+`SessionActivationUntrustedError` and `SessionActivationUnavailableError`
+subtypes let history return `503 history_unavailable`; existing chat and
+run-management callers continue catching their base not-found error and retain
+their current 404 behavior. The normal safe session-ID validation still occurs
+before either history branch, but that ID never becomes a filesystem component.
+
+For a suspended/stopped retained sandbox, activation uses its existing
+deadline-bounded resume/readiness handshake once and re-verifies binding.
+History does not call `touch_session_activity`, extend the idle-reclaim
+deadline, or immediately stop the sandbox; the existing policy re-suspends idle
+compute. Targeted reconciliation may tombstone confirmed loss or quarantine a
+verified corrupt binding before any content is returned.
+
+| Condition | Required response |
+| --- | --- |
+| Valid ready/running checkpoint; or resumed retained checkpoint | `200`; include `x-ms-aca-history-resumed: true` after resume. Active turns may return the prior complete checkpoint. |
+| Missing pointer with marker `none` | `200` empty transcript. |
+| Missing/unsafe pointer with `required` or `unknown`; unreadable, oversized, malformed, or transiently unavailable history; verified row with no usable backing; quarantined row | `503 history_unavailable`, optionally `Retry-After`; never empty success. |
+| Confirmed loss, reclaim, tombstone, deletion, or epoch retirement | `410 history_gone`; terminal status remains governed by normal retention. |
+| No caller-owned row | `404 session_not_found`. |
+| No session header | Preserve existing `200` empty new/unselected-session behavior. |
+
+Stop/suspend retains history. Reclaim and loss end its horizon: a tombstone
+returns 410 until row pruning, after which the forgotten binding returns 404.
+There is no fallback to the Blob provider.
+
+### Implementation, validation, and documentation impact
+
+Discovery and translation remain unchanged; registration is the only
+Azure-aware stage. Implementation adds a provider-neutral controller history
+reader; routes it from `registration/endpoints.py` only when
+`session_runtime` is present; extracts the pure Blob/ACA presentation codec;
+returns the validated pointer and narrow activation subtypes from
+`controller/readiness.py`; and adds the marker to
+`session_state/session_models.py` and `session_state/store.py`. A safe
+checkpoint conversation path builder may be added to `journal_paths.py`.
+`harness/atomic_commit.py`, harness bootstrap, execution seams, terminal
+adoption, transport ports, and `transport/aca_sdk.py` need no
+history-persistence change.
+
+Tests must cover strict pointer/path and JSONL handling; stat/read size and
+mutation rejection; active-turn ordering; marker transitions and preservation;
+owner/slug isolation before file access; narrow 503 versus existing 404 mapping;
+single resume/no activity touch; handle cleanup; loss/tombstone 410; and
+unchanged in-language-worker behavior and SDK/seam guards. The release gate also
+requires deployed ACA proof of first and second ordered turns, resume-on-history,
+loss/tombstone behavior, corrupt-checkpoint 503, and no external transcript
+object. Environment/provisioning failures remain smoke-test errors; correctness
+assertions are failures; live tests skip unless explicitly enabled.
+
+Implementation must update `docs/architecture.md`, the ACA operator guide,
+README history/session-storage wording, and `tests/live/README.md`. No
+schema/front-matter documentation or `update-schema-docs` workflow is needed.

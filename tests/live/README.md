@@ -47,6 +47,37 @@ The test skips before collecting a live fixture unless
 `AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE` is exactly `1`. Do not set that variable
 in normal local development or ordinary unit-test jobs.
 
+## Deployed history proof
+
+`tests/live/test_aca_history_smoke.py` is also opt-in and verifies a deployed
+ACA Function App. It submits two unique chat turns, then requires the history
+endpoint to return ordered user/assistant pairs after each completed turn. It
+also checks three operator-prepared sessions: retained and stopped/suspended
+history must resume with `x-ms-aca-history-resumed: true`, reclaimed or
+tombstoned history must return `410`, and a corrupt or unavailable checkpoint
+must return `503`, never an empty transcript.
+
+The fixture raises `ACA-SMOKE-ENV` before the test body when any required input
+is absent. In addition to the normal ACA variables above, set:
+
+```bash
+export AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_BASE_URL="https://<app>.azurewebsites.net"
+export AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_AGENT_SLUG="<agent-slug>"
+export AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_FUNCTION_KEY="<function-key>"
+export AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_RESUMED_SESSION_ID="<retained-stopped-session>"
+export AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_GONE_SESSION_ID="<tombstoned-session>"
+export AZURE_FUNCTIONS_AGENTS_ACA_HISTORY_SMOKE_UNAVAILABLE_SESSION_ID="<corrupt-session>"
+python -m pytest -m live_aca tests/live/test_aca_history_smoke.py -v
+```
+
+The deployed assertion that no external transcript object exists is explicitly
+pending. The shared support authenticates only to the Function endpoint and
+ACA Sandbox Group data plane; it has no authenticated, known external-storage
+namespace to enumerate and must not infer or provision one. The source-boundary
+invariant test covers the code-level prohibition only. An operator with
+narrowly scoped read/list access to the known storage namespace may add a
+separate deployed assertion without changing this provisioning support.
+
 ### Host ABI prerequisite
 
 Run the live tests only from Linux x86_64, including WSL, on the CPython minor
