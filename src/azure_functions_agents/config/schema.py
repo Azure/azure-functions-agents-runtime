@@ -244,8 +244,6 @@ class HarnessAgentConfig(BaseModel):
     max_context_window_tokens: int | None = None
     max_output_tokens: int | None = None
     disable_file_memory: bool = True
-    harness_instructions: str | None = ""
-    disable_todo: bool = True
     disable_mode: bool = True
 
 

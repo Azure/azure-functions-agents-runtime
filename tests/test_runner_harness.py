@@ -177,7 +177,7 @@ def test_build_harness_agent_session_forces_provider_managed_history(
 
 
 def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: Any) -> None:
-    """Markdown and runtime instructions remain separate from harness-level instructions."""
+    """Markdown and runtime instructions are forwarded without MAF harness guidance."""
     captured: list[dict[str, Any]] = []
 
     def fake_create_harness_agent(_client: Any, **kwargs: Any) -> _FakeAgent:
@@ -213,14 +213,15 @@ def test_build_harness_agent_session_forwards_system_instructions(monkeypatch: A
             workflow_durable_client=None,
             agent_name=None,
             web_request_tools=None,
-            harness_config=HarnessAgentConfig(harness_instructions="Harness guidance."),
+            harness_config=HarnessAgentConfig(),
         )
     )
 
     assert captured[0]["agent_instructions"] == (
         "Markdown system prompt. Runtime system addendum."
     )
-    assert captured[0]["harness_instructions"] == "Harness guidance."
+    assert captured[0]["harness_instructions"] == ""
+    assert captured[0]["disable_todo"] is True
 
 
 def test_build_harness_agent_session_appends_subagent_tools(monkeypatch: Any) -> None:

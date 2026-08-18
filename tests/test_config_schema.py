@@ -140,8 +140,6 @@ def test_harness_agent_config_defaults() -> None:
     assert config.max_context_window_tokens is None
     assert config.max_output_tokens is None
     assert config.disable_file_memory is True
-    assert config.harness_instructions == ""
-    assert config.disable_todo is True
     assert config.disable_mode is True
 
 
@@ -154,6 +152,12 @@ def test_harness_agent_config_with_fields() -> None:
 def test_harness_agent_config_extra_forbidden() -> None:
     with pytest.raises(ValidationError):
         HarnessAgentConfig.model_validate({"unknown_field": True})
+
+
+@pytest.mark.parametrize("field", ["harness_instructions", "disable_todo"])
+def test_harness_agent_config_removed_fields_forbidden(field: str) -> None:
+    with pytest.raises(ValidationError):
+        HarnessAgentConfig.model_validate({field: True})
 
 
 @pytest.mark.parametrize("value", [True, False, None, HarnessAgentConfig(max_context_window_tokens=8192)])

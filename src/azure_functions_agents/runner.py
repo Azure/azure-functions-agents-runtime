@@ -60,7 +60,7 @@ import asyncio
 import contextlib
 import json
 import sys
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -85,7 +85,7 @@ from .config import ResolvedAgent, SubagentRef
 from .config.env import runtime_env_value
 from .config.paths import get_app_root, resolve_config_dir
 from .config.schema import HarnessAgentConfig
-from .discovery.mcp import discover_mcp_servers
+from .discovery.mcp import MCPTool, discover_mcp_servers
 from .discovery.tools import discover_user_tools
 
 # `_handlers` is always fully imported as a side effect of the
@@ -105,6 +105,9 @@ if TYPE_CHECKING:
     from agent_framework import Agent, AgentResponse, ContextProvider, SupportsChatGetResponse
 
     from .workflows.schema import WorkflowPlanPolicy
+
+type AgentFunctionTool = FunctionTool | Callable[..., Any]
+type AgentTool = AgentFunctionTool | MCPTool
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -400,10 +403,10 @@ class _DelegateErrorTracker:
 def _assemble_agent_inputs(
     *,
     instructions: str | None,
-    tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
-    sandbox_tools: list[Any] | None,
-    web_request_tools: list[Any] | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
+    sandbox_tools: list[FunctionTool] | None,
+    web_request_tools: list[FunctionTool] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
@@ -412,12 +415,11 @@ def _assemble_agent_inputs(
     resolved_id: str | None,
     delegate_tools: list[FunctionTool] | None,
     workflow_policy: WorkflowPlanPolicy | None,
-) -> tuple[list[Any], str | None]:
+) -> tuple[list[AgentTool], str | None]:
     """Assemble tools and system instructions shared by plain and harness agents."""
     app_root = get_app_root()
-    resolved_tools: list[Any] = (
-        discover_user_tools(app_root).tools if tools is None else list(tools)
-    )
+    resolved_tools: list[AgentTool] = []
+    resolved_tools.extend(discover_user_tools(app_root).tools if tools is None else tools)
 
     if sandbox_tools:
         resolved_tools.extend(sandbox_tools)
@@ -458,11 +460,11 @@ def _build_role_agent(
     chat_client: SupportsChatGetResponse[Any],
     *,
     instructions: str | None,
-    tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
     skill_paths: list[Path] | None,
-    sandbox_tools: list[Any] | None,
-    web_request_tools: list[Any] | None,
+    sandbox_tools: list[FunctionTool] | None,
+    web_request_tools: list[FunctionTool] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
@@ -810,17 +812,17 @@ async def _build_agent_session_history(
     *,
     instructions: str | None,
     session_id: str | None,
-    tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
     skill_paths: list[Path] | None,
     model: str | None,
-    sandbox_tools: list[Any] | None,
+    sandbox_tools: list[FunctionTool] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
-    web_request_tools: list[Any] | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
     coordinator_deadline: float | None = None,
@@ -854,7 +856,7 @@ async def _build_agent_session_history(
 
     history_provider = _build_history_provider()
 
-    delegate_tools: list[Any] | None = None
+    delegate_tools: list[FunctionTool] | None = None
     delegate_error_tracker: _DelegateErrorTracker | None = None
     if subagents:
         effective_deadline = (
@@ -892,17 +894,17 @@ async def _build_harness_agent_session(
     *,
     instructions: str | None,
     session_id: str | None,
-    tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
     skill_paths: list[Path] | None,
     model: str | None,
-    sandbox_tools: list[Any] | None,
+    sandbox_tools: list[FunctionTool] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
-    web_request_tools: list[Any] | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
     harness_config: HarnessAgentConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -1006,14 +1008,14 @@ async def _build_harness_agent_session(
         warnings.simplefilter("ignore", category=ExperimentalWarning)
         agent = create_harness_agent(
             chat_client,
-            harness_instructions=resolved_config.harness_instructions,
+            harness_instructions="",
             agent_instructions=effective_instructions,
             tools=resolved_tools or None,
             history_provider=history_provider,
             skills_paths=skill_paths or None,
             disable_tool_auto_approval=True,
             disable_web_search=True,
-            disable_todo=resolved_config.disable_todo,
+            disable_todo=True,
             disable_mode=resolved_config.disable_mode,
             max_context_window_tokens=resolved_config.max_context_window_tokens,
             max_output_tokens=resolved_config.max_output_tokens,
@@ -1028,17 +1030,17 @@ async def _build_agent_session(
     *,
     instructions: str | None,
     session_id: str | None,
-    tools: list[Any] | None,
-    mcp_tools: list[Any] | None,
+    tools: list[AgentFunctionTool] | None,
+    mcp_tools: list[MCPTool] | None,
     skill_paths: list[Path] | None,
     model: str | None,
-    sandbox_tools: list[Any] | None,
+    sandbox_tools: list[FunctionTool] | None,
     system_addendum: str | None,
     workflow_enabled: bool,
     workflow_durable_client: Any | None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None,
-    web_request_tools: list[Any] | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
     harness_config: HarnessAgentConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -1156,18 +1158,18 @@ async def run_agent(
     *,
     instructions: str | None = None,
     timeout: float | None = None,
-    tools: list[Any] | None = None,
-    mcp_tools: list[Any] | None = None,
+    tools: list[AgentFunctionTool] | None = None,
+    mcp_tools: list[MCPTool] | None = None,
     skill_paths: list[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: list[Any] | None = None,
+    sandbox_tools: list[FunctionTool] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
-    web_request_tools: list[Any] | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
     harness_config: HarnessAgentConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,
@@ -1352,19 +1354,19 @@ async def run_agent_stream(
     *,
     instructions: str | None = None,
     timeout: float | None = None,
-    tools: list[Any] | None = None,
-    mcp_tools: list[Any] | None = None,
+    tools: list[AgentFunctionTool] | None = None,
+    mcp_tools: list[MCPTool] | None = None,
     skill_paths: list[Path] | None = None,
     model: str | None = None,
     session_id: str | None = None,
-    sandbox_tools: list[Any] | None = None,
+    sandbox_tools: list[FunctionTool] | None = None,
     system_addendum: str | None = None,
     workflow_enabled: bool = False,
     workflow_durable_client: Any | None = None,
     workflow_agent_slug: str | None = None,
     agent_name: str | None = None,
     display_name: str | None = None,
-    web_request_tools: list[Any] | None = None,
+    web_request_tools: list[FunctionTool] | None = None,
     harness_config: HarnessAgentConfig | None = None,
     subagents: list[SubagentRef] | None = None,
     catalog: AgentCatalog | None = None,

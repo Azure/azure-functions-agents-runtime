@@ -207,8 +207,6 @@ unless another agent references it through `subagents` or
 harness:
   max_context_window_tokens: 8192  # Total token budget used by the compaction strategy
   max_output_tokens: 4096          # Reserved response budget and model output-token limit
-  harness_instructions: ""         # MAF harness-level system instructions; "" omits them
-  disable_todo: true               # Disable MAF's todo-list provider and tools
   disable_mode: true               # Disable MAF's plan/execute mode provider
   disable_file_memory: true        # Disable MAF's session file-memory provider
 ```
@@ -218,10 +216,9 @@ matter to opt out. `harness: true` explicitly enables harness defaults and there
 inherit fields from a global harness object; use an object for an agent-specific configuration.
 
 For this runtime's default configuration, compaction of message history across turns in the same
-session is the harness mode's primary added behavior. The other MAF harness providers are disabled
-by default, but can be enabled with `disable_todo: false`, `disable_mode: false`, or
-`disable_file_memory: false`; `harness_instructions` can separately supply MAF harness-level system
-instructions.
+session is the harness mode's primary added behavior. MAF's harness-level instructions and todo
+provider are always disabled. The mode and file-memory providers are disabled by default, but can
+be enabled with `disable_mode: false` or `disable_file_memory: false`.
 
 `max_context_window_tokens` is the budget used by compaction and may be lower than the model's
 physical context window. The default strategy begins truncating older non-system message groups at
