@@ -1,10 +1,10 @@
 # Live ACA harness smoke coverage
 
 The E2E template has one nonblocking, 30-minute Linux Python 3.13
-current-checkout ACA/model smoke for trusted pull requests. It materializes one
-Function-app root, captures it through the production package path, verifies
-the Sandbox Group's sole guest UAMI, and always reaps current-run sandboxes and
-snapshots.
+current-checkout ACA/model smoke for every trusted pipeline invocation. It
+materializes one Function-app root, captures it through the production package
+path, verifies the Sandbox Group's sole guest UAMI, and always reaps current-run
+sandboxes and snapshots.
 
 The protected ACA service connection must be unavailable to fork builds. The
 job's fork condition is defense in depth, not authorization. The smoke requires

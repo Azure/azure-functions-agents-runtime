@@ -16,8 +16,7 @@ def test_e2e_template_has_one_aca_only_python313_smoke_job() -> None:
     assert "versionSpec: '3.13'" in smoke
     assert "timeoutInMinutes: 30" in smoke
     assert "continueOnError: true" in smoke
-    assert "PullRequest" in smoke
-    assert "Manual" not in smoke and "Schedule" not in smoke
+    assert "Build.Reason" not in smoke
     assert "System.PullRequest.IsFork" in smoke
     assert "${{ parameters.acaServiceConnection }}" in smoke
     assert "saf-foundry-connection" not in smoke

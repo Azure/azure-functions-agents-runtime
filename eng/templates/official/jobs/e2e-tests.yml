@@ -78,7 +78,7 @@ jobs:
     displayName: 'Run current-checkout ACA model smoke'
     continueOnError: true
     timeoutInMinutes: 30
-    condition: and(succeeded(), eq(variables['Build.Reason'], 'PullRequest'), ne(variables['System.PullRequest.IsFork'], 'True'))
+    condition: and(succeeded(), ne(variables['System.PullRequest.IsFork'], 'True'))
     pool:
           name: ${{ parameters.PoolName }}
           image: 1es-ubuntu-22.04
