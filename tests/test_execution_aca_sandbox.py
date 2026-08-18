@@ -227,7 +227,7 @@ def _prelaunch_provisioning_records(
         token="f" * 32,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=run.created_at + timedelta(seconds=60),
+        lease_expires_at=run.created_at + timedelta(seconds=120),
         next_attempt_at=None,
         created_at=run.created_at,
         updated_at=run.updated_at,

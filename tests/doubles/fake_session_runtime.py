@@ -824,12 +824,18 @@ class FakeSessionStateStore:
             return outcome("retry")
         if token == operation.token:
             raise SessionStateStoreError("pre-launch cancellation must rotate the operation token")
+        effective_updated_at = max(
+            updated_at,
+            session.updated_at,
+            run.updated_at,
+            operation.updated_at,
+        )
         canceled = replace(
             run,
             status="canceled",
             result_available=False,
             status_reason="canceled_before_launch",
-            updated_at=updated_at,
+            updated_at=effective_updated_at,
         )
         canceled_operation = replace(
             operation,
@@ -840,11 +846,15 @@ class FakeSessionStateStore:
             ),
             token=token,
             attempt_count=operation.attempt_count + 1,
-            updated_at=updated_at,
+            error_code=None,
+            lease_expires_at=effective_updated_at
+            + timedelta(seconds=_OPERATION_LEASE_SECONDS),
+            next_attempt_at=None,
+            updated_at=effective_updated_at,
         )
         retained_session = replace(
             session,
-            updated_at=updated_at,
+            updated_at=effective_updated_at,
         )
         self.runs[run_id] = canceled
         self.durable_operations[operation.operation_id] = canceled_operation

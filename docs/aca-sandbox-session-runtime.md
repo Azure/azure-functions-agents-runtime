@@ -114,8 +114,10 @@ retryable setup timeout. Grant the role at the individual Sandbox Group scope.
 ACA session admission uses one 90-second setup budget anchored before targeted
 reconciliation. Synchronous execution retains its 180-second wall cap; a
 full-cap request therefore leaves a 90-second execution floor. Every durable
-operation uses a sliding 120-second lease, and setup `504`
-responses retain `retry_with=respond-async` with `Retry-After: 120`.
+operation uses a sliding 120-second lease. A pre-reservation setup `504` retains
+`retry_with=respond-async` with `Retry-After: 120`; once a response includes a
+durable management ticket, `Retry-After: 2` is the polling cadence for that
+ticket.
 
 ## Egress and credentials
 

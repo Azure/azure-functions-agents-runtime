@@ -1533,10 +1533,11 @@ begin, resume, takeover, journal claim, and phase advance. Each write renews
 the sliding lease for `provision_submit`, `submit_run`, and `reclaim_backing`;
 timer cadence, timer pass deadline, and reclaim arithmetic remain unchanged.
 After a crash, `submit_run` and `reclaim_backing` recovery may begin up to 60
-seconds later than before. The public `504`
-body remains exactly `error=reason=setup_deadline_exceeded` plus
-`retry_with=respond-async`; it now has `Retry-After: 120` and retains
-`x-ms-retry-with: respond-async`.
+seconds later than before. A pre-reservation public `504` remains
+`error=reason=setup_deadline_exceeded` plus `retry_with=respond-async`; it has
+`Retry-After: 120` and retains `x-ms-retry-with: respond-async`. A linked
+post-reservation ticket uses `Retry-After: 2` for management polling as defined
+by §5.1.
 
 Built-in MCP remains valid with ACA. Its invocation creates the same request
 budget and controller submission used by built-in chat, passing the one
@@ -1545,8 +1546,9 @@ the same redacted timeout observer exactly once, then returned as the MCP
 tool's typed JSON error body (`setup_deadline_exceeded` and
 `retry_with=respond-async`). The MCP framework owns the outer response, so this
 tool result is not represented as an HTTP 504 and cannot carry HTTP headers;
-HTTP-facing controller routes retain `Retry-After: 120`. The default
-in-language MCP path is unchanged.
+HTTP-facing pre-reservation setup failures retain `Retry-After: 120`, while
+linked durable tickets use `Retry-After: 2`. The default in-language MCP path
+is unchanged.
 
 The journal portion of that same budget wraps journal ownership claim,
 live-owner status observation, and run-control submission. Expiry leaves the

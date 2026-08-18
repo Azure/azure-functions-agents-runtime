@@ -8,8 +8,6 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
-from .._logger import logger
-from .._observability import current_span
 from ..config import DEFAULT_TIMEOUT
 from ..controller.idempotency import (
     IdempotencyAttempt,
@@ -1144,14 +1142,6 @@ async def _adopt_if_terminal(
         expected_run_id=run.run_id,
     )
     return outcome.run
-
-
-def _record_journal_corruption() -> None:
-    logger.warning("Sandbox run journal rejected: reason=%s", JOURNAL_CORRUPT_ERROR_CODE)
-    current_span().add_event(
-        "af.session.journal_rejected",
-        {"af.session.reason": JOURNAL_CORRUPT_ERROR_CODE},
-    )
 
 
 def _terminal_record(

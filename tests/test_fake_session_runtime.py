@@ -210,6 +210,46 @@ async def test_fake_journal_claim_renews_the_flat_lease(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("kind", "phase"),
+    [("provision_submit", "provision_create"), ("submit_run", "submit_journal")],
+)
+async def test_fake_prelaunch_cancel_renews_the_flat_lease(
+    kind: str,
+    phase: str,
+) -> None:
+    session = _session()
+    operation = replace(_operation(session, kind), phase=phase)
+    store = FakeSessionStateStore(session)
+    updated = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+        active_run_id="run-1",
+    )
+    await store.begin_operation(
+        previous=session,
+        updated=updated,
+        operation=operation,
+        etag=store.etag,
+    )
+    store.runs["run-1"] = _run(session)
+
+    canceled_at = _NOW + timedelta(seconds=5)
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id="run-1",
+        token="e" * 32,
+        updated_at=canceled_at,
+    )
+
+    assert canceled.disposition == "canceled_before_launch"
+    assert canceled.operation is not None
+    assert canceled.operation.lease_expires_at == canceled_at + timedelta(seconds=120)
+
+
+@pytest.mark.asyncio
 async def test_fake_submit_admission_renews_lease_before_takeover() -> None:
     session = replace(_session(), status="ready", sandbox_id="sandbox-1")
     operation = _operation(session, "submit_run")
