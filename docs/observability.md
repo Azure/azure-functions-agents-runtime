@@ -53,6 +53,10 @@ classifies as **system logs** (emitted with `customer_app_insight = false`), so 
 app's `traces`. `host.json` `logLevel` does **not** surface them, and worker-side `DEBUG` would
 require the `PYTHON_ENABLE_DEBUG_LOGGING` app setting. This is by design.
 
+ACA reconciliation and reclaim audit records are the narrow exception: they are emitted as short
+runtime spans with `af.sandbox.*` attributes, so they are queryable in `AppDependencies`. Their
+companion internal log lines remain system-only; do not query `AppTraces` for either event.
+
 **So to debug a run, use the spans — not the log list:**
 
 - `agent.run {name}` and `dynamic_session.execute`, with all the `af.*` attributes below.
@@ -117,6 +121,15 @@ spans and the sandbox/`web_request` tool spans together.
 | `af.agent.response` | The final response text. **Content — only when `ENABLE_SENSITIVE_DATA=true`.** |
 
 Plus `af.lifecycle_stage=agent_run`, and `af.fault_domain` if the run fails.
+
+### Setup deadline observations
+
+ACA setup timeout responses emit one `af.setup_deadline_exceeded` event and one
+runtime warning at the registration boundary. They contain only the setup phase,
+reason, exception type, configured/elapsed/remaining budget, request mode,
+session-present flag, HTTP `504`, and retry policy. They never contain prompts,
+response content, identifiers, labels, tokens, provider payloads, or exception
+messages; timeout metadata is internal and is not serialized in HTTP responses.
 
 #### Span events (runtime lifecycle milestones)
 
@@ -333,6 +346,28 @@ AppDependencies
 | extend outcome = tostring(Properties["af.delegate.outcome"]), specialist = tostring(Properties["af.delegate.specialist"])
 | where outcome in ("error", "timeout")
 | project TimeGenerated, OperationId, specialist, outcome, DurationMs, Properties
+```
+
+```kql
+// ACA timer-pass summaries and successful session reclaim/tombstone audit events.
+// Runtime logs are system-only; these short spans are customer-queryable dependencies.
+AppDependencies
+| where Name in (
+    "af.sandbox.reconciliation.completed",
+    "af.sandbox.session.reclaimed"
+)
+| project
+    TimeGenerated,
+    event_name = Name,
+    cadence_seconds = toint(Properties["af.sandbox.cadence_seconds"]),
+    session_id = tostring(Properties["af.sandbox.session_id"]),
+    sandbox_id = tostring(Properties["af.sandbox.sandbox_id"]),
+    backing_outcome = tostring(Properties["af.sandbox.backing_outcome"]),
+    tombstone_reason = tostring(Properties["af.sandbox.tombstone_reason"]),
+    deleted_sandboxes = toint(Properties["af.sandbox.deleted_sandboxes"]),
+    deleted_snapshots = toint(Properties["af.sandbox.deleted_snapshots"]),
+    deleted_snapshot_count = toint(Properties["af.sandbox.deleted_snapshot_count"])
+| order by TimeGenerated desc
 ```
 
 ### Measuring telemetry volume (billed bytes per run)

@@ -58,6 +58,7 @@ from ._auth import (
 from ._handlers import (
     _controller_response_to_fastapi,
     _controller_session_id,
+    _observe_setup_timeout_response,
     _session_runtime_kwargs,
     _set_run_result_attributes,
     build_output_validator,
@@ -756,6 +757,50 @@ def _register_mcp_endpoint(
                     _extract_mcp_session_id(payload) if isinstance(payload, dict) else None
                 )
                 span.set_attribute("af.agent.session_id", session_id)
+                if session_runtime is not None:
+                    budget = RequestBudget.start(authored_timeout=resolved.timeout)
+                    backend = create_execution_backend(
+                        binding=AgentBinding(
+                            agent_name=resolved.slug,
+                            output_validator=build_output_validator(resolved),
+                        ),
+                        session_runtime=session_runtime,
+                        owner=FunctionAppPrincipal(),
+                        setup_budget=budget.setup,
+                    )
+                    controller_response = await submit_run(
+                        backend,
+                        StartRunRequest(
+                            prompt=prompt.strip(),
+                            session_id=session_id,
+                            timeout=resolved.timeout,
+                        ),
+                        agent_slug=resolved.slug,
+                        respond_async=False,
+                        budget=budget,
+                    )
+                    if controller_response.status_code != 200:
+                        _observe_setup_timeout_response(controller_response)
+                        span.set_attribute("af.agent.outcome", "error")
+                        return json.dumps(controller_response.body)
+                    controller_body = controller_response.body
+                    controller_session_id = _controller_session_id(controller_response)
+                    if (
+                        not isinstance(controller_body, dict)
+                        or not isinstance(controller_body.get("response"), str)
+                        or controller_session_id is None
+                    ):
+                        span.set_attribute("af.agent.outcome", "error")
+                        return json.dumps(controller_body)
+                    span.set_attribute("af.agent.session_id", controller_session_id)
+                    span.set_attribute("af.agent.outcome", "success")
+                    return json.dumps(
+                        {
+                            "session_id": controller_session_id,
+                            "response": controller_body["response"],
+                            "tool_calls": controller_body.get("tool_calls", []),
+                        }
+                    )
                 result = await _run_builtin_agent(
                     prompt.strip(),
                     resolved=resolved,

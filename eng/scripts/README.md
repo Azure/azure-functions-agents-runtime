@@ -30,16 +30,18 @@ python eng/scripts/generate_config_reference.py --check
 
 ### `reap_aca_smoke_sandboxes.py`
 
-Deletes leftover ACA smoke sandboxes created by the CI-dedicated owner/app.
+Deletes leftover ACA smoke sandboxes created by the current Function App smoke
+identity and its low-level CI companion tests.
 
 **Purpose:** Cleanup safety net for the live ACA smoke job. It is label-scoped to
-the CI smoke owner/app hashes, so it only ever deletes sandboxes this pipeline
-created. The label selector is imported from the test-support module
+the BuildId-derived Function App owner/app hashes and the low-level CI
+owner/app hashes, so it only ever deletes sandboxes this pipeline created. The
+label selectors are imported from the test-support module
 (`tests/live/aca_smoke_support.py`) rather than duplicated here.
 
 **Usage:**
 ```bash
-# Reap every CI smoke sandbox in the configured Sandbox Group
+# Reap the current Function App and CI smoke sandbox families in the configured Sandbox Group
 python eng/scripts/reap_aca_smoke_sandboxes.py
 ```
 
@@ -49,6 +51,18 @@ The Sandbox Group is read from the
 **When to run:**
 - As an `always()` cleanup step after the ACA smoke job
 
-**Integration:**
-- **CI pipeline:** Runs in `eng/templates/official/jobs/e2e-tests.yml`
+**Integration:** The current-checkout E2E ACA job runs it with `always()`. It
+deletes only the BuildId-derived Function App family and current-run low-level
+family, including their snapshots, then fails if either remains.
 
+### `aca_pr_smoke.py`
+
+Runs the protected current-checkout ACA smoke preflight. It uses the controller
+service connection to require exactly one guest UAMI with no system-assigned
+identity and validates the protected group, disk, endpoint, and deployment
+inputs. Guest model-only, no-state/no-group RBAC is an IaC/operations
+prerequisite; the real model turn is positive access proof, not a negative
+role-assignment attestation.
+
+The retained `aca_deployed_qualification.py` and deployed suite helpers are
+manual/local assets only pending the separate post-main qualification work.

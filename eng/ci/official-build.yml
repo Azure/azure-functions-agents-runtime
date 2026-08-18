@@ -5,7 +5,6 @@ trigger:
       - main
       - release/*
 
-# CI only, does not trigger on PRs.
 pr: none
 
 schedules:
@@ -59,3 +58,4 @@ extends:
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
+              acaServiceConnection: 'larohra-sandboxgroup-test'

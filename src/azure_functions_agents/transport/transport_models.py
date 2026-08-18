@@ -9,6 +9,11 @@ from types import MappingProxyType
 from typing import Literal, get_args
 
 _MAX_PROVIDER_LABEL_VALUE_LENGTH = 63
+SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE = "sandbox_group_authorization_failed"
+SANDBOX_GROUP_AUTHORIZATION_MESSAGE = (
+    "Sandbox Group data-plane authorization failed. Grant the controller identity "
+    "'Container Apps SandboxGroup Data Owner' on the configured Sandbox Group."
+)
 
 
 class SandboxTransportError(Exception):
@@ -21,6 +26,17 @@ class SandboxProvisioningError(SandboxTransportError):
 
 class SandboxCapacityError(SandboxProvisioningError):
     """Raised when the Sandbox Group cannot currently admit another sandbox."""
+
+
+class SandboxGroupAuthorizationError(SandboxProvisioningError):
+    """Raised when the controller lacks Sandbox Group data-plane authorization."""
+
+    def __init__(self) -> None:
+        super().__init__(SANDBOX_GROUP_AUTHORIZATION_MESSAGE)
+
+
+class SandboxCreateOutcomeUnknownError(SandboxProvisioningError):
+    """A create was accepted but its durable outcome cannot yet be reconciled."""
 
 
 class SandboxGroupBindingError(SandboxTransportError):
@@ -117,6 +133,7 @@ class SandboxSummary:
 
     sandbox_id: str
     labels: Mapping[str, str]
+    state: str | None = None
     created_at: str | None = None
     modified_at: str | None = None
 
@@ -126,12 +143,14 @@ class SandboxSummary:
         *,
         sandbox_id: str,
         labels: Mapping[str, str],
+        state: str | None = None,
         created_at: str | None = None,
         modified_at: str | None = None,
     ) -> SandboxSummary:
         return cls(
             sandbox_id=_require_nonempty_string(sandbox_id, "sandbox_id"),
             labels=MappingProxyType(_validate_labels(labels)),
+            state=_optional_bounded_text(state, "state", max_bytes=32),
             created_at=_optional_timestamp(created_at, "created_at"),
             modified_at=_optional_timestamp(modified_at, "modified_at"),
         )
@@ -571,6 +590,7 @@ class SandboxCreateRequest:
     ports: tuple[object, ...] = ()
     skip_egress_proxy: bool = False
     polling_interval_seconds: int = 3
+    reconcile_only: bool = False
 
     @classmethod
     def create(
@@ -589,6 +609,7 @@ class SandboxCreateRequest:
         ports: tuple[object, ...] = (),
         skip_egress_proxy: bool = False,
         polling_interval_seconds: int = 3,
+        reconcile_only: bool = False,
     ) -> SandboxCreateRequest:
         if not isinstance(source, (DiskSource, DiskIdSource, PresetSource)):
             raise SandboxProvisioningError(
@@ -613,6 +634,8 @@ class SandboxCreateRequest:
             )
         if polling_interval_seconds <= 0:
             raise SandboxProvisioningError("Sandbox polling_interval_seconds must be positive.")
+        if not isinstance(reconcile_only, bool):
+            raise SandboxProvisioningError("Sandbox reconcile_only must be a boolean.")
         for command_part in (*entrypoint, *cmd):
             _require_nonempty_string(command_part, "entrypoint or cmd item")
 
@@ -631,13 +654,14 @@ class SandboxCreateRequest:
             ports=ports,
             skip_egress_proxy=skip_egress_proxy,
             polling_interval_seconds=polling_interval_seconds,
+            reconcile_only=reconcile_only,
         )
 
     @property
     def provisioning_timeout_seconds(self) -> float:
         """Return the explicit bounded SDK polling timeout for this request."""
 
-        return min(self.remaining_setup_budget_seconds, 30.0)
+        return self.remaining_setup_budget_seconds
 
 
 def parse_sandbox_group_resource_id(value: str) -> SandboxGroupResourceId:
@@ -808,3 +832,12 @@ def _optional_timestamp(value: str | None, field_name: str) -> str | None:
     if value is None:
         return None
     return _require_nonempty_string(value, field_name)
+
+
+def _optional_bounded_text(value: str | None, field_name: str, *, max_bytes: int) -> str | None:
+    if value is None:
+        return None
+    normalized = _require_nonempty_string(value, field_name)
+    if len(normalized.encode("utf-8")) > max_bytes:
+        raise SandboxProvisioningError(f"{field_name} exceeds {max_bytes} UTF-8 bytes.")
+    return normalized

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -107,9 +108,10 @@ def test_prepare_sandbox_verifies_content_and_publishes_manifest(
     assert bootstrap.SANDBOX_MARKER_ENV_VAR in bootstrap.os.environ
 
 
-def test_bootstrap_persists_import_paths_for_a_fresh_harness_interpreter(
+def test_bootstrap_configures_delivered_import_paths_without_pythonpath(
     tmp_path: Path,
     _linux_bootstrap: None,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     session, bootstrap_path = _write_session(
         tmp_path,
@@ -128,36 +130,21 @@ def test_bootstrap_persists_import_paths_for_a_fresh_harness_interpreter(
         ),
     )
     application = tmp_path / "app"
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setattr(bootstrap.sys, "path", list(bootstrap.sys.path))
     bootstrap.prepare_sandbox(
         session,
         application_directory=application,
         bootstrap_path=bootstrap_path,
     )
-    site_packages = application / ".python_packages" / "lib" / "site-packages"
-    environment = {
-        **os.environ,
-        "PYTHONPATH": os.pathsep.join((str(application), str(site_packages))),
-    }
 
-    result = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            (
-                "import azure_functions_agents.harness as harness; "
-                "import delivered_dependency; "
-                "print(harness.MARKER, delivered_dependency.MARKER)"
-            ),
-        ],
-        capture_output=True,
-        check=False,
-        cwd=tmp_path,
-        env=environment,
-        text=True,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert result.stdout.strip() == "harness dependency"
+    try:
+        dependency = importlib.import_module("delivered_dependency")
+        site_packages = application / ".python_packages" / "lib" / "site-packages"
+        assert str(site_packages) in bootstrap.sys.path
+        assert dependency.MARKER == "dependency"
+    finally:
+        sys.modules.pop("delivered_dependency", None)
 
 
 def test_isolated_bootstrap_does_not_load_unverified_sitecustomize(tmp_path: Path) -> None:

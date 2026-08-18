@@ -41,6 +41,7 @@ from .transport_models import (
     PersistedSandboxBinding,
     ProvisionedSandboxIdentity,
     SandboxCapacityError,
+    SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxEgressHeader,
     SandboxEgressHostRule,
@@ -54,6 +55,7 @@ from .transport_models import (
     SandboxFileNotFoundError,
     SandboxFileOperationError,
     SandboxFileStat,
+    SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxGroupIdentity,
@@ -157,6 +159,11 @@ def _load_sdk_factories() -> SdkFactories:
         auto_suspend_policy=sdk.AutoSuspendPolicy,
         auto_delete_policy=sdk.AutoDeletePolicy,
     )
+
+
+def validate_aca_sandbox_dependency() -> None:
+    """Validate the optional SDK import without constructing credentials or clients."""
+    _SDK_FACTORIES()
 
 
 _SDK_FACTORIES: Callable[[], SdkFactories] = _load_sdk_factories
@@ -277,6 +284,10 @@ class AcaSandboxAdapter:
         egress = _compile_egress_policy(self._factories, request.egress_policy)
         provisioning_attempt_id = request.labels.operation_label or uuid.uuid4().hex
         stable_attempt = request.labels.operation_label is not None
+        if request.reconcile_only and not stable_attempt:
+            raise SandboxProvisioningError(
+                "Reconciliation-only provisioning requires a stable operation label."
+            )
         if stable_attempt:
             existing = await self._find_failed_create_sandboxes(
                 provisioning_attempt_id,
@@ -289,12 +300,17 @@ class AcaSandboxAdapter:
                 raise SandboxProvisioningError(
                     "A durable provisioning operation matches multiple sandboxes."
                 )
+            if request.reconcile_only:
+                raise SandboxCreateOutcomeUnknownError(
+                    "Accepted sandbox creation could not be reconciled yet."
+                )
         labels = {
             **request.labels.to_provider_labels(),
             (
                 _OPERATION_LABEL if stable_attempt else _PROVISIONING_ATTEMPT_LABEL
             ): provisioning_attempt_id,
         }
+        create_accepted = False
         try:
             poller = await self._begin_create_sandbox(
                 request,
@@ -303,12 +319,25 @@ class AcaSandboxAdapter:
                 provisioning_attempt_id=provisioning_attempt_id,
                 cleanup_on_failure=not stable_attempt,
             )
+            create_accepted = True
             return await self._await_create_result(
                 poller,
                 provisioning_attempt_id,
                 cleanup_on_failure=not stable_attempt,
             )
+        except SandboxGroupAuthorizationError:
+            if stable_attempt and create_accepted:
+                return await self._recover_stable_accepted_create(
+                    provisioning_attempt_id,
+                    request.labels.to_provider_labels(),
+                )
+            raise
         except (AzureError, TimeoutError, RuntimeError, SandboxProvisioningError):
+            if stable_attempt and create_accepted:
+                return await self._recover_stable_accepted_create(
+                    provisioning_attempt_id,
+                    request.labels.to_provider_labels(),
+                )
             if stable_attempt:
                 existing = await self._find_failed_create_sandboxes(
                     provisioning_attempt_id,
@@ -318,6 +347,32 @@ class AcaSandboxAdapter:
                 if len(existing) == 1:
                     return await self._handle_for_sandbox_id(existing[0])
             raise
+
+    async def _recover_stable_accepted_create(
+        self,
+        provisioning_attempt_id: str,
+        expected_labels: Mapping[str, str],
+    ) -> AcaSandboxHandle:
+        """Recover a labeled create whose accepted poll cannot be observed."""
+        try:
+            existing = await self._find_failed_create_sandboxes(
+                provisioning_attempt_id,
+                label_key=_OPERATION_LABEL,
+                expected_labels=expected_labels,
+            )
+        except SandboxGroupAuthorizationError:
+            raise SandboxCreateOutcomeUnknownError(
+                "Accepted sandbox creation could not be reconciled yet."
+            ) from None
+        if len(existing) == 1:
+            return await self._handle_for_sandbox_id(existing[0])
+        if len(existing) > 1:
+            raise SandboxProvisioningError(
+                "A durable provisioning operation matches multiple sandboxes."
+            )
+        raise SandboxCreateOutcomeUnknownError(
+            "Accepted sandbox creation could not be reconciled yet."
+        )
 
     async def _begin_create_sandbox(
         self,
@@ -357,6 +412,8 @@ class AcaSandboxAdapter:
                 polling_interval=request.polling_interval_seconds,
             )
         except HttpResponseError as exc:
+            if _is_authorization_rejection(exc):
+                raise SandboxGroupAuthorizationError() from None
             if _is_capacity_rejection(exc):
                 if cleanup_on_failure:
                     await self._cleanup_failed_create(provisioning_attempt_id)
@@ -394,6 +451,8 @@ class AcaSandboxAdapter:
                 await self._cleanup_after_cancelled_create(provisioning_attempt_id)
             raise
         except HttpResponseError as exc:
+            if _is_authorization_rejection(exc):
+                raise SandboxGroupAuthorizationError() from None
             if cleanup_on_failure:
                 await self._cleanup_failed_create(provisioning_attempt_id)
             if _is_capacity_rejection(exc):
@@ -437,11 +496,16 @@ class AcaSandboxAdapter:
             "readiness_timeout_seconds",
         )
         handle = await self._attach_handle(persisted, expected)
-        await self._verify_manifest_handshake(
-            handle,
-            expected,
-            readiness_timeout_seconds=readiness_timeout_seconds,
-        )
+        try:
+            await self._verify_manifest_handshake(
+                handle,
+                expected,
+                readiness_timeout_seconds=readiness_timeout_seconds,
+            )
+        except SandboxFileOperationError as exc:
+            if exc.status_code in _AUTHORIZATION_STATUS_CODES:
+                raise SandboxGroupAuthorizationError() from None
+            raise
         return handle
 
     async def resume(
@@ -462,14 +526,23 @@ class AcaSandboxAdapter:
         try:
             await handle.resume()
             resumed = True
+        except HttpResponseError as exc:
+            if _is_authorization_rejection(exc):
+                raise SandboxGroupAuthorizationError() from None
+            raise
         finally:
             if not resumed:
                 await handle.close()
-        await self._verify_manifest_handshake(
-            handle,
-            expected,
-            readiness_timeout_seconds=readiness_timeout_seconds,
-        )
+        try:
+            await self._verify_manifest_handshake(
+                handle,
+                expected,
+                readiness_timeout_seconds=readiness_timeout_seconds,
+            )
+        except SandboxFileOperationError as exc:
+            if exc.status_code in _AUTHORIZATION_STATUS_CODES:
+                raise SandboxGroupAuthorizationError() from None
+            raise
         return handle
 
     async def close(self) -> None:
@@ -487,15 +560,21 @@ class AcaSandboxAdapter:
         """Project label-filtered platform inventory without leaking SDK summaries."""
         self._ensure_open()
         summaries: list[SandboxSummary] = []
-        async for sandbox in self._group_client.list_sandboxes(labels=labels):
-            summaries.append(
-                SandboxSummary.create(
-                    sandbox_id=sandbox.id,
-                    labels=dict(sandbox.labels),
-                    created_at=_sdk_timestamp(sandbox.created_at),
-                    modified_at=None,
+        try:
+            async for sandbox in self._group_client.list_sandboxes(labels=labels):
+                summaries.append(
+                    SandboxSummary.create(
+                        sandbox_id=sandbox.id,
+                        labels=dict(sandbox.labels),
+                        state=sandbox.state,
+                        created_at=_sdk_timestamp(sandbox.created_at),
+                        modified_at=None,
+                    )
                 )
-            )
+        except HttpResponseError as exc:
+            if _is_authorization_rejection(exc):
+                raise SandboxGroupAuthorizationError() from None
+            raise
         return tuple(summaries)
 
     async def delete_sandbox(self, sandbox_id: str) -> None:
@@ -673,9 +752,14 @@ class AcaSandboxAdapter:
 
         labels = {label_key: provisioning_attempt_id}
         for attempt in range(_FAILED_CREATE_LOOKUP_ATTEMPTS):
-            summaries = [
-                sandbox async for sandbox in self._group_client.list_sandboxes(labels=labels)
-            ]
+            try:
+                summaries = [
+                    sandbox async for sandbox in self._group_client.list_sandboxes(labels=labels)
+                ]
+            except HttpResponseError as exc:
+                if _is_authorization_rejection(exc):
+                    raise SandboxGroupAuthorizationError() from None
+                raise
             if summaries:
                 if expected_labels is not None and any(
                     dict(summary.labels) != dict(expected_labels)
@@ -1021,6 +1105,13 @@ def _is_definitive_client_rejection(exc: HttpResponseError) -> bool:
 
     status_code = exc.status_code
     return status_code is not None and 400 <= status_code < 500
+
+
+_AUTHORIZATION_STATUS_CODES = frozenset({401, 403})
+
+
+def _is_authorization_rejection(exc: HttpResponseError) -> bool:
+    return exc.status_code in _AUTHORIZATION_STATUS_CODES
 
 
 def _is_capacity_rejection(exc: HttpResponseError) -> bool:

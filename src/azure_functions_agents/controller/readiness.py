@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
@@ -16,6 +16,13 @@ from pydantic import BaseModel, ConfigDict, ValidationError
 from .._logger import logger
 from .._observability import current_span
 from ..config import DEFAULT_TIMEOUT
+from ..execution.setup_budget import (
+    SetupBudgetExpiredError,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from ..harness.bootstrap_report import (
     BootstrapErrorReport,
     BootstrapReportError,
@@ -30,6 +37,7 @@ from ..journal_paths import (
 )
 from ..sandbox_runtime_limits import lifecycle_auto_delete_seconds
 from ..session_state import (
+    TERMINAL_RUN_STATUSES,
     ActiveRunConflictError,
     AppIdentity,
     ConcurrencyConflictError,
@@ -50,6 +58,7 @@ from ..session_state import (
     SessionRead,
     SessionStateContractError,
     SessionStateStore,
+    SessionStateStoreError,
     StaleOperationTokenError,
     operation_correlation_label,
     operation_id_for_sequence,
@@ -66,11 +75,16 @@ from ..strict_json import DuplicateJsonKeyError, decode_json_object
 from ..transport.manifest import ExpectedSandboxManifestBinding, SandboxManifestMismatchError
 from ..transport.ports import SandboxSessionHandle, SandboxSessionProvider
 from ..transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     PersistedSandboxBinding,
     SandboxCapacityError,
+    SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxCreateSource,
     SandboxFileNotFoundError,
+    SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxLifecyclePolicy,
     SandboxProvisioningLabels,
@@ -109,17 +123,27 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
     }
 )
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
+_RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
 
 type _SessionLockKey = tuple[str, str]
-type TargetedReconciler = Callable[[OwnerPartition, str], Awaitable[None]]
+type TargetedReconciler = Callable[[OwnerPartition, str, "SetupDeadline"], Awaitable[None]]
 type BoundedReconciler = Callable[[], Awaitable[None]]
 
 
 class SetupDeadline(Protocol):
     """The small deadline surface the activation gate needs from execution."""
 
-    def remaining_setup_seconds(self) -> float:
+    def remaining_setup_seconds(self, *, phase: SetupPhase) -> float:
         """Return time remaining before a run may be launched."""
+
+    def timeout_metadata(
+        self,
+        *,
+        phase: SetupPhase,
+        reason: SetupTimeoutReason,
+        exception_type: SetupTimeoutExceptionType,
+    ) -> SetupTimeoutMetadata:
+        """Return redacted metadata for an operation timeout."""
 
 
 class SessionActivationError(RuntimeError):
@@ -136,6 +160,14 @@ class SessionActivationGoneError(SessionActivationError):
 
 class SessionActivationSetupTimeoutError(SessionActivationError):
     """The setup deadline elapsed before a sandbox was ready to receive a run."""
+
+    def __init__(self, metadata: SetupTimeoutMetadata) -> None:
+        self.metadata = metadata
+        super().__init__("Sandbox setup deadline exceeded.")
+
+
+class SessionActivationAuthorizationError(SessionActivationError):
+    """The controller lacks required Sandbox Group data-plane authorization."""
 
 
 class SessionCreationUnavailableError(SessionActivationError):
@@ -226,9 +258,8 @@ class _SessionLockRegistry:
         try:
             lock = await self._acquire(key, setup_deadline=setup_deadline)
         except TimeoutError:
-            raise SessionActivationSetupTimeoutError(
-                "Sandbox setup did not complete before the setup deadline."
-            ) from None
+            assert setup_deadline is not None
+            raise _setup_timeout_error(setup_deadline, SetupPhase.REQUEST_LOCK) from None
         try:
             yield
         finally:
@@ -248,7 +279,9 @@ class _SessionLockRegistry:
             if setup_deadline is None:
                 await lock.acquire()
             else:
-                async with asyncio.timeout(setup_deadline.remaining_setup_seconds()):
+                async with asyncio.timeout(
+                    setup_deadline.remaining_setup_seconds(phase=SetupPhase.REQUEST_LOCK)
+                ):
                     await lock.acquire()
         except BaseException:
             await self._release_waiter(key)
@@ -352,10 +385,21 @@ class SessionRuntimeBinding:
         self,
         partition: OwnerPartition,
         session_id: str,
+        setup_deadline: SetupDeadline | None = None,
     ) -> None:
         """Run the shared targeted lifecycle reconciliation when configured."""
         if self._targeted_reconciler is not None:
-            await self._targeted_reconciler(partition, session_id)
+            try:
+                if setup_deadline is None:
+                    await self._targeted_reconciler(  # type: ignore[misc, call-arg]
+                        partition, session_id
+                    )
+                else:
+                    await self._targeted_reconciler(partition, session_id, setup_deadline)
+            except SandboxGroupAuthorizationError:
+                raise SessionActivationAuthorizationError(
+                    SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+                ) from None
 
     async def reconcile_after_create(self) -> None:
         """Run the awaited bounded post-create cleanup when configured."""
@@ -431,13 +475,16 @@ async def activate_session(
     allow_create: bool,
 ) -> ActivatedSession:
     """Resolve, cross-check, and bind one session before a run can be submitted."""
-    state_binding = await _within_setup_budget(runtime.get_state_store(), setup_deadline)
+    state_binding = await _within_setup_budget(
+        runtime.get_state_store(), setup_deadline, phase=SetupPhase.STATE_STORE
+    )
     partition = owner_partition(owner)
     store = state_binding.store
     try:
         session_read = await _within_setup_budget(
             store.get_session(partition, session_id),
             setup_deadline,
+            phase=SetupPhase.SESSION_LOOKUP,
         )
     except SessionRowNotFoundError:
         if not allow_create:
@@ -476,7 +523,9 @@ async def activate_session(
         session.sandbox_id,
         SandboxGroupBinding.create(runtime.sandbox_group_resource_id, session.region),
     )
-    provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
+    provider = await _within_setup_budget(
+        runtime.get_provider(), setup_deadline, phase=SetupPhase.PROVIDER_BIND
+    )
     handle: SandboxSessionHandle | None = None
     try:
         if session.status == "suspended":
@@ -484,18 +533,24 @@ async def activate_session(
                 provider.resume(
                     persisted,
                     expected,
-                    readiness_timeout_seconds=_remaining_setup_seconds(setup_deadline),
+                    readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
+                        phase=SetupPhase.SESSION_RESUME
+                    ),
                 ),
                 setup_deadline,
+                phase=SetupPhase.SESSION_RESUME,
             )
         else:
             handle = await _within_setup_budget(
                 provider.attach(
                     persisted,
                     expected,
-                    readiness_timeout_seconds=_remaining_setup_seconds(setup_deadline),
+                    readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
+                        phase=SetupPhase.SESSION_ATTACH
+                    ),
                 ),
                 setup_deadline,
+                phase=SetupPhase.SESSION_ATTACH,
             )
         await _within_setup_budget(
             _verify_optional_harness_artifacts(
@@ -504,7 +559,13 @@ async def activate_session(
                 require_protocol=True,
             ),
             setup_deadline,
+            phase=SetupPhase.MANIFEST,
         )
+    except SandboxGroupAuthorizationError:
+        if handle is not None:
+            with suppress(Exception):
+                await handle.close()
+        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
     except SandboxManifestMismatchError:
         await _quarantine_detected_binding(
             store,
@@ -788,7 +849,7 @@ async def begin_submit_operation(
         token=uuid4().hex,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=now + timedelta(seconds=60),
+        lease_expires_at=now,
         next_attempt_at=None,
         created_at=now,
         updated_at=now,
@@ -1136,9 +1197,13 @@ async def provision_new_session_submit(
         raise SessionCreationUnavailableError(
             "No runtime bootstrap source is available for new sandbox sessions."
         )
-    state_binding = await _within_setup_budget(runtime.get_state_store(), setup_deadline)
+    state_binding = await _within_setup_budget(
+        runtime.get_state_store(), setup_deadline, phase=SetupPhase.STATE_STORE
+    )
     package = await _capture_current_package(runtime.script_root, setup_deadline)
-    provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
+    provider = await _within_setup_budget(
+        runtime.get_provider(), setup_deadline, phase=SetupPhase.PROVIDER_BIND
+    )
     partition = owner_partition(owner)
     now = datetime.now(UTC)
     sequence = 1
@@ -1160,7 +1225,7 @@ async def provision_new_session_submit(
         token=uuid4().hex,
         attempt_count=0,
         error_code=None,
-        lease_expires_at=now + timedelta(seconds=60),
+        lease_expires_at=now,
         next_attempt_at=None,
         created_at=now,
         updated_at=now,
@@ -1233,11 +1298,20 @@ async def provision_new_session_submit(
             )
         ),
         setup_deadline,
+        phase=SetupPhase.PROVISION_CREATE,
     )
     if outcome.replayed:
+        if (
+            outcome.run.status in TERMINAL_RUN_STATUSES
+            and outcome.run.status_reason == SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE
+        ):
+            raise SessionActivationAuthorizationError(
+                SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+            )
         existing_session = await _within_setup_budget(
             state_binding.store.get_session(partition, outcome.run.session_id),
             setup_deadline,
+            phase=SetupPhase.SESSION_LOOKUP,
         )
         if existing_session.record.active_operation_id is None:
             return ProvisionedSubmission(outcome=outcome, activated=None)
@@ -1248,6 +1322,7 @@ async def provision_new_session_submit(
                 existing_session.record.active_operation_id,
             ),
             setup_deadline,
+            phase=SetupPhase.OPERATION_STATE,
         )
         if existing_operation.record.kind != "provision_submit":
             return ProvisionedSubmission(outcome=outcome, activated=None)
@@ -1259,9 +1334,14 @@ async def provision_new_session_submit(
                 updated_at=datetime.now(UTC),
             ),
             setup_deadline,
+            phase=SetupPhase.PROVISION_RECONCILE,
         )
         if fence is None:
-            return ProvisionedSubmission(outcome=outcome, activated=None)
+            raise _setup_timeout_error(
+                setup_deadline,
+                SetupPhase.PROVISION_RECONCILE,
+                reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+            )
         activated = await _provision_reserved_session(
             runtime,
             state_binding,
@@ -1283,7 +1363,11 @@ async def provision_new_session_submit(
         setup_deadline,
     )
     try:
-        await _within_setup_budget(runtime.reconcile_after_create(), setup_deadline)
+        await _within_setup_budget(
+            runtime.reconcile_after_create(),
+            setup_deadline,
+            phase=SetupPhase.POST_CREATE_RECONCILE,
+        )
     except BaseException:
         try:
             await activated.handle.close()
@@ -1294,6 +1378,139 @@ async def provision_new_session_submit(
 
 
 async def _provision_reserved_session(
+    runtime: SessionRuntimeBinding,
+    state_binding: StateStoreBinding,
+    provider: SandboxSessionProvider,
+    session: DurableSessionRecord,
+    fence: SessionOperationFence,
+    package: CapturedContentPackage,
+    setup_deadline: SetupDeadline,
+) -> ActivatedSession:
+    """Provision one reserved session, preserving transient file-plane work for takeover."""
+    try:
+        return await _provision_reserved_session_inner(
+            runtime,
+            state_binding,
+            provider,
+            session,
+            fence,
+            package,
+            setup_deadline,
+        )
+    except SandboxCreateOutcomeUnknownError:
+        await _preserve_indeterminate_provision(state_binding.store, fence)
+        raise _setup_timeout_error(
+            setup_deadline,
+            SetupPhase.PROVISION_RECONCILE,
+            reason=SetupTimeoutReason.PROVISION_INDETERMINATE,
+        ) from None
+    except SandboxGroupAuthorizationError:
+        if await _is_indeterminate_provision(state_binding.store, fence):
+            raise _setup_timeout_error(
+                setup_deadline,
+                SetupPhase.PROVISION_RECONCILE,
+                reason=SetupTimeoutReason.PROVISION_INDETERMINATE,
+            ) from None
+        try:
+            await _fail_reserved_provision_authorization(
+                state_binding.store,
+                fence,
+            )
+        except (SessionStateContractError, SessionStateStoreError) as cleanup_error:
+            raise cleanup_error from None
+        raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+    except SandboxFileNotFoundError:
+        raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
+    except SandboxFileOperationError as exc:
+        if exc.status_code in {401, 403}:
+            raise SessionActivationAuthorizationError(SANDBOX_GROUP_AUTHORIZATION_MESSAGE) from None
+        if exc.status_code is None or exc.status_code in _RESUMABLE_FILE_OPERATION_STATUS_CODES:
+            raise _setup_timeout_error(setup_deadline, SetupPhase.CONTENT) from None
+        raise
+
+
+async def _preserve_indeterminate_provision(
+    store: SessionStateStore,
+    fence: SessionOperationFence,
+) -> None:
+    """Persist an accepted-create outcome that needs stable-label reconciliation."""
+    await store.advance_operation(
+        fence=fence,
+        phase="provision_reconcile",
+        error_code="provision_create_indeterminate",
+        updated_at=datetime.now(UTC),
+    )
+
+
+async def _is_indeterminate_provision(
+    store: SessionStateStore,
+    fence: SessionOperationFence,
+) -> bool:
+    operation = await store.get_operation(
+        fence.owner_partition,
+        fence.session_id,
+        fence.operation_id,
+    )
+    return (
+        operation.record.kind == "provision_submit"
+        and operation.record.phase == "provision_reconcile"
+    )
+
+
+async def _fail_reserved_provision_authorization(
+    store: SessionStateStore,
+    fence: SessionOperationFence,
+) -> None:
+    """Atomically terminalize a provision blocked by deterministic group authorization."""
+
+    if fence.target.run_id is None:
+        raise SessionActivationError("Provision-submit operation has no target run.")
+    current = await store.get_session(fence.owner_partition, fence.session_id)
+    run = await store.get_run(
+        fence.owner_partition,
+        fence.session_id,
+        fence.target.run_id,
+    )
+    updated_at = datetime.now(UTC)
+    failed_run = terminal_run(
+        run.record,
+        status="failed",
+        result_available=False,
+        reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        updated_at=updated_at,
+    )
+    deleting = DurableSessionRecord.create(
+        owner_partition=current.record.owner_partition,
+        session_id=current.record.session_id,
+        sandbox_id=current.record.sandbox_id,
+        generation=current.record.generation,
+        digest_kind=current.record.digest_kind,
+        digest=current.record.digest,
+        protocol=current.record.protocol,
+        status="deleting",
+        last_activity_at=current.record.last_activity_at,
+        expires_at=current.record.expires_at,
+        idle_policy_armed=False,
+        active_run_id=None,
+        snapshot_ids=current.record.snapshot_ids,
+        region=current.record.region,
+        state_store_fingerprint=current.record.state_store_fingerprint,
+        quarantine_reason=current.record.quarantine_reason,
+        tombstone_reason=SANDBOX_GROUP_AUTHORIZATION_ERROR_CODE,
+        created_at=current.record.created_at,
+        updated_at=updated_at,
+        active_operation_id=None,
+        operation_sequence=current.record.operation_sequence,
+    )
+    await store.complete_operation(
+        fence=fence,
+        updated_session=deleting,
+        terminal_run=failed_run,
+        updated_at=updated_at,
+    )
+
+
+async def _provision_reserved_session_inner(
     runtime: SessionRuntimeBinding,
     state_binding: StateStoreBinding,
     provider: SandboxSessionProvider,
@@ -1318,10 +1535,12 @@ async def _provision_reserved_session(
             fence.operation_id,
         ),
         setup_deadline,
+        phase=SetupPhase.OPERATION_STATE,
     )
     phase = operation.record.phase
     if phase not in {
         "provision_create",
+        "provision_reconcile",
         "provision_lifecycle",
         "provision_content",
         "provision_manifest",
@@ -1344,9 +1563,11 @@ async def _provision_reserved_session(
         labels=labels,
         setup_deadline=setup_deadline,
     )
+    create_request = replace(create_request, reconcile_only=phase == "provision_reconcile")
     current = await _within_setup_budget(
         state_binding.store.get_session(session.owner_partition, session.session_id),
         setup_deadline,
+        phase=SetupPhase.SESSION_LOOKUP,
     )
     if phase in {"provision_journal", "provision_launching", "provision_rearm"}:
         if current.record.sandbox_id is None:
@@ -1366,9 +1587,12 @@ async def _provision_reserved_session(
                     ),
                 ),
                 expected,
-                readiness_timeout_seconds=_remaining_setup_seconds(setup_deadline),
+                readiness_timeout_seconds=setup_deadline.remaining_setup_seconds(
+                    phase=SetupPhase.SESSION_ATTACH
+                ),
             ),
             setup_deadline,
+            phase=SetupPhase.SESSION_ATTACH,
         )
         return ActivatedSession.create(
             handle=handle,
@@ -1385,16 +1609,39 @@ async def _provision_reserved_session(
                 updated_at=datetime.now(UTC),
             ),
             setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
         )
+    create_request = replace(
+        create_request,
+        remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+            phase=SetupPhase.PROVISION_CREATE
+        ),
+    )
     try:
-        handle = await _within_setup_budget(
-            provider.create(create_request, persisted_group=group),
+        handle = await _create_reserved_sandbox(
+            state_binding.store,
+            provider,
+            create_request,
+            group,
+            fence,
             setup_deadline,
         )
     except SandboxCapacityError:
-        await _within_setup_budget(runtime.reap_for_capacity(), setup_deadline)
-        handle = await _within_setup_budget(
-            provider.create(create_request, persisted_group=group),
+        await _within_setup_budget(
+            runtime.reap_for_capacity(), setup_deadline, phase=SetupPhase.CAPACITY_REAP
+        )
+        create_request = replace(
+            create_request,
+            remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+                phase=SetupPhase.PROVISION_CREATE
+            ),
+        )
+        handle = await _create_reserved_sandbox(
+            state_binding.store,
+            provider,
+            create_request,
+            group,
+            fence,
             setup_deadline,
         )
     try:
@@ -1414,6 +1661,7 @@ async def _provision_reserved_session(
             latest = await _within_setup_budget(
                 state_binding.store.get_session(session.owner_partition, session.session_id),
                 setup_deadline,
+                phase=SetupPhase.SESSION_LOOKUP,
             )
             await _quarantine_detected_binding(
                 state_binding.store,
@@ -1433,6 +1681,27 @@ async def _provision_reserved_session(
         raise
 
 
+async def _create_reserved_sandbox(
+    store: SessionStateStore,
+    provider: SandboxSessionProvider,
+    request: SandboxCreateRequest,
+    group: SandboxGroupBinding,
+    fence: SessionOperationFence,
+    setup_deadline: SetupDeadline,
+) -> SandboxSessionHandle:
+    """Preserve an invoked create as reconcile-only when its outcome is ambiguous."""
+    try:
+        return await _within_setup_budget(
+            provider.create(request, persisted_group=group),
+            setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    except (asyncio.CancelledError, SessionActivationSetupTimeoutError):
+        with suppress(StaleOperationTokenError):
+            await _preserve_indeterminate_provision(store, fence)
+        raise
+
+
 async def _finish_created_provision(
     runtime: SessionRuntimeBinding,
     state_binding: StateStoreBinding,
@@ -1444,7 +1713,7 @@ async def _finish_created_provision(
     handle: SandboxSessionHandle,
     setup_deadline: SetupDeadline,
 ) -> ActivatedSession:
-    if phase == "provision_create":
+    if phase in {"provision_create", "provision_reconcile"}:
         bound_session = _session_with_sandbox_for_operation(
             current.record,
             sandbox_id=handle.identity.sandbox_id,
@@ -1467,11 +1736,13 @@ async def _finish_created_provision(
                 updated_target=bound_target,
             ),
             setup_deadline,
+            phase=SetupPhase.PROVISION_RECONCILE,
         )
         phase = "provision_lifecycle"
         current = await _within_setup_budget(
             state_binding.store.get_session(session.owner_partition, session.session_id),
             setup_deadline,
+            phase=SetupPhase.SESSION_LOOKUP,
         )
     else:
         bound_session = current.record
@@ -1479,6 +1750,7 @@ async def _finish_created_provision(
         await _within_setup_budget(
             handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime)),
             setup_deadline,
+            phase=SetupPhase.LIFECYCLE,
         )
         fence = await _within_setup_budget(
             state_binding.store.advance_operation(
@@ -1487,6 +1759,7 @@ async def _finish_created_provision(
                 updated_at=datetime.now(UTC),
             ),
             setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
         )
         phase = "provision_content"
     expected = build_expected_manifest_binding(
@@ -1498,6 +1771,7 @@ async def _finish_created_provision(
         await _within_setup_budget(
             deliver_content_and_bootstrap(handle, package, expected, handle.identity),
             setup_deadline,
+            phase=SetupPhase.CONTENT,
         )
         fence = await _within_setup_budget(
             state_binding.store.advance_operation(
@@ -1506,6 +1780,7 @@ async def _finish_created_provision(
                 updated_at=datetime.now(UTC),
             ),
             setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
         )
         phase = "provision_manifest"
     if phase == "provision_manifest":
@@ -1521,10 +1796,12 @@ async def _finish_created_provision(
                 require_protocol=True,
             ),
             setup_deadline,
+            phase=SetupPhase.MANIFEST,
         )
         current_policy = await _within_setup_budget(
             handle.get_lifecycle_policy(),
             setup_deadline,
+            phase=SetupPhase.LIFECYCLE,
         )
         await _within_setup_budget(
             handle.set_lifecycle_policy(
@@ -1535,6 +1812,7 @@ async def _finish_created_provision(
                 )
             ),
             setup_deadline,
+            phase=SetupPhase.LIFECYCLE,
         )
         running_session = _running_provisioned_session(
             bound_session,
@@ -1548,10 +1826,12 @@ async def _finish_created_provision(
                 updated_session=running_session,
             ),
             setup_deadline,
+            phase=SetupPhase.PROVISION_CREATE,
         )
     current = await _within_setup_budget(
         state_binding.store.get_session(session.owner_partition, session.session_id),
         setup_deadline,
+        phase=SetupPhase.SESSION_LOOKUP,
     )
     return ActivatedSession.create(
         handle=handle,
@@ -1637,7 +1917,9 @@ async def _create_and_activate_session(
         )
 
     package = await _capture_current_package(runtime.script_root, setup_deadline)
-    provider = await _within_setup_budget(runtime.get_provider(), setup_deadline)
+    provider = await _within_setup_budget(
+        runtime.get_provider(), setup_deadline, phase=SetupPhase.PROVIDER_BIND
+    )
     now = datetime.now(UTC)
     initial_session = DurableSessionRecord.create(
         owner_partition=partition,
@@ -1665,6 +1947,7 @@ async def _create_and_activate_session(
     etag = await _within_setup_budget(
         state_binding.store.create_session(initial_session),
         setup_deadline,
+        phase=SetupPhase.STATE_STORE,
     )
     group = SandboxGroupBinding.create(
         runtime.sandbox_group_resource_id,
@@ -1691,16 +1974,27 @@ async def _create_and_activate_session(
             handle = await _within_setup_budget(
                 provider.create(create_request, persisted_group=group),
                 setup_deadline,
+                phase=SetupPhase.PROVISION_CREATE,
             )
         except SandboxCapacityError:
-            await _within_setup_budget(runtime.reap_for_capacity(), setup_deadline)
+            await _within_setup_budget(
+                runtime.reap_for_capacity(), setup_deadline, phase=SetupPhase.CAPACITY_REAP
+            )
+            create_request = replace(
+                create_request,
+                remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+                    phase=SetupPhase.PROVISION_CREATE
+                ),
+            )
             handle = await _within_setup_budget(
                 provider.create(create_request, persisted_group=group),
                 setup_deadline,
+                phase=SetupPhase.PROVISION_CREATE,
             )
         await _within_setup_budget(
             handle.set_lifecycle_policy(lifecycle_policy_for_idle(runtime)),
             setup_deadline,
+            phase=SetupPhase.LIFECYCLE,
         )
         persisted_session = _session_with_sandbox(
             initial_session,
@@ -1714,6 +2008,7 @@ async def _create_and_activate_session(
                 etag=etag,
             ),
             setup_deadline,
+            phase=SetupPhase.STATE_STORE,
         )
         expected = build_expected_manifest_binding(
             persisted_session,
@@ -1723,6 +2018,7 @@ async def _create_and_activate_session(
         await _within_setup_budget(
             deliver_content_and_bootstrap(handle, package, expected, handle.identity),
             setup_deadline,
+            phase=SetupPhase.CONTENT,
         )
         await _wait_for_created_manifest(
             handle,
@@ -1736,6 +2032,7 @@ async def _create_and_activate_session(
                 require_protocol=True,
             ),
             setup_deadline,
+            phase=SetupPhase.MANIFEST,
         )
         ready_session = _ready_session(persisted_session, updated_at=datetime.now(UTC))
         etag = await _within_setup_budget(
@@ -1745,8 +2042,13 @@ async def _create_and_activate_session(
                 etag=etag,
             ),
             setup_deadline,
+            phase=SetupPhase.STATE_STORE,
         )
-        await _within_setup_budget(runtime.reconcile_after_create(), setup_deadline)
+        await _within_setup_budget(
+            runtime.reconcile_after_create(),
+            setup_deadline,
+            phase=SetupPhase.POST_CREATE_RECONCILE,
+        )
         activated = ActivatedSession.create(
             handle=handle,
             session=ready_session,
@@ -1783,9 +2085,7 @@ async def _create_and_activate_session(
     except ContentPackagingError:
         raise SessionActivationError("Sandbox content delivery could not be verified.") from None
     except TimeoutError:
-        raise SessionActivationSetupTimeoutError(
-            "Sandbox setup did not complete before the setup deadline."
-        ) from None
+        raise _setup_timeout_error(setup_deadline, SetupPhase.PROVISION_CREATE) from None
     finally:
         if handle is not None and not succeeded:
             await handle.close()
@@ -1802,6 +2102,7 @@ async def _wait_for_created_manifest(
             await _within_setup_budget(
                 read_live_manifest_binding(handle, expected, handle.identity),
                 setup_deadline,
+                phase=SetupPhase.MANIFEST,
             )
             return
         except LiveManifestNotReadyError:
@@ -1810,9 +2111,11 @@ async def _wait_for_created_manifest(
                 raise SessionReadinessArtifactError("bootstrap_failure") from None
             delay = min(
                 _MANIFEST_RETRY_INTERVAL_SECONDS,
-                _remaining_setup_seconds(setup_deadline),
+                setup_deadline.remaining_setup_seconds(phase=SetupPhase.MANIFEST),
             )
-            await _within_setup_budget(asyncio.sleep(delay), setup_deadline)
+            await _within_setup_budget(
+                asyncio.sleep(delay), setup_deadline, phase=SetupPhase.MANIFEST
+            )
 
 
 async def _read_bootstrap_error_report(
@@ -1823,6 +2126,7 @@ async def _read_bootstrap_error_report(
         payload = await _within_setup_budget(
             handle.read_file(BOOTSTRAP_ERROR_PATH),
             setup_deadline,
+            phase=SetupPhase.MANIFEST,
         )
     except SandboxFileNotFoundError:
         return None
@@ -1835,14 +2139,16 @@ async def _read_bootstrap_error_report(
 async def _within_setup_budget[T](
     operation: Awaitable[T],
     setup_deadline: SetupDeadline,
+    *,
+    phase: SetupPhase,
 ) -> T:
     try:
-        async with asyncio.timeout(_remaining_setup_seconds(setup_deadline)):
+        async with asyncio.timeout(setup_deadline.remaining_setup_seconds(phase=phase)):
             return await operation
+    except SetupBudgetExpiredError:
+        raise
     except TimeoutError:
-        raise SessionActivationSetupTimeoutError(
-            "Sandbox setup did not complete before the setup deadline."
-        ) from None
+        raise _setup_timeout_error(setup_deadline, phase) from None
 
 
 async def _capture_current_package(
@@ -1853,7 +2159,9 @@ async def _capture_current_package(
     # session on this worker pays the archive cost; every call still runs under
     # the shared setup deadline because a cold capture can block on file I/O.
     try:
-        return await _within_setup_budget(get_content_package(script_root), setup_deadline)
+        return await _within_setup_budget(
+            get_content_package(script_root), setup_deadline, phase=SetupPhase.PACKAGE_CAPTURE
+        )
     except ContentPackagingError:
         raise SessionActivationError("Sandbox content package could not be captured.") from None
 
@@ -1868,7 +2176,9 @@ def _build_create_request(
     if runtime.create_profile is not None:
         return runtime.create_profile.build_request(
             labels=labels,
-            remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
+            remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+                phase=SetupPhase.PROVISION_CREATE
+            ),
             auto_suspend_seconds=runtime.auto_suspend_seconds,
         )
     if source is None:
@@ -1878,7 +2188,9 @@ def _build_create_request(
     return SandboxCreateRequest.create(
         source=source,
         labels=labels,
-        remaining_setup_budget_seconds=_remaining_setup_seconds(setup_deadline),
+        remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+            phase=SetupPhase.PROVISION_CREATE
+        ),
         auto_suspend_seconds=runtime.auto_suspend_seconds,
         auto_suspend_mode="Disk",
     )
@@ -1937,13 +2249,16 @@ async def _read_optional_file(
         return None
 
 
-def _remaining_setup_seconds(setup_deadline: SetupDeadline) -> float:
-    try:
-        return setup_deadline.remaining_setup_seconds()
-    except TimeoutError:
-        raise SessionActivationSetupTimeoutError(
-            "Sandbox setup did not complete before the setup deadline."
-        ) from None
+def _setup_timeout_error(
+    setup_deadline: SetupDeadline, phase: SetupPhase, *, reason: SetupTimeoutReason = SetupTimeoutReason.OPERATION_TIMEOUT
+) -> SessionActivationSetupTimeoutError:
+    return SessionActivationSetupTimeoutError(
+        setup_deadline.timeout_metadata(
+            phase=phase,
+            reason=reason,
+            exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        )
+    )
 
 
 def _verify_owner_binding(owner: OwnerContext, session: DurableSessionRecord) -> None:

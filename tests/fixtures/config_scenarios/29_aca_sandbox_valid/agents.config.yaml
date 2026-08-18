@@ -1,3 +1,4 @@
+# Fully valid ACA session-runtime scenario.
 model: gpt-4o
 timeout: 300
 session_runtime:

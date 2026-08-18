@@ -16,6 +16,7 @@ from azure_functions_agents.controller.readiness import (
     ATOMIC_CHECKPOINT_POINTER_PATH,
     HARNESS_PROTOCOL_PATH,
     ActivatedSession,
+    SessionActivationAuthorizationError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
@@ -51,7 +52,13 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.manifest import SandboxManifestMismatchError
-from azure_functions_agents.transport.transport_models import DiskSource, SandboxFileOperationError
+from azure_functions_agents.transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
+    DiskSource,
+    SandboxCreateOutcomeUnknownError,
+    SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
+)
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
 from tests.doubles.fake_session_runtime import FakeSandboxSessionHandle as _FakeHandle
@@ -219,6 +226,126 @@ async def test_reserved_provision_keeps_successful_created_handle_open(tmp_path:
     assert provisioned.activated is not None
     assert provisioned.activated.handle is handle
     assert handle.close_calls == 0
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_refreshes_initial_create_polling_budget(
+    tmp_path: Path,
+) -> None:
+    clock = [0.0]
+
+    class SlowSessionReadStore(_FakeStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.advanced_clock = False
+
+        async def get_session(self, *args: object, **kwargs: object):  # type: ignore[no-untyped-def]
+            if not self.advanced_clock:
+                clock[0] = 30.0
+                self.advanced_clock = True
+            return await super().get_session(*args, **kwargs)
+
+    script_root = _script_root(tmp_path)
+    handle = _CountingHandle()
+    provider = _FakeProvider(handle)
+    store = SlowSessionReadStore()
+
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=SetupBudget.start(
+            setup_seconds=90.0,
+            clock=lambda: clock[0],
+        ),
+    )
+
+    assert provisioned.activated is not None
+    assert provider.create_calls[0].remaining_setup_budget_seconds == 60.0
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_authorization_failure_terminalizes_durable_state(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SandboxGroupAuthorizationError())
+    store = _FakeStore()
+
+    with pytest.raises(SessionActivationAuthorizationError):
+        await provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert store.session is not None
+    assert store.session.status == "deleting"
+    assert store.session.tombstone_reason == "sandbox_group_authorization_failed"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    assert store.runs["run-1"].status == "failed"
+    assert store.runs["run-1"].status_reason == "sandbox_group_authorization_failed"
+    [operation] = store.durable_operations.values()
+    assert operation.state == "completed"
+    assert operation.lease_expires_at is None
+
+
+@pytest.mark.asyncio
+async def test_targeted_reconciliation_authorization_is_redacted(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    store = _FakeStore()
+
+    async def reconciliation(*_args: object) -> None:
+        raise SandboxGroupAuthorizationError()
+
+    runtime = _runtime(script_root, provider, store)
+    runtime = replace(runtime, _targeted_reconciler=reconciliation)
+
+    with pytest.raises(SessionActivationAuthorizationError) as caught:
+        await runtime.reconcile_session(owner_partition(_owner()), "session-1", SetupBudget.start())
+
+    assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_keeps_post_acceptance_authorization_indeterminate(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SandboxCreateOutcomeUnknownError())
+    store = _FakeStore()
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=SetupBudget.start(),
+        )
+
+    assert store.session is not None
+    assert store.session.status == "creating"
+    assert store.session.active_run_id == "run-1"
+    assert store.session.active_operation_id is not None
+    assert store.runs["run-1"].status == "accepted"
+    [operation] = store.durable_operations.values()
+    assert operation.state == "active"
+    assert operation.phase == "provision_reconcile"
+    assert operation.error_code == "provision_create_indeterminate"
 
 
 @pytest.mark.asyncio
@@ -918,7 +1045,7 @@ async def test_creation_reserves_the_row_then_proves_the_live_manifest(tmp_path:
     )
 
     assert provider.create_calls
-    assert provider.create_calls[0].remaining_setup_budget_seconds <= 30.0
+    assert provider.create_calls[0].remaining_setup_budget_seconds <= 90.0
     assert store.session is not None
     assert store.session.status == "ready"
     assert store.session.sandbox_id == "new-sandbox"

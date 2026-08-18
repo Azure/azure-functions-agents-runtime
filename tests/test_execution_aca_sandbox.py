@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -20,9 +21,11 @@ from azure_functions_agents.controller.http import (
     submit_run,
 )
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
+from azure_functions_agents.controller.package import ContentDeliveryVerificationError
 from azure_functions_agents.controller.readiness import (
     ActivatedSession,
     ProvisionedSubmission,
+    SessionActivationAuthorizationError,
     SessionActivationNotFoundError,
     SessionActivationSetupTimeoutError,
     SessionRunOwnershipChangedError,
@@ -53,7 +56,13 @@ from azure_functions_agents.execution.run_control import (
     RunSubmissionIndeterminateError,
     SandboxRunControl,
 )
-from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.execution.setup_budget import (
+    SetupBudget,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.journal_paths import (
     inbox_path,
     process_path,
@@ -82,9 +91,13 @@ from azure_functions_agents.session_state import (
     owner_partition,
 )
 from azure_functions_agents.transport.transport_models import (
+    SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     DiskSource,
     SandboxCapacityError,
+    SandboxCreateOutcomeUnknownError,
+    SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import (
@@ -105,6 +118,27 @@ def _owner() -> FunctionAppOwnerContext:
         site_name="agent-app",
     )
     return FunctionAppOwnerContext.create(app, "main")
+
+
+def _expire_provision_lease(store: FakeSessionStateStore, operation: DurableSessionOperation) -> None:
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+
+
+def _complete_provisioning(store: FakeSessionStateStore, operation: DurableSessionOperation) -> None:
+    assert store.session is not None
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        state="completed",
+        finished_at=datetime.now(UTC),
+    )
+    store.session = replace(
+        store.session,
+        status="running",
+        active_operation_id=None,
+    )
 
 
 def _binding() -> AgentBinding:
@@ -502,9 +536,10 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
         owner=_owner(),
     )
 
-    with pytest.raises(SandboxFileOperationError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="retryable"))
 
+    _expire_provision_lease(store, next(iter(store.durable_operations.values())))
     recovered = await backend.start_run(
         StartRunRequest(prompt="hello", idempotency_key="retryable")
     )
@@ -513,6 +548,70 @@ async def test_new_submit_recovers_an_ambiguous_stable_label_create(
     assert len(provider.sandboxes) == 1
     labels = next(iter(provider.sandboxes.values())).labels
     assert labels["operation_label"].startswith("op-")
+
+
+@pytest.mark.asyncio
+async def test_indeterminate_provision_waits_for_stable_label_reconciliation(
+    tmp_path: Path,
+) -> None:
+    class DelayedVisibilityProvider(FakeSandboxSessionProvider):
+        def __init__(self, handle: FakeSandboxSessionHandle) -> None:
+            super().__init__(handle)
+            self.visible = False
+            self.reconcile_requests = 0
+
+        async def create(self, request, *, persisted_group):  # type: ignore[no-untyped-def]
+            if not self.create_calls:
+                self.create_calls.append(request)
+                self.handle.labels = request.labels.to_provider_labels()
+                self.sandboxes[self.handle.identity.sandbox_id] = self.handle
+                raise SandboxCreateOutcomeUnknownError()
+            assert request.reconcile_only
+            self.reconcile_requests += 1
+            if not self.visible:
+                raise SandboxCreateOutcomeUnknownError()
+            return self.handle
+
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = DelayedVisibilityProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="ambiguous-create")
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+
+    [operation] = store.durable_operations.values()
+    _expire_provision_lease(store, operation)
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+
+    assert len(provider.create_calls) == 1
+    assert provider.reconcile_requests == 1
+    _expire_provision_lease(store, next(iter(store.durable_operations.values())))
+    provider.visible = True
+    recovered = await backend.start_run(request)
+
+    assert recovered.state == "accepted"
+    assert recovered.session_id == operation.target.session_id
+    assert recovered.run_id == operation.target.run_id
+    assert len(provider.create_calls) == 1
+    assert provider.reconcile_requests == 2
 
 
 @pytest.mark.asyncio
@@ -567,6 +666,93 @@ async def test_duplicate_submit_reuses_run_after_launch_response_loss(
 
     assert replay.state == "accepted"
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_get_run_propagates_provider_authorization_without_table_fallback(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    run = _run(session)
+    store.runs[run.run_id] = run
+    provider = FakeSandboxSessionProvider(FakeSandboxSessionHandle())
+    provider.attach_error = SandboxGroupAuthorizationError()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionActivationAuthorizationError) as caught:
+        await backend.get_run(RunContext(run_id=run.run_id, session_id=session.session_id))
+
+    assert str(caught.value) == SANDBOX_GROUP_AUTHORIZATION_MESSAGE
+
+
+@pytest.mark.asyncio
+async def test_journal_acceptance_timeout_remains_a_typed_resumable_setup_timeout(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    metadata = SetupTimeoutMetadata.create(
+        phase=SetupPhase.JOURNAL,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        configured_budget_seconds=90.0,
+        elapsed_seconds=90.0,
+        remaining_seconds=0.0,
+    )
+
+    class TimeoutAfterAcceptanceRunControl(SandboxRunControl):
+        async def submit(self, *args, **kwargs):  # type: ignore[no-untyped-def]
+            await super().submit(*args, **kwargs)
+            raise SessionActivationSetupTimeoutError(metadata)
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        run_control=TimeoutAfterAcceptanceRunControl(),
+    )
+
+    response = await submit_run(
+        backend,
+        StartRunRequest(
+            prompt="hello",
+            session_id=session.session_id,
+            idempotency_key="journal-timeout",
+        ),
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    assert response.status_code == 504
+    assert response.headers["Retry-After"] == "120"
+    assert response.timeout_metadata is not None
+    assert response.timeout_metadata.phase == SetupPhase.JOURNAL
+    assert response.timeout_metadata.reason == SetupTimeoutReason.OPERATION_TIMEOUT
+    assert response.timeout_metadata.request_mode == "respond_async"
+    assert response.timeout_metadata.session_present
+    [run] = store.runs.values()
+    [operation] = store.durable_operations.values()
+    assert run.status == "accepted"
+    assert operation.phase == "submit_launching"
 
 
 @pytest.mark.asyncio
@@ -648,12 +834,16 @@ async def test_concurrent_retry_cannot_take_an_unexpired_journal_launch(
 
 
 @pytest.mark.asyncio
-async def test_provision_content_failure_leaves_a_resumable_operation(
+@pytest.mark.parametrize("status_code", [None, 409, 423, 425, 429, 500, 502, 503, 504])
+async def test_retryable_provision_content_failure_leaves_a_resumable_operation(
     tmp_path: Path,
+    status_code: int | None,
 ) -> None:
     script_root = _script_root(tmp_path)
     handle = FakeSandboxSessionHandle("sandbox-1")
-    handle.write_errors.append(SandboxFileOperationError("content write failed"))
+    handle.write_errors.append(
+        SandboxFileOperationError("content write failed", status_code=status_code)
+    )
     provider = FakeSandboxSessionProvider(handle)
     store = FakeSessionStateStore()
 
@@ -675,18 +865,164 @@ async def test_provision_content_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="content-retry")
 
-    with pytest.raises(SandboxFileOperationError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(request)
 
     assert store.session is not None
     operation = next(iter(store.durable_operations.values()))
     assert store.session.active_operation_id == operation.operation_id
     assert operation.phase == "provision_content"
+    assert store.session.active_run_id == operation.target.run_id
+    assert store.session.sandbox_id == operation.target.sandbox_id
 
+    _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
+    assert recovered.session_id == operation.target.session_id
+    assert recovered.run_id == operation.target.run_id
     assert recovered.state == "accepted"
     assert len(provider.sandboxes) == 1
+    assert len(provider.create_calls) == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_file_plane_authorization_failure_is_redacted_and_resumable(
+    tmp_path: Path,
+    status_code: int,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    handle.write_errors.append(
+        SandboxFileOperationError("provider response with a secret", status_code=status_code)
+    )
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    response = await submit_run(
+        backend,
+        StartRunRequest(prompt="hello", idempotency_key=f"file-plane-{status_code}"),
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert "secret" not in json.dumps(response.body)
+    assert store.session is not None
+    [operation] = store.durable_operations.values()
+    assert store.session.status == "creating"
+    assert store.session.active_run_id == operation.target.run_id
+    assert store.session.active_operation_id == operation.operation_id
+    assert operation.phase == "provision_content"
+    assert operation.state == "active"
+    assert len(provider.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_missing_provision_artifact_leaves_a_resumable_operation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    handle.write_errors.append(SandboxFileNotFoundError("/sandbox/runtime/content"))
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="missing-artifact-retry")
+
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+
+    assert store.session is not None
+    operation = next(iter(store.durable_operations.values()))
+    assert operation.phase == "provision_content"
+    assert store.session.active_run_id == operation.target.run_id
+    assert store.session.sandbox_id == operation.target.sandbox_id
+
+    _expire_provision_lease(store, operation)
+    recovered = await backend.start_run(request)
+
+    assert recovered.session_id == operation.target.session_id
+    assert recovered.run_id == operation.target.run_id
+    assert len(provider.sandboxes) == 1
+    assert len(provider.create_calls) == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_nonretryable_provision_content_failure_remains_fatal(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    handle.write_errors.append(SandboxFileOperationError("content write rejected", status_code=400))
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SandboxFileOperationError):
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="content-rejected"))
+
+
+@pytest.mark.asyncio
+async def test_content_delivery_verification_failure_is_not_reclassified(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle("sandbox-1")
+    provider = FakeSandboxSessionProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def fail_verification(*_: object, **__: object) -> None:
+        raise ContentDeliveryVerificationError("content verification failed")
+
+    monkeypatch.setattr(
+        "azure_functions_agents.controller.readiness.deliver_content_and_bootstrap",
+        fail_verification,
+    )
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    with pytest.raises(ContentDeliveryVerificationError):
+        await backend.start_run(StartRunRequest(prompt="hello", idempotency_key="content-integrity"))
 
 
 @pytest.mark.asyncio
@@ -728,7 +1064,7 @@ async def test_provision_lifecycle_failure_leaves_a_resumable_operation(
     )
     request = StartRunRequest(prompt="hello", idempotency_key="lifecycle-retry")
 
-    with pytest.raises(SandboxFileOperationError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(request)
 
     operation = next(iter(store.durable_operations.values()))
@@ -736,6 +1072,7 @@ async def test_provision_lifecycle_failure_leaves_a_resumable_operation(
     assert store.session is not None
     assert store.session.active_operation_id == operation.operation_id
 
+    _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
     assert recovered.state == "accepted"
@@ -794,6 +1131,7 @@ async def test_provision_manifest_failure_leaves_a_resumable_operation(
     operation = next(iter(store.durable_operations.values()))
     assert operation.phase == "provision_manifest"
 
+    _expire_provision_lease(store, operation)
     recovered = await backend.start_run(request)
 
     assert recovered.state == "accepted"
@@ -901,7 +1239,9 @@ async def test_active_conflict_reconciles_once_before_returning_or_admitting(
     provider = FakeSandboxSessionProvider(handle)
     reconcile_calls = 0
 
-    async def targeted_reconcile(_: OwnerPartition, __: str) -> None:
+    async def targeted_reconcile(
+        _: OwnerPartition, __: str, ___: SetupBudget
+    ) -> None:
         nonlocal reconcile_calls
         reconcile_calls += 1
         if reconcile_calls == 2:
@@ -1032,7 +1372,7 @@ async def test_backend_retains_admitted_slot_when_acceptance_times_out(
         run_control=SandboxRunControl(event_poll_interval_seconds=0.001),
     )
 
-    with pytest.raises(RunSubmissionIndeterminateError):
+    with pytest.raises(SessionActivationSetupTimeoutError):
         await backend.start_run(StartRunRequest(prompt="hello", session_id=session.session_id))
 
     operations = [call.operation for call in handle.calls]
@@ -1253,6 +1593,145 @@ async def test_backend_setup_deadline_bounds_submission_revalidation(
     with pytest.raises(SessionActivationSetupTimeoutError):
         await asyncio.wait_for(start, timeout=1.0)
 
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+
+@pytest.mark.asyncio
+async def test_controller_setup_deadline_bounds_hanging_journal_claim_and_retry_resumes(
+    tmp_path: Path,
+) -> None:
+    class HangingClaimStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.hang = True
+            self.claim_started = asyncio.Event()
+
+        async def claim_operation_journal(self, **kwargs):  # type: ignore[no-untyped-def]
+            if self.hang:
+                self.claim_started.set()
+                await asyncio.Event().wait()
+            return await super().claim_operation_journal(**kwargs)
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = HangingClaimStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=session.session_id),
+        )
+
+    handle.exec_hook = accept
+    setup_budget = SetupBudget.start(setup_seconds=0.01)
+    controller_budget = RequestBudget(
+        wall_deadline=time.monotonic() + 1.0,
+        setup=setup_budget,
+        _clock=time.monotonic,
+    )
+    request = StartRunRequest(
+        prompt="hello",
+        session_id=session.session_id,
+        idempotency_key="hanging-claim",
+    )
+    response = await submit_run(
+        AcaSandboxExecutionBackend(
+            _binding(),
+            runtime=_runtime(script_root, provider, store),
+            owner=_owner(),
+            setup_budget=setup_budget,
+        ),
+        request,
+        agent_slug="main",
+        respond_async=False,
+        budget=controller_budget,
+    )
+
+    assert response.status_code == 504
+    assert response.headers["Retry-After"] == "120"
+    assert store.claim_started.is_set()
+    assert store.session is not None
+    assert store.session.active_run_id is not None
+    assert len(store.runs) == 1
+    assert [call for call in handle.calls if call.operation == "exec"] == []
+
+    store.hang = False
+    resumed = await AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+        setup_budget=SetupBudget.start(setup_seconds=1.0),
+    ).start_run(request)
+
+    assert resumed.run_id == store.session.active_run_id
+    assert len(store.runs) == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_controller_setup_deadline_bounds_live_owner_journal_status_without_launch(
+    tmp_path: Path,
+) -> None:
+    class LiveOwnerStore(FakeSessionStateStore):
+        def __init__(self, session: DurableSessionRecord) -> None:
+            super().__init__(session)
+            self.live_owner = True
+
+        async def claim_operation_journal(self, **kwargs):  # type: ignore[no-untyped-def]
+            if self.live_owner:
+                return None
+            return await super().claim_operation_journal(**kwargs)
+
+    class HangingStatusRunControl(SandboxRunControl):
+        def __init__(self) -> None:
+            super().__init__()
+            self.status_started = asyncio.Event()
+
+        async def get_status(self, handle, context):  # type: ignore[no-untyped-def]
+            del handle, context
+            self.status_started.set()
+            await asyncio.Event().wait()
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = LiveOwnerStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    run_control = HangingStatusRunControl()
+    setup_budget = SetupBudget.start(setup_seconds=0.01)
+    controller_budget = RequestBudget(
+        wall_deadline=time.monotonic() + 1.0,
+        setup=setup_budget,
+        _clock=time.monotonic,
+    )
+    request = StartRunRequest(
+        prompt="hello",
+        session_id=session.session_id,
+        idempotency_key="hanging-status",
+    )
+    response = await submit_run(
+        AcaSandboxExecutionBackend(
+            _binding(),
+            runtime=_runtime(script_root, provider, store),
+            owner=_owner(),
+            run_control=run_control,
+            setup_budget=setup_budget,
+        ),
+        request,
+        agent_slug="main",
+        respond_async=False,
+        budget=controller_budget,
+    )
+
+    assert response.status_code == 504
+    assert response.headers["Retry-After"] == "120"
+    assert run_control.status_started.is_set()
+    assert store.session is not None
+    assert store.session.active_run_id is not None
+    assert len(store.runs) == 1
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
 
@@ -1851,6 +2330,7 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
     winner = await backend.start_run(
         StartRunRequest(prompt="hello", idempotency_key="caller-key")
     )
+    _complete_provisioning(store, next(iter(store.durable_operations.values())))
     replay = await backend.start_run(
         StartRunRequest(prompt="hello", idempotency_key="caller-key")
     )
@@ -1862,6 +2342,65 @@ async def test_new_session_owner_idempotency_replays_winner_and_rejects_payload_
         await backend.start_run(
             StartRunRequest(prompt="different", idempotency_key="caller-key")
         )
+
+
+@pytest.mark.asyncio
+async def test_new_session_authorization_failure_replays_same_terminal_response(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+    provider.create_errors.append(SandboxGroupAuthorizationError())
+    store = FakeSessionStateStore()
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(
+        prompt="hello",
+        idempotency_key="authorization-failure-key",
+    )
+
+    first = await submit_run(
+        backend,
+        request,
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+    replay = await submit_run(
+        backend,
+        request,
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    expected_body = {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert first.status_code == 503
+    assert first.body == expected_body
+    assert replay.status_code == 503
+    assert replay.body == expected_body
+    assert len(provider.create_calls) == 1
+    assert store.session is not None
+    assert store.session.status == "deleting"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    [run] = store.runs.values()
+    assert run.status == "failed"
+    assert run.status_reason == "sandbox_group_authorization_failed"
+    [operation] = store.durable_operations.values()
+    assert operation.state == "completed"
 
 
 @pytest.mark.asyncio
@@ -1909,19 +2448,92 @@ async def test_live_same_key_provision_replay_does_not_take_over_or_double_creat
     await asyncio.wait_for(provider.create_started.wait(), timeout=1.0)
     [operation_before] = store.durable_operations.values()
 
-    replay = await backend.start_run(request)
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
 
     assert provider.create_attempts == 1
-    assert replay.run_id == operation_before.target.run_id
     assert store.durable_operations[operation_before.operation_id].token == operation_before.token
     assert [call for call in handle.calls if call.operation == "exec"] == []
 
     provider.release_create.set()
     winner = await first
+    _complete_provisioning(store, store.durable_operations[operation_before.operation_id])
     observed = await backend.start_run(request)
 
-    assert winner.run_id == replay.run_id == observed.run_id
+    assert winner.run_id == observed.run_id
     assert provider.create_attempts == 1
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_canceled_provision_replay_waits_for_lease_then_resumes_same_run(
+    tmp_path: Path,
+) -> None:
+    class _BlockingProvider(FakeSandboxSessionProvider):
+        def __init__(self, handle: FakeSandboxSessionHandle) -> None:
+            super().__init__(handle)
+            self.create_started = asyncio.Event()
+            self.release_create = asyncio.Event()
+            self.create_attempts = 0
+
+        async def create(
+            self,
+            *args: object,
+            **kwargs: object,
+        ) -> FakeSandboxSessionHandle:
+            self.create_attempts += 1
+            created = await super().create(*args, **kwargs)
+            self.create_started.set()
+            await self.release_create.wait()
+            return created
+
+    script_root = _script_root(tmp_path)
+    handle = FakeSandboxSessionHandle()
+    provider = _BlockingProvider(handle)
+    store = FakeSessionStateStore()
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=next(iter(store.runs.values())).session_id),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+    request = StartRunRequest(prompt="hello", idempotency_key="canceled-provision-key")
+
+    first = asyncio.create_task(backend.start_run(request))
+    await asyncio.wait_for(provider.create_started.wait(), timeout=1.0)
+    [operation] = store.durable_operations.values()
+    assert len(provider.create_calls) == 1
+    assert handle.labels["operation_label"] == operation.correlation_label
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert store.durable_operations[operation.operation_id].phase == "provision_reconcile"
+    with pytest.raises(SessionActivationSetupTimeoutError):
+        await backend.start_run(request)
+    assert provider.create_attempts == 1
+    assert store.durable_operations[operation.operation_id].token == operation.token
+
+    store.durable_operations[operation.operation_id] = replace(
+        operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    provider.release_create.set()
+    resumed = await backend.start_run(request)
+
+    assert resumed.session_id == operation.target.session_id
+    assert resumed.run_id == operation.target.run_id
+    assert provider.create_attempts == 2
+    assert len(provider.create_calls) == 1
+    assert handle.labels["operation_label"] == operation.correlation_label
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
 
 

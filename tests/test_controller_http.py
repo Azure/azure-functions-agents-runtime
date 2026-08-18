@@ -8,12 +8,17 @@ import pytest
 
 from azure_functions_agents.controller.budget import RequestBudget
 from azure_functions_agents.controller.http import (
+    cancel_run,
     read_result,
     read_status,
     submit_run,
 )
 from azure_functions_agents.controller.idempotency import IdempotencyResultUnavailableError
-from azure_functions_agents.controller.readiness import SessionActivationNotFoundError
+from azure_functions_agents.controller.readiness import (
+    SessionActivationAuthorizationError,
+    SessionActivationNotFoundError,
+    SessionActivationSetupTimeoutError,
+)
 from azure_functions_agents.execution.backend import (
     SESSION_TOMBSTONED_ERROR_CODE,
     RunContext,
@@ -24,7 +29,14 @@ from azure_functions_agents.execution.backend import (
     RunStatus,
     StartRunRequest,
 )
-from azure_functions_agents.execution.setup_budget import SetupBudget, SetupBudgetExpiredError
+from azure_functions_agents.execution.setup_budget import (
+    SetupBudget,
+    SetupBudgetExpiredError,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.session_state import RunRowNotFoundError
 
 
@@ -273,7 +285,16 @@ async def test_sync_deadline_provider_cleanup_error_returns_typed_timeout() -> N
 @pytest.mark.asyncio
 async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
     backend = FakeBackend(_status())
-    backend.raise_on_start = SetupBudgetExpiredError("expired")
+    backend.raise_on_start = SetupBudgetExpiredError(
+        SetupTimeoutMetadata.create(
+            phase=SetupPhase.PROVISION_CREATE,
+            reason=SetupTimeoutReason.DEADLINE_ELAPSED,
+            exception_type=SetupTimeoutExceptionType.SETUP_BUDGET_EXPIRED,
+            configured_budget_seconds=90.0,
+            elapsed_seconds=90.0,
+            remaining_seconds=0.0,
+        )
+    )
 
     response = await submit_run(
         backend,  # type: ignore[arg-type]
@@ -285,7 +306,119 @@ async def test_setup_expiry_returns_retry_hint_before_run_starts() -> None:
 
     assert not backend.started
     assert response.status_code == 504
-    assert response.headers["x-ms-retry-with"] == "respond-async"
+    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "120"}
+
+
+@pytest.mark.asyncio
+async def test_live_provision_lease_returns_the_same_setup_retry_hint() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationSetupTimeoutError(
+        SetupTimeoutMetadata.create(
+            phase=SetupPhase.PROVISION_RECONCILE,
+            reason=SetupTimeoutReason.PROVISION_LEASE_LIVE,
+            exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+            configured_budget_seconds=90.0,
+            elapsed_seconds=90.0,
+            remaining_seconds=0.0,
+        )
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 504
+    assert response.body == {
+        "error": "setup_deadline_exceeded",
+        "reason": "setup_deadline_exceeded",
+        "retry_with": "respond-async",
+    }
+    assert response.headers == {"x-ms-retry-with": "respond-async", "Retry-After": "120"}
+
+
+@pytest.mark.asyncio
+async def test_sandbox_group_authorization_failure_returns_actionable_nonretryable_response() -> None:
+    backend = FakeBackend(_status())
+    backend.raise_on_start = SessionActivationAuthorizationError(
+        "Sandbox Group data-plane authorization failed."
+    )
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert response.headers == {}
+
+
+@pytest.mark.asyncio
+async def test_cancel_sandbox_group_authorization_failure_returns_actionable_nonretryable_response() -> (
+    None
+):
+    backend = FakeBackend(_status())
+    backend.raise_on_cancel = SessionActivationAuthorizationError(
+        "Sandbox Group data-plane authorization failed."
+    )
+
+    response = await cancel_run(
+        backend,  # type: ignore[arg-type]
+        RunContext(run_id="run-1", session_id="session-1"),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert response.headers == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reader", [read_status, read_result])
+async def test_status_and_result_authorization_failures_are_redacted(
+    reader,
+) -> None:  # type: ignore[no-untyped-def]
+    backend = FakeBackend(_status())
+    backend.raise_on_get = SessionActivationAuthorizationError("provider body: secret")
+
+    response = await reader(
+        backend,  # type: ignore[arg-type]
+        RunContext(run_id="run-1", session_id="session-1"),
+    )
+
+    assert response.status_code == 503
+    assert response.body == {
+        "error": "sandbox_group_authorization_failed",
+        "reason": "sandbox_group_authorization_failed",
+        "message": (
+            "Sandbox Group data-plane authorization failed. Grant the controller "
+            "identity 'Container Apps SandboxGroup Data Owner' on the configured "
+            "Sandbox Group."
+        ),
+    }
+    assert "secret" not in str(response.body)
 
 
 @pytest.mark.asyncio

@@ -451,6 +451,12 @@ def start_span(
                 manager.__exit__(None, None, None)
 
 
+def emit_runtime_event(name: str, attributes: Mapping[str, Any]) -> None:
+    """Emit a customer-queryable runtime event as one short span when telemetry is active."""
+    with start_span(name, attributes=attributes):
+        pass
+
+
 # ---------------------------------------------------------------------------
 # Metrics (minimal P0 set; broader fleet metrics are a follow-up)
 # ---------------------------------------------------------------------------

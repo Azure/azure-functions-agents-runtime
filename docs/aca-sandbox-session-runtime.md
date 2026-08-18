@@ -1,8 +1,8 @@
 # ACA Sandbox session runtime
 
-> **Experimental.** The ACA Sandbox backend is opt-in and remains
-> capability-gated until live end-to-end and load acceptance complete. The
-> in-language-worker backend remains the default.
+> **Experimental.** The ACA Sandbox backend is opt-in and available on Linux
+> x86_64 CPython 3.13/3.14. Platform and configuration validation remain
+> fail-closed. The in-language-worker backend remains the default.
 
 This guide is for application authors and operators. For the internal module
 map and runtime pipeline, see [architecture.md](architecture.md). For the
@@ -11,23 +11,29 @@ normative design rationale and durable contracts, see
 
 ## Availability and scope
 
-Configure `session_runtime.aca_sandbox` only for HTTP-triggered MAF agents.
-While the capability gate is closed, enabling it fails startup rather than
-silently falling back to another backend. When the gate opens, ordinary chat
-remains synchronous and `Prefer: respond-async` opts into the durable
-run-management URLs.
+Install the optional transport dependency before deploying:
+
+```bash
+python -m pip install "azurefunctions-agents-runtime[aca_sandbox]"
+```
+
+Configure `session_runtime.aca_sandbox` only for HTTP-triggered MAF agents on a
+supported Linux x86_64 Functions worker. Unsupported hosts, invalid retention,
+missing ACA prerequisites, and incompatible Dynamic Workflows fail startup;
+they never silently select another backend. Ordinary chat remains synchronous
+and `Prefer: respond-async` opts into the durable run-management URLs.
 
 The sandbox has no public inbound port. The Functions app remains the
 authenticated entry point and controller.
 
 ## Disk selection and content
 
-By default, the runtime selects the public disk named for the Functions
-worker's Python minor version, such as `python-3.13`. Select exactly one of
-these Function App settings to pin a customer-managed base disk:
-
-- `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK`
-- `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID`
+By default, `SandboxCreateProfile` selects the public disk named for the
+Functions worker's Python minor version: `python-3.13` or `python-3.14`.
+These public aliases are mutable and intentionally remain the GA default.
+Set `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK` to select a customer disk by name;
+use `AZURE_FUNCTIONS_AGENTS_SANDBOX_DISK_ID` when pinning a literal private
+`disk_id` for reproducibility. Set only one override.
 
 The supported public-disk pairings are CPython 3.13 on Debian 12 with glibc
 2.36 and CPython 3.14 on Ubuntu 24.04 with glibc 2.39. Version-specific
@@ -35,10 +41,10 @@ extensions must match the running interpreter; compatible `abi3` extensions
 and wheel tags are accepted on later CPython versions. Musl and an unmet
 manylinux glibc floor fail closed.
 
-A disk name or ID selects the base disk only. The runtime still delivers the
-application archive, including `.python_packages`, and verifies its digest and
-ABI. There is no fixed-image application-content mode or implicit integrity
-opt-out based on a disk override.
+A disk selection chooses only the base disk. There is no custom bootstrap image:
+the controller delivers the bootstrap, application archive, and complete
+dependency closure (including `.python_packages`) over the file plane, then
+verifies its digest and ABI. A disk override does not disable integrity checks.
 
 ## Sandbox environment
 
@@ -81,11 +87,35 @@ Sandbox Group. Guest code can acquire tokens through the platform identity
 endpoint; egress policy limits where a token is used, not whether it can be
 acquired.
 
-Do not reuse the controller identity or grant the group identity state-store,
-Sandbox Group management, Storage, or Service Bus permissions unless workload
-code genuinely needs them. Native `DefaultAzureCredential` handles Foundry,
-Azure OpenAI, and authenticated MCP calls. Missing or incorrectly selected
-identities fail when the outbound credential or request is used.
+The runtime attaches or forwards no identity or credentials, including
+controller, token, or storage credentials. A customer-attached Sandbox Group identity is directly
+guest-usable because platform token acquisition is egress-exempt; egress policy
+still limits token-use destinations. Make it dedicated and least-privileged. It
+may receive explicitly required workload permissions, including authenticated
+MCP access where needed, but never controller, Sandbox Group management, or
+state-store rights. The controller managed identity is the sole Table writer.
+Native `DefaultAzureCredential` can use that workload identity for its
+authorized workload calls. The U3 qualification grants the group identity model
+inference only, with no MCP or state-store permissions. This model-only,
+no-state/no-group RBAC is a protected infrastructure prerequisite verified by
+customer IaC or operations. CI verifies the sole attached UAMI and a successful
+model turn; it does not attest the absence of every role assignment. OBO is
+reserved and inert: do not expect user-token forwarding.
+
+The Function controller identity separately requires `Container Apps
+SandboxGroup Data Owner` on the configured Sandbox Group. `Container Apps
+SandboxGroup Contributor` is control-plane access and is insufficient for
+listing, creating, or attaching data-plane sandboxes. Missing data-plane access
+fails fast with HTTP `503` and `sandbox_group_authorization_failed`; it is not a
+retryable setup timeout. Grant the role at the individual Sandbox Group scope.
+
+## Setup admission deadline
+
+ACA session admission uses one 90-second setup budget anchored before targeted
+reconciliation. Synchronous execution retains its 180-second wall cap; a
+full-cap request therefore leaves a 90-second execution floor. Every durable
+operation uses a sliding 120-second lease, and setup `504`
+responses retain `retry_with=respond-async` with `Retry-After: 120`.
 
 ## Egress and credentials
 
@@ -112,8 +142,11 @@ update in place.
 
 The runtime applies per-sandbox lifecycle policy: it disables auto-suspend
 during an active run and restores the idle policy after terminal adoption.
-The reconciler is the deletion authority after idle reclaim; group auto-delete
-is only a backstop.
+Normal v1 durability is same-sandbox disk auto-suspend/resume; the platform
+does not expose an explicit snapshot resource for that normal path. The
+controller timer is the reclamation authority after idle expiry and deletes any
+owned snapshot resources if present before tombstoning; group auto-delete is
+only a backstop.
 
 Useful failure signals include:
 
@@ -121,7 +154,17 @@ Useful failure signals include:
 - a durable failed or abandoned run status after sandbox loss or reaping;
 - `410 Gone` for an unavailable or evicted result.
 
-In v1, sandbox or snapshot loss tombstones the session; create a new session.
-Content, egress, credential, and disk changes likewise require a replacement
-session. For detailed operational diagnostics and the exact internal
-state-machine behavior, use the architecture and FRD references above.
+In v1, normal disk suspension resumes the same sandbox and generation; it is
+not loss and does not imply snapshot-backed durability. When the reconciler
+detects missing backing, it tombstones the session and preserves its durable
+status; subsequent unavailable result or session behavior is `410 Gone`. The
+committed live backing-loss proof deletes only its exact-label backing and
+verifies the controller's abandoned/tombstoned state and public `410` result
+behavior. Content, egress, credential, and disk changes require a replacement
+session. The committed live qualification path in
+[the live ACA test guide](../tests/live/README.md) covers adapter create, delivery,
+lower-level model turn, public Easy Auth turn, lifecycle, and backing loss.
+`N=5` is the sole agent/CI load diagnostic; `N=100` formal acceptance is
+human-only for one selected runtime. The Manual/Scheduled runtime matrix is
+nonblocking. For detailed internal state-machine behavior, use the architecture
+and FRD references above.

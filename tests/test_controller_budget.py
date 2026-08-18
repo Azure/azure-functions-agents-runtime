@@ -37,6 +37,23 @@ def test_request_budget_uses_one_anchor_for_setup_and_wall_deadlines() -> None:
 
     assert budget.wall_deadline == 110.0
     assert budget.setup.deadline == 110.0
+    assert budget.setup.origin == 100.0
+    assert budget.setup.configured_budget_seconds == 90.0
+
+
+@pytest.mark.parametrize(
+    ("authored_timeout", "expected_setup_deadline"),
+    [(None, 190.0), (180.0, 190.0), (90.0, 190.0), (15.0, 115.0)],
+)
+def test_request_budget_preserves_one_origin_for_full_and_short_authored_timeouts(
+    authored_timeout: float | None,
+    expected_setup_deadline: float,
+) -> None:
+    budget = RequestBudget.start(authored_timeout=authored_timeout, clock=lambda: 100.0)
+
+    assert budget.setup.origin == 100.0
+    assert budget.setup.deadline == expected_setup_deadline
+    assert budget.setup.configured_budget_seconds == 90.0
 
 
 def test_request_budget_rejects_an_elapsed_wall_deadline() -> None:

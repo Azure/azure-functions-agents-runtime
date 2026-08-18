@@ -15,6 +15,30 @@ from azure_functions_agents.controller.package import CapturedContentPackage  # 
 from tests.doubles.content_package import content_package  # noqa: E402
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--aca-cold-start-samples",
+        action="store",
+        default=None,
+        metavar="N",
+        help="Run the manual deployed ACA cold-start qualification with 1..5 sequential samples.",
+    )
+    parser.addoption(
+        "--aca-load-concurrency",
+        action="store",
+        default=None,
+        metavar="N",
+        help="Run the manual deployed ACA load qualification with N concurrent sessions (1..100).",
+    )
+    parser.addoption(
+        "--aca-provision-concurrency",
+        action="store",
+        default=None,
+        metavar="N",
+        help="Use N concurrent sessions per deployed ACA load provisioning batch (1..4).",
+    )
+
+
 @pytest.fixture
 def deterministic_content_package(
     monkeypatch: pytest.MonkeyPatch,

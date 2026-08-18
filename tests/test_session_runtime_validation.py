@@ -20,14 +20,9 @@ row text):
 * ``25_aca_sandbox_row8_anonymous_auth``                   -> Row 8  (anonymous HTTP access)
 * ``26_aca_sandbox_row9_bad_auto_suspend_idle``            -> Row 9  (bad auto_suspend_idle)
 * ``27_aca_sandbox_row10_bad_reclaim_idle``                -> Row 10 (bad reclaim_idle)
-* ``29_aca_sandbox_valid_but_unavailable``                 -> Row 12 (platform) + Row 13
-  (always-hard-fail backstop, vacuously satisfied) + "valid config parses but
-  fails the capability gate". One physical fixture serves all three: rows 12
-  and 13 have no independently representable *config-content* violation (13
-  in particular is a live-SDK-value check deferred past this phase -- see
-  ``auto_delete_backstop_violated``'s docstring in ``config/validation.py``),
-  so the same otherwise-fully-valid fixture is exercised three times below
-  with different ``platform``/``sys.version_info`` monkeypatching per test.
+* ``29_aca_sandbox_valid``                                 -> Row 12 platform checks and
+  the fully valid supported-host path. Row 13 has no independent config-content
+  violation; the lifecycle backstop is covered by its focused helper tests.
 * ``30_aca_sandbox_explicit_null``                        -> Row 5 edge case:
   a bare ``aca_sandbox:`` key (explicit ``null``, present in the mapping --
   distinct from the key being *omitted*, which is fixture 17's case). See the
@@ -96,13 +91,17 @@ test setup for either row is needed anywhere in this file any more.
 
 from __future__ import annotations
 
+import inspect
 import platform
 import sys
+from collections import namedtuple
 from pathlib import Path
 
 import pytest
 
 from azure_functions_agents.app import create_function_app
+from azure_functions_agents.transport import aca_sdk
+from azure_functions_agents.transport.transport_models import AcaSandboxDependencyError
 
 FIXTURES_ROOT = Path(__file__).resolve().parent / "fixtures" / "config_scenarios"
 
@@ -115,6 +114,19 @@ def test_session_runtime_absent_defaults_to_in_lang_worker_no_row_fires() -> Non
     path is untouched by FRD 0008.
     """
     app = create_function_app(FIXTURES_ROOT / "17_session_runtime_absent")
+    assert app.get_functions()
+
+
+def test_default_runtime_does_not_validate_the_optional_aca_sdk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_sdk_load() -> object:
+        raise AssertionError("default runtime must not load the ACA SDK")
+
+    monkeypatch.setattr(aca_sdk, "_SDK_FACTORIES", unexpected_sdk_load)
+
+    app = create_function_app(FIXTURES_ROOT / "17_session_runtime_absent")
+
     assert app.get_functions()
 
 
@@ -201,31 +213,77 @@ def test_row12_unsupported_platform_fails_startup(monkeypatch: pytest.MonkeyPatc
     """
     monkeypatch.setattr(platform, "system", lambda: "Windows")
     with pytest.raises(ValueError, match=r"Linux") as exc_info:
-        create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid_but_unavailable")
+        create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid")
     message = str(exc_info.value)
     assert "Windows" in message
     assert "aca_sandbox" in message
 
 
-def test_row13_backstop_and_valid_config_fail_capability_gate_not_row12(
+def test_valid_aca_config_passes_capability_gate_on_supported_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Row 13 (always-hard-fail) + "valid config parses but fails the gate".
+    """A fully valid ACA configuration starts on the supported host ABI."""
 
-    With the host mocked to a *supported* platform (Linux/x86_64/Python
-    3.13), the fixture is otherwise fully valid (all other matrix rows
-    pass) -- proving it *parses* successfully -- yet still fails at the final,
-    unconditional capability-gate raise rather than reaching Row 12's
-    platform-specific error. That same unconditional raise is exactly what
-    vacuously satisfies Row 13's "always a hard fail" requirement (see
-    ``auto_delete_backstop_violated``'s docstring in ``config/validation.py``):
-    no ``aca_sandbox`` session can ever run in this build regardless of
-    retention/backstop math.
-    """
     monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(platform, "machine", lambda: "x86_64")
-    monkeypatch.setattr(sys, "version_info", (3, 13, 0, "final", 0))
-    with pytest.raises(ValueError, match=r"not available in this build") as exc_info:
-        create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid_but_unavailable")
-    message = str(exc_info.value)
-    assert "aca_sandbox" in message
+    version_info = namedtuple(
+        "version_info",
+        ("major", "minor", "micro", "releaselevel", "serial"),
+    )
+    monkeypatch.setattr(sys, "version_info", version_info(3, 13, 0, "final", 0))
+    monkeypatch.setenv(
+        "WEBSITE_OWNER_NAME",
+        "11111111-2222-3333-4444-555555555555+westus2webspace",
+    )
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "aca-valid-test")
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+
+    app = create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid")
+
+    reconciler = next(
+        function
+        for function in app.get_functions()
+        if function.get_function_name() == "azure_functions_agents_reconciler"
+    )
+    [parameter] = inspect.signature(reconciler.get_user_function()).parameters.values()
+    assert parameter.name == "timer"
+    assert parameter.annotation == "func.TimerRequest"
+    [binding] = reconciler.get_bindings_dict()["bindings"]
+    assert binding["type"] == "timerTrigger"
+    assert binding["name"] == "timer"
+    assert binding["schedule"] == "0 0 * * * *"
+
+
+def test_valid_aca_config_fails_startup_when_optional_sdk_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
+    monkeypatch.setattr(platform, "machine", lambda: "x86_64")
+    version_info = namedtuple(
+        "version_info",
+        ("major", "minor", "micro", "releaselevel", "serial"),
+    )
+    monkeypatch.setattr(sys, "version_info", version_info(3, 13, 0, "final", 0))
+    monkeypatch.setenv(
+        "WEBSITE_OWNER_NAME",
+        "11111111-2222-3333-4444-555555555555+westus2webspace",
+    )
+    monkeypatch.setenv("WEBSITE_SITE_NAME", "aca-valid-test")
+    monkeypatch.setenv("AzureWebJobsStorage", "UseDevelopmentStorage=true")
+    credential_created = False
+
+    def missing_sdk() -> object:
+        raise AcaSandboxDependencyError("ACA Sandbox support requires the aca_sandbox optional dependency.")
+
+    def unexpected_credential() -> object:
+        nonlocal credential_created
+        credential_created = True
+        raise AssertionError("startup dependency validation must not create credentials")
+
+    monkeypatch.setattr(aca_sdk, "_SDK_FACTORIES", missing_sdk)
+    monkeypatch.setattr(aca_sdk, "_CREDENTIAL_FACTORY", unexpected_credential)
+
+    with pytest.raises(AcaSandboxDependencyError, match="aca_sandbox optional dependency"):
+        create_function_app(FIXTURES_ROOT / "29_aca_sandbox_valid")
+
+    assert not credential_created

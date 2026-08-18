@@ -1,0 +1,2 @@
+model: $AZURE_OPENAI_DEPLOYMENT
+timeout: 120

@@ -7,7 +7,7 @@ parameters:
     default: '1es-pool-azfunc'
   - name: acaServiceConnection
     type: string
-    default: 'saf-foundry-connection'
+    default: 'larohra-sandboxgroup-test'
 
 jobs:
   - job: "E2ETests"
@@ -59,14 +59,6 @@ jobs:
           done
         displayName: 'Start Azurite'
 
-      # Run under AzureCLI@2 so the task performs `az login` as the service
-      # connection's identity. The `func` host and its Python worker are child
-      # processes that inherit AZURE_CONFIG_DIR, so DefaultAzureCredential's
-      # AzureCliCredential reuses that login when the agents call Foundry.
-      # The connection's identity must hold "Cognitive Services User" (or
-      # "Azure AI User" where available) on the target Foundry (AIServices)
-      # account so it can create/run agents (agents/write). See the RBAC command
-      # in the PR / repo notes.
       - task: AzureCLI@2
         displayName: 'Run E2E tests'
         inputs:
@@ -82,106 +74,65 @@ jobs:
           FOUNDRY_PROJECT_ENDPOINT: $(FOUNDRY_PROJECT_ENDPOINT)
           FOUNDRY_MODEL: $(FOUNDRY_MODEL)
 
-  - job: "ACAHarnessEntrypointSmoke"
-    displayName: 'Run ACA harness entrypoint smoke test'
-    condition: in(variables['Build.Reason'], 'Schedule', 'Manual')
+  - job: "ACACurrentCheckoutSmoke"
+    displayName: 'Run current-checkout ACA model smoke'
     continueOnError: true
-
+    timeoutInMinutes: 30
+    condition: and(succeeded(), ne(variables['System.PullRequest.IsFork'], 'True'))
     pool:
-      name: ${{ parameters.PoolName }}
-      image: 1es-ubuntu-22.04
-      os: linux
-
+          name: ${{ parameters.PoolName }}
+          image: 1es-ubuntu-22.04
+          os: linux
     steps:
-      - task: PipAuthenticate@1
-        displayName: 'Pip Authenticate'
-        inputs:
-          artifactFeeds: ${{ parameters.artifactFeed }}
-      - task: UsePythonVersion@0
-        inputs:
-          versionSpec: '3.13'
-      - bash: |
-          python --version
-        displayName: 'Check python version'
-      - bash: |
-          python -m pip install --upgrade pip
-          python -m pip install -U -e ".[dev,aca_sandbox]"
-        displayName: 'Install ACA smoke dependencies'
-
-      - task: AzureCLI@2
-        displayName: 'Verify ACA sandbox group is reachable'
-        inputs:
-          azureSubscription: ${{ parameters.acaServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            set -euo pipefail
-
-            echo "Authenticated as:"
-            az account show --query '{subscription:name, subscriptionId:id, user:user.name}' --output json
-
-            # An undefined pipeline variable arrives as the literal "$(NAME)", which is
-            # non-empty and would pass a plain empty check.
-            for name in ACA_SANDBOX_GROUP_RESOURCE_ID ACA_SANDBOX_DISK; do
-              eval "value=\${AZURE_SMOKE_${name}:-}"
-              if [ -z "${value}" ] || case "${value}" in '$('*')') true;; *) false;; esac; then
-                echo "Pipeline variable ${name} is not set. Define it on the pipeline before running this job." >&2
-                exit 1
-              fi
-            done
-
-            case "${AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID}" in
-              /subscriptions/*/resourceGroups/*/providers/Microsoft.App/sandboxGroups/*) ;;
-              *)
-                echo "ACA_SANDBOX_GROUP_RESOURCE_ID is not a Sandbox Group resource ID: ${AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID}" >&2
-                exit 1
-                ;;
-            esac
-
-            az rest --method get \
-              --url "https://management.azure.com${AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID}?api-version=2026-02-01-preview" \
-              --query '{id:id, location:location}' \
-              --output json
-
-            # ARM (above) is the control plane; the smoke path also needs the data-plane
-            # role, so probe it here to fail in seconds rather than 30 min into pytest.
-            SIGNED_IN_IDENTITY="$(az account show --query user.name --output tsv || true)"
-            AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID="${AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID}" \
-            AZURE_FUNCTIONS_AGENTS_ACA_PROBE_IDENTITY="${SIGNED_IN_IDENTITY}" \
-              python eng/scripts/probe_aca_data_plane.py
-        env:
-          AZURE_TOKEN_CREDENTIALS: 'dev'
-          AZURE_SMOKE_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
-          AZURE_SMOKE_ACA_SANDBOX_DISK: $(ACA_SANDBOX_DISK)
-
-      - task: AzureCLI@2
-        displayName: 'Run ACA harness entrypoint smoke test'
-        inputs:
-          azureSubscription: ${{ parameters.acaServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            python -m pytest -m live_aca \
-              tests/live/test_aca_harness_entrypoint_smoke.py \
-              tests/live/test_aca_run_journal_acceptance.py -v \
-              -o log_cli=true -o log_cli_level=INFO
-        env:
-          AZURE_TOKEN_CREDENTIALS: 'dev'
-          AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE: '1'
-          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
-          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
-          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
-
-      - task: AzureCLI@2
-        displayName: 'Reap ACA smoke sandboxes'
-        condition: always()
-        inputs:
-          azureSubscription: ${{ parameters.acaServiceConnection }}
-          scriptType: bash
-          scriptLocation: inlineScript
-          inlineScript: |
-            python eng/scripts/reap_aca_smoke_sandboxes.py
-        env:
-          AZURE_TOKEN_CREDENTIALS: 'dev'
-          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
-          AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
+          - task: PipAuthenticate@1
+            inputs:
+              artifactFeeds: ${{ parameters.artifactFeed }}
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '3.13'
+          - bash: |
+              docker run -d --name azurite \
+                -p 10000:10000 -p 10001:10001 -p 10002:10002 \
+                mcr.microsoft.com/azure-storage/azurite \
+                azurite --skipApiVersionCheck \
+                  --blobHost 0.0.0.0 --queueHost 0.0.0.0 --tableHost 0.0.0.0
+              python -m pip install --upgrade pip
+              python -m pip install -U -e .[dev,aca_sandbox]
+            displayName: 'Install exact checkout and start Azurite'
+          - task: AzureCLI@2
+            displayName: 'Preflight ACA guest identity and run smoke'
+            inputs:
+              azureSubscription: ${{ parameters.acaServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: >-
+                python eng/scripts/aca_pr_smoke.py &&
+                python -m pytest -m live_aca
+                tests/live/test_aca_harness_entrypoint_smoke.py
+                tests/live/test_aca_run_journal_acceptance.py
+                tests/live/test_aca_real_agent_turn.py -v
+            env:
+              AzureWebJobsStorage: 'UseDevelopmentStorage=true'
+              FUNCTIONS_WORKER_RUNTIME: 'python'
+              AZURE_TOKEN_CREDENTIALS: 'dev'
+              AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE: '1'
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
+              AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK: $(ACA_SANDBOX_DISK)
+              AZURE_FUNCTIONS_AGENTS_PROVIDER: 'azure_openai'
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT: $(ACA_SMOKE_AZURE_OPENAI_ENDPOINT)
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT: $(ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT)
+              AZURE_OPENAI_ENDPOINT: $(ACA_SMOKE_AZURE_OPENAI_ENDPOINT)
+              AZURE_OPENAI_DEPLOYMENT: $(ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT)
+          - task: AzureCLI@2
+            displayName: 'Reap current-run ACA smoke resources'
+            condition: always()
+            inputs:
+              azureSubscription: ${{ parameters.acaServiceConnection }}
+              scriptType: bash
+              scriptLocation: inlineScript
+              inlineScript: python eng/scripts/reap_aca_smoke_sandboxes.py
+            env:
+              AZURE_TOKEN_CREDENTIALS: 'dev'
+              AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_RUN_ID: $(Build.BuildId)
+              AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

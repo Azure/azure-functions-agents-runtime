@@ -20,6 +20,7 @@ from ..controller.journal_integrity import (
 )
 from ..controller.readiness import (
     ActivatedSession,
+    SessionActivationAuthorizationError,
     SessionActivationError,
     SessionActivationGoneError,
     SessionActivationNotFoundError,
@@ -70,7 +71,7 @@ from .run_control import (
     RunSubmissionDefinitiveFailureError,
     SandboxRunControl,
 )
-from .setup_budget import SetupBudget
+from .setup_budget import SetupBudget, SetupPhase
 from .terminal_output_validation import validate_terminal_output
 
 
@@ -99,25 +100,34 @@ class AcaSandboxExecutionBackend:
     async def start_run(self, request: StartRunRequest) -> RunHandle:
         """Activate the session, atomically admit one run, and submit its envelope."""
         partition = owner_partition(self._owner)
+        setup_budget = self._setup_budget or SetupBudget.start()
         if request.session_id is not None:
-            await self._runtime.reconcile_session(partition, request.session_id)
+            await _within_setup_budget(
+                self._runtime.reconcile_session(partition, request.session_id, setup_budget),
+                setup_budget,
+                phase=SetupPhase.PROVISION_RECONCILE,
+            )
         try:
-            return await self._start_run_once(request, partition)
+            return await self._start_run_once(request, partition, setup_budget)
         except ActiveRunConflictError:
             if request.session_id is None:
                 raise
-            await self._runtime.reconcile_session(partition, request.session_id)
-            return await self._start_run_once(request, partition)
+            await _within_setup_budget(
+                self._runtime.reconcile_session(partition, request.session_id, setup_budget),
+                setup_budget,
+                phase=SetupPhase.PROVISION_RECONCILE,
+            )
+            return await self._start_run_once(request, partition, setup_budget)
 
     async def _start_run_once(
         self,
         request: StartRunRequest,
         partition: OwnerPartition,
+        setup_budget: SetupBudget,
     ) -> RunHandle:
         is_new_session = request.session_id is None
         session_id = request.session_id or mint_session_id()
         run_id = mint_run_id()
-        setup_budget = self._setup_budget or SetupBudget.start()
         attempt = build_idempotency_attempt(
             agent_slug=self._agent_name,
             prompt=request.prompt,
@@ -198,10 +208,12 @@ class AcaSandboxExecutionBackend:
                             agent_slug=self._agent_name,
                         ),
                         setup_budget,
+                        phase=SetupPhase.SUBMIT_ADMISSION,
                     )
                     prepared, fence = await _within_setup_budget(
                         disarm_submit_lifecycle(self._runtime, prepared, fence),
                         setup_budget,
+                        phase=SetupPhase.LIFECYCLE,
                     )
                     admitted_session = session_with_admitted_run(
                         prepared.session,
@@ -237,6 +249,7 @@ class AcaSandboxExecutionBackend:
                                 ),
                             ),
                             setup_budget,
+                            phase=SetupPhase.SUBMIT_ADMISSION,
                         )
                     except Exception:
                         await abort_submit_operation(self._runtime, prepared, fence)
@@ -251,6 +264,7 @@ class AcaSandboxExecutionBackend:
                             prepared.session.session_id,
                         ),
                         setup_budget,
+                        phase=SetupPhase.STATE_STORE,
                     )
                     activated = ActivatedSession.create(
                         handle=prepared.handle,
@@ -264,6 +278,7 @@ class AcaSandboxExecutionBackend:
                 await _within_setup_budget(
                     revalidate_before_submit(activated, outcome.run),
                     setup_budget,
+                    phase=SetupPhase.PRE_SUBMIT_VALIDATION,
                 )
                 try:
                     status = await self._submit_fenced_journal(
@@ -298,18 +313,26 @@ class AcaSandboxExecutionBackend:
         request: StartRunRequest,
         setup_budget: SetupBudget,
     ) -> RunStatus:
-        fence = await activated.store.claim_operation_journal(
-            owner_partition=activated.partition,
-            session_id=run.session_id,
-            run_id=run.run_id,
-            token=mint_run_id(),
-            updated_at=datetime.now(UTC),
+        fence = await _within_setup_budget(
+            activated.store.claim_operation_journal(
+                owner_partition=activated.partition,
+                session_id=run.session_id,
+                run_id=run.run_id,
+                token=mint_run_id(),
+                updated_at=datetime.now(UTC),
+            ),
+            setup_budget,
+            phase=SetupPhase.JOURNAL,
         )
         if fence is None:
             try:
-                return await self._run_control.get_status(
-                    activated.handle,
-                    RunContext(run_id=run.run_id, session_id=run.session_id),
+                return await _within_setup_budget(
+                    self._run_control.get_status(
+                        activated.handle,
+                        RunContext(run_id=run.run_id, session_id=run.session_id),
+                    ),
+                    setup_budget,
+                    phase=SetupPhase.JOURNAL,
                 )
             except RunJournalProtocolError:
                 await self._handle_runtime_journal_corruption(
@@ -325,17 +348,21 @@ class AcaSandboxExecutionBackend:
                     active_run_id=run.run_id,
                 ) from exc
         try:
-            return await self._run_control.submit(
-                activated.handle,
-                run.run_id,
-                RunEnvelope.create(
-                    run_id=run.run_id,
-                    session_id=run.session_id,
-                    agent_name=self._agent_name,
-                    prompt=request.prompt,
-                    timeout=request.timeout,
+            return await _within_setup_budget(
+                self._run_control.submit(
+                    activated.handle,
+                    run.run_id,
+                    RunEnvelope.create(
+                        run_id=run.run_id,
+                        session_id=run.session_id,
+                        agent_name=self._agent_name,
+                        prompt=request.prompt,
+                        timeout=request.timeout,
+                    ),
+                    timeout_seconds=setup_budget.remaining_setup_seconds(phase=SetupPhase.JOURNAL),
                 ),
-                timeout_seconds=setup_budget.remaining_setup_seconds(),
+                setup_budget,
+                phase=SetupPhase.JOURNAL,
             )
         except RunJournalProtocolError:
             await self._handle_runtime_journal_corruption(
@@ -432,6 +459,10 @@ class AcaSandboxExecutionBackend:
                     fault_domain="sandbox",
                 ),
             )
+        except SessionActivationAuthorizationError:
+            # Deterministic RBAC failure must reach the management 503 instead of
+            # the durable-state fallback used for other activation failures.
+            raise
         except SessionActivationError:
             await self._runtime.reconcile_session(partition, context.session_id)
             refreshed = await state_binding.store.get_run(
@@ -487,6 +518,10 @@ class AcaSandboxExecutionBackend:
                     SetupBudget.start(),
                     allow_create=False,
                 )
+            except SessionActivationAuthorizationError:
+                # Let event preflight surface the same management 503 rather than
+                # silently ending the stream through the broad fallback below.
+                raise
             except SessionActivationError:
                 return
             try:
@@ -529,6 +564,7 @@ class AcaSandboxExecutionBackend:
                         context.run_id,
                     ),
                     setup_budget,
+                    phase=SetupPhase.STATE_STORE,
                 )
                 try:
                     status = await self._run_control.cancel(activated.handle, context)
@@ -591,7 +627,9 @@ async def _session_idempotency_replay(
     attempt: IdempotencyAttempt,
     setup_budget: SetupBudget,
 ) -> DurableRunRecord | None:
-    state_binding = await _within_setup_budget(runtime.get_state_store(), setup_budget)
+    state_binding = await _within_setup_budget(
+        runtime.get_state_store(), setup_budget, phase=SetupPhase.STATE_STORE
+    )
     existing = await _within_setup_budget(
         state_binding.store.get_idempotency(
             partition,
@@ -599,6 +637,7 @@ async def _session_idempotency_replay(
             attempt.key_hash,
         ),
         setup_budget,
+        phase=SetupPhase.IDEMPOTENCY_LOOKUP,
     )
     if existing is None:
         return None
@@ -615,6 +654,7 @@ async def _session_idempotency_replay(
                 existing.record.run_id,
             ),
             setup_budget,
+            phase=SetupPhase.IDEMPOTENCY_LOOKUP,
         )
     ).record
 

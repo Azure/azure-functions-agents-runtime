@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 
 import pytest
 
+import azure_functions_agents.controller.reconciler as reconciler_module
 from azure_functions_agents.controller.readiness import session_with_admitted_run
 from azure_functions_agents.controller.reconciler import (
     ReconcilerConfig,
@@ -47,16 +50,25 @@ class InventoryProvider:
         *,
         sandboxes: tuple[SandboxSummary, ...],
         snapshots: tuple[SandboxSnapshot, ...] = (),
+        refreshed_sandboxes: tuple[SandboxSummary, ...] | None = None,
     ) -> None:
         self.sandboxes = sandboxes
+        self.refreshed_sandboxes = refreshed_sandboxes
         self.snapshots = {snapshot.snapshot_id: snapshot for snapshot in snapshots}
         self.deleted_sandboxes: list[str] = []
         self.deleted_snapshots: list[str] = []
+        self.list_calls = 0
 
     async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[SandboxSummary, ...]:
+        self.list_calls += 1
+        sandboxes = (
+            self.sandboxes
+            if self.list_calls == 1 or self.refreshed_sandboxes is None
+            else self.refreshed_sandboxes
+        )
         return tuple(
             sandbox
-            for sandbox in self.sandboxes
+            for sandbox in sandboxes
             if all(sandbox.labels.get(key) == value for key, value in labels.items())
         )
 
@@ -110,6 +122,24 @@ class SnapshotAlreadyDeletedProvider(InventoryProvider):
     async def delete_snapshot(self, snapshot_id: str) -> None:
         self.snapshots.pop(snapshot_id, None)
         raise SandboxProvisioningError("Snapshot delete found no target.")
+
+
+class OperationStartedDuringSuspensionProjectionStore(FakeSessionStateStore):
+    def __init__(self, session: DurableSessionRecord) -> None:
+        super().__init__(session)
+        self.session_reads = 0
+
+    async def get_session(self, partition, session_id):  # type: ignore[no-untyped-def]
+        self.session_reads += 1
+        if self.session_reads == 2:
+            assert self.session is not None
+            self.session = replace(
+                self.session,
+                active_operation_id="op-1",
+                operation_sequence=1,
+            )
+            self.etag = "etag-concurrent-operation"
+        return await super().get_session(partition, session_id)
 
 
 class FailOnceOperationStore(FakeSessionStateStore):
@@ -262,6 +292,16 @@ def _owner() -> FunctionAppOwnerContext:
 
 def _app_hash() -> str:
     return owner_partition(_owner()).app_hash
+
+
+def _reclaim_log_payloads(
+    caplog: pytest.LogCaptureFixture,
+) -> list[dict[str, object]]:
+    return [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if "sandbox_session_reclaimed" in record.getMessage()
+    ]
 
 
 def _foreign_owner() -> FunctionAppOwnerContext:
@@ -532,6 +572,7 @@ def _sandbox(
     sandbox_id: str = "sandbox-1",
     *,
     session_id: str = "session-1",
+    state: str | None = None,
 ) -> SandboxSummary:
     partition = owner_partition(_owner())
     return SandboxSummary.create(
@@ -543,6 +584,7 @@ def _sandbox(
             "owner_hash": partition.owner_hash,
             "session_id": session_id,
         },
+        state=state,
         created_at=(now - timedelta(hours=1)).isoformat(),
     )
 
@@ -806,6 +848,252 @@ async def test_page_local_run_absence_does_not_reclaim_healthy_ready_session() -
     assert report.tombstoned_sessions == 0
     assert store.session is not None
     assert store.session.status == "ready"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider_state", ["Stopped", "Suspended"])
+async def test_reconciler_projects_stopped_backing_to_suspended_session(
+    provider_state: str,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now)
+    store = FakeSessionStateStore(session)
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(
+            sandboxes=(_sandbox(now, state=provider_state),)
+        ),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert store.session is not None
+    assert store.session.status == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_does_not_project_foreign_stopped_backing() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now)
+    store = FakeSessionStateStore(session)
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(
+            sandboxes=(_sandbox(now, session_id="other-session", state="Stopped"),)
+        ),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_does_not_overwrite_new_operation_with_suspended_state() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now)
+    store = OperationStartedDuringSuspensionProjectionStore(session)
+
+    await SessionReconciler(
+        store=store,
+        provider=InventoryProvider(
+            sandboxes=(_sandbox(now, state="Stopped"),)
+        ),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert store.session is not None
+    assert store.session.status == "ready"
+    assert store.session.active_operation_id == "op-1"
+
+
+@pytest.mark.asyncio
+async def test_reconciler_reclaims_suspended_session_after_idle_expiry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(hours=1),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+        snapshot_ids=("snapshot-1",),
+    )
+    store = FakeSessionStateStore(session)
+    provider = InventoryProvider(
+        sandboxes=(_sandbox(now, state="Suspended"),),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="snapshot-1",
+                sandbox_id="sandbox-1",
+                created_at=now.isoformat(),
+            ),
+        ),
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await SessionReconciler(
+            store=store,
+            provider=provider,  # type: ignore[arg-type]
+            app_hash=_app_hash(),
+            now=lambda: now,
+        ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.tombstoned_sessions == 1
+    assert report.deleted_snapshots == 1
+    assert provider.deleted_sandboxes == ["sandbox-1"]
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert _reclaim_log_payloads(caplog) == [
+        {
+            "backing_outcome": "deleted",
+            "deleted_snapshot_count": 1,
+            "event_name": "sandbox_session_reclaimed",
+            "sandbox_id": "sandbox-1",
+            "session_id": "session-1",
+            "tombstone_reason": "reclaimed_idle_session",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_finish_deleting_logs_already_absent_backing(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(now, status="deleting")
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(session),
+        provider=InventoryProvider(sandboxes=()),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await reconciler._finish_deleting(  # type: ignore[attr-defined]
+            session,
+            {},
+            {},
+            now,
+            ReconcileReport(),
+        )
+
+    assert report.tombstoned_sessions == 1
+    assert _reclaim_log_payloads(caplog) == [
+        {
+            "backing_outcome": "already_absent",
+            "deleted_snapshot_count": 0,
+            "event_name": "sandbox_session_reclaimed",
+            "sandbox_id": "sandbox-1",
+            "session_id": "session-1",
+            "tombstone_reason": "reclaimed_idle_session",
+        }
+    ]
+
+
+@pytest.mark.asyncio
+async def test_finish_authorization_deletion_preserves_reason_without_reclaim_telemetry(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = replace(
+        _session(now, status="deleting"),
+        tombstone_reason="sandbox_group_authorization_failed",
+    )
+    store = FakeSessionStateStore(session)
+    reconciler = SessionReconciler(
+        store=store,
+        provider=InventoryProvider(sandboxes=()),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await reconciler._finish_deleting(  # type: ignore[attr-defined]
+            session,
+            {},
+            {},
+            now,
+            ReconcileReport(),
+        )
+
+    assert report.tombstoned_sessions == 1
+    assert store.session is not None
+    assert store.session.tombstone_reason == "sandbox_group_authorization_failed"
+    payloads = [
+        json.loads(record.getMessage())
+        for record in caplog.records
+        if record.getMessage().startswith("{")
+    ]
+    assert payloads == [
+        {
+            "event_name": "sandbox_session_cleanup",
+            "sandbox_id": "sandbox-1",
+            "session_id": "session-1",
+            "tombstone_reason": "sandbox_group_authorization_failed",
+        }
+    ]
+
+
+def test_reclaim_emits_a_customer_queryable_telemetry_contract(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    monkeypatch.setattr(
+        reconciler_module,
+        "emit_runtime_event",
+        lambda name, attributes: events.append((name, dict(attributes))),
+    )
+
+    reconciler_module._log_session_reclaimed(
+        session_id="session-1",
+        sandbox_id="sandbox-1",
+        backing_deleted=True,
+        deleted_snapshot_count=2,
+    )
+
+    assert events == [
+        (
+            "af.sandbox.session.reclaimed",
+            {
+                "af.sandbox.backing_outcome": "deleted",
+                "af.sandbox.deleted_snapshot_count": 2,
+                "af.sandbox.session_id": "session-1",
+                "af.sandbox.sandbox_id": "sandbox-1",
+                "af.sandbox.tombstone_reason": "reclaimed_idle_session",
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_idle_reclaim_does_not_log_success_when_delete_is_deferred(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    session = _session(
+        now - timedelta(hours=1),
+        status="suspended",
+        expires_at=now - timedelta(minutes=10),
+    )
+    reconciler = SessionReconciler(
+        store=FakeSessionStateStore(session),
+        provider=FailOnceDeleteProvider(sandboxes=(_sandbox(now, state="Suspended"),)),  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    )
+
+    with caplog.at_level(logging.INFO):
+        report = await reconciler.reconcile_session(
+            session.owner_partition,
+            session.session_id,
+        )
+
+    assert report == ReconcileReport()
+    assert _reclaim_log_payloads(caplog) == []
 
 
 @pytest.mark.asyncio
@@ -1494,7 +1782,7 @@ async def test_targeted_reconciliation_resumes_a_persisted_reclaim_operation() -
     assert store.session is not None
     assert store.session.active_operation_id is not None
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     report = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert report.abandoned_runs == 1
@@ -1520,7 +1808,7 @@ async def test_targeted_reconciliation_defers_transient_per_session_failure() ->
     )
 
     first = await reconciler.reconcile_session(session.owner_partition, session.session_id)
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert first.abandoned_runs == 0
@@ -1575,7 +1863,7 @@ async def test_provider_failure_leaves_fence_resumable_on_next_pass() -> None:
     )
 
     first = await reconciler.run_once()
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.run_once()
 
     assert first.abandoned_runs == 0
@@ -1601,7 +1889,7 @@ async def test_store_failure_leaves_fence_resumable_on_next_pass() -> None:
     )
 
     first = await reconciler.run_once()
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.run_once()
 
     assert first.abandoned_runs == 0
@@ -1632,7 +1920,7 @@ async def test_reclaim_delete_then_crash_completes_when_target_is_missing_next_p
     assert store.session.active_operation_id is not None
     assert next(iter(store.durable_operations.values())).phase == "reclaim_deleting"
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.run_once()
 
     assert second.abandoned_runs == 1
@@ -1808,6 +2096,292 @@ async def test_reconciler_expires_a_no_retry_submit_operation_and_rearms_before_
     assert store.session is not None
     assert store.session.idle_policy_armed
     assert store.operations[-2:] == ["advance_operation", "completed_operation"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["provision_submit", "submit_run"])
+async def test_expired_submit_operation_with_lost_persisted_backing_tombstones_without_remote_reads(
+    kind: str,
+) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(
+        now,
+        status="creating" if kind == "provision_submit" else "running",
+        active_run_id="run-1",
+    )
+    run = _run(base, now, status="accepted")
+    operation = (
+        _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+        if kind == "submit_run"
+        else replace(
+            _provision_operation(base, run, now),
+            target=SessionOperationTarget.create(
+                session_id=base.session_id,
+                sandbox_id=base.sandbox_id,
+                generation=base.generation,
+                digest_kind=base.digest_kind,
+                digest=base.digest,
+                run_id=run.run_id,
+            ),
+        )
+    )
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(sandboxes=())
+
+    remote_reads: list[str] = []
+
+    async def terminal_reader(_: DurableSessionRecord, __: DurableRunRecord) -> None:
+        remote_reads.append("terminal")
+        return None
+
+    async def heartbeat_reader(_: DurableSessionRecord, __: DurableRunRecord) -> None:
+        remote_reads.append("heartbeat")
+        return None
+
+    async def apply_idle_lifecycle(_: SessionOperationFence) -> bool:
+        raise AssertionError("lost backing must not be rearmed")
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        terminal_reader=terminal_reader,
+        heartbeat_reader=heartbeat_reader,
+        idle_lifecycle_applier=apply_idle_lifecycle,
+        now=lambda: now,
+    ).run_once()
+
+    assert provider.list_calls == 2
+    assert remote_reads == []
+    assert report.abandoned_runs == 1
+    assert report.tombstoned_sessions == 1
+    assert store.runs[run.run_id].status == "abandoned"
+    assert store.runs[run.run_id].status_reason == "sandbox_backing_lost"
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+    assert store.session.tombstone_reason == "sandbox_backing_lost"
+    assert store.session.active_run_id is None
+    assert store.session.active_operation_id is None
+    assert store.durable_operations[operation.operation_id].state == "completed"
+    assert store.operations[-2:] == ["takeover_expired_operation", "completed_operation"]
+
+
+@pytest.mark.asyncio
+async def test_lost_submit_operation_deletes_only_referenced_target_snapshots() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now, status="running", active_run_id="run-1", snapshot_ids=("owned", "foreign"))
+    run = _run(base, now, status="accepted")
+    operation = _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(
+        sandboxes=(),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="owned",
+                sandbox_id="sandbox-1",
+                created_at=now.isoformat(),
+            ),
+            SandboxSnapshot.create(
+                snapshot_id="foreign",
+                sandbox_id="foreign-sandbox",
+                created_at=now.isoformat(),
+            ),
+        ),
+    )
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.deleted_snapshots == 1
+    assert report.tombstoned_sessions == 1
+    assert provider.deleted_snapshots == ["owned"]
+    assert "foreign" in provider.snapshots
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+
+
+@pytest.mark.asyncio
+async def test_lost_submit_snapshot_cleanup_stops_when_fence_changes() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now, status="running", active_run_id="run-1", snapshot_ids=("owned",))
+    run = _run(base, now, status="accepted")
+    operation = _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+
+    class FenceChangingSnapshotProvider(InventoryProvider):
+        def __init__(self) -> None:
+            super().__init__(
+                sandboxes=(),
+                snapshots=(
+                    SandboxSnapshot.create(
+                        snapshot_id="owned",
+                        sandbox_id="sandbox-1",
+                        created_at=now.isoformat(),
+                    ),
+                ),
+            )
+            self.snapshot_list_calls = 0
+
+        async def list_snapshots(self) -> tuple[SandboxSnapshot, ...]:
+            snapshots = await super().list_snapshots()
+            self.snapshot_list_calls += 1
+            if self.snapshot_list_calls == 2:
+                current = store.durable_operations[operation.operation_id]
+                store.durable_operations[operation.operation_id] = replace(
+                    current,
+                    token="f" * 32,
+                )
+            return snapshots
+
+    provider = FenceChangingSnapshotProvider()
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: now,
+    ).reconcile_session(session.owner_partition, session.session_id)
+
+    assert report.deleted_snapshots == 0
+    assert report.tombstoned_sessions == 0
+    assert provider.deleted_snapshots == []
+    assert "owned" in provider.snapshots
+    assert store.session is not None
+    assert store.session.active_operation_id == operation.operation_id
+
+
+@pytest.mark.asyncio
+async def test_lost_submit_snapshot_cleanup_retries_before_tombstoning() -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(now, status="running", active_run_id="run-1", snapshot_ids=("owned",))
+    run = _run(base, now, status="accepted")
+    operation = _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = FailOnceSnapshotProvider(
+        sandboxes=(),
+        snapshots=(
+            SandboxSnapshot.create(
+                snapshot_id="owned",
+                sandbox_id="sandbox-1",
+                created_at=now.isoformat(),
+            ),
+        ),
+    )
+    clock = [now]
+    reconciler = SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        now=lambda: clock[0],
+    )
+
+    first = await reconciler.reconcile_session(session.owner_partition, session.session_id)
+
+    assert first.deleted_snapshots == 0
+    assert first.tombstoned_sessions == 0
+    assert store.session is not None
+    assert store.session.active_operation_id == operation.operation_id
+    assert "owned" in provider.snapshots
+
+    clock[0] += timedelta(seconds=121)
+    second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
+
+    assert second.deleted_snapshots == 1
+    assert second.tombstoned_sessions == 1
+    assert provider.deleted_snapshots == ["owned"]
+    assert store.session is not None
+    assert store.session.status == "tombstoned"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["provision_submit", "submit_run"])
+async def test_expired_submit_operation_freshly_finds_stale_inventory_backing(kind: str) -> None:
+    now = datetime(2026, 8, 5, tzinfo=UTC)
+    base = _session(
+        now,
+        status="creating" if kind == "provision_submit" else "running",
+        active_run_id="run-1",
+    )
+    run = _run(base, now, status="accepted")
+    operation = (
+        _submit_operation(base, run, now, lease_expires_at=now - timedelta(seconds=1))
+        if kind == "submit_run"
+        else replace(
+            _provision_operation(base, run, now),
+            target=SessionOperationTarget.create(
+                session_id=base.session_id,
+                sandbox_id=base.sandbox_id,
+                generation=base.generation,
+                digest_kind=base.digest_kind,
+                digest=base.digest,
+                run_id=run.run_id,
+            ),
+        )
+    )
+    session = replace(
+        base,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    store = FakeSessionStateStore(session)
+    store.runs[run.run_id] = run
+    store.durable_operations[operation.operation_id] = operation
+    provider = InventoryProvider(sandboxes=(), refreshed_sandboxes=(_sandbox(now),))
+    terminal_reads = 0
+
+    async def terminal_reader(_: DurableSessionRecord, __: DurableRunRecord) -> None:
+        nonlocal terminal_reads
+        terminal_reads += 1
+        return None
+
+    report = await SessionReconciler(
+        store=store,
+        provider=provider,  # type: ignore[arg-type]
+        app_hash=_app_hash(),
+        terminal_reader=terminal_reader,
+        now=lambda: now,
+    ).run_once()
+
+    assert provider.list_calls == 2
+    assert terminal_reads == 1
+    assert report.tombstoned_sessions == 0
+    assert store.session is not None
+    assert store.session.status == base.status
+    assert store.session.active_run_id == run.run_id
+    assert store.session.active_operation_id == operation.operation_id
+    assert store.durable_operations[operation.operation_id].state == "active"
 
 
 @pytest.mark.asyncio
@@ -2007,7 +2581,7 @@ async def test_reclaim_terminal_lifecycle_failure_retries_with_the_active_fence(
         == "lifecycle_policy_apply_failed"
     )
 
-    clock[0] += timedelta(seconds=61)
+    clock[0] += timedelta(seconds=121)
     second = await reconciler.reconcile_session(session.owner_partition, session.session_id)
 
     assert second.adopted_terminal_runs == 1

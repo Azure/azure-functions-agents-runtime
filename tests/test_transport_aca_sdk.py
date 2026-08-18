@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from importlib import import_module
 from importlib.metadata import PackageNotFoundError, version
 from inspect import signature
@@ -26,6 +26,7 @@ from azure_functions_agents.transport.transport_models import (
     DiskSource,
     PersistedSandboxBinding,
     PresetSource,
+    SandboxCreateOutcomeUnknownError,
     SandboxCreateRequest,
     SandboxEgressHeader,
     SandboxEgressHostRule,
@@ -36,6 +37,7 @@ from azure_functions_agents.transport.transport_models import (
     SandboxEgressSecretRef,
     SandboxFileNotFoundError,
     SandboxFileOperationError,
+    SandboxGroupAuthorizationError,
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxLifecyclePolicy,
@@ -337,7 +339,7 @@ async def test_create_passes_explicit_safe_values_and_returns_only_session_handl
     assert call["disk"] == "runtime-bootstrap"
     assert call["ports"] == []
     assert call["skip_egress_proxy"] is False
-    assert call["polling_timeout"] == 30.0
+    assert call["polling_timeout"] == 45
     assert call["polling_interval"] == 3
     assert {
         key: value
@@ -391,6 +393,78 @@ async def test_create_reuses_a_stable_operation_label_after_ambiguous_recovery(
     )
     await first.close()
     await second.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_create_waits_for_a_temporarily_invisible_stable_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    request = _request(labels=labels)
+    first = await adapter.create(request, persisted_group=_binding())
+    original_list = environment.group_client.list_sandboxes
+    visible = False
+
+    def list_when_visible(**kwargs: Any):
+        async def iterate():
+            if visible:
+                async for item in original_list(**kwargs):
+                    yield item
+
+        return iterate()
+
+    async def no_delay(_: float) -> None:
+        return None
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", list_when_visible)
+    monkeypatch.setattr(aca_sdk, "_sleep", no_delay)
+
+    with pytest.raises(SandboxCreateOutcomeUnknownError):
+        await adapter.create(
+            replace(request, reconcile_only=True),
+            persisted_group=_binding(),
+        )
+
+    assert len(environment.group_client.create_calls) == 1
+    visible = True
+    reconciled = await adapter.create(
+        replace(request, reconcile_only=True),
+        persisted_group=_binding(),
+    )
+
+    assert reconciled.identity.sandbox_id == first.identity.sandbox_id
+    assert len(environment.group_client.create_calls) == 1
+    await first.close()
+    await reconciled.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_only_create_requires_a_stable_operation_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(SandboxProvisioningError, match="stable operation label"):
+        await adapter.create(
+            _request(reconcile_only=True),
+            persisted_group=_binding(),
+        )
+
+    assert environment.group_client.create_calls == []
     await adapter.close()
 
 
@@ -553,6 +627,146 @@ async def test_create_preserves_definitive_request_rejection_without_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_stable_create_translates_initial_list_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+
+    def forbidden_list(**_: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(environment.group_client, "list_sandboxes", forbidden_list)
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert environment.group_client.create_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_create_translates_begin_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 401
+
+    async def forbidden_create(**_: Any) -> None:
+        raise rejection
+
+    monkeypatch.setattr(environment.group_client, "begin_create_sandbox", forbidden_create)
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.create(_request(), persisted_group=_binding())
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert environment.group_client.create_calls == []
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_stable_create_recovers_labeled_sandbox_after_poller_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+    environment.group_client.create_result_error = rejection
+
+    handle = await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert handle.identity.sandbox_id == "created-1"
+    assert len(environment.group_client.create_calls) == 1
+    assert environment.group_client.deleted_sandbox_ids == []
+    await handle.close()
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "poll_failure",
+    [
+        TimeoutError("sensitive poll timeout"),
+        RuntimeError("sensitive poll failure"),
+    ],
+)
+async def test_stable_create_keeps_post_acceptance_authorization_failure_indeterminate(
+    monkeypatch: pytest.MonkeyPatch,
+    poll_failure: Exception,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+    labels = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind="function_app",
+        owner_hash=_OWNER_HASH,
+        app_hash=_APP_HASH,
+        session_id="session-123",
+        operation_label="op-session-123-1",
+    )
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+    environment.group_client.create_result_error = poll_failure
+    original_list = environment.group_client.list_sandboxes
+
+    def list_before_create_then_forbid(**kwargs: Any):
+        if environment.group_client.create_calls:
+            raise rejection
+        return original_list(**kwargs)
+
+    monkeypatch.setattr(
+        environment.group_client,
+        "list_sandboxes",
+        list_before_create_then_forbid,
+    )
+
+    with pytest.raises(SandboxCreateOutcomeUnknownError) as caught:
+        await adapter.create(_request(labels=labels), persisted_group=_binding())
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert "sensitive poll" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert len(environment.group_client.create_calls) == 1
+    assert "created-1" in environment.sandboxes
+    await adapter.close()
+
+
+@pytest.mark.asyncio
 async def test_create_preserves_original_error_when_cleanup_confirms_nothing_was_created(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -581,6 +795,42 @@ async def test_create_preserves_original_error_when_cleanup_confirms_nothing_was
         await adapter.create(_request(), persisted_group=_binding())
 
     assert environment.sandboxes == {}
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+async def test_attach_translates_manifest_read_authorization_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    rejection = HttpResponseError("sensitive provider response")
+    rejection.status_code = 403
+
+    async def forbidden_read(*_: object, **__: object) -> bytes:
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "read_file", forbidden_read)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.attach(
+            PersistedSandboxBinding.create(
+                sandbox_id=sandbox.sandbox_id,
+                group=_binding(),
+            ),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert "sensitive provider response" not in str(caught.value)
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
     await adapter.close()
 
 
@@ -720,6 +970,7 @@ async def test_adapter_projects_group_inventory_and_snapshot_deletion(
     await adapter.delete_sandbox(handle.identity.sandbox_id)
 
     assert inventory[0].sandbox_id == handle.identity.sandbox_id
+    assert inventory[0].state == "Running"
     assert snapshots[0].snapshot_id == "snapshot-1"
     assert environment.group_client.deleted_snapshot_ids == ["snapshot-1"]
     assert environment.group_client.deleted_sandbox_ids == [handle.identity.sandbox_id]
@@ -894,6 +1145,80 @@ async def test_resume_closes_handle_when_the_resume_call_itself_fails(
             readiness_timeout_seconds=1,
         )
 
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_resume_translates_sdk_authorization_failure_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    provider_message = "sensitive provider response body"
+    rejection = HttpResponseError(provider_message)
+    rejection.status_code = status_code
+
+    async def forbidden_resume() -> None:
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "resume", forbidden_resume)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert provider_message not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
+    assert sandbox.closed
+    await adapter.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [401, 403])
+async def test_resume_translates_manifest_authorization_failure_and_closes_handle(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+) -> None:
+    environment = FakeSdkEnvironment()
+    _install_fake_adapter_boundary(monkeypatch, environment)
+    sandbox = environment.add_sandbox("persisted-1")
+    expected = _expected(sandbox.sandbox_id)
+    provider_message = "sensitive provider response body"
+    rejection = HttpResponseError(provider_message)
+    rejection.status_code = status_code
+
+    async def forbidden_read(*_: object, **__: object) -> bytes:
+        raise rejection
+
+    monkeypatch.setattr(sandbox, "read_file", forbidden_read)
+    adapter = await aca_sdk.AcaSandboxAdapter.open(_GROUP_ID, persisted_group=_binding())
+
+    with pytest.raises(
+        SandboxGroupAuthorizationError,
+        match="Container Apps SandboxGroup Data Owner",
+    ) as caught:
+        await adapter.resume(
+            PersistedSandboxBinding.create(sandbox_id=sandbox.sandbox_id, group=_binding()),
+            expected,
+            readiness_timeout_seconds=1,
+        )
+
+    assert provider_message not in str(caught.value)
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__
     assert sandbox.closed
     await adapter.close()
 
@@ -1123,18 +1448,18 @@ def test_provisioning_labels_reject_values_over_aca_limit(field_name: str) -> No
         SandboxProvisioningLabels.create(**values)
 
 
-def test_file_projections_accept_live_numeric_posix_mode() -> None:
+def test_file_projections_preserve_sdk_string_mode() -> None:
     file_info = FakeSdkFileInfo(
         name="file.bin",
         path="/tmp/file.bin",
         size=7,
         is_directory=False,
         modified_at=None,
-        mode=0o644,
+        mode="0644",
     )
 
     entry = aca_sdk._project_file_entry(file_info)
     stat = aca_sdk._project_file_stat(file_info)
 
-    assert entry.mode == 0o644
-    assert stat.mode == 0o644
+    assert entry.mode == "0644"
+    assert stat.mode == "0644"

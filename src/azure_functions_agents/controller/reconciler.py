@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
@@ -10,6 +11,7 @@ from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 from .._logger import logger
+from .._observability import emit_runtime_event
 from ..execution.backend import RunError, RunStatus
 from ..execution.binding import AgentBinding
 from ..execution.run_control import RunJournalProtocolError
@@ -57,12 +59,15 @@ from ..transport.transport_models import (
     SandboxTransportError,
 )
 from .journal_integrity import handle_journal_corruption, journal_corruption_status
-from .readiness import DEFAULT_RECLAIM_IDLE_SECONDS, terminal_run
+from .readiness import DEFAULT_RECLAIM_IDLE_SECONDS, SetupDeadline, terminal_run
 
-_RECLAIMABLE_SESSION_STATUSES = frozenset({"creating", "ready", "quarantined"})
+_RECLAIMABLE_SESSION_STATUSES = frozenset(
+    {"creating", "ready", "suspended", "quarantined"}
+)
 _STATUSES_REQUIRING_BACKING = frozenset(
     {"ready", "running", "canceling", "suspended", "resuming", "quarantined"}
 )
+_PROVIDER_SUSPENDED_STATES = frozenset({"Stopped", "Suspended"})
 RECONCILER_CADENCE_SETTING = "AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS"
 
 type TerminalReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[RunStatus | None]]
@@ -594,6 +599,15 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
+        missing_backing = await self._complete_lost_submit_operation(
+            run,
+            fence,
+            inventory,
+            now,
+            report,
+        )
+        if missing_backing is not None:
+            return missing_backing
         terminal = await self._read_terminal(session, run)
         if terminal is not None and terminal.state in TERMINAL_RUN_STATUSES:
             finalized = await self._finish_reusable_operation(
@@ -646,6 +660,109 @@ class SessionReconciler:
         return _replace_report(
             report,
             abandoned_runs=report.abandoned_runs + int(finalized),
+        )
+
+    async def _complete_lost_submit_operation(
+        self,
+        run: DurableRunRecord,
+        fence: SessionOperationFence,
+        inventory: dict[str, SandboxSummary],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport | None:
+        """Fence an absent persisted submit target before avoiding remote lifecycle work."""
+        target_sandbox_id = fence.target.sandbox_id
+        if target_sandbox_id is None or target_sandbox_id in inventory:
+            return None
+        if fence.target.run_id != run.run_id:
+            return report
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if (
+            not fence.matches(current.record, operation.record)
+            or current.record.sandbox_id != target_sandbox_id
+            or current.record.active_run_id != run.run_id
+        ):
+            return report
+        fresh_inventory = {
+            item.sandbox_id
+            for item in await self._provider.list_sandboxes(
+                labels={"app_hash": self._app_hash}
+            )
+        }
+        if target_sandbox_id in fresh_inventory:
+            return None
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if (
+            not fence.matches(current.record, operation.record)
+            or current.record.sandbox_id != target_sandbox_id
+            or current.record.active_run_id != run.run_id
+        ):
+            return report
+        current_run = await self._store.get_run(
+            fence.owner_partition,
+            fence.session_id,
+            run.run_id,
+        )
+        snapshots = {
+            snapshot.snapshot_id: snapshot
+            for snapshot in await self._provider.list_snapshots()
+        }
+        current = await self._store.get_session(fence.owner_partition, fence.session_id)
+        operation = await self._store.get_operation(
+            fence.owner_partition,
+            fence.session_id,
+            fence.operation_id,
+        )
+        if (
+            not fence.matches(current.record, operation.record)
+            or current.record.sandbox_id != target_sandbox_id
+            or current.record.active_run_id != run.run_id
+        ):
+            return report
+        for snapshot_id in current.record.snapshot_ids:
+            snapshot = snapshots.get(snapshot_id)
+            if snapshot is None or snapshot.sandbox_id != target_sandbox_id:
+                continue
+            await self._provider.delete_snapshot(snapshot_id)
+            report = _replace_report(
+                report,
+                deleted_snapshots=report.deleted_snapshots + 1,
+            )
+        terminal = (
+            None
+            if current_run.record.status in TERMINAL_RUN_STATUSES
+            else terminal_run(
+                current_run.record,
+                status="abandoned",
+                result_available=False,
+                reason="sandbox_backing_lost",
+                updated_at=now,
+            )
+        )
+        await self._store.complete_operation(
+            fence=fence,
+            updated_session=_tombstoned_operation_session(
+                current.record,
+                tombstone_reason="sandbox_backing_lost",
+                updated_at=now,
+            ),
+            terminal_run=terminal,
+            updated_at=now,
+        )
+        return _replace_report(
+            report,
+            abandoned_runs=report.abandoned_runs + int(terminal is not None),
+            tombstoned_sessions=report.tombstoned_sessions + 1,
         )
 
     async def _expire_pre_pointer_provision(
@@ -743,7 +860,7 @@ class SessionReconciler:
             token=uuid4().hex,
             attempt_count=0,
             error_code=None,
-            lease_expires_at=now + timedelta(seconds=60),
+            lease_expires_at=now,
             next_attempt_at=None,
             created_at=now,
             updated_at=now,
@@ -1076,6 +1193,17 @@ class SessionReconciler:
             session.sandbox_id is None or session.sandbox_id not in inventory
         ):
             return await self._tombstone_missing_backing_if_unchanged(session, now, report)
+        summary = None if session.sandbox_id is None else inventory.get(session.sandbox_id)
+        if (
+            session.status == "ready"
+            and summary is not None
+            and summary.state in _PROVIDER_SUSPENDED_STATES
+            and _matches_reclaim_target_label(summary, session)
+        ):
+            suspended = await self._mark_suspended_if_unchanged(session, now)
+            if suspended is None:
+                return report
+            session = suspended
 
         for run in runs:
             if (
@@ -1098,6 +1226,27 @@ class SessionReconciler:
         if session.status in _RECLAIMABLE_SESSION_STATUSES and due:
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
         return report
+
+    async def _mark_suspended_if_unchanged(
+        self,
+        observed: DurableSessionRecord,
+        now: datetime,
+    ) -> DurableSessionRecord | None:
+        latest = await self._store.get_session(observed.owner_partition, observed.session_id)
+        if (
+            latest.record.status != "ready"
+            or latest.record.sandbox_id != observed.sandbox_id
+            or latest.record.generation != observed.generation
+            or latest.record.active_operation_id is not None
+        ):
+            return None
+        suspended = _with_status(latest, "suspended", now)
+        await self._store.update_session(
+            previous=latest.record,
+            updated=suspended,
+            etag=latest.etag,
+        )
+        return suspended
 
     async def _resume_detached_operation(
         self,
@@ -1225,7 +1374,7 @@ class SessionReconciler:
             token=uuid4().hex,
             attempt_count=0,
             error_code=None,
-            lease_expires_at=now + timedelta(seconds=60),
+            lease_expires_at=now,
             next_attempt_at=None,
             created_at=now,
             updated_at=now,
@@ -1274,6 +1423,8 @@ class SessionReconciler:
         if not fence.matches(current.record, operation.record):
             return report
         target_sandbox_id = fence.target.sandbox_id
+        backing_deleted = False
+        deleted_snapshot_count = 0
         if target_sandbox_id is not None and target_sandbox_id in inventory:
             if not _matches_reclaim_target_label(
                 inventory[target_sandbox_id],
@@ -1293,6 +1444,7 @@ class SessionReconciler:
                 report,
                 deleted_sandboxes=report.deleted_sandboxes + 1,
             )
+            backing_deleted = True
         fence = await self._store.advance_operation(
             fence=fence,
             phase="reclaim_snapshots",
@@ -1307,6 +1459,7 @@ class SessionReconciler:
                 report,
                 deleted_snapshots=report.deleted_snapshots + 1,
             )
+            deleted_snapshot_count += 1
         latest = await self._store.get_session(fence.owner_partition, fence.session_id)
         tombstoned = _tombstoned_operation_session(
             latest.record,
@@ -1317,6 +1470,12 @@ class SessionReconciler:
             fence=fence,
             updated_session=tombstoned,
             updated_at=now,
+        )
+        _log_session_reclaimed(
+            session_id=tombstoned.session_id,
+            sandbox_id=target_sandbox_id,
+            backing_deleted=backing_deleted,
+            deleted_snapshot_count=deleted_snapshot_count,
         )
         return _replace_report(
             report,
@@ -1333,9 +1492,12 @@ class SessionReconciler:
     ) -> ReconcileReport:
         if session.active_run_id is not None:
             return report
+        backing_deleted = False
+        deleted_snapshot_count = 0
         if session.sandbox_id is not None and session.sandbox_id in inventory:
             await self._provider.delete_sandbox(session.sandbox_id)
             report = _replace_report(report, deleted_sandboxes=report.deleted_sandboxes + 1)
+            backing_deleted = True
         for snapshot_id in session.snapshot_ids:
             snapshot = snapshots.get(snapshot_id)
             if (
@@ -1345,24 +1507,40 @@ class SessionReconciler:
             ):
                 await self._provider.delete_snapshot(snapshot_id)
                 report = _replace_report(report, deleted_snapshots=report.deleted_snapshots + 1)
+                deleted_snapshot_count += 1
         latest = await self._store.get_session(session.owner_partition, session.session_id)
         if latest.record.status == "deleting" and latest.record.active_run_id is None:
+            tombstone_reason = latest.record.tombstone_reason or "reclaimed_idle_session"
             await self._store.tombstone_session(
                 previous=latest.record,
                 etag=latest.etag,
-                tombstone_reason="reclaimed_idle_session",
+                tombstone_reason=tombstone_reason,
                 updated_at=now,
             )
             report = _replace_report(
                 report,
                 tombstoned_sessions=report.tombstoned_sessions + 1,
             )
+            if tombstone_reason == "reclaimed_idle_session":
+                _log_session_reclaimed(
+                    session_id=latest.record.session_id,
+                    sandbox_id=latest.record.sandbox_id,
+                    backing_deleted=backing_deleted,
+                    deleted_snapshot_count=deleted_snapshot_count,
+                )
+            else:
+                _log_session_cleanup(
+                    session_id=latest.record.session_id,
+                    sandbox_id=latest.record.sandbox_id,
+                    tombstone_reason=tombstone_reason,
+                )
         return report
 
     async def reconcile_session(
         self,
         owner_partition: OwnerPartition,
         session_id: str,
+        setup_deadline: SetupDeadline | None = None,
     ) -> ReconcileReport:
         """Reconcile one app-owned session without a broad Table scan."""
         if owner_partition.app_hash != self._app_hash:
@@ -2152,3 +2330,76 @@ def _replace_report(report: ReconcileReport, **changes: int) -> ReconcileReport:
     }
     values.update(changes)
     return ReconcileReport(**values)
+
+
+def _log_session_reclaimed(
+    *,
+    session_id: str,
+    sandbox_id: str | None,
+    backing_deleted: bool,
+    deleted_snapshot_count: int,
+) -> None:
+    backing_outcome = (
+        "deleted"
+        if backing_deleted
+        else "already_absent"
+        if sandbox_id is not None
+        else "not_bound"
+    )
+    logger.info(
+        "%s",
+        json.dumps(
+            {
+                "backing_outcome": backing_outcome,
+                "deleted_snapshot_count": deleted_snapshot_count,
+                "event_name": "sandbox_session_reclaimed",
+                "sandbox_id": sandbox_id,
+                "session_id": session_id,
+                "tombstone_reason": "reclaimed_idle_session",
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    emit_runtime_event(
+        "af.sandbox.session.reclaimed",
+        {
+            "af.sandbox.backing_outcome": backing_outcome,
+            "af.sandbox.deleted_snapshot_count": deleted_snapshot_count,
+            "af.sandbox.session_id": session_id,
+            "af.sandbox.sandbox_id": sandbox_id,
+            "af.sandbox.tombstone_reason": "reclaimed_idle_session",
+        },
+    )
+
+
+def _log_session_cleanup(
+    *,
+    session_id: str,
+    sandbox_id: str | None,
+    tombstone_reason: str,
+) -> None:
+    """Record a non-idle deletion without misclassifying it as reclaim."""
+    logger.info(
+        "%s",
+        json.dumps(
+            {
+                "event_name": "sandbox_session_cleanup",
+                "sandbox_id": sandbox_id,
+                "session_id": session_id,
+                "tombstone_reason": tombstone_reason,
+            },
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        ),
+    )
+    emit_runtime_event(
+        "af.sandbox.session.cleaned_up",
+        {
+            "af.sandbox.session_id": session_id,
+            "af.sandbox.sandbox_id": sandbox_id,
+            "af.sandbox.tombstone_reason": tombstone_reason,
+        },
+    )
