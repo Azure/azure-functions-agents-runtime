@@ -4,11 +4,13 @@ import sys
 import textwrap
 import types
 from pathlib import Path
+from typing import Any, get_type_hints
 
 import pytest
 from agent_framework import FunctionTool
 
 from azure_functions_agents._function_tool import tool
+from azure_functions_agents.discovery import tools as discovery_tools
 from azure_functions_agents.discovery.tools import (
     clear_tool_discovery_cache,
     discover_project_tools,
@@ -297,6 +299,41 @@ def test_multiple_workflow_tools_can_be_declared_in_one_file(tmp_path: Path) -> 
         "fetch_logs",
         "fetch_metrics",
     ]
+
+
+def test_workflow_tools_survive_plain_function_fallback_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _write_tool_file(
+        tmp_path,
+        "mixed_tools",
+        """
+        from __future__ import annotations
+
+        from azure_functions_agents import workflow_tool
+
+        @workflow_tool
+        def fetch_logs(args: dict[str, object]) -> dict[str, object]:
+            return {"logs": args}
+
+        def broken_tool(args: MissingAnnotation) -> str:
+            return "unreachable"
+        """,
+    )
+
+    original_tool = discovery_tools.tool
+
+    def tool_with_annotation_resolution(fn: Any, **kwargs: Any) -> FunctionTool:
+        get_type_hints(fn)
+        return original_tool(fn, **kwargs)
+
+    monkeypatch.setattr(discovery_tools, "tool", tool_with_annotation_resolution)
+    discovered = discover_project_tools(tmp_path)
+
+    assert discovered.user_tools == []
+    assert [tool.name for tool in discovered.workflow_tools] == ["fetch_logs"]
+    assert discovered.failed_loads[0][0] == "mixed_tools.py"
+    assert "NameError" in discovered.failed_loads[0][1]
 
 
 def test_discover_user_tools_tracks_failed_loads(tmp_path: Path) -> None:

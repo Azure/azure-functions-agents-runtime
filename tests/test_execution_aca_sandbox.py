@@ -91,6 +91,7 @@ from azure_functions_agents.session_state import (
     SessionOperationFence,
     SessionOperationTarget,
     SessionRead,
+    SessionStateStoreError,
     StaleOperationTokenError,
     operation_correlation_label,
     owner_partition,
@@ -414,6 +415,23 @@ class _StallingRevalidationStore(FakeSessionStateStore):
         return await super().get_session(partition, session_id)
 
 
+class _StallingDurableReadStore(FakeSessionStateStore):
+    def __init__(self, session: DurableSessionRecord) -> None:
+        super().__init__(session)
+        self.durable_read_started = asyncio.Event()
+
+    async def get_run(
+        self,
+        partition: OwnerPartition,
+        session_id: str,
+        run_id: str,
+    ) -> SessionRead:
+        del partition, session_id, run_id
+        self.durable_read_started.set()
+        await asyncio.Event().wait()
+        raise AssertionError("stalled durable read unexpectedly resumed")
+
+
 @pytest.mark.asyncio
 async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     tmp_path: Path,
@@ -448,6 +466,7 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     run_handle = await backend.start_run(StartRunRequest(prompt="hello"))
 
     assert run_handle.state == "accepted"
+    assert run_handle.phase == "executing"
     assert store.session is not None
     assert store.session.status == "running"
     assert store.session.active_run_id == run_handle.run_id
@@ -461,6 +480,42 @@ async def test_backend_satisfies_the_lifecycle_seam_and_submits_after_admission(
     assert handle.closed
     assert handle.lifecycle_policy.auto_suspend_seconds is None
     assert store.session.idle_policy_armed is False
+
+
+@pytest.mark.asyncio
+async def test_async_aca_submission_renders_the_durable_handle_phase(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        inbox = json.loads(await handle.read_file(inbox_path(run_id)))
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=inbox["session_id"]),
+        )
+
+    handle.exec_hook = accept
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    )
+
+    response = await submit_run(
+        backend,
+        StartRunRequest(prompt="hello", session_id=session.session_id),
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    assert response.status_code == 202
+    assert isinstance(response.body, dict)
+    assert response.body["phase"] == "executing"
 
 
 @pytest.mark.asyncio
@@ -537,6 +592,8 @@ async def test_replayed_provision_never_submits_local_loser_identifiers(
         created_at=datetime.now(UTC),
         updated_at=datetime.now(UTC),
     )
+    candidate_store.runs[winner.run_id] = winner
+    candidate_store.session = replace(candidate_session, session_id=winner.session_id)
 
     async def replayed_provision(*args, **kwargs):  # type: ignore[no-untyped-def]
         del args, kwargs
@@ -568,6 +625,7 @@ async def test_replayed_provision_never_submits_local_loser_identifiers(
 
     assert replay.run_id == "winner-run"
     assert replay.session_id == "winner-session"
+    assert replay.phase == "terminal"
     assert candidate_handle.closed
     assert [call for call in candidate_handle.calls if call.operation in {"exec", "write_file"}] == []
 
@@ -826,10 +884,156 @@ async def test_journal_acceptance_timeout_remains_a_typed_resumable_setup_timeou
     assert response.timeout_metadata.reason == SetupTimeoutReason.OPERATION_TIMEOUT
     assert response.timeout_metadata.request_mode == "respond_async"
     assert response.timeout_metadata.session_present
+    assert isinstance(response.body, dict)
+    assert response.body["phase"] == "executing"
     [run] = store.runs.values()
     [operation] = store.durable_operations.values()
     assert run.status == "accepted"
     assert operation.phase == "submit_launching"
+
+
+@pytest.mark.asyncio
+async def test_durable_timeout_handle_bounds_stalled_state_confirmation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    run = _run(session)
+    store = _StallingDurableReadStore(session)
+    store.runs[run.run_id] = run
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(FakeSandboxSessionHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+    monkeypatch.setattr(
+        "azure_functions_agents.controller.readiness._ADMISSION_CONFIRMATION_TIMEOUT_SECONDS",
+        0.01,
+    )
+    outcome = AdmissionOutcome(
+        run=run,
+        run_etag="run-etag",
+        session_etag="session-etag",
+        replayed=False,
+    )
+    metadata = SetupTimeoutMetadata.create(
+        phase=SetupPhase.JOURNAL,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        configured_budget_seconds=90.0,
+        elapsed_seconds=90.0,
+        remaining_seconds=0.0,
+    )
+
+    timeout = await asyncio.wait_for(
+        backend._durable_admission_timeout(outcome, metadata),
+        timeout=1.0,
+    )
+
+    assert store.durable_read_started.is_set()
+    assert timeout.handle.state == "accepted"
+    assert timeout.handle.phase == "provisioning"
+
+
+@pytest.mark.asyncio
+async def test_durable_timeout_handle_confirmation_preserves_outer_cancellation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    run = _run(session)
+    store = _StallingDurableReadStore(session)
+    store.runs[run.run_id] = run
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(FakeSandboxSessionHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+    outcome = AdmissionOutcome(
+        run=run,
+        run_etag="run-etag",
+        session_etag="session-etag",
+        replayed=False,
+    )
+    metadata = SetupTimeoutMetadata.create(
+        phase=SetupPhase.JOURNAL,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+        configured_budget_seconds=90.0,
+        elapsed_seconds=90.0,
+        remaining_seconds=0.0,
+    )
+    pending = asyncio.create_task(backend._durable_admission_timeout(outcome, metadata))
+    await asyncio.wait_for(store.durable_read_started.wait(), timeout=1.0)
+
+    pending.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await pending
+
+
+@pytest.mark.asyncio
+async def test_run_handle_uses_refreshed_durable_run_state(tmp_path: Path) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    stale = _run(session)
+    terminal = replace(stale, status="succeeded", result_available=True)
+    store = FakeSessionStateStore(session)
+    store.runs[terminal.run_id] = terminal
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(FakeSandboxSessionHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+
+    handle = await backend._run_handle_from_durable_evidence(stale)
+
+    assert handle.state == "succeeded"
+    assert handle.phase == "terminal"
+
+
+@pytest.mark.asyncio
+async def test_run_handle_rejects_mismatched_durable_evidence(tmp_path: Path) -> None:
+    class MismatchedRunStore(FakeSessionStateStore):
+        async def get_run(
+            self,
+            partition: OwnerPartition,
+            session_id: str,
+            run_id: str,
+        ) -> SessionRead:
+            del partition, session_id, run_id
+            return SessionRead(record=other, etag=self.etag)
+
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    expected = _run(session)
+    other = replace(expected, run_id="other-run")
+    store = MismatchedRunStore(session)
+    backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            FakeSandboxSessionProvider(FakeSandboxSessionHandle()),
+            store,
+        ),
+        owner=_owner(),
+    )
+
+    with pytest.raises(SessionStateStoreError, match="does not match"):
+        await backend._run_handle_from_durable_evidence(expected)
 
 
 @pytest.mark.asyncio
@@ -912,6 +1116,7 @@ async def test_concurrent_retry_cannot_take_an_unexpired_journal_launch(
     assert replay.run_id == run.run_id
     assert replay.state == "accepted"
     assert result.run_id == run.run_id
+    assert replay.phase == "executing"
     assert len([call for call in handle.calls if call.operation == "exec"]) == 1
 
 
@@ -1246,6 +1451,7 @@ async def test_new_session_timeout_before_sandbox_pointer_returns_committed_hand
     assert excinfo.value.outcome == "committed"
     assert excinfo.value.handle.session_id == store.session.session_id
     assert excinfo.value.handle.run_id == store.session.active_run_id
+    assert excinfo.value.handle.phase == "provisioning"
     assert store.session.sandbox_id is None
     assert len(provider.create_calls) == 1
 
@@ -1325,6 +1531,7 @@ async def test_ambiguous_new_reservation_returns_candidate_without_provider_crea
     assert excinfo.value.outcome == "possibly_committed"
     assert excinfo.value.handle.session_id == store.candidate.session.session_id
     assert excinfo.value.handle.run_id == store.candidate.run.run_id
+    assert excinfo.value.handle.phase == "provisioning"
     assert provider.create_calls == []
 
 
@@ -2182,6 +2389,8 @@ async def test_replayed_admission_restores_idle_policy_when_winner_is_terminal(t
     )
 
     assert replay.run_id == "run-1"
+    assert replay.state == "succeeded"
+    assert replay.phase == "terminal"
     assert store.session is not None
     assert store.session.idle_policy_armed
     assert handle.lifecycle_policy_history[-2].auto_suspend_seconds is None

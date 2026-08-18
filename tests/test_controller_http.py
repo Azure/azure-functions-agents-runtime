@@ -211,6 +211,22 @@ async def test_async_submission_returns_shared_management_urls() -> None:
 
 
 @pytest.mark.asyncio
+async def test_async_submission_derives_phase_when_the_handle_has_none() -> None:
+    backend = FakeBackend(_status())
+
+    response = await submit_run(
+        backend,  # type: ignore[arg-type]
+        StartRunRequest(prompt="hello"),
+        agent_slug="main",
+        respond_async=True,
+        budget=_expired_budget(),
+    )
+
+    assert response.status_code == 202
+    assert response.body["phase"] == "executing"
+
+
+@pytest.mark.asyncio
 async def test_status_payload_includes_provider_neutral_phase_when_available() -> None:
     backend = FakeBackend(_status(phase="settling"))
 

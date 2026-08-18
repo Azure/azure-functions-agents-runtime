@@ -59,6 +59,7 @@ from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 from azure_functions_agents.transport.manifest import ExpectedSandboxManifestBinding
 from azure_functions_agents.transport.ports import SandboxSessionHandle
 from azure_functions_agents.transport.transport_models import (
+    SandboxCreateRequest,
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxLifecyclePolicy,
@@ -127,6 +128,7 @@ class AcaSmokeModelConfig:
         if self.reasoning_effort is not None:
             environment["AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT"] = self.reasoning_effort
         return environment
+
 
 @dataclass(frozen=True, slots=True)
 class DependencyClosureArchive:
@@ -223,9 +225,7 @@ def aca_smoke_config_from_environment() -> AcaSmokeConfig:
 def aca_smoke_model_config_from_environment() -> AcaSmokeModelConfig:
     """Read and validate the credential-free model inputs for the real-turn smoke."""
 
-    endpoint = _required_https_endpoint(
-        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT"
-    )
+    endpoint = _required_https_endpoint("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_ENDPOINT")
     deployment = _required_environment_value(
         "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_AZURE_OPENAI_DEPLOYMENT"
     )
@@ -391,7 +391,9 @@ def build_dependency_closure(temporary_directory: Path) -> DependencyClosureArch
 def materialize_current_checkout_app(destination: Path) -> Path:
     """Create the Linux Function-app root that production package capture consumes."""
 
-    require_sandbox_compatible_host(_required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK"))
+    require_sandbox_compatible_host(
+        _required_environment_value("AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_DISK")
+    )
     source = _LIVE_MODEL_AGENT_PROJECT_ROOT
     shutil.copytree(source, destination, dirs_exist_ok=True)
     site_packages = destination / ".python_packages" / "lib" / "site-packages"
@@ -510,9 +512,7 @@ def _read_archive_members(archive_bytes: bytes, *, source: str) -> list[_Archive
             for entry in archive.infolist():
                 _validate_composite_member_name(entry.filename, source=source)
                 if entry.filename in names:
-                    raise AcaSmokeEnvironmentError(
-                        f"{source} has duplicate archive member paths."
-                    )
+                    raise AcaSmokeEnvironmentError(f"{source} has duplicate archive member paths.")
                 names.add(entry.filename)
                 if entry.file_size > _MAX_STANDARD_ZIP_ENTRY_SIZE:
                     raise AcaSmokeEnvironmentError(
@@ -530,7 +530,9 @@ def _read_archive_members(archive_bytes: bytes, *, source: str) -> list[_Archive
                     )
                 )
     except (OSError, ValueError, zipfile.BadZipFile, zipfile.LargeZipFile) as error:
-        raise AcaSmokeEnvironmentError(f"{source} is not a readable standard ZIP archive.") from error
+        raise AcaSmokeEnvironmentError(
+            f"{source} is not a readable standard ZIP archive."
+        ) from error
 
     return members
 
@@ -874,6 +876,149 @@ async def reap_current_production_smoke_sandboxes(config: AcaSmokeConfig) -> int
         await adapter.close()
 
 
+async def _collect_cleanup_sandbox_ids(
+    adapter: AcaSandboxAdapter,
+    sandbox_id: str | None,
+    labels: dict[str, str],
+    cleanup_errors: list[Exception],
+) -> set[str]:
+    known_sandbox_ids = {sandbox_id} if sandbox_id is not None else set()
+    try:
+        current = await adapter.list_sandboxes(labels=labels)
+        known_sandbox_ids.update(item.sandbox_id for item in current)
+    except Exception as error:
+        cleanup_errors.append(error)
+    return known_sandbox_ids
+
+
+async def _delete_cleanup_snapshots(
+    adapter: AcaSandboxAdapter,
+    sandbox_ids: set[str],
+    cleanup_errors: list[Exception],
+) -> None:
+    if not sandbox_ids:
+        return
+    try:
+        for snapshot in await adapter.list_snapshots():
+            if snapshot.sandbox_id in sandbox_ids:
+                await adapter.delete_snapshot(snapshot.snapshot_id)
+    except Exception as error:
+        cleanup_errors.append(error)
+
+
+async def _delete_cleanup_handle(
+    handle: SandboxSessionHandle | None,
+    cleanup_errors: list[Exception],
+) -> bool:
+    if handle is None:
+        return False
+    deleted = False
+    try:
+        await handle.delete()
+        deleted = True
+    except Exception as error:
+        _LOGGER.warning(
+            "ACA smoke handle deletion failed; reconciling by sandbox ID.", exc_info=error
+        )
+    try:
+        await handle.close()
+    except Exception as error:
+        if deleted:
+            _LOGGER.warning("ACA smoke handle close failed after deletion.", exc_info=error)
+        else:
+            cleanup_errors.append(error)
+    return deleted
+
+
+async def _delete_cleanup_sandbox_by_id(
+    adapter: AcaSandboxAdapter,
+    sandbox_id: str | None,
+    deleted: bool,
+) -> bool:
+    if deleted or sandbox_id is None:
+        return deleted
+    try:
+        await _force_delete_by_id(adapter, sandbox_id)
+    except Exception as error:
+        _LOGGER.warning("ACA smoke ID deletion failed; reconciling by labels.", exc_info=error)
+        return False
+    return True
+
+
+async def _delete_cleanup_sandbox_by_labels(
+    adapter: AcaSandboxAdapter,
+    labels: dict[str, str],
+    creation_attempted: bool,
+    deleted: bool,
+    cleanup_errors: list[Exception],
+) -> bool:
+    if deleted or not creation_attempted:
+        return deleted
+    required_label_keys = {"owner_kind", "owner_hash", "app_hash", "session_id"}
+    if not required_label_keys.issubset(labels):
+        cleanup_errors.append(RuntimeError("ACA smoke cleanup had no complete CI label selector."))
+        return False
+    try:
+        deleted = await _delete_labelled_sandboxes(adapter, labels) > 0
+    except Exception as error:
+        cleanup_errors.append(error)
+        return False
+    if not deleted:
+        cleanup_errors.append(
+            RuntimeError("ACA smoke label cleanup did not find a created sandbox.")
+        )
+    return deleted
+
+
+async def _confirm_cleanup(
+    adapter: AcaSandboxAdapter,
+    sandbox_ids: set[str],
+    labels: dict[str, str],
+    cleanup_errors: list[Exception],
+) -> None:
+    if not sandbox_ids:
+        return
+    await _delete_cleanup_snapshots(adapter, sandbox_ids, cleanup_errors)
+    try:
+        remaining_snapshots = [
+            snapshot
+            for snapshot in await adapter.list_snapshots()
+            if snapshot.sandbox_id in sandbox_ids
+        ]
+        if remaining_snapshots:
+            cleanup_errors.append(
+                RuntimeError("ACA smoke snapshot deletion could not be confirmed.")
+            )
+    except Exception as error:
+        cleanup_errors.append(error)
+    try:
+        remaining_sandboxes = [
+            item
+            for item in await adapter.list_sandboxes(labels=labels)
+            if item.sandbox_id in sandbox_ids
+        ]
+        if remaining_sandboxes:
+            cleanup_errors.append(
+                RuntimeError("ACA smoke sandbox deletion could not be confirmed.")
+            )
+    except Exception as error:
+        cleanup_errors.append(error)
+
+
+async def _close_cleanup_adapter(
+    adapter: AcaSandboxAdapter,
+    deleted: bool,
+    cleanup_errors: list[Exception],
+) -> None:
+    try:
+        await adapter.close()
+    except Exception as error:
+        if deleted:
+            _LOGGER.warning("ACA smoke adapter close failed after deletion.", exc_info=error)
+        else:
+            cleanup_errors.append(error)
+
+
 async def cleanup_sandbox(
     *,
     adapter: AcaSandboxAdapter | None,
@@ -887,93 +1032,18 @@ async def cleanup_sandbox(
     if adapter is None:
         return
 
-    known_sandbox_ids = {sandbox_id} if sandbox_id is not None else set()
     cleanup_errors: list[Exception] = []
-    try:
-        current = await adapter.list_sandboxes(labels=labels)
-        known_sandbox_ids.update(item.sandbox_id for item in current)
-    except Exception as error:
-        cleanup_errors.append(error)
-
-    async def delete_snapshots() -> None:
-        for snapshot in await adapter.list_snapshots():
-            if snapshot.sandbox_id in known_sandbox_ids:
-                await adapter.delete_snapshot(snapshot.snapshot_id)
-
-    if known_sandbox_ids:
-        try:
-            await delete_snapshots()
-        except Exception as error:
-            cleanup_errors.append(error)
-
-    deleted = False
-    if handle is not None:
-        try:
-            await handle.delete()
-            deleted = True
-        except Exception as error:
-            _LOGGER.warning("ACA smoke handle deletion failed; reconciling by sandbox ID.", exc_info=error)
-        try:
-            await handle.close()
-        except Exception as error:
-            if deleted:
-                _LOGGER.warning("ACA smoke handle close failed after deletion.", exc_info=error)
-            else:
-                cleanup_errors.append(error)
-
-    if not deleted and sandbox_id is not None:
-        try:
-            await _force_delete_by_id(adapter, sandbox_id)
-            deleted = True
-        except Exception as error:
-            _LOGGER.warning("ACA smoke ID deletion failed; reconciling by labels.", exc_info=error)
-
-    if not deleted and creation_attempted:
-        required_label_keys = {"owner_kind", "owner_hash", "app_hash", "session_id"}
-        if required_label_keys.issubset(labels):
-            try:
-                deleted = await _delete_labelled_sandboxes(adapter, labels) > 0
-                if not deleted:
-                    cleanup_errors.append(
-                        RuntimeError("ACA smoke label cleanup did not find a created sandbox.")
-                    )
-            except Exception as error:
-                cleanup_errors.append(error)
-        else:
-            cleanup_errors.append(
-                RuntimeError("ACA smoke cleanup had no complete CI label selector.")
-            )
-
-    if known_sandbox_ids:
-        try:
-            await delete_snapshots()
-            remaining_snapshots = [
-                snapshot
-                for snapshot in await adapter.list_snapshots()
-                if snapshot.sandbox_id in known_sandbox_ids
-            ]
-            if remaining_snapshots:
-                cleanup_errors.append(RuntimeError("ACA smoke snapshot deletion could not be confirmed."))
-        except Exception as error:
-            cleanup_errors.append(error)
-        try:
-            remaining_sandboxes = [
-                item
-                for item in await adapter.list_sandboxes(labels=labels)
-                if item.sandbox_id in known_sandbox_ids
-            ]
-            if remaining_sandboxes:
-                cleanup_errors.append(RuntimeError("ACA smoke sandbox deletion could not be confirmed."))
-        except Exception as error:
-            cleanup_errors.append(error)
-
-    try:
-        await adapter.close()
-    except Exception as error:
-        if deleted:
-            _LOGGER.warning("ACA smoke adapter close failed after deletion.", exc_info=error)
-        else:
-            cleanup_errors.append(error)
+    known_sandbox_ids = await _collect_cleanup_sandbox_ids(
+        adapter, sandbox_id, labels, cleanup_errors
+    )
+    await _delete_cleanup_snapshots(adapter, known_sandbox_ids, cleanup_errors)
+    deleted = await _delete_cleanup_handle(handle, cleanup_errors)
+    deleted = await _delete_cleanup_sandbox_by_id(adapter, sandbox_id, deleted)
+    deleted = await _delete_cleanup_sandbox_by_labels(
+        adapter, labels, creation_attempted, deleted, cleanup_errors
+    )
+    await _confirm_cleanup(adapter, known_sandbox_ids, labels, cleanup_errors)
+    await _close_cleanup_adapter(adapter, deleted, cleanup_errors)
 
     if creation_attempted and not deleted:
         cleanup_errors.append(RuntimeError("ACA smoke sandbox deletion could not be confirmed."))
@@ -1029,6 +1099,135 @@ def _require_journal_root_probe_content(content: bytes) -> None:
         raise RuntimeError("Sandbox journal root probe content did not round-trip.")
 
 
+async def _build_provisioning_closure(
+    materialized_app_root: Path | None,
+    setup_deadline: SetupBudget,
+) -> DependencyClosureArchive | None:
+    if materialized_app_root is not None:
+        return None
+    with tempfile.TemporaryDirectory(prefix=".aca-smoke-", dir=REPOSITORY_ROOT) as temporary:
+        closure = await _within_setup_budget(
+            asyncio.to_thread(build_dependency_closure, Path(temporary)),
+            setup_deadline,
+            phase=SetupPhase.PACKAGE_CAPTURE,
+        )
+    _enforce_archive_budget(len(closure.payload))
+    return closure
+
+
+def _build_provisioning_request(
+    adapter: AcaSandboxAdapter,
+    config: AcaSmokeConfig,
+    session_prefix: str,
+    model_config: AcaSmokeModelConfig | None,
+    setup_deadline: SetupBudget,
+) -> tuple[SandboxCreateRequest, SandboxGroupBinding, dict[str, str], str]:
+    group_binding = SandboxGroupBinding.create(
+        resource_id=adapter.group.resource_id,
+        region=adapter.group.region,
+    )
+    session_id = f"{aca_smoke_run_id()}-{session_prefix}-{uuid.uuid4().hex[:16]}"
+    labels_model = SandboxProvisioningLabels.create(
+        owner_hash_version="o1",
+        owner_kind=CI_OWNER_KIND,
+        owner_hash=CI_OWNER_HASH,
+        app_hash=CI_APP_HASH,
+        session_id=session_id,
+    )
+    profile_environment = {SANDBOX_DISK_ENV: config.disk}
+    if model_config is not None:
+        profile_environment.update(model_config.sandbox_environment())
+    create_profile = build_sandbox_create_profile(
+        web_request_allowed_hosts=(),
+        mcp_urls=(),
+        model_endpoint=None if model_config is None else model_config.endpoint,
+        telemetry_endpoint=None,
+        environment=profile_environment,
+    )
+    return (
+        create_profile.build_request(
+            labels=labels_model,
+            remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
+                phase=SetupPhase.PROVISION_CREATE
+            ),
+            auto_suspend_seconds=60,
+        ),
+        group_binding,
+        labels_model.to_provider_labels(),
+        session_id,
+    )
+
+
+async def _deliver_dependency_closure(
+    handle: SandboxSessionHandle,
+    closure: DependencyClosureArchive,
+    session_id: str,
+    setup_deadline: SetupBudget,
+) -> None:
+    sandbox_root = f"/tmp/{session_id}"
+    closure_archive_path = f"{sandbox_root}/dependency-closure.zip"
+    closure_directory = f"{sandbox_root}/site-packages"
+    await _within_setup_budget(
+        handle.write_file(closure_archive_path, closure.payload, create_dirs=True),
+        setup_deadline,
+        phase=SetupPhase.CONTENT,
+    )
+    extraction = await _within_setup_budget(
+        handle.exec(
+            _python_command(
+                f"import zipfile; zipfile.ZipFile({closure_archive_path!r}).extractall("
+                f"{closure_directory!r})"
+            ),
+            timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
+        ),
+        setup_deadline,
+        phase=SetupPhase.CONTENT,
+    )
+    _require_successful_setup_command(
+        description="dependency closure extraction failed",
+        exit_code=extraction.exit_code,
+        stdout=extraction.stdout,
+        stderr=extraction.stderr,
+    )
+
+
+async def _prepare_provisioned_sandbox(
+    handle: SandboxSessionHandle,
+    *,
+    materialized_app_root: Path | None,
+    config: AcaSmokeConfig,
+    closure: DependencyClosureArchive | None,
+    session_id: str,
+    before_yield: Callable[[SandboxSessionHandle], Awaitable[None]] | None,
+    setup_deadline: SetupBudget,
+) -> None:
+    await _within_setup_budget(
+        handle.set_lifecycle_policy(
+            SandboxLifecyclePolicy.create(
+                auto_suspend_seconds=60,
+                auto_delete_seconds=3_960,
+            )
+        ),
+        setup_deadline,
+        phase=SetupPhase.LIFECYCLE,
+    )
+    if materialized_app_root is not None:
+        await prepare_materialized_application(
+            handle,
+            application_root=materialized_app_root,
+            config=config,
+            setup_deadline=setup_deadline,
+        )
+    elif closure is not None:
+        await _deliver_dependency_closure(handle, closure, session_id, setup_deadline)
+    if before_yield is not None:
+        await _within_setup_budget(
+            before_yield(handle),
+            setup_deadline,
+            phase=SetupPhase.JOURNAL,
+        )
+
+
 @asynccontextmanager
 async def provision_aca_smoke_sandbox(
     config: AcaSmokeConfig,
@@ -1048,50 +1247,14 @@ async def provision_aca_smoke_sandbox(
     setup_deadline = SetupBudget.start()
 
     try:
-        closure: DependencyClosureArchive | None = None
-        if materialized_app_root is None:
-            with tempfile.TemporaryDirectory(prefix=".aca-smoke-", dir=REPOSITORY_ROOT) as temporary:
-                closure = await _within_setup_budget(
-                    asyncio.to_thread(build_dependency_closure, Path(temporary)),
-                    setup_deadline,
-                    phase=SetupPhase.PACKAGE_CAPTURE,
-                )
-            _enforce_archive_budget(len(closure.payload))
-
+        closure = await _build_provisioning_closure(materialized_app_root, setup_deadline)
         adapter = await _within_setup_budget(
             AcaSandboxAdapter.open(config.group_resource_id),
             setup_deadline,
             phase=SetupPhase.PROVIDER_BIND,
         )
-        group_binding = SandboxGroupBinding.create(
-            resource_id=adapter.group.resource_id,
-            region=adapter.group.region,
-        )
-        session_id = f"{aca_smoke_run_id()}-{session_prefix}-{uuid.uuid4().hex[:16]}"
-        labels_model = SandboxProvisioningLabels.create(
-            owner_hash_version="o1",
-            owner_kind=CI_OWNER_KIND,
-            owner_hash=CI_OWNER_HASH,
-            app_hash=CI_APP_HASH,
-            session_id=session_id,
-        )
-        labels = labels_model.to_provider_labels()
-        profile_environment = {SANDBOX_DISK_ENV: config.disk}
-        if model_config is not None:
-            profile_environment.update(model_config.sandbox_environment())
-        create_profile = build_sandbox_create_profile(
-            web_request_allowed_hosts=(),
-            mcp_urls=(),
-            model_endpoint=None if model_config is None else model_config.endpoint,
-            telemetry_endpoint=None,
-            environment=profile_environment,
-        )
-        request = create_profile.build_request(
-            labels=labels_model,
-            remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
-                phase=SetupPhase.PROVISION_CREATE
-            ),
-            auto_suspend_seconds=60,
+        request, group_binding, labels, session_id = _build_provisioning_request(
+            adapter, config, session_prefix, model_config, setup_deadline
         )
         creation_attempted = True
         handle = await _within_setup_budget(
@@ -1100,56 +1263,15 @@ async def provision_aca_smoke_sandbox(
             phase=SetupPhase.PROVISION_CREATE,
         )
         sandbox_id = handle.identity.sandbox_id
-
-        await _within_setup_budget(
-            handle.set_lifecycle_policy(
-                SandboxLifecyclePolicy.create(
-                    auto_suspend_seconds=60,
-                    auto_delete_seconds=3_960,
-                )
-            ),
-            setup_deadline,
-            phase=SetupPhase.LIFECYCLE,
+        await _prepare_provisioned_sandbox(
+            handle,
+            materialized_app_root=materialized_app_root,
+            config=config,
+            closure=closure,
+            session_id=session_id,
+            before_yield=before_yield,
+            setup_deadline=setup_deadline,
         )
-        if materialized_app_root is not None:
-            await prepare_materialized_application(
-                handle,
-                application_root=materialized_app_root,
-                config=config,
-                setup_deadline=setup_deadline,
-            )
-        elif closure is not None:
-            sandbox_root = f"/tmp/{session_id}"
-            closure_archive_path = f"{sandbox_root}/dependency-closure.zip"
-            closure_directory = f"{sandbox_root}/site-packages"
-            await _within_setup_budget(
-                handle.write_file(closure_archive_path, closure.payload, create_dirs=True),
-                setup_deadline,
-                phase=SetupPhase.CONTENT,
-            )
-            extraction = await _within_setup_budget(
-                handle.exec(
-                    _python_command(
-                        f"import zipfile; zipfile.ZipFile({closure_archive_path!r}).extractall("
-                        f"{closure_directory!r})"
-                    ),
-                    timeout_seconds=_COMMAND_TIMEOUT_SECONDS,
-                ),
-                setup_deadline,
-                phase=SetupPhase.CONTENT,
-            )
-            _require_successful_setup_command(
-                description="dependency closure extraction failed",
-                exit_code=extraction.exit_code,
-                stdout=extraction.stdout,
-                stderr=extraction.stderr,
-            )
-        if before_yield is not None:
-            await _within_setup_budget(
-                before_yield(handle),
-                setup_deadline,
-                phase=SetupPhase.JOURNAL,
-            )
     except asyncio.CancelledError:
         await _cleanup_sandbox_shielded(
             adapter=adapter,

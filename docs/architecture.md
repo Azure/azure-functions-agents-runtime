@@ -256,15 +256,18 @@ sandbox/generation after normal disk auto-suspend.
 Admission becomes durable before provider creation: one same-partition Table
 transaction reserves the idempotency claim, session, accepted run, and submit
 operation. If setup later exhausts its request budget, the response retains that
-run's status/result/events/cancel URLs. An ambiguous transaction acknowledgement
-is confirmed by point-reading the exact reserved rows; provider creation cannot
-start until that reservation is confirmed. During `provision_*`, status, result,
-event preflight, and pre-launch cancel read or update Tables without requiring a
-live sandbox. Journal launch and cancellation race on the same operation fence,
-so either the prompt launches once or the accepted run is canceled before
-launch. Terminal cleanup retains the active slot as `phase=settling` until a
-fenced EGT clears both the operation and slot, after which the phase is
-`terminal` and same-session admission can resume.
+run's status/result/events/cancel URLs. The same key plus a byte-equivalent
+request safely replays; changed input is `422`; a committed admission uses its
+handles; and uncertainty requires exact replay or a fresh independent session.
+An ambiguous transaction acknowledgement is confirmed by point-reading the
+exact reserved rows; provider creation cannot start until that reservation is
+confirmed. During `provision_*`, status, result, event preflight, and pre-launch
+cancel read or update Tables without requiring a live sandbox. Journal launch
+and cancellation race on the same operation fence, so either the prompt launches
+once or the accepted run is canceled before launch. Terminal-prompt cleanup
+retains the active slot as `phase=settling` until a fenced EGT clears both the
+operation and slot, after which the phase is `terminal` and same-session
+admission can resume.
 
 Capture requires secure Linux filesystem primitives and fails closed elsewhere.
 One root descriptor spans scan, archive, and rescan; only contained regular-file

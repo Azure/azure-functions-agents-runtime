@@ -95,6 +95,9 @@ select = [
     "SIM",
     "RUF",
     "N",
+    # Keep orchestration functions decomposed into reviewable units.
+    "PLR0912",
+    "PLR0915",
     # Try/except hygiene; see .github/instructions/python.instructions.md.
     "TRY002",
     "TRY201",

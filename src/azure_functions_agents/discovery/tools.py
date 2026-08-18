@@ -5,6 +5,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 from typing import Any, cast, get_type_hints
 
 from agent_framework import FunctionTool
@@ -111,6 +112,80 @@ def _workflow_tool_from_member(module_name: str, name: str, obj: object) -> Work
     )
 
 
+def _tool_module(tools_dir: str, filename: str) -> tuple[str, ModuleType | None]:
+    module_name = filename[:-3]
+    filepath = os.path.join(tools_dir, filename)
+    logger.debug("Loading tool module %s from %s", module_name, filepath)
+    spec = importlib.util.spec_from_file_location(module_name, filepath)
+    if spec is None or spec.loader is None:
+        logger.warning("Could not create import spec for %s", filename)
+        return module_name, None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module_name, module
+
+
+def _discover_workflow_tools(module_name: str, module: ModuleType) -> list[WorkflowTool]:
+    workflow_tools: list[WorkflowTool] = []
+    for name, obj in inspect.getmembers(module):
+        if name.startswith("_"):
+            continue
+        workflow_candidate = _workflow_tool_from_member(module_name, name, obj)
+        if workflow_candidate is not None:
+            workflow_tools.append(workflow_candidate)
+    return workflow_tools
+
+
+def _first_function_tool(module_name: str, module: ModuleType) -> FunctionTool | None:
+    for name, obj in inspect.getmembers(module):
+        if name.startswith("_") or not isinstance(obj, FunctionTool):
+            continue
+        logger.debug("Loaded FunctionTool %s", obj.name)
+        return obj
+
+    local_functions = [
+        (name, obj)
+        for name, obj in inspect.getmembers(module, inspect.isfunction)
+        if obj.__module__ == module_name and not name.startswith("_") and not _is_workflow_marked(obj)
+    ]
+    if not local_functions:
+        return None
+
+    name, fn = local_functions[0]
+    description = (fn.__doc__ or f"Tool: {name}").strip()
+    schema = _single_basemodel_parameter(fn)
+    if schema is not None:
+        discovered = tool(fn, name=name, description=description, schema=schema)
+    else:
+        discovered = tool(fn, name=name, description=description)
+    logger.debug("Auto-wrapped tool %s with description %s", name, description)
+    return discovered
+
+
+def _discover_tool_file(
+    tools_dir: str,
+    filename: str,
+    workflow_tools: list[WorkflowTool],
+) -> FunctionTool | None:
+    module_name, module = _tool_module(tools_dir, filename)
+    if module is None:
+        return None
+    workflow_tools.extend(_discover_workflow_tools(module_name, module))
+    return _first_function_tool(module_name, module)
+
+
+def _project_tools(
+    tools: list[FunctionTool],
+    workflow_tools: list[WorkflowTool],
+    failed_loads: list[tuple[str, str]],
+) -> ProjectTools:
+    return ProjectTools(
+        user_tools=list(tools),
+        workflow_tools=list(workflow_tools),
+        failed_loads=failed_loads,
+    )
+
+
 def discover_project_tools(app_root: Path) -> ProjectTools:
     """
     Dynamically discover and load tools from the project's ``tools/`` folder.
@@ -148,67 +223,17 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
     if not os.path.exists(tools_dir):
         logger.warning("Tools directory not found: %s", tools_dir)
         _DISCOVERED_TOOLS_CACHE[resolved_root] = (tuple(tools), tuple(workflow_tools))
-        return ProjectTools(
-            user_tools=list(tools),
-            workflow_tools=list(workflow_tools),
-            failed_loads=[],
-        )
+        return _project_tools(tools, workflow_tools, failed_loads)
 
     files = sorted(f for f in os.listdir(tools_dir) if f.endswith(".py") and not f.startswith("_"))
     logger.debug("Python tool files found in %s: %s", tools_dir, files)
 
     for filename in files:
-        filepath = os.path.join(tools_dir, filename)
-        module_name = filename[:-3]
-        logger.debug("Loading tool module %s from %s", module_name, filepath)
         try:
-            spec = importlib.util.spec_from_file_location(module_name, filepath)
-            if spec is None or spec.loader is None:
-                logger.warning("Could not create import spec for %s", filename)
-                continue
-
-            module = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(module)
-
-            picked: FunctionTool | None = None
-            for name, obj in inspect.getmembers(module):
-                if name.startswith("_"):
-                    continue
-                workflow_candidate = _workflow_tool_from_member(module_name, name, obj)
-                if workflow_candidate is not None:
-                    workflow_tools.append(workflow_candidate)
-
-            # Prefer module-level ``@tool``-decorated values (FunctionTool
-            # instances) — they carry their own name/description/schema.
-            for name, obj in inspect.getmembers(module):
-                if name.startswith("_"):
-                    continue
-                if isinstance(obj, FunctionTool):
-                    picked = obj
-                    logger.debug("Loaded FunctionTool %s", obj.name)
-                    break
-
-            # Fallback: first plain function defined in the module.
+            picked = _discover_tool_file(tools_dir, filename, workflow_tools)
             if picked is None:
-                local_functions = [
-                    (name, obj)
-                    for name, obj in inspect.getmembers(module, inspect.isfunction)
-                    if obj.__module__ == module_name
-                    and not name.startswith("_")
-                    and not _is_workflow_marked(obj)
-                ]
-                if local_functions:
-                    name, fn = local_functions[0]
-                    description = (fn.__doc__ or f"Tool: {name}").strip()
-                    schema = _single_basemodel_parameter(fn)
-                    if schema is not None:
-                        picked = tool(fn, name=name, description=description, schema=schema)
-                    else:
-                        picked = tool(fn, name=name, description=description)
-                    logger.debug("Auto-wrapped tool %s with description %s", name, description)
-
-            if picked is not None:
-                tools.append(picked)
+                continue
+            tools.append(picked)
         except Exception as exc:
             error_msg = f"{type(exc).__name__}: {exc}"
             failed_loads.append((filename, error_msg))
@@ -218,11 +243,7 @@ def discover_project_tools(app_root: Path) -> ProjectTools:
     logger.info("Discovered %d user tool(s) from %s", len(tools), tools_dir)
     if failed_loads:
         logger.warning("Failed to load %d tool file(s)", len(failed_loads))
-    return ProjectTools(
-        user_tools=list(tools),
-        workflow_tools=list(workflow_tools),
-        failed_loads=failed_loads,
-    )
+    return _project_tools(tools, workflow_tools, failed_loads)
 
 
 def discover_user_tools(app_root: Path) -> ToolDiscoveryResult:

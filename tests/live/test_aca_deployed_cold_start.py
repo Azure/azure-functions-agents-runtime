@@ -88,6 +88,21 @@ class _Progress:
     retries: int = 0
 
 
+@dataclass(frozen=True, slots=True)
+class _Admission:
+    candidate: _Candidate
+    first_status: int
+    first_acceptance_seconds: float
+    first_typed_setup_deadline: bool
+    retries: int
+
+
+@dataclass(frozen=True, slots=True)
+class _AdmissionResponse:
+    candidate: _Candidate | None
+    retry: bool
+
+
 @pytest.mark.live_aca
 @pytest.mark.asyncio
 async def test_deployed_aca_cold_start_acceptance_is_bounded_and_cleaned(
@@ -143,30 +158,9 @@ async def test_deployed_aca_cold_start_acceptance_is_bounded_and_cleaned(
         primary_error = exc
     finally:
         if resources is not None:
-            cleanup_error: BaseException | None = None
-            try:
-                unresolved_keys = await _recover_cleanup_candidates(
-                    resources, config, partition_key, attempted_keys, candidates
-                )
-                cleanup_failure: AcaSmokeEnvironmentError | None = None
-                try:
-                    await _cleanup_candidates(resources, config, partition_key, candidates)
-                except AcaSmokeEnvironmentError as exc:
-                    cleanup_failure = exc
-                if unresolved_keys:
-                    cleanup_error = AcaSmokeEnvironmentError(
-                        "cold_start_cleanup_incomplete_unresolved_idempotency"
-                    )
-                elif cleanup_failure is not None:
-                    cleanup_error = _sanitized_cleanup_error(cleanup_failure)
-                else:
-                    cleanup_complete = True
-            except AcaSmokeEnvironmentError as exc:
-                cleanup_error = _sanitized_cleanup_error(exc)
-            except (AssertionError, TimeoutError):
-                cleanup_error = AcaSmokeEnvironmentError("cold_start_cleanup_incomplete_controller_failed")
-            finally:
-                await resources.close()
+            cleanup_complete, cleanup_error = await _finalize_cold_start_cleanup(
+                resources, config, partition_key, attempted_keys, candidates
+            )
             if primary_error is None and cleanup_error is not None:
                 primary_error = cleanup_error
     _LOGGER.info(
@@ -259,6 +253,41 @@ async def _run_cold_start_sample_phases(
     key = uuid.uuid4().hex
     attempted_keys.append(key)
     started_at = time.perf_counter()
+    admission = await _admit_cold_start_candidate(
+        client, config, resources, partition_key, headers, key, started_at, progress
+    )
+    candidates.append(admission.candidate)
+    total_accepted_at = time.perf_counter()
+    first_event_at, terminal_at = await _qualify_public_turn(
+        client, admission.candidate, headers, started_at
+    )
+    return _Sample(
+        candidate=admission.candidate,
+        first_attempt_status=admission.first_status,
+        first_attempt_acceptance_seconds=admission.first_acceptance_seconds,
+        total_acceptance_seconds=total_accepted_at - started_at,
+        first_event_seconds=first_event_at - started_at,
+        terminal_seconds=terminal_at - started_at,
+        retries=admission.retries,
+        result_available=True,
+        first_attempt_failure=first_attempt_slo_failure(
+            status=admission.first_status,
+            elapsed_seconds=admission.first_acceptance_seconds,
+            typed_setup_deadline=admission.first_typed_setup_deadline,
+        ),
+    )
+
+
+async def _admit_cold_start_candidate(
+    client: ClientSession,
+    config: DeployedAcaLifecycleConfig,
+    resources: DeployedAcaLifecycleResources,
+    partition_key: str,
+    headers: dict[str, str],
+    key: str,
+    started_at: float,
+    progress: _Progress,
+) -> _Admission:
     first_status = 0
     first_elapsed = 0.0
     first_typed_setup_deadline = False
@@ -276,60 +305,111 @@ async def _run_cold_start_sample_phases(
                     payload=submission_payload(_PROMPT),
                 )
         except AcaSmokeEnvironmentError:
-            candidate = await _recover_candidate(
-                resources, config, partition_key, key, deadline=_recovery_deadline(admission_deadline)
+            candidate = await _recover_or_fail(
+                resources,
+                config,
+                partition_key,
+                key,
+                admission_deadline=admission_deadline,
+                category="cold_start_admission_ambiguous",
             )
-            if candidate is None:
-                raise AcaSmokeEnvironmentError("cold_start_admission_ambiguous") from None
             break
         except TimeoutError:
-            candidate = await _recover_candidate(
-                resources, config, partition_key, key, deadline=_recovery_deadline(admission_deadline)
+            candidate = await _recover_or_fail(
+                resources,
+                config,
+                partition_key,
+                key,
+                admission_deadline=admission_deadline,
+                category="cold_start_admission_timeout",
             )
-            if candidate is None:
-                raise AcaSmokeEnvironmentError("cold_start_admission_timeout") from None
             break
-        accepted_at = time.perf_counter()
         if attempt == 0:
             first_status = status
-            first_elapsed = accepted_at - started_at
+            first_elapsed = time.perf_counter() - started_at
             first_typed_setup_deadline = (
                 status == 504 and payload.get("error") == "setup_deadline_exceeded"
             )
-        if status == 202:
-            try:
-                candidate = _Candidate(parse_accepted_run(payload, config.deployed), key)
-            except (AssertionError, ValueError):
-                raise AssertionError("cold_start_accepted_response_invalid") from None
-            break
-        if (
-            status == 504
-            and payload.get("error") == "setup_deadline_exceeded"
-            and attempt + 1 < _SETUP_ATTEMPTS
-        ):
+        outcome = _classify_admission_response(status, payload, key, config)
+        if outcome.retry and attempt + 1 < _SETUP_ATTEMPTS:
             retries += 1
             progress.retries += 1
             await asyncio.sleep(
-                _remaining(
-                    admission_deadline,
-                    setup_retry_after_seconds(response_headers),
-                )
+                _remaining(admission_deadline, setup_retry_after_seconds(response_headers))
             )
             continue
-        candidate = await _recover_candidate(
-            resources, config, partition_key, key, deadline=_recovery_deadline(admission_deadline)
+        if outcome.candidate is not None:
+            candidate = outcome.candidate
+            break
+        candidate = await _recover_or_fail(
+            resources,
+            config,
+            partition_key,
+            key,
+            admission_deadline=admission_deadline,
+            category="cold_start_admission_unresolved",
         )
-        if candidate is None:
-            raise AcaSmokeEnvironmentError("cold_start_admission_unresolved")
         break
     if candidate is None:
-        candidate = await _recover_candidate(
-            resources, config, partition_key, key, deadline=_recovery_deadline(admission_deadline)
+        candidate = await _recover_or_fail(
+            resources,
+            config,
+            partition_key,
+            key,
+            admission_deadline=admission_deadline,
+            category="cold_start_admission_unresolved",
         )
-        if candidate is None:
-            raise AcaSmokeEnvironmentError("cold_start_admission_unresolved")
-    candidates.append(candidate)
-    total_accepted_at = time.perf_counter()
+    return _Admission(
+        candidate=candidate,
+        first_status=first_status,
+        first_acceptance_seconds=first_elapsed,
+        first_typed_setup_deadline=first_typed_setup_deadline,
+        retries=retries,
+    )
+
+
+def _classify_admission_response(
+    status: int,
+    payload: dict[str, object],
+    key: str,
+    config: DeployedAcaLifecycleConfig,
+) -> _AdmissionResponse:
+    if status == 202:
+        try:
+            return _AdmissionResponse(
+                candidate=_Candidate(parse_accepted_run(payload, config.deployed), key),
+                retry=False,
+            )
+        except (AssertionError, ValueError):
+            raise AssertionError("cold_start_accepted_response_invalid") from None
+    if status == 504 and payload.get("error") == "setup_deadline_exceeded":
+        return _AdmissionResponse(candidate=None, retry=True)
+    return _AdmissionResponse(candidate=None, retry=False)
+
+
+async def _recover_or_fail(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    key: str,
+    *,
+    admission_deadline: float,
+    category: str,
+) -> _Candidate:
+    candidate = await _recover_candidate(
+        resources, config, partition_key, key, deadline=_recovery_deadline(admission_deadline)
+    )
+    if candidate is None:
+        raise AcaSmokeEnvironmentError(category) from None
+    return candidate
+
+
+async def _qualify_public_turn(
+    client: ClientSession,
+    candidate: _Candidate,
+    headers: dict[str, str],
+    started_at: float,
+) -> tuple[float, float]:
     sse_deadline = time.perf_counter() + SSE_TERMINAL_WINDOW_SECONDS
     try:
         status, events, _, first_event_at = await read_sse_events_with_first_event_time(
@@ -364,21 +444,7 @@ async def _run_cold_start_sample_phases(
         except AcaSmokeEnvironmentError:
             raise AcaSmokeEnvironmentError("cold_start_public_result_unavailable") from None
         _validate_public_result(result_code, public_result, candidate)
-    return _Sample(
-        candidate=candidate,
-        first_attempt_status=first_status,
-        first_attempt_acceptance_seconds=first_elapsed,
-        total_acceptance_seconds=total_accepted_at - started_at,
-        first_event_seconds=first_event_at - started_at,
-        terminal_seconds=terminal_at - started_at,
-        retries=retries,
-        result_available=True,
-        first_attempt_failure=first_attempt_slo_failure(
-            status=first_status,
-            elapsed_seconds=first_elapsed,
-            typed_setup_deadline=first_typed_setup_deadline,
-        ),
-    )
+    return first_event_at, terminal_at
 
 
 async def _recover_candidate(
@@ -467,6 +533,42 @@ async def _cleanup_candidates(
             failure_category = "cold_start_cleanup_controller_failed"
     if failure_category is not None:
         raise AcaSmokeEnvironmentError(failure_category) from None
+
+
+async def _finalize_cold_start_cleanup(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    partition_key: str,
+    attempted_keys: list[str],
+    candidates: list[_Candidate],
+) -> tuple[bool, BaseException | None]:
+    """Recover, provider-clean, and close; leave durable Table state to the controller."""
+    cleanup_complete = False
+    cleanup_error: BaseException | None = None
+    try:
+        unresolved_keys = await _recover_cleanup_candidates(
+            resources, config, partition_key, attempted_keys, candidates
+        )
+        cleanup_failure: AcaSmokeEnvironmentError | None = None
+        try:
+            await _cleanup_candidates(resources, config, partition_key, candidates)
+        except AcaSmokeEnvironmentError as exc:
+            cleanup_failure = exc
+        if unresolved_keys:
+            cleanup_error = AcaSmokeEnvironmentError(
+                "cold_start_cleanup_incomplete_unresolved_idempotency"
+            )
+        elif cleanup_failure is not None:
+            cleanup_error = _sanitized_cleanup_error(cleanup_failure)
+        else:
+            cleanup_complete = True
+    except AcaSmokeEnvironmentError as exc:
+        cleanup_error = _sanitized_cleanup_error(exc)
+    except (AssertionError, TimeoutError):
+        cleanup_error = AcaSmokeEnvironmentError("cold_start_cleanup_incomplete_controller_failed")
+    finally:
+        await resources.close()
+    return cleanup_complete, cleanup_error
 
 
 def _remaining(deadline: float, cap_seconds: float) -> float:

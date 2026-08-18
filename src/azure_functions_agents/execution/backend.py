@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
+from typing import TYPE_CHECKING, Final, Literal, Protocol, TypeIs, runtime_checkable
 
 from .setup_budget import SetupBudgetExpiredError, SetupTimeoutMetadata
 
@@ -23,6 +23,13 @@ type DurableAdmissionOutcome = Literal["committed", "possibly_committed"]
 
 TERMINAL_EVENT_TYPES: frozenset[str] = frozenset({"done", "error"})
 SESSION_TOMBSTONED_ERROR_CODE = "session_tombstoned"
+_DURABLE_ADMISSION_OUTCOMES: Final[frozenset[DurableAdmissionOutcome]] = frozenset(
+    {"committed", "possibly_committed"}
+)
+
+
+def _is_durable_admission_outcome(outcome: str) -> TypeIs[DurableAdmissionOutcome]:
+    return outcome in _DURABLE_ADMISSION_OUTCOMES
 
 
 @dataclass
@@ -64,7 +71,7 @@ class DurableAdmissionSetupTimeoutError(SetupBudgetExpiredError):
         handle: RunHandle,
         metadata: SetupTimeoutMetadata,
     ) -> None:
-        if outcome not in {"committed", "possibly_committed"}:
+        if not _is_durable_admission_outcome(outcome):
             raise ValueError("outcome must be 'committed' or 'possibly_committed'")
         super().__init__(metadata)
         self.outcome = outcome

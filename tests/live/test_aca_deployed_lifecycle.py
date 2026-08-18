@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from dataclasses import dataclass
 from datetime import timedelta
 
 import pytest
@@ -36,6 +37,8 @@ from tests.live.aca_deployed_lifecycle_support import (
     wait_until_reclaim_due,
 )
 
+from azure_functions_agents.session_state import DurableSessionRecord
+
 _SETUP_RETRY_ATTEMPTS = 4
 
 if not deployed_aca_smoke_enabled():
@@ -46,6 +49,19 @@ if not deployed_aca_smoke_enabled():
     )
 
 
+@dataclass(slots=True)
+class _LifecycleProgress:
+    last_session_id: str | None = None
+    cleanup_session: DurableSessionRecord | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class _FirstRunObservation:
+    run: AcceptedRun
+    sandbox_id: str
+    generation: int
+
+
 @pytest.mark.live_aca
 @pytest.mark.asyncio
 async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() -> None:
@@ -53,8 +69,7 @@ async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() 
 
     config = deployed_aca_lifecycle_config_from_environment()
     resources: DeployedAcaLifecycleResources | None = None
-    last_session_id: str | None = None
-    cleanup_session = None
+    progress = _LifecycleProgress()
     try:
         resources = await open_deployed_aca_lifecycle_resources(config)
         authorization = await acquire_default_authorization_header(config.deployed.token_scope)
@@ -64,105 +79,127 @@ async def test_deployed_aca_session_auto_suspends_resumes_reuses_and_reclaims() 
             "Prefer": "respond-async",
         }
         async with ClientSession(timeout=client_timeout(config.deployed)) as client:
-            first_run = await _submit_and_wait(
-                client,
-                config,
-                headers,
-                session_id=None,
+            first = await _qualify_first_run_and_suspend(client, config, resources, headers, progress)
+            resumed_run = await _qualify_resume_and_reclaim(
+                client, config, resources, headers, first, progress
             )
-            last_session_id = first_run.session_id
-            first_session = await wait_for_idle_session(
-                resources,
-                session_id=first_run.session_id,
-                timeout_seconds=config.deployed.timeout_seconds,
-            )
-            cleanup_session = first_session
-            assert_session_belongs_to_deployment(first_session, config)
-            assert first_session.generation >= 1
-            assert first_session.sandbox_id is not None
-            assert first_session.expires_at - first_session.last_activity_at == timedelta(seconds=120)
-            first_sandbox_id = first_session.sandbox_id
-            first_generation = first_session.generation
-
-            suspended = await wait_for_suspended_sandbox(
-                resources,
-                first_session,
-                timeout_seconds=105.0,
-            )
-            assert suspended.sandbox_id == first_sandbox_id
-
-            resumed_run = await _submit_and_wait(
-                client,
-                config,
-                headers,
-                session_id=first_run.session_id,
-            )
-            assert resumed_run.session_id == first_run.session_id
-            resumed_session = await wait_for_idle_session(
-                resources,
-                session_id=resumed_run.session_id,
-                timeout_seconds=config.deployed.timeout_seconds,
-            )
-            cleanup_session = resumed_session
-            assert resumed_session.sandbox_id == first_sandbox_id
-            assert resumed_session.generation == first_generation
-            assert resumed_session.expires_at - resumed_session.last_activity_at == timedelta(
-                seconds=120
-            )
-
-            resumed_suspended = await wait_for_suspended_sandbox(
-                resources,
-                resumed_session,
-                timeout_seconds=105.0,
-            )
-            assert resumed_suspended.sandbox_id == first_sandbox_id
-            await wait_until_reclaim_due(resumed_session)
-            reclaimed = await wait_for_reclaimed_session(
-                resources,
-                session_id=resumed_run.session_id,
-            )
-            cleanup_session = reclaimed
-            assert reclaimed.status == "tombstoned"
-            assert reclaimed.tombstone_reason == "reclaimed_idle_session"
-            assert reclaimed.active_run_id is None
-            assert reclaimed.active_operation_id is None
-            assert await owned_sandbox(resources, reclaimed) is None
-            snapshots_after_reclaim = await owned_snapshots(resources, reclaimed)
-            assert not snapshots_after_reclaim
-
-            status_code, status, _ = await json_request(
-                client,
-                "GET",
-                resumed_run.management_urls["status_url"],
-                headers={"Authorization": authorization},
-            )
-            assert status_code == 200
-            assert status.get("session_id") == resumed_run.session_id
-            assert status.get("run_id") == resumed_run.run_id
-            assert status.get("state") == "succeeded"
-
-            result_code, result, _ = await json_request(
-                client,
-                "GET",
-                resumed_run.management_urls["result_url"],
-                headers={"Authorization": authorization},
-            )
-            assert result_code == 410
-            assert result.get("error") in {"result_unavailable", "session_gone"}
+            await _assert_public_terminal_after_reclaim(client, resumed_run, authorization)
     finally:
         if resources is not None:
-            try:
-                if cleanup_session is not None:
-                    await cleanup_owned_lifecycle_session(
-                        resources,
-                        session=cleanup_session,
-                        config=config,
-                    )
-                elif last_session_id is not None:
-                    session = await read_authoritative_session(resources, session_id=last_session_id)
-                    await cleanup_owned_lifecycle_session(resources, session=session, config=config)
-            finally:
-                await resources.close()
+            await _cleanup_lifecycle(resources, config, progress)
+
+
+async def _qualify_first_run_and_suspend(
+    client: ClientSession,
+    config: DeployedAcaLifecycleConfig,
+    resources: DeployedAcaLifecycleResources,
+    headers: dict[str, str],
+    progress: _LifecycleProgress,
+) -> _FirstRunObservation:
+    first_run = await _submit_and_wait(client, config, headers, session_id=None)
+    progress.last_session_id = first_run.session_id
+    first_session = await wait_for_idle_session(
+        resources,
+        session_id=first_run.session_id,
+        timeout_seconds=config.deployed.timeout_seconds,
+    )
+    progress.cleanup_session = first_session
+    assert_session_belongs_to_deployment(first_session, config)
+    assert first_session.generation >= 1
+    assert first_session.sandbox_id is not None
+    assert first_session.expires_at - first_session.last_activity_at == timedelta(seconds=120)
+    first_sandbox_id = first_session.sandbox_id
+    first_generation = first_session.generation
+
+    suspended = await wait_for_suspended_sandbox(resources, first_session, timeout_seconds=105.0)
+    assert suspended.sandbox_id == first_sandbox_id
+    return _FirstRunObservation(
+        run=first_run, sandbox_id=first_sandbox_id, generation=first_generation
+    )
+
+
+async def _qualify_resume_and_reclaim(
+    client: ClientSession,
+    config: DeployedAcaLifecycleConfig,
+    resources: DeployedAcaLifecycleResources,
+    headers: dict[str, str],
+    first: _FirstRunObservation,
+    progress: _LifecycleProgress,
+) -> AcceptedRun:
+    resumed_run = await _submit_and_wait(client, config, headers, session_id=first.run.session_id)
+    assert resumed_run.session_id == first.run.session_id
+    resumed_session = await wait_for_idle_session(
+        resources,
+        session_id=resumed_run.session_id,
+        timeout_seconds=config.deployed.timeout_seconds,
+    )
+    progress.cleanup_session = resumed_session
+    assert resumed_session.sandbox_id == first.sandbox_id
+    assert resumed_session.generation == first.generation
+    assert resumed_session.expires_at - resumed_session.last_activity_at == timedelta(seconds=120)
+
+    resumed_suspended = await wait_for_suspended_sandbox(
+        resources, resumed_session, timeout_seconds=105.0
+    )
+    assert resumed_suspended.sandbox_id == first.sandbox_id
+    await wait_until_reclaim_due(resumed_session)
+    reclaimed = await wait_for_reclaimed_session(resources, session_id=resumed_run.session_id)
+    progress.cleanup_session = reclaimed
+    assert reclaimed.status == "tombstoned"
+    assert reclaimed.tombstone_reason == "reclaimed_idle_session"
+    assert reclaimed.active_run_id is None
+    assert reclaimed.active_operation_id is None
+    assert await owned_sandbox(resources, reclaimed) is None
+    snapshots_after_reclaim = await owned_snapshots(resources, reclaimed)
+    assert not snapshots_after_reclaim
+    return resumed_run
+
+
+async def _assert_public_terminal_after_reclaim(
+    client: ClientSession,
+    resumed_run: AcceptedRun,
+    authorization: str,
+) -> None:
+    status_code, status, _ = await json_request(
+        client,
+        "GET",
+        resumed_run.management_urls["status_url"],
+        headers={"Authorization": authorization},
+    )
+    assert status_code == 200
+    assert status.get("session_id") == resumed_run.session_id
+    assert status.get("run_id") == resumed_run.run_id
+    assert status.get("state") == "succeeded"
+
+    result_code, result, _ = await json_request(
+        client,
+        "GET",
+        resumed_run.management_urls["result_url"],
+        headers={"Authorization": authorization},
+    )
+    assert result_code == 410
+    assert result.get("error") in {"result_unavailable", "session_gone"}
+
+
+async def _cleanup_lifecycle(
+    resources: DeployedAcaLifecycleResources,
+    config: DeployedAcaLifecycleConfig,
+    progress: _LifecycleProgress,
+) -> None:
+    try:
+        if progress.cleanup_session is not None:
+            await cleanup_owned_lifecycle_session(
+                resources,
+                session=progress.cleanup_session,
+                config=config,
+            )
+        elif progress.last_session_id is not None:
+            session = await read_authoritative_session(
+                resources, session_id=progress.last_session_id
+            )
+            await cleanup_owned_lifecycle_session(resources, session=session, config=config)
+    finally:
+        await resources.close()
 
 
 async def _submit_and_wait(

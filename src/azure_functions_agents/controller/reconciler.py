@@ -26,6 +26,7 @@ from ..session_state import (
     TERMINAL_RUN_STATUSES,
     ConcurrencyConflictError,
     DurableIdempotencyRecord,
+    DurableOperationKind,
     DurableOperationPhase,
     DurableOwnerIdempotencyRecord,
     DurableRunRecord,
@@ -69,12 +70,37 @@ _STATUSES_REQUIRING_BACKING = frozenset(
 )
 _PROVIDER_SUSPENDED_STATES = frozenset({"Stopped", "Suspended"})
 RECONCILER_CADENCE_SETTING = "AZURE_FUNCTIONS_AGENTS_RECONCILER_CADENCE_SECONDS"
+_PROVISION_SUBMIT_OPERATION_KIND: DurableOperationKind = "provision_submit"
+_SUBMIT_RUN_OPERATION_KIND: DurableOperationKind = "submit_run"
+_SUBMIT_OPERATION_KINDS: frozenset[DurableOperationKind] = frozenset(
+    {_PROVISION_SUBMIT_OPERATION_KIND, _SUBMIT_RUN_OPERATION_KIND}
+)
+_TOMBSTONED_SESSION_STATUS: SessionStatus = "tombstoned"
+_DELETED_SESSION_STATUS: SessionStatus = "deleted"
+_RETIRED_SESSION_STATUSES: frozenset[SessionStatus] = frozenset(
+    {_TOMBSTONED_SESSION_STATUS, _DELETED_SESSION_STATUS}
+)
+_DELETING_SESSION_STATUS: SessionStatus = "deleting"
+_NON_REUSABLE_SESSION_STATUSES: frozenset[SessionStatus] = (
+    _RETIRED_SESSION_STATUSES
+    | frozenset(
+    {_DELETING_SESSION_STATUS}
+    )
+)
+_PROVISION_TERMINAL_BEFORE_POINTER_REASON = "provision_terminal_before_pointer"
 
 type TerminalReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[RunStatus | None]]
 type DeathVerifier = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[bool | None]]
 type HeartbeatReader = Callable[[DurableSessionRecord, DurableRunRecord], Awaitable[datetime | None]]
 type IdleLifecycleApplier = Callable[[SessionOperationFence], Awaitable[bool]]
 type _SessionKey = tuple[str, str]
+type _WorkingSetRecord = (
+    DurableSessionRecord
+    | DurableRunRecord
+    | DurableIdempotencyRecord
+    | DurableOwnerIdempotencyRecord
+    | DurableSessionOperation
+)
 
 _SESSION_RECONCILIATION_ERRORS = (
     ConcurrencyConflictError,
@@ -316,47 +342,19 @@ class SessionReconciler:
                 continuation_token=continuation,
             )
             for entity in page.entities:
-                try:
-                    row_key = parse_row_key(str(entity["RowKey"]))
-                except (KeyError, SessionStateContractError):
+                record = _working_set_record(entity)
+                if (
+                    record is None
+                    or record.owner_partition.app_hash != self._app_hash
+                ):
                     continue
-                if isinstance(row_key, RunRowKey):
-                    try:
-                        run = DurableRunRecord.from_table_entity(entity)
-                    except SessionStateContractError:
-                        continue
-                    if run.owner_partition.app_hash == self._app_hash:
-                        runs.append(run)
-                elif isinstance(row_key, OperationRowKey):
-                    try:
-                        operation = DurableSessionOperation.from_table_entity(entity)
-                    except SessionStateContractError:
-                        continue
-                    if operation.owner_partition.app_hash == self._app_hash:
-                        operations.append(operation)
-                elif isinstance(row_key, IdempotencyRowKey):
-                    try:
-                        idempotency = DurableIdempotencyRecord.from_table_entity(entity)
-                    except SessionStateContractError:
-                        continue
-                    if idempotency.owner_partition.app_hash == self._app_hash:
-                        idempotencies.append(idempotency)
-                elif isinstance(row_key, OwnerIdempotencyRowKey):
-                    try:
-                        owner_idempotency = DurableOwnerIdempotencyRecord.from_table_entity(
-                            entity
-                        )
-                    except SessionStateContractError:
-                        continue
-                    if owner_idempotency.owner_partition.app_hash == self._app_hash:
-                        idempotencies.append(owner_idempotency)
-                elif isinstance(row_key, SessionRowKey):
-                    try:
-                        session = DurableSessionRecord.from_table_entity(entity)
-                    except SessionStateContractError:
-                        continue
-                    if session.owner_partition.app_hash == self._app_hash:
-                        sessions.append(session)
+                _append_working_set_record(
+                    record,
+                    sessions,
+                    runs,
+                    idempotencies,
+                    operations,
+                )
             if page.service_time is not None:
                 service_times.append(_utc(page.service_time))
             continuation = page.continuation_token
@@ -570,7 +568,7 @@ class SessionReconciler:
         )
         if fence is None:
             return report
-        if fence.kind in {"provision_submit", "submit_run"}:
+        if fence.kind in _SUBMIT_OPERATION_KINDS:
             return await self._resume_submit_operation(
                 session,
                 run,
@@ -654,7 +652,7 @@ class SessionReconciler:
         if now < run.expires_at + timedelta(seconds=self._config.safety_grace_seconds):
             return report
         if (
-            fence.kind == "provision_submit"
+            fence.kind == _PROVISION_SUBMIT_OPERATION_KIND
             and (session.sandbox_id is None or fence.target.sandbox_id is None)
         ):
             return await self._expire_pre_pointer_provision(
@@ -810,7 +808,7 @@ class SessionReconciler:
             )
         tombstoned = _tombstoned_operation_session(
             session,
-            tombstone_reason="provision_terminal_before_pointer",
+            tombstone_reason=_PROVISION_TERMINAL_BEFORE_POINTER_REASON,
             updated_at=now,
         )
         await self._store.complete_operation(
@@ -1242,7 +1240,7 @@ class SessionReconciler:
                     report,
                 )
             return await self._resume_detached_operation(session, now, report)
-        if session.status == "deleting":
+        if session.status == _DELETING_SESSION_STATUS:
             return await self._begin_reclaim(session, inventory, snapshots, now, report)
         if session.status == "creating":
             if _is_older_than(session.created_at, now, self._config.safety_grace_seconds):
@@ -1339,7 +1337,7 @@ class SessionReconciler:
                 now=now,
                 report=report,
             )
-        if fence.kind not in {"provision_submit", "submit_run"}:
+        if fence.kind not in _SUBMIT_OPERATION_KINDS:
             return report
         try:
             run = await self._store.get_run(
@@ -1568,7 +1566,10 @@ class SessionReconciler:
                 report = _replace_report(report, deleted_snapshots=report.deleted_snapshots + 1)
                 deleted_snapshot_count += 1
         latest = await self._store.get_session(session.owner_partition, session.session_id)
-        if latest.record.status == "deleting" and latest.record.active_run_id is None:
+        if (
+            latest.record.status == _DELETING_SESSION_STATUS
+            and latest.record.active_run_id is None
+        ):
             tombstone_reason = latest.record.tombstone_reason or "reclaimed_idle_session"
             await self._store.tombstone_session(
                 previous=latest.record,
@@ -1665,7 +1666,7 @@ class SessionReconciler:
         *,
         fence: SessionOperationFence | None = None,
     ) -> ReconcileReport:
-        if session.status in {"tombstoned", "deleting", "deleted"}:
+        if session.status in _NON_REUSABLE_SESSION_STATUSES:
             return report
         if fence is None:
             if session.active_operation_id is None:
@@ -1678,7 +1679,7 @@ class SessionReconciler:
                 )
             except OperationRowNotFoundError:
                 return report
-            if operation.record.kind not in {"provision_submit", "submit_run"}:
+            if operation.record.kind not in _SUBMIT_OPERATION_KINDS:
                 return report
             fence = await self._store.takeover_expired_operation(
                 owner_partition=session.owner_partition,
@@ -1688,7 +1689,7 @@ class SessionReconciler:
             )
             if fence is None:
                 return report
-        if fence.kind not in {"provision_submit", "submit_run"}:
+        if fence.kind not in _SUBMIT_OPERATION_KINDS:
             return report
         current = await self._store.get_session(fence.owner_partition, fence.session_id)
         operation = await self._store.get_operation(
@@ -1699,7 +1700,7 @@ class SessionReconciler:
         if not fence.matches(current.record, operation.record):
             return report
         if (
-            fence.kind == "provision_submit"
+            fence.kind == _PROVISION_SUBMIT_OPERATION_KIND
             and (
                 current.record.sandbox_id is None
                 or fence.target.sandbox_id is None
@@ -1738,84 +1739,132 @@ class SessionReconciler:
         report: ReconcileReport,
     ) -> ReconcileReport:
         sessions_by_sandbox: dict[str, DurableSessionRecord | None] = {}
-        snapshots_by_sandbox: dict[str, list[SandboxSnapshot]] = {}
-        for snapshot in snapshots:
-            if snapshot.sandbox_id is not None:
-                snapshots_by_sandbox.setdefault(snapshot.sandbox_id, []).append(snapshot)
+        snapshots_by_sandbox = _snapshots_by_sandbox(snapshots)
         orphan_snapshot_sandboxes: set[str] = set()
         for sandbox in inventory.values():
             session, is_verifiable = await self._session_for_labeled_sandbox(sandbox)
             if not is_verifiable:
                 continue
             sessions_by_sandbox[sandbox.sandbox_id] = session
-            if await self._is_active_provision_sandbox(session, sandbox, now):
+            if not await self._is_deletable_labeled_orphan(session, sandbox, now):
                 continue
-            if (
-                session is None
-                or session.sandbox_id != sandbox.sandbox_id
-            ) and _is_older_than(
-                sandbox.created_at or sandbox.modified_at,
-                now,
-                self._config.safety_grace_seconds,
-            ):
-                orphan_snapshot_sandboxes.add(sandbox.sandbox_id)
-                snapshots_deleted = True
-                for snapshot in snapshots_by_sandbox.get(sandbox.sandbox_id, ()):
-                    try:
-                        deleted = await self._delete_verified_orphan_snapshot(
-                            snapshot,
-                            sandbox,
-                        )
-                    except SandboxTransportError:
-                        logger.warning(
-                            "Sandbox orphan snapshot cleanup deferred: sandbox_id=%s",
-                            sandbox.sandbox_id,
-                        )
-                        snapshots_deleted = False
-                        break
-                    if deleted:
-                        report = _replace_report(
-                            report,
-                            deleted_snapshots=report.deleted_snapshots + 1,
-                        )
-                if not snapshots_deleted:
-                    continue
-                try:
-                    deleted = await self._delete_verified_orphan_sandbox(sandbox)
-                except SandboxTransportError:
-                    logger.warning(
-                        "Sandbox orphan cleanup deferred: sandbox_id=%s",
-                        sandbox.sandbox_id,
-                    )
-                    continue
-                if deleted:
-                    report = _replace_report(
-                        report,
-                        deleted_sandboxes=report.deleted_sandboxes + 1,
-                    )
+            orphan_snapshot_sandboxes.add(sandbox.sandbox_id)
+            report = await self._delete_labeled_orphan(
+                sandbox,
+                snapshots_by_sandbox.get(sandbox.sandbox_id, ()),
+                report,
+            )
 
         for snapshot in snapshots:
-            if snapshot.sandbox_id is None:
-                continue
-            if snapshot.sandbox_id in orphan_snapshot_sandboxes:
-                continue
-            session = sessions_by_sandbox.get(snapshot.sandbox_id)
-            if snapshot.sandbox_id not in sessions_by_sandbox:
-                continue
-            if (
-                (session is None or snapshot.snapshot_id not in session.snapshot_ids)
-                and _is_older_than(
-                    snapshot.created_at,
-                    now,
-                    self._config.safety_grace_seconds,
+            report = await self._delete_unreferenced_labeled_snapshot(
+                snapshot,
+                sessions_by_sandbox,
+                orphan_snapshot_sandboxes,
+                now,
+                report,
+            )
+        return report
+
+
+    async def _is_deletable_labeled_orphan(
+        self,
+        session: DurableSessionRecord | None,
+        sandbox: SandboxSummary,
+        now: datetime,
+    ) -> bool:
+        if await self._is_active_provision_sandbox(session, sandbox, now):
+            return False
+        if session is not None and session.sandbox_id == sandbox.sandbox_id:
+            return False
+        return _is_older_than(
+            sandbox.created_at or sandbox.modified_at,
+            now,
+            self._config.safety_grace_seconds,
+        )
+
+
+    async def _delete_labeled_orphan(
+        self,
+        sandbox: SandboxSummary,
+        snapshots: tuple[SandboxSnapshot, ...],
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        report, snapshots_deleted = await self._delete_orphan_snapshots(
+            snapshots,
+            sandbox,
+            report,
+        )
+        if not snapshots_deleted:
+            return report
+        try:
+            deleted = await self._delete_verified_orphan_sandbox(sandbox)
+        except SandboxTransportError:
+            logger.warning(
+                "Sandbox orphan cleanup deferred: sandbox_id=%s",
+                sandbox.sandbox_id,
+            )
+            return report
+        if deleted:
+            return _replace_report(
+                report,
+                deleted_sandboxes=report.deleted_sandboxes + 1,
+            )
+        return report
+
+
+    async def _delete_orphan_snapshots(
+        self,
+        snapshots: tuple[SandboxSnapshot, ...],
+        sandbox: SandboxSummary,
+        report: ReconcileReport,
+    ) -> tuple[ReconcileReport, bool]:
+        for snapshot in snapshots:
+            try:
+                deleted = await self._delete_verified_orphan_snapshot(snapshot, sandbox)
+            except SandboxTransportError:
+                logger.warning(
+                    "Sandbox orphan snapshot cleanup deferred: sandbox_id=%s",
+                    sandbox.sandbox_id,
                 )
-            ):
-                await self._provider.delete_snapshot(snapshot.snapshot_id)
+                return report, False
+            if deleted:
                 report = _replace_report(
                     report,
                     deleted_snapshots=report.deleted_snapshots + 1,
                 )
-        return report
+        return report, True
+
+
+    async def _delete_unreferenced_labeled_snapshot(
+        self,
+        snapshot: SandboxSnapshot,
+        sessions_by_sandbox: dict[str, DurableSessionRecord | None],
+        orphan_snapshot_sandboxes: set[str],
+        now: datetime,
+        report: ReconcileReport,
+    ) -> ReconcileReport:
+        sandbox_id = snapshot.sandbox_id
+        if (
+            sandbox_id is None
+            or sandbox_id in orphan_snapshot_sandboxes
+            or sandbox_id not in sessions_by_sandbox
+        ):
+            return report
+        session = sessions_by_sandbox[sandbox_id]
+        if session is not None and snapshot.snapshot_id in session.snapshot_ids:
+            return report
+        if not _is_older_than(
+            snapshot.created_at,
+            now,
+            self._config.safety_grace_seconds,
+        ):
+            return report
+        await self._provider.delete_snapshot(snapshot.snapshot_id)
+        return _replace_report(
+            report,
+            deleted_snapshots=report.deleted_snapshots + 1,
+        )
+
 
     async def _delete_verified_orphan_snapshot(
         self,
@@ -1869,7 +1918,7 @@ class SessionReconciler:
             return False
         target = operation.record.target
         matches = (
-            operation.record.kind == "provision_submit"
+            operation.record.kind == _PROVISION_SUBMIT_OPERATION_KIND
             and operation.record.correlation_label
             == sandbox.labels.get("operation_label")
             and target.session_id == session.session_id
@@ -1900,47 +1949,79 @@ class SessionReconciler:
         now: datetime,
         report: ReconcileReport,
     ) -> ReconcileReport:
+        await self._prune_expired_idempotencies(idempotencies, now)
+        await self._prune_expired_operations(operations, now)
+        await self._prune_expired_runs(sessions, runs, now)
+        await self._prune_expired_sessions(sessions, now)
+        return report
+
+    async def _prune_expired_idempotencies(
+        self,
+        idempotencies: tuple[
+            DurableIdempotencyRecord | DurableOwnerIdempotencyRecord, ...
+        ],
+        now: datetime,
+    ) -> None:
         for idempotency in idempotencies:
             if idempotency.expires_at > now:
                 continue
             if isinstance(idempotency, DurableOwnerIdempotencyRecord):
-                owner_idempotency_read = await self._store.get_owner_idempotency(
-                    idempotency.owner_partition,
-                    idempotency.idempotency_hash,
-                )
-                if (
-                    owner_idempotency_read is not None
-                    and owner_idempotency_read.record.expires_at <= now
-                    and await self._owner_idempotency_is_prunable(
-                        owner_idempotency_read.record,
-                        now,
-                    )
-                ):
-                    with suppress(ConcurrencyConflictError):
-                        await self._store.delete_owner_idempotency(
-                            previous=owner_idempotency_read.record,
-                            etag=owner_idempotency_read.etag,
-                        )
+                await self._prune_expired_owner_idempotency(idempotency, now)
                 continue
-            idempotency_read = await self._store.get_idempotency(
-                idempotency.owner_partition,
-                idempotency.session_id,
-                idempotency.idempotency_hash,
-            )
-            if idempotency_read is not None and idempotency_read.record.expires_at <= now:
-                with suppress(ConcurrencyConflictError):
-                    await self._store.delete_idempotency(
-                        previous=idempotency_read.record,
-                        etag=idempotency_read.etag,
-                    )
+            await self._prune_expired_session_idempotency(idempotency, now)
 
+    async def _prune_expired_owner_idempotency(
+        self,
+        idempotency: DurableOwnerIdempotencyRecord,
+        now: datetime,
+    ) -> None:
+        owner_idempotency_read = await self._store.get_owner_idempotency(
+            idempotency.owner_partition,
+            idempotency.idempotency_hash,
+        )
+        if (
+            owner_idempotency_read is None
+            or owner_idempotency_read.record.expires_at > now
+            or not await self._owner_idempotency_is_prunable(
+                owner_idempotency_read.record,
+                now,
+            )
+        ):
+            return
+        with suppress(ConcurrencyConflictError):
+            await self._store.delete_owner_idempotency(
+                previous=owner_idempotency_read.record,
+                etag=owner_idempotency_read.etag,
+            )
+
+    async def _prune_expired_session_idempotency(
+        self,
+        idempotency: DurableIdempotencyRecord,
+        now: datetime,
+    ) -> None:
+        idempotency_read = await self._store.get_idempotency(
+            idempotency.owner_partition,
+            idempotency.session_id,
+            idempotency.idempotency_hash,
+        )
+        if idempotency_read is None or idempotency_read.record.expires_at > now:
+            return
+        with suppress(ConcurrencyConflictError):
+            await self._store.delete_idempotency(
+                previous=idempotency_read.record,
+                etag=idempotency_read.etag,
+            )
+
+    async def _prune_expired_operations(
+        self,
+        operations: tuple[DurableSessionOperation, ...],
+        now: datetime,
+    ) -> None:
         for operation in operations:
-            if (
-                operation.state == "active"
-                or operation.finished_at is None
-                or operation.finished_at
-                + timedelta(seconds=self._config.terminal_retention_seconds)
-                > now
+            if not _is_expired_completed_operation(
+                operation,
+                now,
+                self._config.terminal_retention_seconds,
             ):
                 continue
             operation_read = await self._store.get_operation(
@@ -1948,62 +2029,75 @@ class SessionReconciler:
                 operation.target.session_id,
                 operation.operation_id,
             )
-            if (
-                operation_read.record.state != "active"
-                and operation_read.record.finished_at is not None
-                and operation_read.record.finished_at
-                + timedelta(seconds=self._config.terminal_retention_seconds)
-                <= now
+            if not _is_expired_completed_operation(
+                operation_read.record,
+                now,
+                self._config.terminal_retention_seconds,
             ):
-                with suppress(ConcurrencyConflictError, OperationRowNotFoundError):
-                    await self._store.delete_operation(
-                        previous=operation_read.record,
-                        etag=operation_read.etag,
-                    )
+                continue
+            with suppress(ConcurrencyConflictError, OperationRowNotFoundError):
+                await self._store.delete_operation(
+                    previous=operation_read.record,
+                    etag=operation_read.etag,
+                )
 
+    async def _prune_expired_runs(
+        self,
+        sessions: tuple[DurableSessionRecord, ...],
+        runs: tuple[DurableRunRecord, ...],
+        now: datetime,
+    ) -> None:
         sessions_by_key = {
             (session.owner_partition.partition_key, session.session_id): session
             for session in sessions
         }
         for run in runs:
             session = sessions_by_key.get((run.owner_partition.partition_key, run.session_id))
-            if (
-                session is None
-                or session.status not in {"tombstoned", "deleted"}
-                or run.status not in TERMINAL_RUN_STATUSES
-                or now
-                < max(
-                    run.updated_at
-                    + timedelta(seconds=self._config.terminal_retention_seconds),
-                    session.updated_at
-                    + timedelta(seconds=self._config.tombstone_retention_seconds),
-                )
-            ):
+            if not self._is_prunable_tombstone_run(session, run, now):
                 continue
             run_read = await self._store.get_run(
                 run.owner_partition,
                 run.session_id,
                 run.run_id,
             )
-            if (
-                run_read.record.status in TERMINAL_RUN_STATUSES
-                and run_read.record.updated_at
-                + timedelta(seconds=self._config.terminal_retention_seconds)
-                <= now
+            if not _is_expired_terminal_run(
+                run_read.record,
+                now,
+                self._config.terminal_retention_seconds,
             ):
-                with suppress(ConcurrencyConflictError, RunRowNotFoundError):
-                    await self._store.delete_run(
-                        previous=run_read.record,
-                        etag=run_read.etag,
-                    )
+                continue
+            with suppress(ConcurrencyConflictError, RunRowNotFoundError):
+                await self._store.delete_run(
+                    previous=run_read.record,
+                    etag=run_read.etag,
+                )
 
+    def _is_prunable_tombstone_run(
+        self,
+        session: DurableSessionRecord | None,
+        run: DurableRunRecord,
+        now: datetime,
+    ) -> bool:
+        if (
+            session is None
+            or session.status not in _RETIRED_SESSION_STATUSES
+            or run.status not in TERMINAL_RUN_STATUSES
+        ):
+            return False
+        retention_complete_at = max(
+            run.updated_at + timedelta(seconds=self._config.terminal_retention_seconds),
+            session.updated_at
+            + timedelta(seconds=self._config.tombstone_retention_seconds),
+        )
+        return now >= retention_complete_at
+
+    async def _prune_expired_sessions(
+        self,
+        sessions: tuple[DurableSessionRecord, ...],
+        now: datetime,
+    ) -> None:
         for session in sessions:
-            if (
-                session.status not in {"tombstoned", "deleted"}
-                or session.updated_at
-                + timedelta(seconds=self._config.tombstone_retention_seconds)
-                > now
-            ):
+            if not self._is_expired_tombstone_session(session, now):
                 continue
             references = await self._store.query_entities(
                 filter_expression=_session_reference_filter(session),
@@ -2015,18 +2109,25 @@ class SessionReconciler:
                 session.owner_partition,
                 session.session_id,
             )
-            if (
-                session_read.record.status in {"tombstoned", "deleted"}
-                and session_read.record.updated_at
-                + timedelta(seconds=self._config.tombstone_retention_seconds)
-                <= now
-            ):
-                with suppress(ConcurrencyConflictError, SessionRowNotFoundError):
-                    await self._store.delete_session(
-                        previous=session_read.record,
-                        etag=session_read.etag,
-                    )
-        return report
+            if not self._is_expired_tombstone_session(session_read.record, now):
+                continue
+            with suppress(ConcurrencyConflictError, SessionRowNotFoundError):
+                await self._store.delete_session(
+                    previous=session_read.record,
+                    etag=session_read.etag,
+                )
+
+    def _is_expired_tombstone_session(
+        self,
+        session: DurableSessionRecord,
+        now: datetime,
+    ) -> bool:
+        return (
+            session.status in _RETIRED_SESSION_STATUSES
+            and session.updated_at
+            + timedelta(seconds=self._config.tombstone_retention_seconds)
+            <= now
+        )
 
     async def _owner_idempotency_is_prunable(
         self,
@@ -2061,7 +2162,7 @@ class SessionReconciler:
                 record.run_id,
             )
         except RunRowNotFoundError:
-            return session.record.status in {"tombstoned", "deleted"}
+            return session.record.status in _RETIRED_SESSION_STATUSES
         return (
             run.record.status in TERMINAL_RUN_STATUSES
             and run.record.updated_at
@@ -2102,6 +2203,79 @@ class SessionReconciler:
             )
         except SessionRowNotFoundError:
             return None, True
+
+
+def _snapshots_by_sandbox(
+    snapshots: tuple[SandboxSnapshot, ...],
+) -> dict[str, tuple[SandboxSnapshot, ...]]:
+    grouped: dict[str, list[SandboxSnapshot]] = {}
+    for snapshot in snapshots:
+        if snapshot.sandbox_id is not None:
+            grouped.setdefault(snapshot.sandbox_id, []).append(snapshot)
+    return {sandbox_id: tuple(records) for sandbox_id, records in grouped.items()}
+
+
+def _is_expired_completed_operation(
+    operation: DurableSessionOperation,
+    now: datetime,
+    retention_seconds: int,
+) -> bool:
+    return (
+        operation.state != "active"
+        and operation.finished_at is not None
+        and operation.finished_at + timedelta(seconds=retention_seconds) <= now
+    )
+
+
+def _is_expired_terminal_run(
+    run: DurableRunRecord,
+    now: datetime,
+    retention_seconds: int,
+) -> bool:
+    return (
+        run.status in TERMINAL_RUN_STATUSES
+        and run.updated_at + timedelta(seconds=retention_seconds) <= now
+    )
+
+
+def _working_set_record(entity: Mapping[str, object]) -> _WorkingSetRecord | None:
+    try:
+        row_key = parse_row_key(str(entity["RowKey"]))
+    except (KeyError, SessionStateContractError):
+        return None
+    try:
+        if isinstance(row_key, RunRowKey):
+            return DurableRunRecord.from_table_entity(entity)
+        if isinstance(row_key, OperationRowKey):
+            return DurableSessionOperation.from_table_entity(entity)
+        if isinstance(row_key, IdempotencyRowKey):
+            return DurableIdempotencyRecord.from_table_entity(entity)
+        if isinstance(row_key, OwnerIdempotencyRowKey):
+            return DurableOwnerIdempotencyRecord.from_table_entity(entity)
+        if isinstance(row_key, SessionRowKey):
+            return DurableSessionRecord.from_table_entity(entity)
+    except SessionStateContractError:
+        return None
+    return None
+
+
+def _append_working_set_record(
+    record: _WorkingSetRecord,
+    sessions: list[DurableSessionRecord],
+    runs: list[DurableRunRecord],
+    idempotencies: list[DurableIdempotencyRecord | DurableOwnerIdempotencyRecord],
+    operations: list[DurableSessionOperation],
+) -> None:
+    if isinstance(record, DurableSessionRecord):
+        sessions.append(record)
+        return
+    if isinstance(record, DurableRunRecord):
+        runs.append(record)
+        return
+    if isinstance(record, DurableSessionOperation):
+        operations.append(record)
+        return
+    idempotencies.append(record)
 
 
 def _runs_by_session(
@@ -2193,7 +2367,7 @@ def _is_pre_pointer_provision(
     fence: SessionOperationFence,
 ) -> bool:
     return (
-        fence.kind == "provision_submit"
+        fence.kind == _PROVISION_SUBMIT_OPERATION_KIND
         and (session.sandbox_id is None or fence.target.sandbox_id is None)
     )
 
@@ -2277,7 +2451,7 @@ def _matches_reusable_operation(
     target = fence.target
     return (
         fence.matches(session, operation)
-        and session.status not in {"tombstoned", "deleting", "deleted"}
+        and session.status not in _NON_REUSABLE_SESSION_STATUSES
         and target.sandbox_id is not None
         and session.sandbox_id == target.sandbox_id
         and session.generation == target.generation
@@ -2298,9 +2472,9 @@ def _can_rearm_reclaim_operation(operation: DurableSessionOperation) -> bool:
 
 
 def _idle_rearm_phase(fence: SessionOperationFence) -> DurableOperationPhase:
-    if fence.kind == "provision_submit":
+    if fence.kind == _PROVISION_SUBMIT_OPERATION_KIND:
         return "provision_rearm"
-    if fence.kind == "submit_run":
+    if fence.kind == _SUBMIT_RUN_OPERATION_KIND:
         return "submit_rearm"
     return "reclaim_rearm"
 
@@ -2350,7 +2524,7 @@ def _tombstoned_operation_session(
         digest_kind=record.digest_kind,
         digest=record.digest,
         protocol=record.protocol,
-        status="tombstoned",
+        status=_TOMBSTONED_SESSION_STATUS,
         last_activity_at=record.last_activity_at,
         expires_at=record.expires_at,
         idle_policy_armed=False,

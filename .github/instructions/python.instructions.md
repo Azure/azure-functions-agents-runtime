@@ -27,6 +27,10 @@ Python semantics; `pyproject.toml` owns ruff and mypy enforcement.
 - Give every source module a globally unique, intent-revealing basename.
   Source tests mirror the module name as `tests/test_<module>.py`.
 - Use a module constant rather than repeating a named URL, API version, or path.
+- Declare each finite domain vocabulary once in its owning module using the
+  repository's typed idiom (`Literal`/`StrEnum` plus named constants,
+  frozensets, or mappings as appropriate); consumers reuse those symbols rather
+  than redeclaring raw strings.
 
 ## Documentation and logging
 

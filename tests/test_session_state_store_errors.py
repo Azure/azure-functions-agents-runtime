@@ -1216,6 +1216,58 @@ async def test_provision_submit_confirmation_upgrades_an_ambiguous_acknowledgeme
 
 
 @pytest.mark.asyncio
+async def test_provision_submit_confirmation_uses_candidate_rows_after_terminal_race() -> None:
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    initial = _provision_submit_records()
+    owner_idempotency = DurableOwnerIdempotencyRecord.create(
+        owner_partition=initial.session.owner_partition,
+        idempotency_hash="d" * 64,
+        request_hash="e" * 64,
+        session_id=initial.session.session_id,
+        run_id=initial.run.run_id,
+        expires_at=_NOW + timedelta(hours=1),
+        created_at=_NOW,
+    )
+    records = ProvisionSubmitRecords.create(
+        initial.session,
+        initial.run,
+        initial.operation,
+        owner_idempotency,
+    )
+    reserved = await store.begin_provision_submit(records)
+    assert reserved.fence is not None
+
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=records.session.owner_partition,
+        session_id=records.session.session_id,
+        run_id=records.run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assert canceled.fence is not None
+    current = await store.get_session(
+        records.session.owner_partition,
+        records.session.session_id,
+    )
+    await store.complete_operation(
+        fence=canceled.fence,
+        updated_session=_session_after_prelaunch_cancel(
+            current.record,
+            updated_at=_NOW + timedelta(seconds=2),
+        ),
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    outcome = await store.confirm_provision_submit(records)
+
+    assert outcome.admission == "committed"
+    assert outcome.replayed is False
+    assert outcome.run.status == "canceled"
+    assert outcome.fence is None
+
+
+@pytest.mark.asyncio
 async def test_provision_submit_unconfirmed_acknowledgement_returns_unresolved_candidate() -> None:
     fake = _FakeTableClient()
     store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
@@ -1363,6 +1415,82 @@ async def test_operation_admission_confirmation_upgrades_an_ambiguous_acknowledg
     assert outcome.run == run
     stored = await store.get_session(session.owner_partition, session.session_id)
     assert stored.record.active_run_id == run.run_id
+
+
+@pytest.mark.asyncio
+async def test_operation_admission_confirmation_uses_matching_idempotency_after_terminal_race() -> (
+    None
+):
+    fake = _FakeTableClient()
+    store = AzureTableSessionStateStore(fake)  # type: ignore[arg-type]
+    session = _session(status="ready")
+    session_etag = await store.create_session(session)
+    run = _run(run_id="run-admission", status="accepted")
+    operation = DurableSessionOperation.create(
+        owner_partition=session.owner_partition,
+        target=SessionOperationTarget.create(
+            session_id=session.session_id,
+            sandbox_id=session.sandbox_id,
+            generation=session.generation,
+            digest_kind=session.digest_kind,
+            digest=session.digest,
+            run_id=run.run_id,
+        ),
+        sequence=1,
+        kind="submit_run",
+        phase="submit_admission",
+        state="active",
+        correlation_label=operation_correlation_label(session.session_id, 1),
+        token="a" * 32,
+        attempt_count=0,
+        error_code=None,
+        lease_expires_at=_NOW + timedelta(seconds=60),
+        next_attempt_at=None,
+        created_at=_NOW,
+        updated_at=_NOW,
+        finished_at=None,
+    )
+    prepared = replace(
+        session,
+        active_operation_id=operation.operation_id,
+        operation_sequence=operation.sequence,
+    )
+    fence = await store.begin_operation(
+        previous=session,
+        updated=prepared,
+        operation=operation,
+        etag=session_etag,
+    )
+    records = AdmissionRecords.create(
+        replace(prepared, status="running", active_run_id=run.run_id),
+        run,
+        _idempotency(session_id=session.session_id, run_id=run.run_id),
+    )
+    await store.admit_operation_run(fence=fence, records=records)
+
+    canceled = await store.cancel_prelaunch_submit(
+        owner_partition=session.owner_partition,
+        session_id=session.session_id,
+        run_id=run.run_id,
+        token="b" * 32,
+        updated_at=_NOW + timedelta(seconds=1),
+    )
+    assert canceled.fence is not None
+    current = await store.get_session(session.owner_partition, session.session_id)
+    await store.complete_operation(
+        fence=canceled.fence,
+        updated_session=_session_after_prelaunch_cancel(
+            current.record,
+            updated_at=_NOW + timedelta(seconds=2),
+        ),
+        updated_at=_NOW + timedelta(seconds=2),
+    )
+
+    outcome = await store.confirm_operation_run_admission(fence=fence, records=records)
+
+    assert outcome.admission == "committed"
+    assert outcome.replayed is False
+    assert outcome.run.status == "canceled"
 
 
 @pytest.mark.asyncio

@@ -488,31 +488,27 @@ journal events rotated out: read status/result, then reconnect at the reported
 earliest ID minus one. Supply `Idempotency-Key` to replay the same logical
 attempt safely; keys are stored only as hashes.
 
-If sandbox setup exceeds its 90-second budget after durable admission, the
-server does not discard the ticket. An async request receives the linked `202`
-above; a synchronous request may receive `504 setup_deadline_exceeded` with the
-same IDs, URLs, `Location`, and `x-ms-session-id`. Use those URLs directly—the
-prompt and idempotency key are not needed to poll or cancel.
+If sandbox setup exceeds its 90-second budget after admission, an async request
+keeps its linked `202` ticket and a synchronous request may receive linked
+`504 setup_deadline_exceeded` with the same IDs, URLs, `Location`, and
+`x-ms-session-id`. A committed admission is managed through those handles; the
+prompt and key are not needed to poll or cancel.
 
-An unlinked `504` with `admission: "not_reserved"` means no session or run was
-created, so an exact retry is safe. A linked `504` with
-`admission: "possibly_committed"` means the reservation acknowledgement is
-uncertain: poll its candidate `status_url` for a `200`, or exact-replay the same
-request and key. A `404` means only that the candidate is not visible yet; no
-wall-clock deadline makes it proof that a timed-out Table transaction cannot
-commit later. Do not change the request under the same key while that outcome
-is uncertain. If exact replay is unavailable, use a fresh key with no session
-header for an independent new session rather than reinterpreting the uncertain
-attempt.
+Retry simply: the same key plus a byte-equivalent request safely replays;
+changed input under that key returns `422`. `not_reserved` permits a retry. For
+`possibly_committed`, poll the candidate `status_url` or exact-replay; a `404`
+does not prove absence. If exact replay is unavailable, start an independent
+new session with a fresh key and no session header.
 
 During setup, status and result return `200` with `status: "accepted"` and
 `phase: "provisioning"`; events emit heartbeats. A linked
 `409 active_run_exists` identifies the existing provisioning or executing run.
-Canceling before launch prevents the prompt from starting; wait for
-`phase: "terminal"` before submitting another run to that same session. If the
-journal-launch fence has won but the live journal is not yet available, cancel
-returns `202` with `Retry-After: 2`; retry cancel or poll status rather than
-treating that response as terminal success.
+`settling` means the prompt is terminal but fenced cleanup still holds that
+session's slot; wait for `phase: "terminal"` before another same-session run.
+Canceling before launch prevents the prompt from starting. If the journal-launch
+fence has won but the live journal is not yet available, cancel returns `202`
+with `Retry-After: 2`; retry cancel or poll status rather than treating it as
+terminal success.
 
 After sandbox loss or reap, a terminal failed/abandoned **status** remains
 readable (`200`) from durable state. Its **result** URL returns `410 Gone`;

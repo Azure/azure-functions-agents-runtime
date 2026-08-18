@@ -168,9 +168,9 @@ Setup timeout responses distinguish three outcomes:
 
 | `admission` | Meaning | Client action |
 | --- | --- | --- |
-| `not_reserved` | No durable session or run was created. | Submit again. Reusing the same key with the exact request is safe. |
-| `committed` | The durable session and run exist, but setup exceeded the synchronous budget. | Use the returned URLs. Async requests receive `202`; synchronous requests receive a linked `504`. |
-| `possibly_committed` | The Table transaction acknowledgement was lost, so the candidate reservation may exist. | Poll the returned `status_url` for `200`, or exact-replay the same request and key. A `404` never proves absence because the timed-out Table transaction may still commit. Do not reuse that key for changed input while uncertain. |
+| `not_reserved` | No durable session or run was created. | Submit again. The same key plus a byte-equivalent request is safe. |
+| `committed` | The durable session and run exist, but setup exceeded the synchronous budget. | Use the returned URLs; async receives `202` and synchronous receives a linked `504`. |
+| `possibly_committed` | The Table transaction acknowledgement was lost, so the candidate reservation may exist. | Poll the returned `status_url` for `200` or exact-replay the same key and byte-equivalent request. A `404` never proves absence. If exact replay is unavailable, start a fresh independent session with a new key and no session header. |
 
 A committed synchronous timeout includes the same identifiers, URLs,
 `Location`, `Retry-After`, and `x-ms-session-id` as the async ticket. Do not
@@ -180,7 +180,7 @@ The public `phase` explains where work is without adding new run states:
 
 - `provisioning`: the sandbox is being prepared and the prompt has not launched;
 - `executing`: the journal-launch fence has won or the journal reports running;
-- `settling`: the run is terminal but fenced cleanup still owns the session slot;
+- `settling`: the prompt is terminal but fenced cleanup still owns the session slot;
 - `terminal`: cleanup has cleared the slot and a new run may be admitted.
 
 Status and result return `200` with the durable `accepted`/`provisioning`
@@ -204,9 +204,9 @@ header. Do not treat the absent candidate as disproved or submit changed input
 under its key.
 
 `Idempotency-Key` names one logical attempt. The runtime separately hashes the
-agent slug, exact prompt, and timeout to prevent that key from changing meaning.
-Same key plus the exact request replays the original IDs; the same claimed key
-with changed input returns `422`; a different key is a distinct attempt subject
+agent slug, exact prompt, and timeout to prevent that key from changing meaning:
+the same key plus a byte-equivalent request safely replays the original IDs,
+changed input returns `422`, and a different key is a distinct attempt subject
 to the one-active-run rule.
 
 ## Lifecycle, recovery, and troubleshooting

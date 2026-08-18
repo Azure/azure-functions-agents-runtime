@@ -312,33 +312,11 @@ async def _ensure_shared_resources(
         return token_provider, _http_session
 
 
-def create_sandbox_tools(
-    config: dict[str, Any],
-    *,
-    fallback_session_id: str | None = None,
-) -> list[FunctionTool]:
-    """Create an ``execute_python`` tool bound to a specific ACA session pool.
-
-    Parameters
-    ----------
-    config:
-        The ``system_tools.dynamic_sessions_code_interpreter`` block. Must
-        contain ``endpoint``. Optional ``client_id`` selects a user-assigned
-        managed identity for the session pool.
-    fallback_session_id:
-        Used as the ACA session identifier so the REPL state persists across
-        ``execute_python`` calls within the same conversation. The runner
-        passes the resolved agent-runtime session id here. MAF does not
-        currently expose the active session id to tools, so the runner bakes
-        it into the tool closure on every request. When omitted, a fresh GUID
-        is generated so independent invocations do not share a sandbox.
-
-    Returns a list with one tool, or an empty list if the config is invalid.
-    """
+def _resolve_sandbox_config(config: dict[str, Any]) -> tuple[str, str | None] | None:
     raw_endpoint = config.get("endpoint", "")
     if not raw_endpoint:
         logger.warning("dynamic_sessions_code_interpreter: missing 'endpoint', skipping")
-        return []
+        return None
 
     endpoint = substitute_env_vars_in_value(str(raw_endpoint))
     if not endpoint or has_unresolved_placeholders(endpoint):
@@ -346,7 +324,7 @@ def create_sandbox_tools(
             "dynamic_sessions_code_interpreter: could not resolve endpoint '%s', skipping",
             raw_endpoint,
         )
-        return []
+        return None
 
     if not _is_allowed_sessions_endpoint(endpoint):
         logger.warning(
@@ -355,7 +333,7 @@ def create_sandbox_tools(
             "skipping tool creation",
             endpoint,
         )
-        return []
+        return None
 
     raw_client_id = config.get("client_id")
     client_id = None
@@ -369,14 +347,14 @@ def create_sandbox_tools(
             )
         else:
             client_id = resolved_client_id.strip() or None
+    return endpoint, client_id
 
-    aca_session_id = fallback_session_id or uuid.uuid4().hex
-    logger.info(
-        "dynamic_sessions_code_interpreter: creating tool with endpoint %s (aca_session=%s)",
-        endpoint,
-        aca_session_id,
-    )
 
+def _create_execute_python_tool(
+    endpoint: str,
+    client_id: str | None,
+    aca_session_id: str,
+) -> FunctionTool:
     @tool(
         name="execute_python",
         description=_EXECUTE_PYTHON_DESCRIPTION,
@@ -471,5 +449,42 @@ def create_sandbox_tools(
                 )
                 return json.dumps({"error": error_msg})
 
+    return execute_python
+
+
+def create_sandbox_tools(
+    config: dict[str, Any],
+    *,
+    fallback_session_id: str | None = None,
+) -> list[FunctionTool]:
+    """Create an ``execute_python`` tool bound to a specific ACA session pool.
+
+    Parameters
+    ----------
+    config:
+        The ``system_tools.dynamic_sessions_code_interpreter`` block. Must
+        contain ``endpoint``. Optional ``client_id`` selects a user-assigned
+        managed identity for the session pool.
+    fallback_session_id:
+        Used as the ACA session identifier so the REPL state persists across
+        ``execute_python`` calls within the same conversation. The runner
+        passes the resolved agent-runtime session id here. MAF does not
+        currently expose the active session id to tools, so the runner bakes
+        it into the tool closure on every request. When omitted, a fresh GUID
+        is generated so independent invocations do not share a sandbox.
+
+    Returns a list with one tool, or an empty list if the config is invalid.
+    """
+    resolved_config = _resolve_sandbox_config(config)
+    if resolved_config is None:
+        return []
+    endpoint, client_id = resolved_config
+    aca_session_id = fallback_session_id or uuid.uuid4().hex
+    logger.info(
+        "dynamic_sessions_code_interpreter: creating tool with endpoint %s (aca_session=%s)",
+        endpoint,
+        aca_session_id,
+    )
+    execute_python = _create_execute_python_tool(endpoint, client_id, aca_session_id)
     logger.info("dynamic_sessions_code_interpreter: execute_python tool created")
     return [execute_python]

@@ -36,7 +36,7 @@ from azure_functions_agents.controller.readiness import (
     touch_session_activity,
 )
 from azure_functions_agents.controller.reconciler import SessionReconciler
-from azure_functions_agents.execution.setup_budget import SetupBudget
+from azure_functions_agents.execution.setup_budget import SetupBudget, SetupPhase
 from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from azure_functions_agents.journal_paths import BOOTSTRAP_ERROR_PATH
 from azure_functions_agents.session_state import (
@@ -175,6 +175,79 @@ class _CountingHandle(_FakeHandle):
     async def close(self) -> None:
         self.close_calls += 1
         await super().close()
+
+
+@pytest.mark.asyncio
+async def test_admission_timeout_preserves_outer_cancellation() -> None:
+    started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    confirmations = 0
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+        return "unexpected"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    task = asyncio.create_task(
+        readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=1),
+            confirm,
+            lambda result: False,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    )
+    await started.wait()
+    task.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert child_cancelled.is_set()
+    assert confirmations == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_timeout_confirms_child_cancellation() -> None:
+    started = asyncio.Event()
+    child_cancelled = asyncio.Event()
+    confirmations = 0
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            child_cancelled.set()
+            raise
+        return "unexpected"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    result = await readiness_module._await_admission_with_setup_timeout(
+        operation,
+        SetupBudget.start(setup_seconds=0.05),
+        confirm,
+        lambda result: False,
+        phase=SetupPhase.PROVISION_CREATE,
+    )
+
+    assert started.is_set()
+    assert child_cancelled.is_set()
+    assert confirmations == 1
+    assert result == "confirmed"
 
 
 @pytest.mark.asyncio

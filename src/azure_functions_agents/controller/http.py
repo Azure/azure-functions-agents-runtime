@@ -43,6 +43,16 @@ from .readiness import (
     SessionActivationSetupTimeoutError,
 )
 
+_RESPOND_ASYNC_PREFERENCE = "respond-async"
+_SETUP_TIMEOUT_ERROR_CODE = "setup_deadline_exceeded"
+_RUN_TIMEOUT_ERROR_CODE = "run_deadline_exceeded"
+_ADMISSION_OUTCOME_UNKNOWN_ERROR_CODE = "admission_outcome_unknown"
+_ADMISSION_NOT_RESERVED = "not_reserved"
+_ADMISSION_COMMITTED: DurableAdmissionOutcome = "committed"
+_ADMISSION_POSSIBLY_COMMITTED: DurableAdmissionOutcome = "possibly_committed"
+_PROVISIONING_PHASE: RunPhase = "provisioning"
+_DEFAULT_ACCEPTED_RUN_PHASE: RunPhase = "executing"
+
 
 @dataclass(frozen=True, slots=True)
 class ControllerResponse:
@@ -69,7 +79,7 @@ def prefers_respond_async(headers: Mapping[str, str] | None) -> bool:
         "",
     )
     return any(
-        token.strip().split(";", 1)[0].casefold() == "respond-async"
+        token.strip().split(";", 1)[0].casefold() == _RESPOND_ASYNC_PREFERENCE
         for token in prefer.split(",")
     )
 
@@ -117,8 +127,33 @@ async def submit_run(
     budget: RequestBudget,
 ) -> ControllerResponse:
     """Start a run, return an LRO ticket, or preserve the synchronous contract."""
+    started = await _start_run_or_response(
+        backend,
+        request,
+        agent_slug=agent_slug,
+        respond_async=respond_async,
+    )
+    if isinstance(started, ControllerResponse):
+        return started
+    context = RunContext(run_id=started.run_id, session_id=started.session_id)
+    if respond_async:
+        return _accepted_response(agent_slug, started, context)
     try:
-        handle = await backend.start_run(request)
+        status, _events = await budget.wait_for(collect_terminal_run(backend, context))
+    except RunDeadlineExceededError:
+        return await _synchronous_timeout_response(backend, context, budget)
+    return _synchronous_status_response(status)
+
+
+async def _start_run_or_response(
+    backend: AgentExecutionBackend,
+    request: StartRunRequest,
+    *,
+    agent_slug: str,
+    respond_async: bool,
+) -> RunHandle | ControllerResponse:
+    try:
+        return await backend.start_run(request)
     except DurableAdmissionSetupTimeoutError as exc:
         return _durable_admission_timeout_response(
             agent_slug,
@@ -154,27 +189,25 @@ async def submit_run(
     except SessionActivationNotFoundError:
         return ControllerResponse(status_code=404, body={"error": "session_not_found"})
 
-    context = RunContext(run_id=handle.run_id, session_id=handle.session_id)
-    if respond_async:
-        return _accepted_response(agent_slug, handle, context)
 
+async def _synchronous_timeout_response(
+    backend: AgentExecutionBackend,
+    context: RunContext,
+    budget: RequestBudget,
+) -> ControllerResponse:
     try:
-        status, _events = await budget.wait_for(collect_terminal_run(backend, context))
-    except RunDeadlineExceededError:
-        try:
-            status = await budget.wait_for_cleanup(backend.get_run(context))
-            if status.state in TERMINAL_RUN_STATUSES:
-                return _synchronous_status_response(status)
-            await budget.wait_for_cleanup(backend.cancel_run(context))
-        except Exception as exc:
-            logger.warning(
-                "Synchronous run cleanup deferred: session_id=%s run_id=%s error=%s",
-                context.session_id,
-                context.run_id,
-                type(exc).__name__,
-            )
-        return _run_timeout_response(context)
-    return _synchronous_status_response(status)
+        status = await budget.wait_for_cleanup(backend.get_run(context))
+        if status.state in TERMINAL_RUN_STATUSES:
+            return _synchronous_status_response(status)
+        await budget.wait_for_cleanup(backend.cancel_run(context))
+    except Exception as exc:
+        logger.warning(
+            "Synchronous run cleanup deferred: session_id=%s run_id=%s error=%s",
+            context.session_id,
+            context.run_id,
+            type(exc).__name__,
+        )
+    return _run_timeout_response(context)
 
 
 async def read_status(
@@ -349,13 +382,13 @@ def _setup_timeout_response(*, metadata: SetupTimeoutMetadata) -> ControllerResp
     return ControllerResponse(
         status_code=504,
         body={
-            "error": "setup_deadline_exceeded",
-            "reason": "setup_deadline_exceeded",
-            "retry_with": "respond-async",
-            "admission": "not_reserved",
+            "error": _SETUP_TIMEOUT_ERROR_CODE,
+            "reason": _SETUP_TIMEOUT_ERROR_CODE,
+            "retry_with": _RESPOND_ASYNC_PREFERENCE,
+            "admission": _ADMISSION_NOT_RESERVED,
         },
         headers={
-            "x-ms-retry-with": "respond-async",
+            "x-ms-retry-with": _RESPOND_ASYNC_PREFERENCE,
             "Retry-After": str(SETUP_TIMEOUT_RETRY_AFTER_SECONDS),
         },
         timeout_metadata=metadata,
@@ -406,14 +439,14 @@ def _durable_admission_timeout_response(
         respond_async=respond_async,
         session_present=True,
     )
-    phase = error.handle.phase or "provisioning"
-    if error.outcome == "committed":
+    phase = error.handle.phase or _PROVISIONING_PHASE
+    if error.outcome == _ADMISSION_COMMITTED:
         if respond_async:
             return _accepted_response(
                 agent_slug,
                 error.handle,
                 context,
-                admission="committed",
+                admission=_ADMISSION_COMMITTED,
                 phase=phase,
                 timeout_metadata=metadata,
             )
@@ -421,8 +454,8 @@ def _durable_admission_timeout_response(
             agent_slug,
             error.handle,
             context,
-            error_code="setup_deadline_exceeded",
-            admission="committed",
+            error_code=_SETUP_TIMEOUT_ERROR_CODE,
+            admission=_ADMISSION_COMMITTED,
             phase=phase,
             timeout_metadata=metadata,
         )
@@ -430,8 +463,8 @@ def _durable_admission_timeout_response(
         agent_slug,
         error.handle,
         context,
-        error_code="admission_outcome_unknown",
-        admission="possibly_committed",
+        error_code=_ADMISSION_OUTCOME_UNKNOWN_ERROR_CODE,
+        admission=_ADMISSION_POSSIBLY_COMMITTED,
         phase=phase,
         timeout_metadata=metadata,
     )
@@ -451,7 +484,7 @@ def _linked_setup_timeout_response(
     body: dict[str, object] = {
         "error": error_code,
         "reason": error_code,
-        "retry_with": "respond-async",
+        "retry_with": _RESPOND_ASYNC_PREFERENCE,
         **_run_ticket_payload(handle, urls, admission=admission, phase=phase),
     }
     return ControllerResponse(
@@ -466,14 +499,14 @@ def _run_timeout_response(context: RunContext) -> ControllerResponse:
     return ControllerResponse(
         status_code=504,
         body={
-            "error": "run_deadline_exceeded",
-            "reason": "run_deadline_exceeded",
-            "retry_with": "respond-async",
+            "error": _RUN_TIMEOUT_ERROR_CODE,
+            "reason": _RUN_TIMEOUT_ERROR_CODE,
+            "retry_with": _RESPOND_ASYNC_PREFERENCE,
             "session_id": context.session_id,
             "run_id": context.run_id,
         },
         headers={
-            "x-ms-retry-with": "respond-async",
+            "x-ms-retry-with": _RESPOND_ASYNC_PREFERENCE,
             "x-ms-session-id": context.session_id,
         },
     )
@@ -529,11 +562,19 @@ def _run_ticket_payload(
     }
     if admission is not None:
         payload["admission"] = admission
-    resolved_phase = phase if phase is not None else handle.phase
-    if resolved_phase is not None:
-        payload["phase"] = resolved_phase
+    payload["phase"] = _ticket_phase(handle, phase)
     payload.update(urls)
     return payload
+
+
+def _ticket_phase(handle: RunHandle, phase: RunPhase | None) -> RunPhase:
+    if phase is not None:
+        return phase
+    if handle.phase is not None:
+        return handle.phase
+    if handle.state in TERMINAL_RUN_STATUSES:
+        return "terminal"
+    return _DEFAULT_ACCEPTED_RUN_PHASE
 
 
 def _management_headers(
@@ -548,7 +589,7 @@ def _management_headers(
         "x-ms-session-id": context.session_id,
     }
     if retry_with:
-        headers["x-ms-retry-with"] = "respond-async"
+        headers["x-ms-retry-with"] = _RESPOND_ASYNC_PREFERENCE
     return headers
 
 
