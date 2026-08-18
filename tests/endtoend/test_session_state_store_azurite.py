@@ -766,7 +766,7 @@ async def test_prelaunch_cancel_completion_releases_both_fences_in_one_egt() -> 
         completed = await store.complete_operation(
             fence=canceled.fence,
             updated_session=_session_after_operation(
-                await store.get_session(partition, records.session.session_id).record
+                (await store.get_session(partition, records.session.session_id)).record
             ),
             updated_at=_NOW + timedelta(seconds=2),
         )
@@ -897,8 +897,12 @@ async def test_terminal_submit_adopts_before_completing_operation() -> None:
             updated_at=_NOW,
         )
         assert completed.operation.state == "completed"
-        assert completed.run is not None
-        assert completed.run.status == "succeeded"
+        stored_terminal = await store_a.get_run(
+            partition,
+            session.session_id,
+            run.run_id,
+        )
+        assert stored_terminal.record.status == "succeeded"
         contender_run = _run(
             partition=partition,
             run_id="run-contender",
