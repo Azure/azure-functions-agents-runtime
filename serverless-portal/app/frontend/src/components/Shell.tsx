@@ -1,15 +1,133 @@
+// App chrome: top appbar + collapsible left sidebar. Migrated to the CoreAI
+// Design System (Fluent v9) — Button / Avatar / Tooltip from the
+// @coreai/fluentui-react barrel, styled with makeStyles + semantic tokens,
+// following the CoreAI `templates-shell-and-navigation` patterns. Behavior
+// (collapse + persist, theme toggle, nav, sign out) and a11y are preserved;
+// product glyphs stay on the local Icon set.
+
 import { type ReactNode, useState } from 'react'
-import { NavLink, Link } from 'react-router-dom'
+import { NavLink, Link, useNavigate } from 'react-router-dom'
+import { Avatar, Button, Tooltip, makeStyles, mergeClasses, shorthands, tokens } from '@coreai/fluentui-react'
 import { useIdentity } from '../identity'
 import { signOut } from '../auth'
 import { useTheme } from '../theme'
-import { Icon } from './ui'
+import { Icon, type IconName } from './ui'
 
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (!parts.length) return '?'
-  return (parts[0][0] + (parts[1]?.[0] ?? '')).toUpperCase()
+const useStyles = makeStyles({
+  app: { minHeight: '100vh', display: 'flex', flexDirection: 'column', backgroundColor: tokens.colorNeutralBackground2 },
+  appbar: {
+    position: 'sticky',
+    top: 0,
+    zIndex: 20,
+    height: '56px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalM,
+    ...shorthands.padding('0', tokens.spacingHorizontalXL),
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderBottom('1px', 'solid', tokens.colorNeutralStroke2),
+  },
+  brand: {
+    display: 'inline-flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalS,
+    color: tokens.colorNeutralForeground1,
+    textDecoration: 'none',
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  brandMark: {
+    width: '28px',
+    height: '28px',
+    display: 'grid',
+    placeItems: 'center',
+    color: tokens.colorNeutralForegroundOnBrand,
+    backgroundColor: tokens.colorBrandBackground,
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+  },
+  brandName: { fontSize: tokens.fontSizeBase300 },
+  spacer: { flexGrow: 1 },
+  actions: { display: 'flex', alignItems: 'center', gap: tokens.spacingHorizontalS },
+  body: { flexGrow: 1, display: 'flex', alignItems: 'flex-start' },
+  sidebar: {
+    position: 'sticky',
+    top: '56px',
+    height: 'calc(100vh - 56px)',
+    flexShrink: 0,
+    width: '236px',
+    backgroundColor: tokens.colorNeutralBackground1,
+    ...shorthands.borderRight('1px', 'solid', tokens.colorNeutralStroke2),
+    display: 'flex',
+    flexDirection: 'column',
+    overflow: 'hidden',
+    transitionProperty: 'width',
+    transitionDuration: tokens.durationNormal,
+    transitionTimingFunction: tokens.curveEasyEase,
+  },
+  sidebarCollapsed: { width: '64px' },
+  sidenav: {
+    flexGrow: 1,
+    ...shorthands.padding(tokens.spacingVerticalM, tokens.spacingHorizontalM),
+    display: 'flex',
+    flexDirection: 'column',
+    gap: tokens.spacingVerticalXXS,
+    overflowY: 'auto',
+  },
+  groupLabel: {
+    fontSize: tokens.fontSizeBase100,
+    textTransform: 'uppercase',
+    letterSpacing: '0.5px',
+    color: tokens.colorNeutralForeground3,
+    fontWeight: tokens.fontWeightSemibold,
+    ...shorthands.padding(tokens.spacingVerticalS, tokens.spacingHorizontalS, tokens.spacingVerticalXS),
+    whiteSpace: 'nowrap',
+  },
+  navLink: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: tokens.spacingHorizontalM,
+    ...shorthands.padding(tokens.spacingVerticalSNudge, tokens.spacingHorizontalMNudge),
+    ...shorthands.borderRadius(tokens.borderRadiusMedium),
+    color: tokens.colorNeutralForeground2,
+    fontSize: tokens.fontSizeBase300,
+    fontWeight: tokens.fontWeightMedium,
+    textDecoration: 'none',
+    whiteSpace: 'nowrap',
+    ':hover': { backgroundColor: tokens.colorNeutralBackground3, color: tokens.colorNeutralForeground1 },
+  },
+  navLinkCollapsed: { justifyContent: 'center', gap: 0 },
+  navLinkActive: {
+    backgroundColor: tokens.colorNeutralBackground3,
+    color: tokens.colorNeutralForeground1,
+    fontWeight: tokens.fontWeightSemibold,
+  },
+  navIcon: {
+    width: '22px',
+    display: 'inline-flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+    color: tokens.colorNeutralForeground3,
+  },
+  navIconActive: { color: tokens.colorBrandForeground1 },
+  navLabel: { overflow: 'hidden', textOverflow: 'ellipsis' },
+  collapseBtn: { margin: tokens.spacingHorizontalS, justifyContent: 'flex-start' },
+  main: {
+    flexGrow: 1,
+    minWidth: 0,
+    ...shorthands.padding('30px', 'clamp(22px, 4vw, 56px)', '72px'),
+  },
+})
+
+interface NavDef {
+  to: string
+  icon: IconName
+  label: string
 }
+
+const NAV_ITEMS: NavDef[] = [
+  { to: '/agents', icon: 'grid', label: 'AI Apps' },
+  { to: '/playground', icon: 'message', label: 'Playground' },
+]
 
 function getCollapsed(): boolean {
   try {
@@ -20,12 +138,14 @@ function getCollapsed(): boolean {
 }
 
 export default function Shell({ children }: { children: ReactNode }) {
+  const styles = useStyles()
+  const navigate = useNavigate()
   const { identity } = useIdentity()
   const { theme, toggle } = useTheme()
   const [collapsed, setCollapsed] = useState<boolean>(getCollapsed)
   const user = identity?.user
-
-  const linkClass = ({ isActive }: { isActive: boolean }) => 'sidelink' + (isActive ? ' active' : '')
+  const userName = user?.name || user?.username
+  const userTitle = user ? `${user.name} · ${user.username}` : 'Not signed in'
 
   const toggleSidebar = () =>
     setCollapsed((c) => {
@@ -38,73 +158,102 @@ export default function Shell({ children }: { children: ReactNode }) {
       return next
     })
 
+  const renderNav = ({ to, icon, label }: NavDef) => {
+    const link = (
+      <NavLink
+        key={to}
+        to={to}
+        className={({ isActive }) =>
+          mergeClasses(styles.navLink, collapsed && styles.navLinkCollapsed, isActive && styles.navLinkActive)
+        }
+        title={label}
+        aria-label={label}
+      >
+        {({ isActive }) => (
+          <>
+            <span className={mergeClasses(styles.navIcon, isActive && styles.navIconActive)}>
+              <Icon name={icon} size={17} />
+            </span>
+            {!collapsed && <span className={styles.navLabel}>{label}</span>}
+          </>
+        )}
+      </NavLink>
+    )
+    return collapsed ? (
+      <Tooltip key={to} content={label} relationship="label" positioning="after">
+        {link}
+      </Tooltip>
+    ) : (
+      link
+    )
+  }
+
   return (
-    <div className="app">
-      <header className="appbar">
-        <button
-          className="icon-btn"
-          onClick={toggleSidebar}
-          title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          aria-label="Toggle sidebar"
-        >
-          <Icon name="menu" size={18} />
-        </button>
-        <Link to="/agents" className="brand" title="AI Apps">
-          <span className="brand-mark">
+    <div className={styles.app}>
+      <header className={styles.appbar}>
+        <Tooltip content={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} relationship="label">
+          <Button
+            appearance="subtle"
+            icon={<Icon name="menu" size={18} />}
+            aria-label="Toggle sidebar"
+            onClick={toggleSidebar}
+          />
+        </Tooltip>
+        <Link to="/agents" className={styles.brand} title="AI Apps">
+          <span className={styles.brandMark}>
             <Icon name="zap" size={18} />
           </span>
-          <span className="brand-name">AI Apps</span>
+          <span className={styles.brandName}>AI Apps</span>
         </Link>
 
-        <div className="appbar-spacer" />
+        <div className={styles.spacer} />
 
-        <Link to="/create-agent" className="btn primary sm">
-          <Icon name="plus" size={14} /> New AI App
-        </Link>
-        <button
-          className="icon-btn"
-          onClick={toggle}
-          title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
-          aria-label="Toggle color theme"
-        >
-          {theme === 'dark' ? <Icon name="sun" size={17} /> : <Icon name="moon" size={17} />}
-        </button>
-        <div className="appbar-user" title={user ? `${user.name} · ${user.username}` : 'Not signed in'}>
-          {user ? initials(user.name || user.username) : '…'}
+        <div className={styles.actions}>
+          <Button
+            appearance="primary"
+            icon={<Icon name="plus" size={16} />}
+            onClick={() => navigate('/create-agent')}
+          >
+            New AI App
+          </Button>
+          <Tooltip content={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'} relationship="label">
+            <Button
+              appearance="subtle"
+              icon={theme === 'dark' ? <Icon name="sun" size={17} /> : <Icon name="moon" size={17} />}
+              aria-label="Toggle color theme"
+              onClick={toggle}
+            />
+          </Tooltip>
+          <Tooltip content={userTitle} relationship="label">
+            <Avatar name={userName} size={28} />
+          </Tooltip>
+          <Button appearance="subtle" onClick={() => void signOut()}>
+            Sign out
+          </Button>
         </div>
-        <button className="btn ghost sm" onClick={() => void signOut()} title="Sign out">
-          Sign out
-        </button>
       </header>
 
-      <div className="body">
-        <aside className={'sidebar' + (collapsed ? ' collapsed' : '')}>
-          <nav className="sidenav">
-            <div className="group-label">Build</div>
-            <NavLink className={linkClass} to="/agents" title="AI Apps">
-              <span className="ico">
-                <Icon name="grid" size={17} />
-              </span>
-              <span className="label">AI Apps</span>
-            </NavLink>
-            <NavLink className={linkClass} to="/playground" title="Playground">
-              <span className="ico">
-                <Icon name="message" size={17} />
-              </span>
-              <span className="label">Playground</span>
-            </NavLink>
+      <div className={styles.body}>
+        <aside className={mergeClasses(styles.sidebar, collapsed && styles.sidebarCollapsed)}>
+          <nav className={styles.sidenav} aria-label="Primary navigation">
+            {!collapsed && <div className={styles.groupLabel}>Build</div>}
+            {NAV_ITEMS.map(renderNav)}
           </nav>
-          <button
-            className="collapse-toggle"
-            onClick={toggleSidebar}
-            title={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
-          >
-            <span className="chev">{collapsed ? '»' : '«'}</span>
-            <span className="label">Collapse</span>
-          </button>
+          <Tooltip content={collapsed ? 'Expand sidebar' : 'Collapse sidebar'} relationship="label" positioning="after">
+            <Button
+              appearance="subtle"
+              className={styles.collapseBtn}
+              icon={<Icon name={collapsed ? 'arrowRight' : 'arrowLeft'} size={16} />}
+              aria-label={collapsed ? 'Expand sidebar' : 'Collapse sidebar'}
+              aria-expanded={!collapsed}
+              onClick={toggleSidebar}
+            >
+              {!collapsed ? 'Collapse' : undefined}
+            </Button>
+          </Tooltip>
         </aside>
 
-        <main className="main">{children}</main>
+        <main className={styles.main}>{children}</main>
       </div>
     </div>
   )

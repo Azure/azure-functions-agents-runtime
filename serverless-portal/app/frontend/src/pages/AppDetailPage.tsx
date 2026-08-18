@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, type LiveAgentApp } from '../api'
-import { useDeployJob, DeploymentStatus } from '../deploy'
+import { useDeployJob, DeploymentStatus, GitHubConnect } from '../deploy'
 import { CopyButton, DraftEditor } from '../components/SourceEditor'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 import { Badge, EmptyState, StatTiles, StatusBadge } from '../components/ui'
+import { Button } from '@coreai/fluentui-react'
 
 const enc = encodeURIComponent
 
@@ -152,6 +153,84 @@ export default function AppDetailPage() {
   })
   const mcpServers = parseMcpServers(mcpSource?.content)
 
+  // GitHub connection for this app — powers the contextual "Create PR" action that
+  // appears in the editor toolbar once a saved (unpushed) draft exists.
+  const { data: appConn } = useQuery({
+    queryKey: ['githubAppConnection', subForQuery, app?.resourceGroup ?? '', appName ?? ''],
+    queryFn: () =>
+      api.githubAppConnection({ subscription: subForQuery, resourceGroup: app!.resourceGroup, app: app!.name }),
+    enabled: !!app,
+    staleTime: 30_000,
+  })
+  const [prBusy, setPrBusy] = useState(false)
+  const [prPushed, setPrPushed] = useState(false)
+  const [prResult, setPrResult] = useState<{ url: string; number?: number } | null>(null)
+  const [prError, setPrError] = useState<string | null>(null)
+  const createPr = async () => {
+    if (!app || !appConn?.connected || !appConn.repoUrl) return
+    const repo = appConn.repoUrl.replace('https://github.com/', '')
+    setPrBusy(true)
+    setPrError(null)
+    try {
+      const r = await api.githubConnect({
+        subscription: subForQuery,
+        resourceGroup: app.resourceGroup,
+        app: app.name,
+        mode: 'existing',
+        repo,
+        branch: appConn.branch || 'main',
+      })
+      setPrResult({ url: r.prUrl || r.htmlUrl, number: r.prNumber })
+      setPrPushed(true)
+    } catch (e) {
+      setPrError((e as Error).message)
+    } finally {
+      setPrBusy(false)
+    }
+  }
+  const onDraftSaved = () => {
+    setPrPushed(false)
+    setPrResult(null)
+    setPrError(null)
+  }
+  const renderPrAction = ({ source, dirty }: { source: string; dirty: boolean }): ReactNode => {
+    if (!appConn?.connected) return null
+    if (prBusy) {
+      return (
+        <span className="muted" style={{ display: 'inline-flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+          <span className="gh-spin" /> Opening pull request…
+        </span>
+      )
+    }
+    if (prPushed && prResult) {
+      return (
+        <a className="btn sm" href={prResult.url} target="_blank" rel="noreferrer" title="View the pull request">
+          ✓ PR updated{prResult.number ? ` · #${prResult.number}` : ''} →
+        </a>
+      )
+    }
+    if (source === 'draft' && !dirty) {
+      return (
+        <>
+          <Button
+            appearance="primary"
+            size="small"
+            onClick={() => void createPr()}
+            title="Open or update a pull request with your saved changes"
+          >
+            Create PR
+          </Button>
+          {prError && (
+            <span className="muted" style={{ color: 'var(--red)', fontSize: 11 }}>
+              {prError.slice(0, 90)}
+            </span>
+          )}
+        </>
+      )
+    }
+    return null
+  }
+
   return (
     <>
       <div className="breadcrumb">
@@ -194,8 +273,8 @@ export default function AppDetailPage() {
           </p>
 
           <div className="toolbar" style={{ marginBottom: 12 }}>
-            <button
-              className="btn primary"
+            <Button
+              appearance="primary"
               disabled={deployJob.phase === 'running'}
               onClick={() =>
                 deployJob.redeploy({
@@ -207,7 +286,7 @@ export default function AppDetailPage() {
               title="Redeploy this app from its current source with your saved drafts applied"
             >
               {deployJob.phase === 'running' ? 'Deploying…' : '🚀 Deploy edits'}
-            </button>
+            </Button>
             <Link className="btn" to="/create-agent">
               ＋ Add agent
             </Link>
@@ -221,25 +300,10 @@ export default function AppDetailPage() {
             portalUrl={deployJob.portalUrl}
             message={deployJob.message}
           />
-
-          {endpoints.length > 0 && (
-            <div className="card" style={{ marginBottom: 18 }}>
-              <div className="card-head">
-                <h3 style={{ margin: 0 }}>Endpoints</h3>
-                <CopyButton text={endpointsText} title="Copy all URLs" />
-              </div>
-              <div className="endpoint-list">
-                {endpoints.map((e) => (
-                  <div className="endpoint-row" key={e.url}>
-                    <span className={'badge ' + (e.kind === 'GET' ? 'gray' : 'purple')}>{e.kind}</span>
-                    <span className="cell-title">{e.label}</span>
-                    <code className="endpoint-url">{e.url}</code>
-                    <CopyButton text={e.url} title={`Copy ${e.label} URL`} />
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
+          <GitHubConnect
+            github={{ subscription: subForQuery, resourceGroup: app.resourceGroup, app: app.name }}
+            defaultCollapsed
+          />
 
           <div className="components">
             <aside className="explorer">
@@ -395,6 +459,8 @@ export default function AppDetailPage() {
                       })
                     }
                     fallback=""
+                    renderActions={renderPrAction}
+                    onSaved={onDraftSaved}
                   />
                 </>
               )}
@@ -424,6 +490,8 @@ export default function AppDetailPage() {
                       api.saveSource({ subscription: subForQuery, app: app.name, path: 'mcp.json', content })
                     }
                     fallback=""
+                    renderActions={renderPrAction}
+                    onSaved={onDraftSaved}
                   />
                 </>
               )}
@@ -457,11 +525,32 @@ export default function AppDetailPage() {
                       api.saveSource({ subscription: subForQuery, app: app.name, path: sel.path, content })
                     }
                     fallback=""
+                    renderActions={renderPrAction}
+                    onSaved={onDraftSaved}
                   />
                 </>
               )}
             </section>
           </div>
+
+          {endpoints.length > 0 && (
+            <div className="card" style={{ marginTop: 18 }}>
+              <div className="card-head">
+                <h3 style={{ margin: 0 }}>Endpoints</h3>
+                <CopyButton text={endpointsText} title="Copy all URLs" />
+              </div>
+              <div className="endpoint-list">
+                {endpoints.map((e) => (
+                  <div className="endpoint-row" key={e.url}>
+                    <span className={'badge ' + (e.kind === 'GET' ? 'gray' : 'purple')}>{e.kind}</span>
+                    <span className="cell-title">{e.label}</span>
+                    <code className="endpoint-url">{e.url}</code>
+                    <CopyButton text={e.url} title={`Copy ${e.label} URL`} />
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
         </>
       )}
     </>

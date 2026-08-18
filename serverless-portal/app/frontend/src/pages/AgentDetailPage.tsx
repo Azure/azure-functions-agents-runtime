@@ -3,6 +3,7 @@ import { Link, useNavigate, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, type LiveAgent, type LiveAgentApp } from '../api'
 import { useDeployJob, DeploymentStatus, GitHubConnect } from '../deploy'
+import { Button } from '@coreai/fluentui-react'
 import { AddCapability } from '../components/AddCapability'
 import { CopyButton, DraftEditor } from '../components/SourceEditor'
 import { useIdentity } from '../identity'
@@ -186,13 +187,14 @@ export default function AgentDetailPage() {
     if (source === 'draft' && !dirty) {
       return (
         <>
-          <button
-            className="btn sm primary"
+          <Button
+            appearance="primary"
+            size="small"
             onClick={() => void createPr()}
             title="Open or update a pull request with your saved changes"
           >
             📤 Create PR
-          </button>
+          </Button>
           {prError && (
             <span className="muted" style={{ color: 'var(--red)', fontSize: 11 }}>
               {prError.slice(0, 90)}

@@ -6,9 +6,11 @@ import { useState } from 'react'
 import { useQueryClient, useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { Modal } from './Modal'
-import { SearchableSelect } from './ui'
+import { SearchableSelect, Icon, type IconName } from './ui'
+import { Button, Checkbox, Input, Textarea } from '@coreai/fluentui-react'
 import {
   TRIGGER_SPECS,
+  SCHEDULE_PRESETS,
   buildTriggerYaml,
   applyTriggerToMarkdown,
   addMcpServer,
@@ -18,7 +20,15 @@ import {
   type McpServer,
 } from '../capabilities'
 
-type Mode = 'trigger' | 'connector' | 'mcp' | 'skill'
+type View =
+  | 'gallery'
+  | 'schedule'
+  | 'http'
+  | 'outlook'
+  | 'trigger-advanced'
+  | 'mcp-advanced'
+  | 'tool-ai'
+  | 'skill'
 
 export function AddCapability({
   subscription,
@@ -33,7 +43,7 @@ export function AddCapability({
 }) {
   const qc = useQueryClient()
   const [open, setOpen] = useState(false)
-  const [mode, setMode] = useState<Mode>('trigger')
+  const [view, setView] = useState<View>('gallery')
   const [busy, setBusy] = useState(false)
   const [msg, setMsg] = useState('')
   const [error, setError] = useState('')
@@ -41,6 +51,7 @@ export function AddCapability({
   // Trigger form state.
   const [trigType, setTrigType] = useState<string>('http')
   const [trigValues, setTrigValues] = useState<Record<string, string>>({})
+  const [httpRoute, setHttpRoute] = useState('')
 
   // MCP form state.
   const [mcpName, setMcpName] = useState('')
@@ -60,12 +71,12 @@ export function AddCapability({
     setError('')
   }
 
-  const applyTrigger = async (specKey: string) => {
+  const applyTrigger = async (specKey: string, valuesOverride?: Record<string, string>) => {
     reset()
     setBusy(true)
     try {
       const def = await api.getAgentDefinition({ subscription, app, resourceGroup, name: agentName })
-      const yaml = buildTriggerYaml(specKey, trigValues)
+      const yaml = buildTriggerYaml(specKey, valuesOverride ?? trigValues)
       const next = applyTriggerToMarkdown(def.content || '', yaml)
       await api.saveAgentDefinition({ subscription, app, name: agentName, content: next })
       qc.invalidateQueries({ queryKey: ['agentDefinition', subscription, app, agentName] })
@@ -141,279 +152,488 @@ export function AddCapability({
   const triggerIncomplete = spec.fields.some(
     (f) => f.required && !(trigValues[f.name] ?? f.default ?? '').trim(),
   )
+  const outlookPreset = MCP_PRESETS.find((p) => p.name === 'office365-outlook')
+  const openModal = () => {
+    setOpen(true)
+    setView('gallery')
+    reset()
+  }
+  const backToGallery = () => {
+    setView('gallery')
+    reset()
+  }
 
   return (
     <>
       <div className="card" style={{ marginBottom: 18 }}>
         <div className="card-head">
-          <h3 style={{ margin: 0 }}>➕ Add capability</h3>
-          <button className="btn sm" onClick={() => setOpen(true)}>
-            Add trigger, connector, MCP tool, or skill
-          </button>
+          <h3 style={{ margin: 0, display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="plus" size={18} /> Add capability
+          </h3>
+          <Button size="small" onClick={openModal}>
+            Add a trigger or tool
+          </Button>
         </div>
         <p className="muted" style={{ fontSize: 12, margin: 0 }}>
-          Add a trigger, a connector trigger, an MCP tool, or a reusable skill. Changes are saved as a draft on
-          this agent's <span className="mono">.agent.md</span>, the app's <span className="mono">mcp.json</span>,
-          or <span className="mono">skills/</span> — publish with <strong>Deploy edits</strong> or open a PR.
+          Pick a ready-made recipe to make <span className="mono">{agentName}</span> run (a trigger) or give it new
+          abilities (a tool or skill). Every change saves as a draft — publish with <strong>Deploy edits</strong> or
+          open a PR.
         </p>
       </div>
 
       {open && (
-        <Modal title="➕ Add capability" onClose={() => setOpen(false)} width={760}>
-          <div className="tabs" style={{ marginBottom: 12 }}>
-        <button
-          className={'tab' + (mode === 'trigger' ? ' active' : '')}
-          onClick={() => {
-            setMode('trigger')
-            reset()
-          }}
-        >
-          ⏱ Trigger
-        </button>
-        <button
-          className={'tab' + (mode === 'connector' ? ' active' : '')}
-          onClick={() => {
-            setMode('connector')
-            reset()
-          }}
-        >
-          🔌 Connector trigger
-        </button>
-        <button
-          className={'tab' + (mode === 'mcp' ? ' active' : '')}
-          onClick={() => {
-            setMode('mcp')
-            reset()
-          }}
-        >
-          🧰 MCP tool
-        </button>
-        <button
-          className={'tab' + (mode === 'skill' ? ' active' : '')}
-          onClick={() => {
-            setMode('skill')
-            reset()
-          }}
-        >
-          🧠 Skill
-        </button>
-      </div>
-
-      {mode === 'trigger' && (
-        <>
-          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-            Declarative: writes the <span className="mono">trigger:</span> block into{' '}
-            <span className="mono">{agentName}.agent.md</span>. The runtime registers the Azure Functions binding
-            at deploy — no <span className="mono">function_app.py</span> code is produced.
-          </p>
-          <div className="field">
-            <label>Trigger type</label>
-            <SearchableSelect
-              value={trigType}
-              onChange={(v) => {
-                setTrigType(v)
-                setTrigValues({})
-                reset()
-              }}
-              options={Object.entries(TRIGGER_SPECS).map(([k, s]) => ({ value: k, label: s.label }))}
-              placeholder="Select a trigger type…"
-              ariaLabel="Trigger type"
-            />
-          </div>
-          {spec.note && (
-            <p className="muted" style={{ fontSize: 12 }}>
-              {spec.note}
-            </p>
-          )}
-          {spec.fields.map((f) => (
-            <div className="field" key={f.name}>
-              <label>
-                {f.label}
-                {f.required ? ' *' : ''}
-              </label>
-              <input
-                value={trigValues[f.name] ?? f.default ?? ''}
-                placeholder={f.placeholder}
-                onChange={(e) => setTrigValues((v) => ({ ...v, [f.name]: e.target.value }))}
-              />
-              {f.help && <div className="hint">{f.help}</div>}
+        <Modal title="Add a capability" onClose={() => setOpen(false)} width={760}>
+          {error && (
+            <div className="gh-err" style={{ marginBottom: 12 }}>
+              {error}
             </div>
-          ))}
-          <button className="btn primary" disabled={busy || triggerIncomplete} onClick={() => void applyTrigger(trigType)}>
-            {busy ? 'Applying…' : `Apply ${spec.label} trigger`}
-          </button>
-          <AiGenerate
-            kind="http_trigger"
-            triggerType={spec.type}
-            title={`Generate a ${spec.label} agent with AI`}
-            hint={`Describe the task; a Foundry model writes a complete .agent.md (${spec.label.toLowerCase()} trigger + instructions). Applying replaces this agent's draft.`}
-            subscription={subscription}
-            app={app}
-            agentName={agentName}
-          />
-        </>
-      )}
+          )}
+          {msg && (
+            <div className="note ok" style={{ marginBottom: 12 }}>
+              ✓ {msg}
+            </div>
+          )}
 
-      {mode === 'connector' && (
-        <>
-          <p className="muted" style={{ fontSize: 13 }}>
-            Declarative: writes <span className="mono">trigger: generic_trigger · connectorTrigger</span> into{' '}
-            <span className="mono">{agentName}.agent.md</span> — the runtime registers the connector binding at
-            deploy (no <span className="mono">function_app.py</span> code). The agent runs when an Azure Connector
-            event fires (e.g. a new Outlook email). You still need to: (1) create the connector{' '}
-            <strong>connection</strong> in Azure, and (2) add the connector's <strong>MCP tool</strong> (MCP tab)
-            so the agent can act.
-          </p>
-          <button className="btn primary" disabled={busy} onClick={() => void applyTrigger('connector')}>
-            {busy ? 'Applying…' : 'Apply connector trigger'}
-          </button>
-          <AiGenerate
-            kind="connector_trigger"
-            title="Generate a connector agent with AI"
-            hint="Describe the connector event and task; a Foundry model writes a complete .agent.md (connector trigger + instructions). Applying replaces this agent's draft."
-            subscription={subscription}
-            app={app}
-            agentName={agentName}
-          />
-        </>
-      )}
+          {view === 'gallery' && (
+            <>
+              <div className="recipe-section-label">Make it run — triggers</div>
+              <div className="recipe-grid">
+                <RecipeCard
+                  icon="clock"
+                  title="On a schedule"
+                  desc="Run every hour, daily, or weekly."
+                  onClick={() => {
+                    setView('schedule')
+                    reset()
+                  }}
+                />
+                <RecipeCard
+                  icon="globe"
+                  title="HTTP endpoint"
+                  desc="Call the agent with a web request."
+                  onClick={() => {
+                    setHttpRoute(agentName)
+                    setView('http')
+                    reset()
+                  }}
+                />
+                <RecipeCard
+                  icon="mail"
+                  title="On new Outlook email"
+                  desc="React to incoming mail (connector)."
+                  onClick={() => {
+                    setView('outlook')
+                    reset()
+                  }}
+                />
+                <RecipeCard
+                  icon="zap"
+                  title="More trigger types…"
+                  desc="Queue, Service Bus, Blob, Event Grid."
+                  onClick={() => {
+                    setView('trigger-advanced')
+                    reset()
+                  }}
+                />
+              </div>
 
-      {mode === 'mcp' && (
-        <>
-          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-            A <strong>remote MCP server</strong> is configuration written to <span className="mono">mcp.json</span>.
-            A <strong>custom tool</strong> is actual Python code written to <span className="mono">tools/&lt;name&gt;.py</span>{' '}
-            — use <strong>✨ Generate a custom tool</strong> below.
-          </p>
-          <div className="field">
-            <label>Quick add</label>
-            <div className="pill-row">
-              {MCP_PRESETS.map((p) => (
-                <button key={p.name} className="btn sm" disabled={busy} onClick={() => void applyMcp(p.server, p.name)}>
-                  ＋ {p.label}
-                </button>
+              <div className="recipe-section-label">Give it tools &amp; knowledge</div>
+              <div className="recipe-grid">
+                {MCP_PRESETS.map((p) => (
+                  <RecipeCard
+                    key={p.name}
+                    icon={p.name === 'microsoft-learn' ? 'book' : 'mail'}
+                    title={p.label}
+                    desc={p.description ?? 'Ready-made MCP tool server.'}
+                    disabled={busy}
+                    onClick={() => void applyMcp(p.server, p.name)}
+                  />
+                ))}
+                <RecipeCard
+                  icon="server"
+                  title="Custom MCP server"
+                  desc="Connect any remote MCP endpoint."
+                  onClick={() => {
+                    setView('mcp-advanced')
+                    reset()
+                  }}
+                />
+                <RecipeCard
+                  icon="terminal"
+                  title="Custom tool (Python)"
+                  desc="Generate code the agent can call."
+                  onClick={() => {
+                    setView('tool-ai')
+                    reset()
+                  }}
+                />
+                <RecipeCard
+                  icon="bulb"
+                  title="Skill"
+                  desc="Reusable knowledge in Markdown."
+                  onClick={() => {
+                    setView('skill')
+                    reset()
+                  }}
+                />
+              </div>
+            </>
+          )}
+
+          {view === 'schedule' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="clock" size={16} /> Run on a schedule
+              </h4>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                Choose how often <span className="mono">{agentName}</span> runs. Writes a timer trigger into its{' '}
+                <span className="mono">.agent.md</span> — no cron syntax required.
+              </p>
+              <div className="schedule-grid">
+                {SCHEDULE_PRESETS.map((s) => (
+                  <Button
+                    key={s.cron}
+                    disabled={busy}
+                    onClick={() => void applyTrigger('timer', { schedule: s.cron })}
+                  >
+                    {s.label}
+                  </Button>
+                ))}
+              </div>
+              <div className="divider" />
+              <div className="field">
+                <label>Custom schedule (advanced)</label>
+                <Input
+                  value={trigValues.schedule ?? ''}
+                  placeholder="0 0 */6 * * *"
+                  onChange={(_, data) => setTrigValues({ schedule: data.value })}
+                />
+                <div className="hint">6-field NCRONTAB: second minute hour day month weekday.</div>
+              </div>
+              <Button
+                appearance="primary"
+                disabled={busy || !(trigValues.schedule ?? '').trim()}
+                onClick={() => void applyTrigger('timer')}
+              >
+                {busy ? 'Applying…' : 'Apply custom schedule'}
+              </Button>
+            </>
+          )}
+
+          {view === 'http' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="globe" size={16} /> HTTP endpoint
+              </h4>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                Exposes <span className="mono">POST /&lt;route&gt;</span> that runs the agent. Writes an http trigger
+                into <span className="mono">{agentName}.agent.md</span>.
+              </p>
+              <div className="field">
+                <label>Route</label>
+                <Input value={httpRoute} placeholder={agentName} onChange={(_, data) => setHttpRoute(data.value)} />
+                <div className="hint">The path callers POST to (defaults to the agent name). Auth: function key.</div>
+              </div>
+              <Button
+                appearance="primary"
+                disabled={busy || !httpRoute.trim()}
+                onClick={() =>
+                  void applyTrigger('http', {
+                    route: httpRoute.trim(),
+                    methods: 'POST',
+                    auth_level: 'function',
+                  })
+                }
+              >
+                {busy ? 'Applying…' : 'Add HTTP endpoint'}
+              </Button>
+              <AiGenerate
+                kind="http_trigger"
+                triggerType="http_trigger"
+                title="Generate an HTTP agent with AI"
+                hint="Describe the task; a Foundry model writes a complete .agent.md (HTTP trigger + instructions). Applying replaces this agent's draft."
+                subscription={subscription}
+                app={app}
+                agentName={agentName}
+              />
+            </>
+          )}
+
+          {view === 'outlook' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="mail" size={16} /> On new Outlook email
+              </h4>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                The agent runs when a new Office 365 Outlook email arrives. This writes the connector trigger into{' '}
+                <span className="mono">{agentName}.agent.md</span>. Two things are still needed to go live:
+              </p>
+              <ul className="muted" style={{ fontSize: 12, marginTop: 0, paddingLeft: 18 }}>
+                <li>Create the Outlook connection in Azure (Connector Gateway).</li>
+                <li>Add the Outlook email tool so the agent can act — one click below.</li>
+              </ul>
+              <div className="gh-row">
+                <Button appearance="primary" disabled={busy} onClick={() => void applyTrigger('connector')}>
+                  {busy ? 'Applying…' : 'Add connector trigger'}
+                </Button>
+                {outlookPreset && (
+                  <Button
+                    disabled={busy}
+                    onClick={() => void applyMcp(outlookPreset.server, outlookPreset.name)}
+                  >
+                    Add Outlook email tool
+                  </Button>
+                )}
+              </div>
+              <AiGenerate
+                kind="connector_trigger"
+                title="Generate a connector agent with AI"
+                hint="Describe the connector event and task; a Foundry model writes a complete .agent.md (connector trigger + instructions). Applying replaces this agent's draft."
+                subscription={subscription}
+                app={app}
+                agentName={agentName}
+              />
+            </>
+          )}
+
+          {view === 'trigger-advanced' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                Declarative: writes the <span className="mono">trigger:</span> block into{' '}
+                <span className="mono">{agentName}.agent.md</span>. The runtime registers the Azure Functions binding
+                at deploy — no <span className="mono">function_app.py</span> code is produced.
+              </p>
+              <div className="field">
+                <label>Trigger type</label>
+                <SearchableSelect
+                  value={trigType}
+                  onChange={(v) => {
+                    setTrigType(v)
+                    setTrigValues({})
+                    reset()
+                  }}
+                  options={Object.entries(TRIGGER_SPECS).map(([k, s]) => ({ value: k, label: s.label }))}
+                  placeholder="Select a trigger type…"
+                  ariaLabel="Trigger type"
+                />
+              </div>
+              {spec.note && (
+                <p className="muted" style={{ fontSize: 12 }}>
+                  {spec.note}
+                </p>
+              )}
+              {spec.fields.map((f) => (
+                <div className="field" key={f.name}>
+                  <label>
+                    {f.label}
+                    {f.required ? ' *' : ''}
+                  </label>
+                  <Input
+                    value={trigValues[f.name] ?? f.default ?? ''}
+                    placeholder={f.placeholder}
+                    onChange={(_, data) => setTrigValues((v) => ({ ...v, [f.name]: data.value }))}
+                  />
+                  {f.help && <div className="hint">{f.help}</div>}
+                </div>
               ))}
-            </div>
-            <div className="hint">Adds a ready-made server from the runtime samples.</div>
-          </div>
-          <div className="divider" />
-          <div className="field">
-            <label>Server name *</label>
-            <input value={mcpName} placeholder="my-mcp-server" onChange={(e) => setMcpName(e.target.value)} />
-          </div>
-          <div className="field">
-            <label>Server URL *</label>
-            <input value={mcpUrl} placeholder="https://… or $ENV_VAR" onChange={(e) => setMcpUrl(e.target.value)} />
-            <div className="hint">Remote HTTP MCP endpoint. Supports $ENV_VAR substitution.</div>
-          </div>
-          <div className="field">
-            <label>Tools (optional)</label>
-            <input
-              value={mcpTools}
-              placeholder="tool_a, tool_b (blank = all)"
-              onChange={(e) => setMcpTools(e.target.value)}
-            />
-          </div>
-          <div className="grid cols-2">
-            <div className="field">
-              <label>Auth scope (optional)</label>
-              <input
-                value={mcpScope}
-                placeholder="https://apihub.azure.com/.default"
-                onChange={(e) => setMcpScope(e.target.value)}
+              <Button
+                appearance="primary"
+                disabled={busy || triggerIncomplete}
+                onClick={() => void applyTrigger(trigType)}
+              >
+                {busy ? 'Applying…' : `Apply ${spec.label} trigger`}
+              </Button>
+              <AiGenerate
+                kind="http_trigger"
+                triggerType={spec.type}
+                title={`Generate a ${spec.label} agent with AI`}
+                hint={`Describe the task; a Foundry model writes a complete .agent.md (${spec.label.toLowerCase()} trigger + instructions). Applying replaces this agent's draft.`}
+                subscription={subscription}
+                app={app}
+                agentName={agentName}
               />
-            </div>
-            <div className="field">
-              <label>Client ID (optional)</label>
-              <input
-                value={mcpClientId}
-                placeholder="$O365_MCP_CLIENT_ID"
-                onChange={(e) => setMcpClientId(e.target.value)}
-              />
-            </div>
-          </div>
-          <button className="btn primary" disabled={busy || !mcpName.trim() || !mcpUrl.trim()} onClick={applyMcpForm}>
-            {busy ? 'Applying…' : 'Add MCP server'}
-          </button>
-          {mcpPreview && (
-            <pre className="code" style={{ marginTop: 12, maxHeight: 220 }}>
-              {mcpPreview}
-            </pre>
+            </>
           )}
-          <AiGenerate
-            kind="custom_tool"
-            title="Generate a custom tool (Python) with AI"
-            hint="Describe a capability; a Foundry model writes a Python @tool for the tools/ folder that this app's agents can call. Saved as tools/<name>.py."
-            subscription={subscription}
-            app={app}
-            agentName={agentName}
-          />
-        </>
-      )}
 
-      {mode === 'skill' && (
-        <>
-          <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
-            A <strong>skill</strong> is reusable knowledge written to{' '}
-            <span className="mono">skills/&lt;name&gt;/SKILL.md</span>. The runtime auto-discovers it and the agent
-            pulls it in on demand — edit it any time to control and enhance behaviour.
-          </p>
-          <div className="field">
-            <label>Skill name *</label>
-            <input value={skillName} placeholder="api-assistant" onChange={(e) => setSkillName(e.target.value)} />
-            <div className="hint">kebab-case, e.g. azure-resources</div>
-          </div>
-          <div className="field">
-            <label>Description *</label>
-            <input
-              value={skillDesc}
-              placeholder="What it provides and when the agent should use it"
-              onChange={(e) => setSkillDesc(e.target.value)}
-            />
-          </div>
-          <div className="field">
-            <label>Content (Markdown, optional)</label>
-            <textarea
-              className="editor"
-              style={{ minHeight: 120 }}
-              spellCheck={false}
-              value={skillBody}
-              placeholder={'# Title\n\nDomain knowledge, how-to steps, references, best practices…'}
-              onChange={(e) => setSkillBody(e.target.value)}
-            />
-            <div className="hint">Leave blank to start from a stub, or use ✨ Generate below.</div>
-          </div>
-          <button
-            className="btn primary"
-            disabled={busy || !skillName.trim() || !skillDesc.trim()}
-            onClick={() => void applySkill()}
-          >
-            {busy ? 'Applying…' : 'Add skill'}
-          </button>
-          <AiGenerate
-            kind="skill"
-            title="Generate a skill with AI"
-            hint="Describe the knowledge/capability; a Foundry model writes a SKILL.md saved to skills/<name>/SKILL.md."
-            subscription={subscription}
-            app={app}
-            agentName={agentName}
-          />
-        </>
-      )}
+          {view === 'mcp-advanced' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="server" size={16} /> Custom MCP server
+              </h4>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                Connect a remote HTTP MCP endpoint. Written to <span className="mono">mcp.json</span> and shared by all
+                of this app's agents.
+              </p>
+              <div className="field">
+                <label>Server name *</label>
+                <Input value={mcpName} placeholder="my-mcp-server" onChange={(_, data) => setMcpName(data.value)} />
+              </div>
+              <div className="field">
+                <label>Server URL *</label>
+                <Input value={mcpUrl} placeholder="https://… or $ENV_VAR" onChange={(_, data) => setMcpUrl(data.value)} />
+                <div className="hint">Remote HTTP MCP endpoint. Supports $ENV_VAR substitution.</div>
+              </div>
+              <div className="field">
+                <label>Tools (optional)</label>
+                <Input
+                  value={mcpTools}
+                  placeholder="tool_a, tool_b (blank = all)"
+                  onChange={(_, data) => setMcpTools(data.value)}
+                />
+              </div>
+              <div className="grid cols-2">
+                <div className="field">
+                  <label>Auth scope (optional)</label>
+                  <Input
+                    value={mcpScope}
+                    placeholder="https://apihub.azure.com/.default"
+                    onChange={(_, data) => setMcpScope(data.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label>Client ID (optional)</label>
+                  <Input
+                    value={mcpClientId}
+                    placeholder="$O365_MCP_CLIENT_ID"
+                    onChange={(_, data) => setMcpClientId(data.value)}
+                  />
+                </div>
+              </div>
+              <Button
+                appearance="primary"
+                disabled={busy || !mcpName.trim() || !mcpUrl.trim()}
+                onClick={applyMcpForm}
+              >
+                {busy ? 'Applying…' : 'Add MCP server'}
+              </Button>
+              {mcpPreview && (
+                <pre className="code" style={{ marginTop: 12, maxHeight: 220 }}>
+                  {mcpPreview}
+                </pre>
+              )}
+            </>
+          )}
 
-      {msg && (
-        <div className="note ok" style={{ marginTop: 12 }}>
-          ✓ {msg}
-        </div>
-      )}
-      {error && (
-        <div className="gh-err" style={{ marginTop: 12 }}>
-          {error}
-        </div>
-      )}
+          {view === 'tool-ai' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="terminal" size={16} /> Custom tool (Python)
+              </h4>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                Generates a Python <span className="mono">@tool</span> saved to{' '}
+                <span className="mono">tools/&lt;name&gt;.py</span> that this app's agents can call.
+              </p>
+              <AiGenerate
+                kind="custom_tool"
+                title="Generate a custom tool (Python) with AI"
+                hint="Describe a capability; a Foundry model writes a Python @tool for the tools/ folder that this app's agents can call. Saved as tools/<name>.py."
+                subscription={subscription}
+                app={app}
+                agentName={agentName}
+              />
+            </>
+          )}
+
+          {view === 'skill' && (
+            <>
+              <button className="view-back" onClick={backToGallery}>
+                <Icon name="arrowLeft" size={14} /> All capabilities
+              </button>
+              <h4 style={{ margin: '0 0 4px', display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                <Icon name="bulb" size={16} /> Skill
+              </h4>
+              <p className="muted" style={{ fontSize: 12, marginTop: 0 }}>
+                A <strong>skill</strong> is reusable knowledge written to{' '}
+                <span className="mono">skills/&lt;name&gt;/SKILL.md</span>. The runtime auto-discovers it and the agent
+                pulls it in on demand.
+              </p>
+              <div className="field">
+                <label>Skill name *</label>
+                <Input value={skillName} placeholder="api-assistant" onChange={(_, data) => setSkillName(data.value)} />
+                <div className="hint">kebab-case, e.g. azure-resources</div>
+              </div>
+              <div className="field">
+                <label>Description *</label>
+                <Input
+                  value={skillDesc}
+                  placeholder="What it provides and when the agent should use it"
+                  onChange={(_, data) => setSkillDesc(data.value)}
+                />
+              </div>
+              <div className="field">
+                <label>Content (Markdown, optional)</label>
+                <Textarea
+                  value={skillBody}
+                  placeholder={'# Title\n\nDomain knowledge, how-to steps, references, best practices…'}
+                  onChange={(_, data) => setSkillBody(data.value)}
+                  textarea={{ spellCheck: false, style: { minHeight: '120px' } }}
+                />
+                <div className="hint">Leave blank to start from a stub, or use Generate below.</div>
+              </div>
+              <Button
+                appearance="primary"
+                disabled={busy || !skillName.trim() || !skillDesc.trim()}
+                onClick={() => void applySkill()}
+              >
+                {busy ? 'Applying…' : 'Add skill'}
+              </Button>
+              <AiGenerate
+                kind="skill"
+                title="Generate a skill with AI"
+                hint="Describe the knowledge/capability; a Foundry model writes a SKILL.md saved to skills/<name>/SKILL.md."
+                subscription={subscription}
+                app={app}
+                agentName={agentName}
+              />
+            </>
+          )}
         </Modal>
       )}
     </>
+  )
+}
+
+function RecipeCard({
+  icon,
+  title,
+  desc,
+  onClick,
+  disabled,
+}: {
+  icon: IconName
+  title: string
+  desc: string
+  onClick: () => void
+  disabled?: boolean
+}) {
+  return (
+    <button type="button" className="recipe-card" onClick={onClick} disabled={disabled}>
+      <span className="recipe-ico">
+        <Icon name={icon} size={18} />
+      </span>
+      <span className="recipe-body">
+        <span className="recipe-title">{title}</span>
+        <span className="recipe-desc">{desc}</span>
+      </span>
+    </button>
   )
 }
 
@@ -553,19 +773,16 @@ function AiGenerate({
       {(kind === 'custom_tool' || kind === 'skill') && (
         <div className="field">
           <label>{kind === 'skill' ? 'Skill name *' : 'Tool name *'}</label>
-          <input
+          <Input
             value={toolName}
             placeholder={kind === 'skill' ? 'api-assistant' : 'fetch_weather'}
-            onChange={(e) => setToolName(e.target.value)}
+            onChange={(_, data) => setToolName(data.value)}
           />
         </div>
       )}
       <div className="field">
         <label>Describe what to generate *</label>
-        <textarea
-          className="editor"
-          style={{ minHeight: 84 }}
-          spellCheck={false}
+        <Textarea
           value={desc}
           placeholder={
             kind === 'custom_tool'
@@ -576,15 +793,18 @@ function AiGenerate({
                   ? 'e.g. When a new Outlook email arrives from my manager, draft a concise reply.'
                   : 'e.g. Accept a support ticket, classify urgency, and return a JSON triage result.'
           }
-          onChange={(e) => setDesc(e.target.value)}
+          onChange={(_, data) => setDesc(data.value)}
+          textarea={{ spellCheck: false, style: { minHeight: '84px' } }}
         />
       </div>
-      <label className="check" style={{ fontSize: 12, marginBottom: 10 }}>
-        <input type="checkbox" checked={ground} onChange={(e) => setGround(e.target.checked)} />
-        Ground in this app's existing skills
-      </label>
-      <button
-        className="btn primary"
+      <Checkbox
+        checked={ground}
+        onChange={(_, data) => setGround(data.checked === true)}
+        label="Ground in this app's existing skills"
+        style={{ marginBottom: 10 }}
+      />
+      <Button
+        appearance="primary"
         disabled={busy || !desc.trim() || !selected || ((kind === 'custom_tool' || kind === 'skill') && !toolName.trim())}
         onClick={() => void generate()}
       >
@@ -595,14 +815,14 @@ function AiGenerate({
         ) : (
           '✨ Generate'
         )}
-      </button>
+      </Button>
       {content && (
         <>
           <pre className="code" style={{ marginTop: 12, maxHeight: 320 }}>
             {content}
           </pre>
           <div className="gh-row">
-            <button className="btn primary" disabled={busy} onClick={() => void apply()}>
+            <Button appearance="primary" disabled={busy} onClick={() => void apply()}>
               {busy
                 ? 'Applying…'
                 : kind === 'custom_tool'
@@ -610,10 +830,10 @@ function AiGenerate({
                   : kind === 'skill'
                     ? 'Save as skill draft'
                     : 'Apply to .agent.md draft'}
-            </button>
-            <button className="btn sm ghost" onClick={() => setContent('')}>
+            </Button>
+            <Button appearance="subtle" size="small" onClick={() => setContent('')}>
               Discard
-            </button>
+            </Button>
           </div>
         </>
       )}

@@ -1,8 +1,9 @@
-// A lightweight, accessible searchable dropdown: a button that opens a panel with
-// a filter box and the matching options. Controlled + prop-driven so it can
-// replace any native <select> across the portal.
+// A filterable single-select built on the CoreAI/Fluent Combobox. Keeps the
+// controlled, prop-driven API (value = option value, onChange(value)) so it can
+// replace any native <select> across the portal without call-site changes.
 
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
+import { Combobox, Option } from '@coreai/fluentui-react'
 
 export interface SearchOption {
   value: string
@@ -29,16 +30,13 @@ export const SearchableSelect = ({
   loading = false,
   ariaLabel,
 }: SearchableSelectProps) => {
-  const [open, setOpen] = useState(false)
-  const [query, setQuery] = useState('')
-  const [active, setActive] = useState(0)
-  const rootRef = useRef<HTMLDivElement>(null)
-  const inputRef = useRef<HTMLInputElement>(null)
-  const listId = useId()
-
   const selected = options.find((o) => o.value === value)
+  // `query` is the live filter text while the user is typing; `null` means "not
+  // typing" so the input shows the selected option's label.
+  const [query, setQuery] = useState<string | null>(null)
+
   const filtered = useMemo(() => {
-    const q = query.trim().toLowerCase()
+    const q = (query ?? '').trim().toLowerCase()
     if (!q) return options
     return options.filter(
       (o) =>
@@ -48,97 +46,42 @@ export const SearchableSelect = ({
     )
   }, [options, query])
 
-  // Close on outside click.
-  useEffect(() => {
-    if (!open) return
-    const onDown = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDown)
-    return () => document.removeEventListener('mousedown', onDown)
-  }, [open])
-
-  // Focus the filter box when opening; reset the highlight as results change.
-  useEffect(() => {
-    if (open) inputRef.current?.focus()
-  }, [open])
-  useEffect(() => {
-    setActive(0)
-  }, [query, open])
-
-  const choose = (v: string) => {
-    onChange(v)
-    setOpen(false)
-    setQuery('')
-  }
-
-  const onKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Escape') {
-      setOpen(false)
-      return
-    }
-    if (e.key === 'ArrowDown') {
-      e.preventDefault()
-      setActive((a) => Math.min(a + 1, filtered.length - 1))
-    } else if (e.key === 'ArrowUp') {
-      e.preventDefault()
-      setActive((a) => Math.max(a - 1, 0))
-    } else if (e.key === 'Enter') {
-      e.preventDefault()
-      const opt = filtered[active]
-      if (opt) choose(opt.value)
-    }
-  }
-
   return (
-    <div className="ss" ref={rootRef}>
-      <button
-        type="button"
-        className="ss-btn"
-        disabled={disabled || loading}
-        aria-haspopup="listbox"
-        aria-expanded={open}
-        aria-label={ariaLabel}
-        onClick={() => setOpen((o) => !o)}
-      >
-        <span className={'ss-val' + (selected ? '' : ' ss-placeholder')}>
-          {loading ? 'Loading…' : selected ? selected.label : placeholder}
-        </span>
-        <span className="ss-chev" aria-hidden="true">
-          ▾
-        </span>
-      </button>
-      {open && (
-        <div className="ss-panel">
-          <input
-            ref={inputRef}
-            className="ss-search"
-            type="text"
-            value={query}
-            placeholder="Search…"
-            aria-label="Filter options"
-            onChange={(e) => setQuery(e.target.value)}
-            onKeyDown={onKeyDown}
-          />
-          <div className="ss-list" role="listbox" id={listId}>
-            {filtered.length === 0 && <div className="ss-empty">No matches</div>}
-            {filtered.map((o, i) => (
-              <button
-                type="button"
-                key={o.value}
-                role="option"
-                aria-selected={o.value === value}
-                className={'ss-opt' + (i === active ? ' active' : '') + (o.value === value ? ' selected' : '')}
-                onMouseEnter={() => setActive(i)}
-                onClick={() => choose(o.value)}
-              >
-                {o.label}
-                {o.sublabel && <span className="ss-sub">{o.sublabel}</span>}
-              </button>
-            ))}
-          </div>
-        </div>
+    <Combobox
+      value={query ?? selected?.label ?? ''}
+      selectedOptions={value ? [value] : []}
+      placeholder={loading ? 'Loading…' : placeholder}
+      disabled={disabled || loading}
+      aria-label={ariaLabel}
+      freeform
+      onOptionSelect={(_, data) => {
+        onChange(data.optionValue ?? '')
+        setQuery(null)
+      }}
+      onChange={(e) => setQuery(e.target.value)}
+      onOpenChange={(_, data) => {
+        // Revert any unselected typed text back to the current selection on close.
+        if (!data.open) setQuery(null)
+      }}
+    >
+      {filtered.length === 0 ? (
+        <Option key="__none" value="__none" text="" disabled>
+          No matches
+        </Option>
+      ) : (
+        filtered.map((o) => (
+          <Option key={o.value} value={o.value} text={o.label}>
+            {o.sublabel ? (
+              <span className="ss-opt-body">
+                <span>{o.label}</span>
+                <span className="ss-sub">{o.sublabel}</span>
+              </span>
+            ) : (
+              o.label
+            )}
+          </Option>
+        ))
       )}
-    </div>
+    </Combobox>
   )
 }

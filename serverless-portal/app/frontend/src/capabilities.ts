@@ -92,6 +92,23 @@ export const TRIGGER_SPECS: Record<string, TriggerSpec> = {
   },
 }
 
+export interface SchedulePreset {
+  label: string
+  cron: string
+}
+
+// Friendly recurring-schedule choices mapped to 6-field NCRONTAB, so the UI can
+// offer plain-language options instead of asking users to hand-write cron. The
+// values mirror the timer schedules used in the runtime samples.
+export const SCHEDULE_PRESETS: SchedulePreset[] = [
+  { label: 'Every hour', cron: '0 0 * * * *' },
+  { label: 'Every 6 hours', cron: '0 0 */6 * * *' },
+  { label: 'Every day at 9:00 AM', cron: '0 0 9 * * *' },
+  { label: 'Every day at 3:00 PM', cron: '0 0 15 * * *' },
+  { label: 'Weekdays at 8:00 AM', cron: '0 0 8 * * 1-5' },
+  { label: 'Every Monday at 9:00 AM', cron: '0 0 9 * * 1' },
+]
+
 function yamlScalar(v: string): string {
   return '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
 }
@@ -199,6 +216,7 @@ export function addMcpServer(jsonText: string, name: string, server: McpServer):
 export interface McpPreset {
   label: string
   name: string
+  description?: string
   server: McpServer
 }
 
@@ -207,11 +225,13 @@ export const MCP_PRESETS: McpPreset[] = [
   {
     label: 'Microsoft Learn',
     name: 'microsoft-learn',
+    description: 'Search official Microsoft/Azure docs. No auth required.',
     server: { type: 'http', url: 'https://learn.microsoft.com/api/mcp' },
   },
   {
     label: 'Office 365 Outlook',
     name: 'office365-outlook',
+    description: 'Send email via Outlook. Needs a connection + O365 env vars.',
     server: {
       type: 'http',
       url: '$O365_MCP_SERVER_URL',

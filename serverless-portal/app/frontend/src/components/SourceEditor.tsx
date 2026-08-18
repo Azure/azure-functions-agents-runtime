@@ -5,25 +5,30 @@
 
 import { useEffect, useState, type ReactNode } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { Button, Tooltip } from '@coreai/fluentui-react'
+import { CopyRegular, CheckmarkRegular } from '@fluentui/react-icons'
 
 export function CopyButton({ text, title }: { text: string; title: string }) {
   const [copied, setCopied] = useState(false)
   return (
-    <button
-      className="btn sm"
-      title={title}
-      onClick={async () => {
-        try {
-          await navigator.clipboard.writeText(text)
-          setCopied(true)
-          setTimeout(() => setCopied(false), 1200)
-        } catch {
-          /* clipboard unavailable */
-        }
-      }}
-    >
-      {copied ? '✓ Copied' : '⧉ Copy'}
-    </button>
+    <Tooltip content={title} relationship="label">
+      <Button
+        appearance="subtle"
+        size="small"
+        icon={copied ? <CheckmarkRegular /> : <CopyRegular />}
+        onClick={async () => {
+          try {
+            await navigator.clipboard.writeText(text)
+            setCopied(true)
+            setTimeout(() => setCopied(false), 1200)
+          } catch {
+            /* clipboard unavailable */
+          }
+        }}
+      >
+        {copied ? 'Copied' : 'Copy'}
+      </Button>
+    </Tooltip>
   )
 }
 
@@ -100,21 +105,23 @@ export function DraftEditor({
           </span>
         )}
         <div style={{ flex: 1 }} />
-        <button
-          className="btn sm"
+        <Button
+          appearance="subtle"
+          size="small"
           onClick={() => setText(null)}
           disabled={!dirty || saveMutation.isPending}
           title="Discard unsaved changes"
         >
           Reset
-        </button>
-        <button
-          className="btn sm primary"
+        </Button>
+        <Button
+          appearance="primary"
+          size="small"
           onClick={() => saveMutation.mutate(value)}
           disabled={!dirty || saveMutation.isPending}
         >
           {saveMutation.isPending ? 'Saving…' : 'Save draft'}
-        </button>
+        </Button>
         {renderActions?.({ source, dirty })}
       </div>
       {unreadable && (

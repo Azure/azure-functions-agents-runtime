@@ -6,6 +6,7 @@ import { useDeployJob, DeploymentStatus } from '../deploy'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 import { DeployTargetPicker, SearchableSelect, Icon } from '../components/ui'
+import { Button, Input } from '@coreai/fluentui-react'
 import { DraftEditor } from '../components/SourceEditor'
 import { AddCapability } from '../components/AddCapability'
 import { skillSlug } from '../capabilities'
@@ -316,9 +317,9 @@ export default function DraftAppPage() {
         Home / <Link to={`/agents/${selected}`}>AI Apps</Link> / <Link to="/create-agent">Create</Link> / Review
       </div>
       <div className="page-title">
-        <button className="btn ghost sm" onClick={() => navigate('/create-agent')} title="Back to describe">
+        <Button appearance="subtle" size="small" onClick={() => navigate('/create-agent')} title="Back to describe">
           ← Back
-        </button>
+        </Button>
         <h1 className="mono">{fileName}</h1>
         <span className="badge blue">
           <span className="dot" /> {draft.foundryModel || 'no model'}
@@ -342,12 +343,12 @@ export default function DraftAppPage() {
             <h3>Agent</h3>
             <div className="field" style={{ marginBottom: 0 }}>
               <label>Name</label>
-              <input
+              <Input
                 type="text"
                 value={draft.name}
                 placeholder="support-triage"
                 disabled={capsEnabled}
-                onChange={(e) => set('name', e.target.value)}
+                onChange={(_, data) => set('name', data.value)}
               />
               <div className="hint">
                 File <span className="mono">{fileName}</span> and route slug.
@@ -363,13 +364,14 @@ export default function DraftAppPage() {
               {capsEnabled ? (
                 <span className="badge blue">draft</span>
               ) : draft.mdOverride != null ? (
-                <button
-                  className="btn sm"
+                <Button
+                  appearance="subtle"
+                  size="small"
                   onClick={() => set('mdOverride', null)}
                   title="Recompose from the generated instructions"
                 >
                   ↺ Reset
-                </button>
+                </Button>
               ) : (
                 <span className="badge gray">generated</span>
               )}

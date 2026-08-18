@@ -4,6 +4,7 @@ import { useQuery } from '@tanstack/react-query'
 import { api } from '../api'
 import { useIdentity } from '../identity'
 import { Callout, SearchableSelect, Icon } from '../components/ui'
+import { Button, Input } from '@coreai/fluentui-react'
 import { type Draft, loadDraft, saveDraft, clearDraft, deriveName } from '../agentDraft'
 
 export default function CreateAgentPage() {
@@ -191,9 +192,14 @@ export default function CreateAgentPage() {
                       ariaLabel="Foundry resource"
                     />
                   </div>
-                  <button className="btn sm" onClick={() => void refetchFoundry()} title="Refresh Foundry list">
-                    <Icon name="refresh" size={14} />
-                  </button>
+                  <Button
+                    appearance="subtle"
+                    size="small"
+                    icon={<Icon name="refresh" size={14} />}
+                    onClick={() => void refetchFoundry()}
+                    title="Refresh Foundry list"
+                    aria-label="Refresh Foundry list"
+                  />
                 </div>
 
                 {selectedAccount && (
@@ -238,20 +244,20 @@ export default function CreateAgentPage() {
               <div className="grid cols-2" style={{ gap: 12, marginTop: 8 }}>
                 <div className="field" style={{ marginBottom: 0 }}>
                   <label>Model / deployment name</label>
-                  <input
+                  <Input
                     type="text"
                     value={draft.foundryModel}
                     placeholder="gpt-4o"
-                    onChange={(e) => set('foundryModel', e.target.value)}
+                    onChange={(_, data) => set('foundryModel', data.value)}
                   />
                 </div>
                 <div className="field" style={{ marginBottom: 0 }}>
                   <label>Foundry project endpoint</label>
-                  <input
+                  <Input
                     type="url"
                     value={draft.foundryEndpoint}
                     placeholder="https://<account>.services.ai.azure.com/api/projects/<project>"
-                    onChange={(e) => set('foundryEndpoint', e.target.value)}
+                    onChange={(_, data) => set('foundryEndpoint', data.value)}
                   />
                 </div>
                 <div className="hint" style={{ gridColumn: '1 / -1' }}>
@@ -261,12 +267,10 @@ export default function CreateAgentPage() {
             )}
           </div>
           <div className="toolbar" style={{ marginTop: 16 }}>
-            <button className="btn primary" disabled={!foundryReady} onClick={() => setStep(2)}>
+            <Button appearance="primary" disabled={!foundryReady} onClick={() => setStep(2)}>
               Continue →
-            </button>
-            <button className="btn" onClick={cancel}>
-              Cancel
-            </button>
+            </Button>
+            <Button onClick={cancel}>Cancel</Button>
             {!foundryReady && (
               <span className="muted" style={{ fontSize: 12 }}>
                 Select or enter a Foundry model to continue.

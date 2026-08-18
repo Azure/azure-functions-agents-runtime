@@ -2,6 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { api, type LiveAgent } from '../api'
+import { Button, Checkbox, Input } from '@coreai/fluentui-react'
+import { SearchableSelect } from '../components/ui'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 
@@ -350,29 +352,20 @@ export default function PlaygroundPage() {
       <p className="page-sub">Run a deployed agent by chatting with its built-in endpoint.</p>
 
       <div className="toolbar">
-        <select
-          style={{ width: 'auto' }}
+        <SearchableSelect
           value={selectedKey}
-          onChange={(e) => setSelectedKey(e.target.value)}
+          onChange={setSelectedKey}
+          options={chatAgents.map((a) => ({ value: keyOf(a), label: `${a.name} · ${a.app}` }))}
+          placeholder={chatAgents.length ? 'Select an agent…' : 'No chat-enabled agents'}
           disabled={!chatAgents.length}
-          aria-label="Select agent"
-        >
-          {chatAgents.length === 0 && <option>No chat-enabled agents</option>}
-          {chatAgents.map((a) => (
-            <option key={keyOf(a)} value={keyOf(a)}>
-              {a.name} · {a.app}
-            </option>
-          ))}
-        </select>
-        <label className="badge gray" style={{ cursor: 'pointer' }} title="Stream tokens + live trace">
-          <input
-            type="checkbox"
-            checked={stream}
-            onChange={(e) => setStream(e.target.checked)}
-            style={{ width: 'auto', marginRight: 6 }}
-          />
-          Stream
-        </label>
+          ariaLabel="Select agent"
+        />
+        <Checkbox
+          checked={stream}
+          onChange={(_, data) => setStream(data.checked === true)}
+          label="Stream"
+          title="Stream tokens + live trace"
+        />
         {sessionId && (
           <span className="badge blue">
             <span className="dot" /> session <span className="mono">{sessionId.slice(0, 8)}…</span>
@@ -384,12 +377,12 @@ export default function PlaygroundPage() {
             Open agent
           </Link>
         )}
-        <button className="btn sm" onClick={newSession} disabled={sending}>
+        <Button size="small" onClick={newSession} disabled={sending}>
           ＋ New session
-        </button>
-        <button className="btn sm" onClick={clearAll} disabled={sending || !messages.length}>
+        </Button>
+        <Button size="small" onClick={clearAll} disabled={sending || !messages.length}>
           Clear
-        </button>
+        </Button>
       </div>
 
       {!subForQuery && <div className="empty">Select a subscription to load agents.</div>}
@@ -433,26 +426,24 @@ export default function PlaygroundPage() {
               )}
             </div>
             <div className="composer">
-              <input
+              <Input
                 type="text"
                 placeholder={`Message ${agent.name}…`}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Enter' && !e.shiftKey) {
-                    e.preventDefault()
-                    void send()
-                  }
-                }}
+                onChange={(_, data) => setInput(data.value)}
                 disabled={sending}
+                input={{
+                  onKeyDown: (e) => {
+                    if (e.key === 'Enter' && !e.shiftKey) {
+                      e.preventDefault()
+                      void send()
+                    }
+                  },
+                }}
               />
-              <button
-                className="btn primary"
-                onClick={() => void send()}
-                disabled={sending || !input.trim()}
-              >
+              <Button appearance="primary" onClick={() => void send()} disabled={sending || !input.trim()}>
                 {sending ? 'Sending…' : 'Send'}
-              </button>
+              </Button>
             </div>
           </div>
 

@@ -1,6 +1,10 @@
 # Build context excludes local artifacts so the image is reproducible.
 **/node_modules
 **/dist
+# ...except the prebuilt SPA, which the image ships directly (the CoreAI DS dep
+# is on a private feed the image builder can't auth to, so we build it locally).
+!app/frontend/dist
+!app/frontend/dist/**
 **/.env
 **/.env.*
 **/npm-debug.log*

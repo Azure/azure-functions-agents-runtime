@@ -13,6 +13,9 @@ import {
   type GitHubConnectResult,
   type GitHubAppConnection,
 } from './api'
+import { Button, Input } from '@coreai/fluentui-react'
+import { DismissRegular } from '@fluentui/react-icons'
+import { SearchableSelect } from './components/ui'
 
 export type DeployPhase = 'idle' | 'running' | 'deployed' | 'error'
 
@@ -124,13 +127,14 @@ function GrantAccess({
         The app’s identity needs access to Foundry <span className="mono">{grant.account}</span> to call the
         model.
       </div>
-      <button
-        className="btn sm primary"
+      <Button
+        appearance="primary"
+        size="small"
         onClick={() => void run()}
         disabled={state === 'granting' || state === 'done'}
       >
         {state === 'granting' ? 'Granting…' : state === 'done' ? '✓ Access granted' : '🔑 Grant access'}
-      </button>{' '}
+      </Button>{' '}
       <a href={iamUrl} target="_blank" rel="noreferrer" style={{ fontSize: 12 }}>
         or grant in the portal ↗
       </a>
@@ -429,12 +433,10 @@ export function GitHubConnect({
           <span className="gh-user">
             {status.avatarUrl && <img src={status.avatarUrl} alt="" />}
             @{status.login}
-            <button className="btn ghost sm" title="Disconnect GitHub" onClick={disconnect}>
-              ✕
-            </button>
+            <Button appearance="subtle" size="small" icon={<DismissRegular />} title="Disconnect GitHub" aria-label="Disconnect GitHub" onClick={disconnect} />
           </span>
         ) : (
-          <button className="btn sm" disabled={busy} onClick={() => void connect()} title="Connect GitHub">
+          <Button size="small" disabled={busy} onClick={() => void connect()} title="Connect GitHub">
             {busy ? (
               <>
                 <span className="gh-spin" /> Connecting…
@@ -442,7 +444,7 @@ export function GitHubConnect({
             ) : (
               <>🐙 Connect</>
             )}
-          </button>
+          </Button>
         )}
       </div>
 
@@ -478,7 +480,7 @@ export function GitHubConnect({
               open a pull request with your changes.
             </div>
             <div className="gh-row" style={{ marginTop: 10 }}>
-              <button className="btn sm" disabled={provisioning} onClick={() => void provisionDeploy()}>
+              <Button size="small" disabled={provisioning} onClick={() => void provisionDeploy()}>
                 {provisioning ? (
                   <>
                     <span className="gh-spin" /> Setting up…
@@ -486,8 +488,8 @@ export function GitHubConnect({
                 ) : (
                   <>⚙️ Set up GitHub Actions deploy</>
                 )}
-              </button>
-              <button className="btn sm ghost" disabled={unlinking} onClick={() => void changeRepo()}>
+              </Button>
+              <Button appearance="subtle" size="small" disabled={unlinking} onClick={() => void changeRepo()}>
                 {unlinking ? (
                   <>
                     <span className="gh-spin" /> Updating…
@@ -495,7 +497,7 @@ export function GitHubConnect({
                 ) : (
                   <>🔁 Change repository</>
                 )}
-              </button>
+              </Button>
               {appConn.source === 'deploymentCenter' && (
                 <button
                   className="btn sm danger"
@@ -551,9 +553,9 @@ export function GitHubConnect({
                 {result.branch}
                 {result.base ? ` → ${result.base}` : ''}
               </span>
-              <button className="btn sm ghost" onClick={() => setResult(null)} title="Back to the repository">
+              <Button appearance="subtle" size="small" onClick={() => setResult(null)} title="Back to the repository">
                 ← Back
-              </button>
+              </Button>
             </div>
             <div className="muted" style={{ fontSize: 12, marginTop: 6 }}>
               {result.deploymentCenter
@@ -582,7 +584,7 @@ export function GitHubConnect({
                 merge to publish.
               </p>
             )}
-            <button className="btn primary" disabled={busy} onClick={() => void connect()}>
+            <Button appearance="primary" disabled={busy} onClick={() => void connect()}>
               {busy ? (
                 <>
                   <span className="gh-spin" /> Waiting for GitHub…
@@ -590,7 +592,7 @@ export function GitHubConnect({
               ) : (
                 <>🐙 {appConn?.connected ? 'Reconnect GitHub' : 'Connect GitHub'}</>
               )}
-            </button>
+            </Button>
             {busy && (
               <div className="muted" style={{ fontSize: 12, marginTop: 8 }}>
                 Complete sign-in in the popup — this tab updates automatically.
@@ -649,7 +651,7 @@ export function GitHubConnect({
               <>
                 <div className="gh-field">
                   <label>Repository name</label>
-                  <input value={repoName} onChange={(e) => setRepoName(e.target.value)} placeholder="my-agent" />
+                  <Input value={repoName} onChange={(_, data) => setRepoName(data.value)} placeholder="my-agent" />
                 </div>
                 <div className="gh-field">
                   <label>Visibility</label>
@@ -674,15 +676,17 @@ export function GitHubConnect({
             ) : (
               <div className="gh-field">
                 <label>Repository</label>
-                <select value={existingRepo} onChange={(e) => setExistingRepo(e.target.value)}>
-                  <option value="">{repos ? 'Select a repository…' : 'Loading your repositories…'}</option>
-                  {repos?.map((r) => (
-                    <option key={r.fullName} value={r.fullName}>
-                      {r.fullName}
-                      {r.private ? ' (private)' : ''}
-                    </option>
-                  ))}
-                </select>
+                <SearchableSelect
+                  value={existingRepo}
+                  onChange={setExistingRepo}
+                  options={(repos ?? []).map((r) => ({
+                    value: r.fullName,
+                    label: r.private ? `${r.fullName} (private)` : r.fullName,
+                  }))}
+                  placeholder={repos ? 'Select a repository…' : 'Loading your repositories…'}
+                  loading={!repos}
+                  ariaLabel="Repository"
+                />
               </div>
             )}
 

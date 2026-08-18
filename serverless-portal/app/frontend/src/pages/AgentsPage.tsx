@@ -5,6 +5,7 @@ import { api } from '../api'
 import { useIdentity } from '../identity'
 import { queryKeys, readAgentsSnapshot, writeAgentsSnapshot } from '../query'
 import { AiAppCard, EmptyState, StatTiles, SubscriptionPicker } from '../components/ui'
+import { Button } from '@coreai/fluentui-react'
 
 function formatCachedAt(ms: number): string {
   if (!ms) return ''
@@ -116,14 +117,13 @@ export default function AgentsPage() {
             Cached {formatCachedAt(dataUpdatedAt)}
           </span>
         )}
-        <button
-          className="btn"
+        <Button
           onClick={() => refetch()}
           disabled={!selected || isFetching}
           title="Force a fresh scan of the selected subscription"
         >
           {isFetching ? '⟳ Refreshing…' : '⟳ Hard refresh'}
-        </button>
+        </Button>
         <Link className="btn primary" to="/create-agent">
           ＋ New AI App
         </Link>

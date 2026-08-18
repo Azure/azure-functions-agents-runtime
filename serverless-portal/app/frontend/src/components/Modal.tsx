@@ -1,7 +1,10 @@
-// Lightweight modal dialog rendered in a portal at the document body, so it
-// overlays the whole page. Closes on backdrop click or Escape.
-import { type ReactNode, useEffect } from 'react'
-import { createPortal } from 'react-dom'
+// Modal dialog built on the CoreAI/Fluent Dialog: focus-trapped, escape- and
+// backdrop-dismissable, and portalled. Keeps the lightweight
+// { title, onClose, children, width } API used across the portal so call sites
+// don't change.
+import { type ReactNode } from 'react'
+import { Dialog, DialogSurface, DialogBody, DialogTitle, DialogContent, Button } from '@coreai/fluentui-react'
+import { DismissRegular } from '@fluentui/react-icons'
 
 export function Modal({
   title,
@@ -14,37 +17,32 @@ export function Modal({
   children: ReactNode
   width?: number
 }) {
-  useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') onClose()
-    }
-    window.addEventListener('keydown', onKey)
-    const prev = document.body.style.overflow
-    document.body.style.overflow = 'hidden'
-    return () => {
-      window.removeEventListener('keydown', onKey)
-      document.body.style.overflow = prev
-    }
-  }, [onClose])
-
-  return createPortal(
-    <div className="modal-backdrop" onClick={onClose}>
-      <div
-        className="modal"
-        style={width ? { maxWidth: width } : undefined}
-        role="dialog"
-        aria-modal="true"
-        onClick={(e) => e.stopPropagation()}
-      >
-        <div className="modal-head">
-          <h3>{title}</h3>
-          <button className="btn ghost sm" onClick={onClose} title="Close" aria-label="Close">
-            ✕
-          </button>
-        </div>
-        <div className="modal-body">{children}</div>
-      </div>
-    </div>,
-    document.body,
+  return (
+    <Dialog
+      open
+      onOpenChange={(_, data) => {
+        if (!data.open) onClose()
+      }}
+    >
+      <DialogSurface style={width ? { maxWidth: `${width}px` } : undefined}>
+        <DialogBody>
+          <DialogTitle
+            action={
+              <Button
+                appearance="subtle"
+                size="small"
+                icon={<DismissRegular />}
+                onClick={onClose}
+                title="Close"
+                aria-label="Close"
+              />
+            }
+          >
+            {title}
+          </DialogTitle>
+          <DialogContent>{children}</DialogContent>
+        </DialogBody>
+      </DialogSurface>
+    </Dialog>
   )
 }
