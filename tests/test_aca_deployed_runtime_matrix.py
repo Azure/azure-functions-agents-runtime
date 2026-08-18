@@ -7,6 +7,7 @@ import yaml
 
 def test_e2e_template_has_one_aca_only_python313_smoke_job() -> None:
     root = Path(__file__).parents[1]
+    pipeline = (root / "eng/ci/e2e-tests.yml").read_text()
     template = (root / "eng/templates/official/jobs/e2e-tests.yml").read_text()
     normal = template.split('- job: "ACACurrentCheckoutSmoke"', maxsplit=1)[0]
     smoke = template.split('- job: "ACACurrentCheckoutSmoke"', maxsplit=1)[1]
@@ -24,6 +25,9 @@ def test_e2e_template_has_one_aca_only_python313_smoke_job() -> None:
     assert "test_aca_run_journal_acceptance.py" in smoke
     assert "test_aca_real_agent_turn.py" in smoke
     assert "reap_aca_smoke_sandboxes.py" in smoke
+    assert "name: acaServiceConnection" in pipeline
+    assert "default: 'larohra-sandboxgroup-test'" in pipeline
+    assert "acaServiceConnection: ${{ parameters.acaServiceConnection }}" in pipeline
 
 
 def test_removed_predeployed_automation_and_targets_stay_removed() -> None:

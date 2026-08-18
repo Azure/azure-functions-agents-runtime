@@ -1,3 +1,9 @@
+parameters:
+  - name: acaServiceConnection
+    displayName: 'ACA smoke: Azure service connection'
+    type: string
+    default: 'larohra-sandboxgroup-test'
+
 trigger:
   batch: true
   branches:
@@ -53,4 +59,4 @@ extends:
             parameters:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
-              acaServiceConnection: 'larohra-sandboxgroup-test'
+              acaServiceConnection: ${{ parameters.acaServiceConnection }}
