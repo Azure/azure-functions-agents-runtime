@@ -163,15 +163,6 @@ def test_model_config_forwards_only_guest_safe_model_inputs(
     }
     assert "AZURE_CLIENT_ID" not in config.sandbox_environment()
 
-    policy = config.sandbox_egress_policy()
-    assert policy.default_action == "Deny"
-    assert policy.traffic_inspection == "Full"
-    assert [(rule.host, rule.action) for rule in policy.host_rules] == [
-        ("management.azure.com", "Deny"),
-        ("management.azuredevcompute.io", "Deny"),
-        ("smoke-model.openai.azure.com", "Allow"),
-    ]
-
 
 @pytest.mark.parametrize(
     ("name", "value", "message"),

@@ -39,7 +39,10 @@ from azure_functions_agents.controller.readiness import (
     _wait_for_created_manifest,
     _within_setup_budget,
 )
-from azure_functions_agents.egress.policy import compile_egress_policy
+from azure_functions_agents.controller.sandbox_config import (
+    SANDBOX_DISK_ENV,
+    build_sandbox_create_profile,
+)
 from azure_functions_agents.execution.setup_budget import SetupBudget, SetupPhase
 from azure_functions_agents.journal_paths import (
     JOURNAL_ROOT_PATH,
@@ -56,9 +59,6 @@ from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
 from azure_functions_agents.transport.manifest import ExpectedSandboxManifestBinding
 from azure_functions_agents.transport.ports import SandboxSessionHandle
 from azure_functions_agents.transport.transport_models import (
-    DiskSource,
-    SandboxCreateRequest,
-    SandboxEgressPolicy,
     SandboxGroupBinding,
     SandboxGroupBindingError,
     SandboxLifecyclePolicy,
@@ -127,15 +127,6 @@ class AcaSmokeModelConfig:
         if self.reasoning_effort is not None:
             environment["AZURE_FUNCTIONS_AGENTS_REASONING_EFFORT"] = self.reasoning_effort
         return environment
-
-    def sandbox_egress_policy(self) -> SandboxEgressPolicy:
-        """Allow only the configured model host in addition to hard control-plane denies."""
-
-        return compile_egress_policy(
-            web_request_allowed_hosts=[],
-            model_endpoint=self.endpoint,
-        )
-
 
 @dataclass(frozen=True, slots=True)
 class DependencyClosureArchive:
@@ -1085,19 +1076,22 @@ async def provision_aca_smoke_sandbox(
             session_id=session_id,
         )
         labels = labels_model.to_provider_labels()
-        environment = {"AZURE_FUNCTIONS_AGENTS_SANDBOX": "1"}
-        egress_policy: SandboxEgressPolicy | None = None
+        profile_environment = {SANDBOX_DISK_ENV: config.disk}
         if model_config is not None:
-            environment.update(model_config.sandbox_environment())
-            egress_policy = model_config.sandbox_egress_policy()
-        request = SandboxCreateRequest.create(
-            source=DiskSource.create(config.disk),
+            profile_environment.update(model_config.sandbox_environment())
+        create_profile = build_sandbox_create_profile(
+            web_request_allowed_hosts=(),
+            mcp_urls=(),
+            model_endpoint=None if model_config is None else model_config.endpoint,
+            telemetry_endpoint=None,
+            environment=profile_environment,
+        )
+        request = create_profile.build_request(
             labels=labels_model,
             remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(
                 phase=SetupPhase.PROVISION_CREATE
             ),
-            environment=environment,
-            egress_policy=egress_policy,
+            auto_suspend_seconds=60,
         )
         creation_attempted = True
         handle = await _within_setup_budget(

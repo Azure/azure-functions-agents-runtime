@@ -25,8 +25,11 @@ def test_low_level_smoke_uses_the_production_setup_budget_and_manifest_gate() ->
 
     assert "setup_deadline = SetupBudget.start()" in support
     assert "remaining_setup_budget_seconds=setup_deadline.remaining_setup_seconds(" in support
+    assert "build_sandbox_create_profile(" in support
+    assert "create_profile.build_request(" in support
     assert "_wait_for_created_manifest(" in support
     assert "remaining_setup_budget_seconds=30.0" not in support
+    assert "SandboxCreateRequest.create(" not in support
 
 
 def test_snapshot_cleanup_precedes_and_follows_sandbox_deletion() -> None:
