@@ -9,6 +9,7 @@ in ``summarize_findings``.
 from __future__ import annotations
 
 import importlib.util
+import json
 import sys
 from pathlib import Path
 
@@ -28,6 +29,30 @@ assert _SPEC is not None and _SPEC.loader is not None
 
 incident_tools = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(incident_tools)
+
+
+@pytest.mark.parametrize(
+    "template_name",
+    ["local.settings.template.json", "local.settings.dts.json.template"],
+)
+def test_sample_settings_templates_use_current_foundry_contract(
+    template_name: str,
+) -> None:
+    values = json.loads((_SAMPLE_SRC / template_name).read_text(encoding="utf-8"))[
+        "Values"
+    ]
+
+    assert values["AZURE_FUNCTIONS_AGENTS_PROVIDER"] == "foundry"
+    assert values["FOUNDRY_PROJECT_ENDPOINT"] == ""
+    assert values["FOUNDRY_MODEL"]
+    assert values["APPLICATIONINSIGHTS_CONNECTION_STRING"] == ""
+    assert "GITHUB_TOKEN" not in values
+
+
+def test_sample_installs_runtime_monitor_extra() -> None:
+    requirements = (_SAMPLE_SRC / "requirements.txt").read_text(encoding="utf-8").splitlines()
+
+    assert requirements == ["-e ../../..[monitor]"]
 
 
 def test_fetch_logs_shape():

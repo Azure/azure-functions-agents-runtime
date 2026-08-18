@@ -29,8 +29,18 @@ sub-agent tasks.
 
 Follow the [shared local development guide](../README.md#run-locally) for
 Python env setup, `local.settings.json`, Azurite, and `func start`. This sample
-has no extra prerequisites beyond `GITHUB_TOKEN` (used by the placeholder
-agent) and Azurite (used by Durable Functions' default Azure Storage backend).
+defaults to Microsoft Foundry. Set `FOUNDRY_PROJECT_ENDPOINT` and
+`FOUNDRY_MODEL` in `local.settings.json`; `FOUNDRY_MODEL` must be the deployment
+name that exists in that project. Run `az login` so `DefaultAzureCredential`
+can authenticate. Azure OpenAI and OpenAI remain supported through the provider
+settings in the [shared guide](../README.md#set-required-environment-variables).
+Azurite is required by the Functions host and by the default Azure Storage
+Durable backend.
+
+The sample installs the runtime's optional `[monitor]` extra. To export traces
+and metrics to Application Insights, set the standard
+`APPLICATIONINSIGHTS_CONNECTION_STRING` value in `local.settings.json`. Leaving
+it blank is supported and disables the Azure Monitor exporter.
 
 > [!IMPORTANT]
 > Activate the venv in the same shell as `func start`. Core Tools uses the
@@ -112,7 +122,8 @@ cd samples/workflow-incident-triage
 ### 3. Add the DTS app settings to `local.settings.json`
 
 `src/local.settings.dts.json.template` has the two extra values DTS
-needs:
+needs in addition to the same Foundry and optional Application Insights
+settings as the default template:
 
 ```json
 "DURABLE_TASK_SCHEDULER_CONNECTION_STRING": "Endpoint=http://localhost:8080;Authentication=None",

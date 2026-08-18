@@ -3,6 +3,9 @@
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "python",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "GITHUB_TOKEN": ""
+    "AZURE_FUNCTIONS_AGENTS_PROVIDER": "foundry",
+    "FOUNDRY_PROJECT_ENDPOINT": "",
+    "FOUNDRY_MODEL": "gpt-5.4-mini",
+    "APPLICATIONINSIGHTS_CONNECTION_STRING": ""
   }
 }
