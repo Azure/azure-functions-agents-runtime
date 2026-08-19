@@ -106,8 +106,8 @@ extends:
               runtimeTarget: 'python313'
               pythonVersion: '3.13'
               constraintsFile: 'eng/constraints/aca-fixture-py313.txt'
-              appSiteName: $(ACA_QUAL_APP_PY313)
-              baseUrl: $(ACA_QUAL_BASE_URL_PY313)
+              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY313)
+              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY313)
               acaServiceConnection: 'larohra-sandboxgroup-test'
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc
@@ -123,8 +123,8 @@ extends:
               runtimeTarget: 'python314'
               pythonVersion: '3.14'
               constraintsFile: 'eng/constraints/aca-fixture-py314.txt'
-              appSiteName: $(ACA_QUAL_APP_PY314)
-              baseUrl: $(ACA_QUAL_BASE_URL_PY314)
+              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
+              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
               acaServiceConnection: 'larohra-sandboxgroup-test'
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc
@@ -142,8 +142,8 @@ extends:
             parameters:
               runtimeTarget: 'python313'
               pythonVersion: '3.13'
-              appSiteName: $(ACA_QUAL_APP_PY313)
-              baseUrl: $(ACA_QUAL_BASE_URL_PY313)
+              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY313)
+              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY313)
               acaServiceConnection: 'larohra-sandboxgroup-test'
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc
@@ -158,8 +158,8 @@ extends:
             parameters:
               runtimeTarget: 'python314'
               pythonVersion: '3.14'
-              appSiteName: $(ACA_QUAL_APP_PY314)
-              baseUrl: $(ACA_QUAL_BASE_URL_PY314)
+              appSiteName: $(ACA_DEPLOYED_APP_SITE_NAME_PY314)
+              baseUrl: $(ACA_DEPLOYED_FUNCTION_BASE_URL_PY314)
               acaServiceConnection: 'larohra-sandboxgroup-test'
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               poolName: 1es-pool-azfunc

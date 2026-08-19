@@ -74,7 +74,7 @@ jobs:
             set -euo pipefail
             python eng/scripts/aca_qualification_pipeline.py preflight-deploy \
               --app-name "${{ parameters.appSiteName }}" \
-              --resource-group "$(ACA_QUAL_RESOURCE_GROUP)"
+              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)"
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'
 
@@ -107,7 +107,7 @@ jobs:
             # rather than in someone's production deploy.
             az functionapp config appsettings set \
               --name "${{ parameters.appSiteName }}" \
-              --resource-group "$(ACA_QUAL_RESOURCE_GROUP)" \
+              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
               --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true \
               --output none
 
@@ -116,7 +116,7 @@ jobs:
 
             az functionapp deployment source config-zip \
               --name "${{ parameters.appSiteName }}" \
-              --resource-group "$(ACA_QUAL_RESOURCE_GROUP)" \
+              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
               --src "$(Build.ArtifactStagingDirectory)/aca-fixture.zip" \
               --build-remote true \
               --output none
@@ -134,7 +134,7 @@ jobs:
             # Portal-readable metadata only, never the attestation gate: a tag is
             # a separate ARM call and so is not atomic with the deployment.
             az tag update --operation merge \
-              --resource-group "$(ACA_QUAL_RESOURCE_GROUP)" \
+              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
               --name "${{ parameters.appSiteName }}" \
               --resource-type Microsoft.Web/sites \
               --tags "build_id=$(Build.BuildId)" "commit_sha=$(Build.SourceVersion)" \
@@ -152,7 +152,7 @@ jobs:
             set -euo pipefail
             python eng/scripts/aca_qualification_pipeline.py check-build \
               --base-url "${{ parameters.baseUrl }}" \
-              --token-scope "$(ACA_QUAL_EASY_AUTH_TOKEN_SCOPE)" \
+              --token-scope "$(ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE)" \
               --build-id "$(Build.BuildId)" \
               --commit-sha "$(Build.SourceVersion)" \
               --python-version "${{ parameters.pythonVersion }}"
@@ -175,11 +175,11 @@ jobs:
           ACA_DEPLOYED_COLD_START_SAMPLES: '3'
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL: ${{ parameters.baseUrl }}
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: ${{ parameters.appSiteName }}
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG: $(ACA_QUAL_AGENT_SLUG)
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_QUAL_EASY_AUTH_TOKEN_SCOPE)
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_QUAL_EASY_AUTH_AUDIENCE)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG: $(ACA_DEPLOYED_AGENT_SLUG)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_DEPLOYED_EASY_AUTH_AUDIENCE)
           AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS: '300'
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI: $(ACA_QUAL_TABLE_SERVICE_URI)
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME: $(ACA_QUAL_TABLE_NAME)
-          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_QUAL_SUBSCRIPTION_ID)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI: $(ACA_DEPLOYED_TABLE_SERVICE_URI)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME: $(ACA_DEPLOYED_TABLE_NAME)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_DEPLOYED_APP_SUBSCRIPTION_ID)
           AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

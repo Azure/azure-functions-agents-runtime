@@ -39,20 +39,30 @@ Every stage is `continueOnError` during stabilization.
 
 ### Pipeline variables
 
-Set these as ordinary non-secret pipeline variables on the official build
-pipeline, the same way the existing ACA smoke sources
-`ACA_SANDBOX_GROUP_RESOURCE_ID`:
+Set these as ordinary pipeline variables on the official build pipeline
+(`agent-runtime.official-build`, definition **1733**), matching how the e2e
+pipeline (1777) already carries its `ACA_DEPLOYED_*` set. **Already created.**
 
-`ACA_QUAL_SUBSCRIPTION_ID`, `ACA_QUAL_RESOURCE_GROUP`, `ACA_QUAL_APP_PY313`,
-`ACA_QUAL_APP_PY314`, `ACA_QUAL_BASE_URL_PY313`, `ACA_QUAL_BASE_URL_PY314`,
-`ACA_QUAL_EASY_AUTH_TOKEN_SCOPE`, `ACA_QUAL_EASY_AUTH_AUDIENCE`,
-`ACA_QUAL_TABLE_SERVICE_URI`, `ACA_QUAL_TABLE_NAME`, `ACA_QUAL_AGENT_SLUG`, plus
-the existing `ACA_SANDBOX_GROUP_RESOURCE_ID`.
+| Variable | Notes |
+| --- | --- |
+| `ACA_DEPLOYED_APP_SUBSCRIPTION_ID` | |
+| `ACA_DEPLOYED_RESOURCE_GROUP` | |
+| `ACA_DEPLOYED_APP_SITE_NAME_PY313` / `_PY314` | one per runtime leg |
+| `ACA_DEPLOYED_FUNCTION_BASE_URL_PY313` / `_PY314` | include the `/api` route prefix |
+| `ACA_DEPLOYED_AGENT_SLUG` | must equal the fixture agent's `name` |
+| `ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE` | must end in `/.default` |
+| `ACA_DEPLOYED_EASY_AUTH_AUDIENCE` | resource URI **or** its client ID |
+| `ACA_DEPLOYED_TABLE_SERVICE_URI` | |
+| `ACA_DEPLOYED_TABLE_NAME` | `AzureFunctionsAgentsSessions` |
+| `ACA_SANDBOX_GROUP_RESOURCE_ID` | marked secret, matching pipeline 1777 |
 
-**None of these are credentials.** They are configuration that simply must not
-live in a public repository — site names, URLs, a resource group, an app
-registration client ID. Plain variables are sufficient; a variable group is not
-required.
+Names match the e2e pipeline's existing convention so both pipelines share one
+vocabulary and values can be copied between them. The per-runtime suffixes are
+the only addition, because this pipeline drives two apps rather than one.
+
+**Only `ACA_SANDBOX_GROUP_RESOURCE_ID` is secret.** The rest are configuration
+that must not sit in a public repository — site names, URLs, a resource group,
+an app-registration client ID — but are not credentials.
 
 A variable group is deliberately **not** used. A `- group:` reference that does
 not resolve fails pipeline *compilation*, so a missing or renamed group would
@@ -63,6 +73,17 @@ Move to a variable group only if these values need sharing across pipelines or
 Key Vault backing — and if you do, create the group **before** merging the
 change that references it.
 
+### The base URL must match the fixture's route prefix
+
+`ACA_DEPLOYED_FUNCTION_BASE_URL_*` ends in `/api` because the fixture's
+`host.json` leaves the default route prefix in place. Override that prefix to
+`""` and every agent route — plus `/__buildinfo` — moves, so the build check and
+the qualification suites would fail against a perfectly healthy app. Change both
+together or neither.
+
+Likewise `ACA_DEPLOYED_AGENT_SLUG` must equal the `name` in the fixture's
+`*.agent.md`. Both are currently `deployed_turn`.
+
 **No site name, base URL, resource group, subscription, or endpoint is committed
 to this repository.** Everything environment-specific arrives here or from app
 settings.
@@ -70,8 +91,8 @@ settings.
 Two values must satisfy a contract the deployed helpers enforce, or the suite
 fails as an environment error rather than a test failure:
 
-- `ACA_QUAL_EASY_AUTH_TOKEN_SCOPE` must end in `/.default`.
-- `ACA_QUAL_EASY_AUTH_AUDIENCE` must equal the resource URI **or** its client ID.
+- `ACA_DEPLOYED_EASY_AUTH_TOKEN_SCOPE` must end in `/.default`.
+- `ACA_DEPLOYED_EASY_AUTH_AUDIENCE` must equal the resource URI **or** its client ID.
 
 Do **not** set `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_BEARER_TOKEN`. The helper
 rejects it outright; the job authenticates app-only through `AzureCLI@2`.
