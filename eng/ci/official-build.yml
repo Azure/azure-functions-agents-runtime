@@ -72,8 +72,15 @@ extends:
       # the pipeline stabilizes. Promotion to a blocking gate is a separate,
       # explicitly human-approved step.
       #
-      # Targets come from the protected variable group; no site name, base URL,
-      # resource group, or subscription is committed to this repository.
+      # Targets come from non-secret pipeline variables, matching how the
+      # existing ACA smoke sources ACA_SANDBOX_GROUP_RESOURCE_ID. None of these
+      # are credentials -- they are configuration that simply must not be
+      # committed to a public repository.
+      #
+      # Deliberately NOT a variable group: a `- group:` reference that does not
+      # resolve fails pipeline *compilation*, which would take Build, RunTests,
+      # and RunE2ETests down with it. Plain variables degrade to a failure
+      # inside the ACA stages, which are continueOnError.
       # ---------------------------------------------------------------------
       - stage: AcaSweep
         displayName: 'ACA pre-run leak sweep'
@@ -81,8 +88,6 @@ extends:
         # is a leak *detector*, not cleanup -- see the template for why it runs
         # before the qualification rather than after it.
         dependsOn: []
-        variables:
-          - group: aca-qualification-protected
         jobs:
           - template: /eng/templates/official/jobs/aca-sweep.yml@self
             parameters:
@@ -95,8 +100,6 @@ extends:
         dependsOn:
           - Build
           - AcaSweep
-        variables:
-          - group: aca-qualification-protected
         jobs:
           - template: /eng/templates/official/jobs/aca-deploy-cold.yml@self
             parameters:
@@ -114,8 +117,6 @@ extends:
         dependsOn:
           - Build
           - AcaSweep
-        variables:
-          - group: aca-qualification-protected
         jobs:
           - template: /eng/templates/official/jobs/aca-deploy-cold.yml@self
             parameters:
@@ -136,8 +137,6 @@ extends:
         dependsOn:
           - AcaDeployColdPy313
           - AcaDeployColdPy314
-        variables:
-          - group: aca-qualification-protected
         jobs:
           - template: /eng/templates/official/jobs/aca-qualify.yml@self
             parameters:
@@ -154,8 +153,6 @@ extends:
         dependsOn:
           - AcaDeployColdPy313
           - AcaDeployColdPy314
-        variables:
-          - group: aca-qualification-protected
         jobs:
           - template: /eng/templates/official/jobs/aca-qualify.yml@self
             parameters:

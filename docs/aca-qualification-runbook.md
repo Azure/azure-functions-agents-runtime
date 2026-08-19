@@ -35,15 +35,33 @@ Every stage is `continueOnError` during stabilization.
 | Two Flex Consumption Linux apps | one Python 3.13, one 3.14, Easy Auth enabled |
 | Shared ACA Sandbox Group | both apps point at it |
 | ADO service connection | currently `larohra-sandboxgroup-test`, reused for deployment |
-| Variable group `aca-qualification-protected` | see below |
+| Pipeline variables | see below |
 
-### Variable group contents
+### Pipeline variables
+
+Set these as ordinary non-secret pipeline variables on the official build
+pipeline, the same way the existing ACA smoke sources
+`ACA_SANDBOX_GROUP_RESOURCE_ID`:
 
 `ACA_QUAL_SUBSCRIPTION_ID`, `ACA_QUAL_RESOURCE_GROUP`, `ACA_QUAL_APP_PY313`,
 `ACA_QUAL_APP_PY314`, `ACA_QUAL_BASE_URL_PY313`, `ACA_QUAL_BASE_URL_PY314`,
 `ACA_QUAL_EASY_AUTH_TOKEN_SCOPE`, `ACA_QUAL_EASY_AUTH_AUDIENCE`,
-`ACA_QUAL_TABLE_SERVICE_URI`, `ACA_QUAL_TABLE_NAME`, `ACA_QUAL_AGENT_SLUG`, and
+`ACA_QUAL_TABLE_SERVICE_URI`, `ACA_QUAL_TABLE_NAME`, `ACA_QUAL_AGENT_SLUG`, plus
 the existing `ACA_SANDBOX_GROUP_RESOURCE_ID`.
+
+**None of these are credentials.** They are configuration that simply must not
+live in a public repository — site names, URLs, a resource group, an app
+registration client ID. Plain variables are sufficient; a variable group is not
+required.
+
+A variable group is deliberately **not** used. A `- group:` reference that does
+not resolve fails pipeline *compilation*, so a missing or renamed group would
+take `Build`, `RunTests`, and `RunE2ETests` down with it. With plain variables an
+unset value fails inside the ACA stages instead, and those are `continueOnError`.
+
+Move to a variable group only if these values need sharing across pipelines or
+Key Vault backing — and if you do, create the group **before** merging the
+change that references it.
 
 **No site name, base URL, resource group, subscription, or endpoint is committed
 to this repository.** Everything environment-specific arrives here or from app
