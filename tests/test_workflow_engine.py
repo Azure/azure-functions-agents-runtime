@@ -1121,14 +1121,35 @@ def test_incident_sample_plan_runs_through_dynamic_scheduler() -> None:
         if entry["status"] == "skipped"
     )
     summary = result["results"]["summarize"]
-    assert summary["scanned"] == sum(
+    completed_count = sum(
         entry["status"] == "completed" for entry in aggregate
     )
-    assert summary["skipped"] == sum(
+    skipped_count = sum(
         entry["status"] == "skipped" for entry in aggregate
     )
+    assert summary["scanned"] == completed_count
+    assert summary["skipped"] == skipped_count
     assert _activity_ids(context, engine._ACTIVITY_NAME)[0] == "discover"
     assert _activity_ids(context, engine._ACTIVITY_NAME)[-1] == "summarize"
+
+    final_status = context.statuses[-1]
+    assert final_status["counts"] == {
+        "logical_total": 3,
+        "materialized_total": len(aggregate) + 2,
+        "completed": completed_count + 2,
+        "skipped": skipped_count,
+        "running": 0,
+    }
+    assert final_status["nodes"]["discover"] == {"state": "completed"}
+    assert final_status["nodes"]["inspect"] == {
+        "state": "aggregated",
+        "expanded_count": len(aggregate),
+        "instances": {
+            f"inspect[{entry['index']}]": {"state": entry["status"]}
+            for entry in aggregate
+        },
+    }
+    assert final_status["nodes"]["summarize"] == {"state": "completed"}
 
 
 def test_multiple_expansions_run_in_sorted_logical_id_order() -> None:
