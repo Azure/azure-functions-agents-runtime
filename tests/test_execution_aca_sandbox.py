@@ -1681,6 +1681,74 @@ async def test_active_conflict_reconciles_once_before_returning_or_admitting(
 
 
 @pytest.mark.asyncio
+async def test_existing_session_exact_replay_precedes_stalled_reconciliation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    session = _session(script_root)
+    store = FakeSessionStateStore(session)
+    handle = FakeSandboxSessionHandle()
+    provider = FakeSandboxSessionProvider(handle)
+
+    async def accept(command: str) -> None:
+        run_id = command.split("--run-id ", 1)[1].split(" ", 1)[0]
+        handle.seed_file(
+            status_path(run_id),
+            _status(state="accepted", run_id=run_id, session_id=session.session_id),
+        )
+
+    handle.exec_hook = accept
+    request = StartRunRequest(
+        prompt="hello",
+        session_id=session.session_id,
+        idempotency_key="exact-replay",
+    )
+    original = await AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(script_root, provider, store),
+        owner=_owner(),
+    ).start_run(request)
+    reconciliation_started = asyncio.Event()
+
+    async def stall_reconciliation(
+        _: OwnerPartition, __: str, ___: SetupBudget
+    ) -> None:
+        reconciliation_started.set()
+        await asyncio.Event().wait()
+
+    retry_backend = AcaSandboxExecutionBackend(
+        _binding(),
+        runtime=_runtime(
+            script_root,
+            provider,
+            store,
+            targeted_reconciler=stall_reconciliation,
+        ),
+        owner=_owner(),
+        setup_budget=SetupBudget.start(setup_seconds=0.1),
+    )
+
+    response = await submit_run(
+        retry_backend,
+        request,
+        agent_slug="main",
+        respond_async=True,
+        budget=RequestBudget.start(authored_timeout=None),
+    )
+
+    assert response.status_code == 202
+    assert isinstance(response.body, dict)
+    assert response.body["run_id"] == original.run_id
+    assert response.body["status"] == original.state
+    assert response.body["phase"] == original.phase
+    assert response.body.get("admission") != "not_reserved"
+    assert not reconciliation_started.is_set()
+    assert set(store.runs) == {original.run_id}
+    assert provider.create_calls == []
+    assert len([call for call in handle.calls if call.operation == "exec"]) == 1
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("operation_phase", "sandbox_id", "expected_phase"),
     [

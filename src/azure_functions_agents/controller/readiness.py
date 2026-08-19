@@ -128,6 +128,7 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
 _ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
+_INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS = 1.0
 _PROVISION_SUBMIT_OPERATION_KIND: DurableOperationKind = "provision_submit"
 _SUBMIT_RUN_OPERATION_KIND: DurableOperationKind = "submit_run"
 _SUBMIT_OPERATION_KINDS: frozenset[DurableOperationKind] = frozenset(
@@ -1631,7 +1632,7 @@ async def _provision_reserved_session(
             setup_deadline,
         )
     except SandboxCreateOutcomeUnknownError:
-        await _preserve_indeterminate_provision(state_binding.store, fence)
+        await _preserve_indeterminate_provision(state_binding.store, fence, setup_deadline)
         raise _setup_timeout_error(
             setup_deadline,
             SetupPhase.PROVISION_RECONCILE,
@@ -1665,13 +1666,24 @@ async def _provision_reserved_session(
 async def _preserve_indeterminate_provision(
     store: SessionStateStore,
     fence: SessionOperationFence,
+    setup_deadline: SetupDeadline,
 ) -> None:
     """Persist an accepted-create outcome that needs stable-label reconciliation."""
-    await store.advance_operation(
-        fence=fence,
-        phase="provision_reconcile",
-        error_code="provision_create_indeterminate",
-        updated_at=datetime.now(UTC),
+    try:
+        timeout_seconds = min(
+            _INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS,
+            setup_deadline.remaining_setup_seconds(phase=SetupPhase.PROVISION_RECONCILE),
+        )
+    except SetupBudgetExpiredError:
+        return
+    await _bounded_task_result(
+        store.advance_operation(
+            fence=fence,
+            phase="provision_reconcile",
+            error_code="provision_create_indeterminate",
+            updated_at=datetime.now(UTC),
+        ),
+        timeout_seconds=timeout_seconds,
     )
 
 
@@ -1805,7 +1817,10 @@ async def _provision_reserved_session_inner(
         labels=labels,
         setup_deadline=setup_deadline,
     )
-    create_request = replace(create_request, reconcile_only=phase == "provision_reconcile")
+    create_request = replace(
+        create_request,
+        reconcile_only=phase == "provision_reconcile" or operation.record.attempt_count > 0,
+    )
     current = await _within_setup_budget(
         state_binding.store.get_session(session.owner_partition, session.session_id),
         setup_deadline,
@@ -1940,7 +1955,7 @@ async def _create_reserved_sandbox(
         )
     except (asyncio.CancelledError, SessionActivationSetupTimeoutError):
         with suppress(StaleOperationTokenError):
-            await _preserve_indeterminate_provision(store, fence)
+            await _preserve_indeterminate_provision(store, fence, setup_deadline)
         raise
 
 
@@ -2476,13 +2491,17 @@ async def _resolve_timed_out_admission[T](
     return result
 
 
-async def _bounded_admission_confirmation[T](operation: Awaitable[T], fallback: T) -> T:
-    """Bound one post-timeout point read without leaving its task behind."""
+async def _bounded_task_result[T](
+    operation: Awaitable[T],
+    *,
+    timeout_seconds: float,
+) -> T | None:
+    """Await a task to completion or cancellation without leaving it behind."""
     task = asyncio.ensure_future(operation)
     try:
         done, _pending = await asyncio.wait(
             {task},
-            timeout=_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS,
+            timeout=timeout_seconds,
         )
     except asyncio.CancelledError:
         await _cancel_and_wait(task)
@@ -2492,11 +2511,20 @@ async def _bounded_admission_confirmation[T](operation: Awaitable[T], fallback: 
         raise
     if task not in done:
         await _cancel_and_wait(task)
-        return fallback
+        return None
     try:
         return task.result()
     except asyncio.CancelledError:
-        return fallback
+        return None
+
+
+async def _bounded_admission_confirmation[T](operation: Awaitable[T], fallback: T) -> T:
+    """Bound one post-timeout point read without leaving its task behind."""
+    result = await _bounded_task_result(
+        operation,
+        timeout_seconds=_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS,
+    )
+    return fallback if result is None else result
 
 
 async def _cancel_and_wait[T](task: asyncio.Future[T]) -> None:

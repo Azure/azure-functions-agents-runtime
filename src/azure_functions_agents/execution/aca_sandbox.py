@@ -165,14 +165,36 @@ class AcaSandboxExecutionBackend:
         """Activate the session, atomically admit one run, and submit its envelope."""
         partition = owner_partition(self._owner)
         setup_budget = self._setup_budget or SetupBudget.start()
+        attempt = build_idempotency_attempt(
+            agent_slug=self._agent_name,
+            prompt=request.prompt,
+            timeout=request.timeout,
+            idempotency_key=request.idempotency_key,
+        )
         if request.session_id is not None:
+            replay = await self._replay_start_request(
+                request,
+                partition,
+                request.session_id,
+                False,
+                attempt,
+                setup_budget,
+            )
+            if replay is not None:
+                return replay
             await _within_setup_budget(
                 self._runtime.reconcile_session(partition, request.session_id, setup_budget),
                 setup_budget,
                 phase=SetupPhase.PROVISION_RECONCILE,
             )
         try:
-            return await self._start_run_once(request, partition, setup_budget)
+            return await self._start_run_once(
+                request,
+                partition,
+                setup_budget,
+                attempt,
+                replay_checked=request.session_id is not None,
+            )
         except ActiveRunConflictError:
             if request.session_id is None:
                 raise
@@ -182,7 +204,7 @@ class AcaSandboxExecutionBackend:
                 phase=SetupPhase.PROVISION_RECONCILE,
             )
             try:
-                return await self._start_run_once(request, partition, setup_budget)
+                return await self._start_run_once(request, partition, setup_budget, attempt)
             except ActiveRunConflictError as exc:
                 linked = await self._linked_active_run_conflict(
                     request.session_id,
@@ -195,26 +217,24 @@ class AcaSandboxExecutionBackend:
         request: StartRunRequest,
         partition: OwnerPartition,
         setup_budget: SetupBudget,
+        attempt: IdempotencyAttempt | None,
+        *,
+        replay_checked: bool = False,
     ) -> RunHandle:
         is_new_session = request.session_id is None
         session_id = request.session_id or mint_session_id()
         run_id = mint_run_id()
-        attempt = build_idempotency_attempt(
-            agent_slug=self._agent_name,
-            prompt=request.prompt,
-            timeout=request.timeout,
-            idempotency_key=request.idempotency_key,
-        )
-        replay = await self._replay_start_request(
-            request,
-            partition,
-            session_id,
-            is_new_session,
-            attempt,
-            setup_budget,
-        )
-        if replay is not None:
-            return replay
+        if not replay_checked:
+            replay = await self._replay_start_request(
+                request,
+                partition,
+                session_id,
+                is_new_session,
+                attempt,
+                setup_budget,
+            )
+            if replay is not None:
+                return replay
         if not is_new_session:
             await self._ensure_existing_session_is_idle(
                 partition,

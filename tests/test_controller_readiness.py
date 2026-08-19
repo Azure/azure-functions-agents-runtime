@@ -36,7 +36,13 @@ from azure_functions_agents.controller.readiness import (
     touch_session_activity,
 )
 from azure_functions_agents.controller.reconciler import SessionReconciler
-from azure_functions_agents.execution.setup_budget import SetupBudget, SetupPhase
+from azure_functions_agents.execution.setup_budget import (
+    SetupBudget,
+    SetupPhase,
+    SetupTimeoutExceptionType,
+    SetupTimeoutMetadata,
+    SetupTimeoutReason,
+)
 from azure_functions_agents.harness.sandbox_capabilities import REQUIRED_HARNESS_CAPABILITIES
 from azure_functions_agents.journal_paths import BOOTSTRAP_ERROR_PATH
 from azure_functions_agents.session_state import (
@@ -58,8 +64,10 @@ from azure_functions_agents.transport.transport_models import (
     SANDBOX_GROUP_AUTHORIZATION_MESSAGE,
     DiskSource,
     SandboxCreateOutcomeUnknownError,
+    SandboxCreateRequest,
     SandboxFileOperationError,
     SandboxGroupAuthorizationError,
+    SandboxGroupBinding,
 )
 from tests.doubles.content_package import content_package
 from tests.doubles.fake_session_runtime import DEFAULT_GROUP_RESOURCE_ID
@@ -175,6 +183,25 @@ class _CountingHandle(_FakeHandle):
     async def close(self) -> None:
         self.close_calls += 1
         await super().close()
+
+
+class _StalledRecoveryStore(_FakeStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.recovery_started = asyncio.Event()
+        self.recovery_cancelled = asyncio.Event()
+        self.release_recovery = asyncio.Event()
+        self.stall_recovery = True
+
+    async def advance_operation(self, **kwargs: object):  # type: ignore[no-untyped-def]
+        if kwargs["phase"] == "provision_reconcile" and self.stall_recovery:
+            self.recovery_started.set()
+            try:
+                await self.release_recovery.wait()
+            except asyncio.CancelledError:
+                self.recovery_cancelled.set()
+                raise
+        return await super().advance_operation(**kwargs)
 
 
 @pytest.mark.asyncio
@@ -426,6 +453,202 @@ async def test_reserved_provision_keeps_post_acceptance_authorization_indetermin
     assert operation.state == "active"
     assert operation.phase == "provision_reconcile"
     assert operation.error_code == "provision_create_indeterminate"
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_persists_typed_create_timeout_for_reconciliation(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    setup_deadline = SetupBudget.start()
+    timeout_metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SessionActivationSetupTimeoutError(timeout_metadata))
+    store = _FakeStore()
+
+    provisioned = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=None,
+        setup_deadline=setup_deadline,
+    )
+
+    assert provisioned.setup_timed_out
+    assert provisioned.timeout_metadata is timeout_metadata
+    assert provisioned.outcome.fence is not None
+    [operation] = store.durable_operations.values()
+    assert operation.phase == "provision_reconcile"
+    assert operation.error_code == "provision_create_indeterminate"
+    assert len(provider.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_returns_timeout_when_recovery_write_stalls(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    setup_deadline = SetupBudget.start()
+    timeout_metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SessionActivationSetupTimeoutError(timeout_metadata))
+    store = _StalledRecoveryStore()
+
+    provisioned = await asyncio.wait_for(
+        provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=setup_deadline,
+        ),
+        timeout=2.0,
+    )
+
+    assert provisioned.setup_timed_out
+    assert provisioned.timeout_metadata is timeout_metadata
+    assert provisioned.outcome.fence is not None
+    assert store.recovery_started.is_set()
+    assert store.recovery_cancelled.is_set()
+    [operation] = store.durable_operations.values()
+    assert operation.phase == "provision_create"
+    assert len(provider.create_calls) == 1
+
+
+@pytest.mark.asyncio
+async def test_taken_over_indeterminate_provision_reconciles_without_second_create(
+    tmp_path: Path,
+) -> None:
+    class _TemporarilyInvisibleProvider(_FakeProvider):
+        def __init__(
+            self,
+            handle: _FakeHandle,
+            timeout_metadata: SetupTimeoutMetadata,
+        ) -> None:
+            super().__init__(handle)
+            self.create_attempts = 0
+            self.reconcile_requests: list[SandboxCreateRequest] = []
+            self._timeout_metadata = timeout_metadata
+
+        async def create(
+            self,
+            request: SandboxCreateRequest,
+            *,
+            persisted_group: SandboxGroupBinding,
+        ) -> _FakeHandle:
+            del persisted_group
+            if request.reconcile_only:
+                self.reconcile_requests.append(request)
+                raise SandboxCreateOutcomeUnknownError()
+            self.create_attempts += 1
+            self.create_calls.append(request)
+            raise SessionActivationSetupTimeoutError(self._timeout_metadata)
+
+    script_root = _script_root(tmp_path)
+    initial_deadline = SetupBudget.start()
+    timeout_metadata = initial_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _TemporarilyInvisibleProvider(_FakeHandle(), timeout_metadata)
+    store = _StalledRecoveryStore()
+    attempt = build_idempotency_attempt(
+        agent_slug="main",
+        prompt="hello",
+        timeout=None,
+        idempotency_key="indeterminate-provision-retry",
+    )
+    assert attempt is not None
+
+    initial = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=initial_deadline,
+    )
+
+    assert initial.setup_timed_out
+    assert store.recovery_cancelled.is_set()
+    assert store.session is not None
+    operation_id = store.session.active_operation_id
+    assert operation_id is not None
+    initial_operation = store.durable_operations[operation_id]
+    assert initial_operation.phase == "provision_create"
+    store.durable_operations[operation_id] = replace(
+        initial_operation,
+        lease_expires_at=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    store.stall_recovery = False
+
+    replay = await provision_new_session_submit(
+        _runtime(script_root, provider, store),
+        _owner(),
+        session_id="new-session",
+        run_id="run-1",
+        timeout=None,
+        attempt=attempt,
+        setup_deadline=SetupBudget.start(),
+    )
+
+    assert replay.setup_timed_out
+    assert provider.create_attempts == 1
+    assert len(provider.create_calls) == 1
+    assert len(provider.reconcile_requests) == 1
+    assert provider.reconcile_requests[0].reconcile_only
+    assert provider.reconcile_requests[0].labels.operation_label == initial_operation.correlation_label
+    resumed_operation = store.durable_operations[operation_id]
+    assert resumed_operation.attempt_count == 1
+    assert resumed_operation.phase == "provision_reconcile"
+
+
+@pytest.mark.asyncio
+async def test_reserved_provision_preserves_outer_cancellation_during_recovery_write(
+    tmp_path: Path,
+) -> None:
+    script_root = _script_root(tmp_path)
+    setup_deadline = SetupBudget.start()
+    timeout_metadata = setup_deadline.timeout_metadata(
+        phase=SetupPhase.PROVISION_CREATE,
+        reason=SetupTimeoutReason.OPERATION_TIMEOUT,
+        exception_type=SetupTimeoutExceptionType.SESSION_ACTIVATION_SETUP_TIMEOUT,
+    )
+    provider = _FakeProvider(_FakeHandle())
+    provider.create_errors.append(SessionActivationSetupTimeoutError(timeout_metadata))
+    store = _StalledRecoveryStore()
+    pending = asyncio.create_task(
+        provision_new_session_submit(
+            _runtime(script_root, provider, store),
+            _owner(),
+            session_id="new-session",
+            run_id="run-1",
+            timeout=None,
+            attempt=None,
+            setup_deadline=setup_deadline,
+        )
+    )
+
+    await asyncio.wait_for(store.recovery_started.wait(), timeout=1.0)
+    pending.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(pending, timeout=1.0)
+
+    assert store.recovery_cancelled.is_set()
 
 
 @pytest.mark.asyncio
