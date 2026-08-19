@@ -1,0 +1,132 @@
+# ACA qualification runbook
+
+Operating guide for the post-main ACA deployment and qualification stages in
+`eng/ci/official-build.yml`. Design and decisions live in
+[`frds/0008-aca-sandbox-session-runtime.md`](frds/0008-aca-sandbox-session-runtime.md) §14.
+
+## What runs, and when
+
+On every merge to `main` or `release/*` (the pipeline is `pr: none`):
+
+```
+AcaSweep ──┐
+           ├─► AcaDeployColdPy313 ─┐
+Build ─────┤                       ├─► AcaQualifyPy313
+           └─► AcaDeployColdPy314 ─┘   AcaQualifyPy314
+```
+
+**Two phases.** Both runtimes finish deploy + attest + cold start before either
+enters the qualification suite. A cold-start regression therefore fails fast for
+both runtimes instead of being discovered after one has already spent its N=5
+budget.
+
+| Stage | Does |
+| --- | --- |
+| `AcaSweep` | Reports and clears sandboxes left by *earlier* runs. Never fatal. |
+| `AcaDeployCold*` | Preflight → assemble → deploy (remote build) → verify build → cold start |
+| `AcaQualify*` | Re-verify build → public turn → lifecycle → backing loss → N=5 |
+
+Every stage is `continueOnError` during stabilization.
+
+## Prerequisites
+
+| Item | Notes |
+| --- | --- |
+| Two Flex Consumption Linux apps | one Python 3.13, one 3.14, Easy Auth enabled |
+| Shared ACA Sandbox Group | both apps point at it |
+| ADO service connection | currently `larohra-sandboxgroup-test`, reused for deployment |
+| Variable group `aca-qualification-protected` | see below |
+
+### Variable group contents
+
+`ACA_QUAL_SUBSCRIPTION_ID`, `ACA_QUAL_RESOURCE_GROUP`, `ACA_QUAL_APP_PY313`,
+`ACA_QUAL_APP_PY314`, `ACA_QUAL_BASE_URL_PY313`, `ACA_QUAL_BASE_URL_PY314`,
+`ACA_QUAL_EASY_AUTH_TOKEN_SCOPE`, `ACA_QUAL_EASY_AUTH_AUDIENCE`,
+`ACA_QUAL_TABLE_SERVICE_URI`, `ACA_QUAL_TABLE_NAME`, `ACA_QUAL_AGENT_SLUG`, and
+the existing `ACA_SANDBOX_GROUP_RESOURCE_ID`.
+
+**No site name, base URL, resource group, subscription, or endpoint is committed
+to this repository.** Everything environment-specific arrives here or from app
+settings.
+
+Two values must satisfy a contract the deployed helpers enforce, or the suite
+fails as an environment error rather than a test failure:
+
+- `ACA_QUAL_EASY_AUTH_TOKEN_SCOPE` must end in `/.default`.
+- `ACA_QUAL_EASY_AUTH_AUDIENCE` must equal the resource URI **or** its client ID.
+
+Do **not** set `AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_BEARER_TOKEN`. The helper
+rejects it outright; the job authenticates app-only through `AzureCLI@2`.
+
+## How a deployment is proven
+
+The build stamps `BUILD_INFO.json` into the package. The fixture serves it at
+`/__buildinfo`, and the pipeline compares `build_id`, `commit_sha`, and the
+app's **live** `sys.version_info` against the build under test.
+
+This works only because **the marker is a file inside the deployed package**. A
+file can be served only if the package containing it is genuinely on disk, so a
+stale app cannot claim a build it is not running. An app setting or a resource
+tag could be changed without deploying anything — which is exactly where a
+service reporting its own version stops being evidence. Tags *are* set after a
+successful deploy, but only as portal-readable metadata, never as the gate: a
+tag write is a separate ARM call and so is not atomic with the deployment.
+
+The check runs twice — once after deploying, once at the start of the
+qualification suite. The second is not redundant: phase 2 can begin much later,
+and a redeploy in between would otherwise silently move the target.
+
+## Triage
+
+| Symptom | Meaning | Action |
+| --- | --- | --- |
+| `preflight-deploy` fails naming `Website Contributor` | The service connection lacks deploy rights on that app | Grant it; the connection was originally created for ACA data-plane access only |
+| `check-build` reports `marker_absent` | The app is running a package with no marker — almost always a failed or partial deploy | Re-run the deploy stage |
+| `check-build` reports `build_id` | The app is running a *different* build | Check whether another run redeployed concurrently |
+| `check-build` reports `python_version` | The wrong runtime's package reached this app | Check the stage's `constraintsFile` and `pythonVersion` wiring |
+| Deployment fails during remote build | Oryx could not resolve `requirements.txt` | Read the deployment logs; this is the customer build path, so it is a genuine finding |
+| Sweep warns that stale sandboxes were found | ACA idle-delete or the controller's hourly reconciliation is not firing | Investigate the reconciliation timer; the sweep already deleted the leftovers |
+| Suite errors with `ACA-SMOKE-ENV:` | Environment/config problem | Call ops |
+| Suite *fails* an assertion | The environment was healthy and behavior was wrong | Call the runtime owners |
+
+That last distinction is load-bearing: environment problems surface as **errors**
+and correctness problems as **failures**, so an incomplete environment can never
+masquerade as the defect the test exists to detect.
+
+## Recovery
+
+**There is no rollback machinery, by design.** The apps are disposable and every
+merge redeploys them, so a bad deployment is corrected by the next merge. If you
+need the previous build immediately, re-run the pipeline on the previous commit.
+
+## Sandbox cleanup
+
+Sandboxes are reclaimed by ACA idle-delete and by the controller's hourly
+reconciliation. The pipeline adds **no** end-of-run reaper.
+
+That is deliberate. A post-run reaper would quietly tidy up after every run and
+so would hide the failure of both automatic mechanisms — we would keep paying
+for leaks and never notice. Running the sweep *first* inverts that: a clean
+sweep is evidence the mechanisms work, and a dirty one is a warning that they
+have stopped.
+
+The sweep scopes by **age** (6 hours), not by build ID, because it is hunting
+*other* runs' leftovers and so cannot use this run's identifier. A sandbox whose
+creation time cannot be determined is **never** deleted — unprovable age is not
+grounds for deleting something that may be live — but it is reported, since a
+group full of un-ageable sandboxes is itself a finding.
+
+## Load, and what this pipeline does not prove
+
+Automated load is **N=5**. FRD 0008 Decision #29 requires a **100**-concurrent
+gate before GA, and this pipeline does not discharge it: N=100 stays human-only,
+requires a manually queued build, and targets a single runtime. A green
+post-main run is therefore **not** FRD 0008 GA sign-off.
+
+## Promotion to blocking
+
+Stages stay `continueOnError` until the criteria already set by FRD 0008
+Decision #156 are met: five scheduled low-level smoke runs with zero reaper
+leaks, plus five manual N=5 diagnostics. N=100 is never an automated promotion
+prerequisite. Promotion is an explicit human decision and also requires an ADO
+build-validation change outside this repository.

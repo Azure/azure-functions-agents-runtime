@@ -413,8 +413,28 @@ async def read_sse_events_with_first_event_time(
     overall_timeout_seconds: float = 240.0,
 ) -> tuple[int, list[SseEvent], Mapping[str, str], float | None]:
     """Reconnect public SSE with ``Last-Event-ID`` until the terminal ``done`` event."""
+    status, events, response_headers, first_event_at, _ = (
+        await read_sse_events_with_observation_times(
+            session,
+            url,
+            headers=headers,
+            overall_timeout_seconds=overall_timeout_seconds,
+        )
+    )
+    return status, events, response_headers, first_event_at
+
+
+async def read_sse_events_with_observation_times(
+    session: ClientSession,
+    url: str,
+    *,
+    headers: Mapping[str, str],
+    overall_timeout_seconds: float = 240.0,
+) -> tuple[int, list[SseEvent], Mapping[str, str], float | None, tuple[float, ...]]:
+    """Reconnect public SSE and record client-side observation times for each event."""
     deadline = time.perf_counter() + overall_timeout_seconds
     events: list[SseEvent] = []
+    observed_at: list[float] = []
     first_event_at: float | None = None
     response_headers: Mapping[str, str] = {}
     while True:
@@ -428,7 +448,13 @@ async def read_sse_events_with_first_event_time(
             request_headers["Last-Event-ID"] = str(events[-1].sequence)
         try:
             async with asyncio.timeout(remaining):
-                status, segment, response_headers, segment_first_event_at = await _read_sse_response(
+                (
+                    status,
+                    segment,
+                    response_headers,
+                    segment_first_event_at,
+                    segment_observed_at,
+                ) = await _read_sse_response(
                     session,
                     url,
                     headers=request_headers,
@@ -438,10 +464,11 @@ async def read_sse_events_with_first_event_time(
                 "Function App SSE stream did not reach done before the overall deadline."
             ) from exc
         events = append_contiguous_sse_events(events, segment)
+        observed_at.extend(segment_observed_at)
         if first_event_at is None and segment_first_event_at is not None:
             first_event_at = segment_first_event_at
         if events and events[-1].payload.get("type") == "done":
-            return status, events, response_headers, first_event_at
+            return status, events, response_headers, first_event_at, tuple(observed_at)
         if time.perf_counter() >= deadline:
             raise AcaSmokeEnvironmentError(
                 "Function App SSE stream did not reach done before the overall deadline."
@@ -454,7 +481,7 @@ async def _read_sse_response(
     url: str,
     *,
     headers: Mapping[str, str],
-) -> tuple[int, list[SseEvent], Mapping[str, str], float | None]:
+) -> tuple[int, list[SseEvent], Mapping[str, str], float | None, tuple[float, ...]]:
     """Read one public SSE response, which may end at the server lease boundary."""
     try:
         async with session.get(url, headers=headers) as response:
@@ -462,19 +489,31 @@ async def _read_sse_response(
             response_headers = dict(response.headers)
             if status != 200:
                 raise SseResponseStatusError(url, status)
-            chunks: list[str] = []
+            events: list[SseEvent] = []
+            observed_at: list[float] = []
             first_event_at: float | None = None
             pending = ""
             async for chunk in response.content:
                 decoded = chunk.decode("utf-8")
-                chunks.append(decoded)
                 pending += decoded.replace("\r\n", "\n")
                 frames = pending.split("\n\n")
                 pending = frames.pop()
-                if first_event_at is None and parse_sse_frames(frames):
-                    first_event_at = time.perf_counter()
-            body = "".join(chunks).replace("\r\n", "\n")
-            return status, parse_sse_frames(body.split("\n\n")), response_headers, first_event_at
+                parsed = parse_sse_frames(frames)
+                if parsed:
+                    timestamp = time.perf_counter()
+                    if first_event_at is None:
+                        first_event_at = timestamp
+                    events.extend(parsed)
+                    observed_at.extend([timestamp] * len(parsed))
+            if pending.strip():
+                parsed = parse_sse_frames([pending])
+                if parsed:
+                    timestamp = time.perf_counter()
+                    if first_event_at is None:
+                        first_event_at = timestamp
+                    events.extend(parsed)
+                    observed_at.extend([timestamp] * len(parsed))
+            return status, events, response_headers, first_event_at, tuple(observed_at)
     except AcaSmokeEnvironmentError:
         raise
     except (TimeoutError, OSError, UnicodeDecodeError) as exc:

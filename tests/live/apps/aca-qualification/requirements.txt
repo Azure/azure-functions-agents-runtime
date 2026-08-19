@@ -1,0 +1,26 @@
+# GENERATED AT DEPLOY TIME — do not add pins here.
+#
+# The qualification pipeline's `assemble` step overwrites this file in its
+# staging copy with:
+#
+#   1. the locally built runtime wheel, referenced by its exact filename, and
+#   2. the pinned dependency set from eng/constraints/aca-fixture-py3XX.txt
+#      matching the target app's Python version.
+#
+# The wheel must ship in the upload because the merged commit is not on PyPI, so
+# Azure's remote build could never fetch it; shipping it is what guarantees the
+# deployed app is the merge under test rather than the last release.
+#
+# This file deliberately does NOT duplicate the pinned set. An inlined copy
+# would be dead weight that drifts out of step with the real locks the moment
+# either is regenerated, and a stale duplicate here would be invisible because
+# nothing reads it.
+#
+# To deploy this fixture by hand, generate the same content the pipeline would:
+#
+#   python eng/scripts/aca_qualification_pipeline.py assemble \
+#     --artifact-root <dir containing dist/*.whl> \
+#     --staging-root <output dir> \
+#     --constraints-file eng/constraints/aca-fixture-py313.txt \
+#     --commit-sha <sha> --build-id local --branch local \
+#     --runtime-version <version>

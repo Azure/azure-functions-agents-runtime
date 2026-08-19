@@ -4,8 +4,8 @@ title: ACA Sandbox session runtime
 status: Finalized
 author: larohra
 created: 2026-07-20
-updated: 2026-08-18
-issues: []
+updated: 2026-08-20
+issues: [166]
 pull_requests: []
 branch: feature/aca-sandboxes
 ---
@@ -423,6 +423,15 @@ controlling amendments.
 | 179 | Stale submit fence | Propagate / durable re-read | If cancel, takeover, or another launch claimant wins, re-read the durable run and return its linked projection; never leak the losing fence as a 500 or launch twice. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 180 | Terminal provision replay | Take over / return terminal | Exact replay of a terminal reserved run returns its durable outcome before operation takeover; canceled pre-pointer work never requires a sandbox pointer. | Agent reviewer | 2026-08-14 | Setup-timeout corrective |
 | 181 | Complexity and domain vocabulary | Advisory / enforce PLR0912 and PLR0915; repeated strings / owned typed vocabulary | Human approved enforcing PLR0912/PLR0915 and declaring each finite domain once in its owning typed symbols for consumers to reuse. | Human | 2026-08-18 | Review guidance |
+| 182 | Post-main pipeline placement | New pipeline / extend official build | Add additive `AcaSweep`/`AcaDeploy*`/`AcaCold*`/`AcaQualify*` stages to `eng/ci/official-build.yml`; `pr: none`, the existing stages, and the §13 current-checkout smoke are unchanged. | Human | 2026-08-19 | #166 |
+| 183 | Deployment package build | In-pipeline immutable package / remote build | Use Flex remote build from pinned requirements plus the wheel the existing Build stage produces, exercising the customer deployment path. Byte-level reproducibility is traded for that coverage; version determinism is kept by pinning. | Human | 2026-08-19 | #166 |
+| 184 | Deployment attestation | External blob/hash chain / build-stamped marker | Stamp `BUILD_INFO.json` into the package and compare `build_id`, `commit_sha`, and live `sys.version_info` against the running build. The marker must be a file inside the package, never an app setting or resource tag. | Human | 2026-08-19 | #166 |
+| 185 | Build-info route ownership | Product `registration/endpoints.py` / deployed fixture | The route lives in the deployed fixture's `function_app.py` and touches no product module, so no endpoint-response merge ordering is required. | Human | 2026-08-19 | #166 |
+| 186 | Post-main matrix and provisioning | Serialize legs / retain #157 two-phase and #158 bound | Keep the two-phase matrix and parallel legs, with provisioning concurrency 1 per leg passed explicitly because the load helper defaults to 4. N=5 is the automated maximum; N=100 stays human-only. | Human | 2026-08-19 | #166 (applies #157/#158) |
+| 187 | Post-main leak handling | Post-run reconciliation / pre-run sweep | Run one non-fatal, age-scoped sweep before the run and none after: idle-delete and the hourly reap already reclaim, and a post-run reaper would mask their failure. Age scoping replaces BuildId narrowing because the sweep targets other runs' leftovers. | Human | 2026-08-19 | #166 |
+| 188 | Post-main rollback | Retained-package rollback / none | No rollback machinery and no retention requirement; the next merge to `main` corrects a bad deployment. | Human | 2026-08-19 | #166 |
+| 189 | Streaming visibility latency | Omit / gate / observe-only | Measure client-side p50/p95/p99 during the N=5 pass and warn above 2 s, never gate. Report observed poll cadence and batch size so poll latency is separable from transport latency, and state that the true sandbox-write-to-client-observe delta is not captured because cross-machine clock skew exceeds the budget under test. | Human | 2026-08-19 | #166 (evidence for #25) |
+| 190 | Deployed fixture source | Out-of-band / committed | Commit the fixture at `tests/live/apps/aca-qualification/`, config-free, so deployed content is a function of the commit SHA. Not under `tests/endtoend/apps/`, whose `func start` suite auto-enrolls every app with a `host.json`. | Agent | 2026-08-19 | #166 |
 
 *Terminology note.* "Signed package" / "signed content package" phrasing in
 earlier decision rows (e.g. #17, #43), and the historical
@@ -1766,3 +1775,52 @@ ADO 298692 passed the identity preflight, low-level entrypoint, journal
 acceptance, real model turn, and cleanup. Post-main deployment, external
 attestation, py313/py314 lifecycle/loss/N=5 qualification, and rollback remain
 owned by issue #166.
+
+## 14. Post-main deployment and qualification amendment — issue #166
+
+**Status: design finalized, implementation in progress.** Decisions 182–190
+record this amendment; it narrows §13's forward reference, which anticipated
+external attestation and rollback that Decisions 184 and 188 replace.
+
+Post-merge `main`/`release/*` qualification runs as additive stages inside
+`eng/ci/official-build.yml`. Top-level `pr: none`, the existing `Build`,
+`RunTests`, and `RunE2ETests` stages, and the §13 current-checkout smoke are
+unchanged. The new stages complement that smoke rather than replacing it: the
+smoke proves the current checkout, these prove a deployed build.
+
+Stage order is `AcaSweep` → `AcaDeploy*` → `AcaCold*` → `AcaQualify*`. Per #157
+the matrix is two-phase — both cold-start legs finish before either
+deployed-suite leg, with legs parallel inside a phase. Per #158 provisioning
+concurrency is 1 per leg and is passed explicitly, because the load helper
+defaults to 4. Load stays at N=5; N=100 remains human-only. Stages are
+`continueOnError` until the #156 promotion criteria are met.
+
+Deployment uses Flex remote build from a pinned `requirements.txt` plus the
+wheel the existing `Build` stage produces. The merged commit is not on PyPI, so
+shipping that wheel is what makes the deployed app the merge rather than the
+last release. Remote build additionally exercises the customer deployment path,
+so an Oryx or remote-build regression surfaces here.
+
+Attestation is a `BUILD_INFO.json` marker stamped into the package and compared
+against the running build's `build_id`, `commit_sha`, and live
+`sys.version_info`. The marker must be a file inside the package: an app setting
+or resource tag can be changed without deploying, and a tag write is a separate
+ARM call that is not atomic with deployment. The route serving it belongs to the
+deployed fixture's `function_app.py` and touches no product module, so it needs
+no endpoint-response merge ordering.
+
+Cleanup is one non-fatal, age-scoped sweep before the run and none after. ACA
+idle-delete and the hourly reap already reclaim sandboxes, so a post-run reaper
+would mask their failure; running the sweep first turns a leftover into a signal
+that automatic cleanup has stopped working. There is no rollback machinery — the
+next merge corrects a bad deployment.
+
+Streaming visibility latency is measured during the N=5 pass as evidence for
+Decision #25, which conditionally accepted the file transport on an unmeasured
+2-second p95. The measurement is client-side p50/p95/p99, warning above 2 s and
+never gating. It reports observed poll cadence and events per batch so
+poll-interval latency is separable from transport latency, and it states that
+the true sandbox-write-to-client-observe delta is not captured: that needs a
+common clock across two machines, and the cheapest skew estimator is bounded by
+the file plane's per-call overhead, so its error bar would equal the budget
+under test.

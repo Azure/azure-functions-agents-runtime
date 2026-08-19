@@ -25,6 +25,7 @@ from tests.live.aca_deployed_agent_support import (
     json_request,
     parse_accepted_run,
     read_sse_events_with_first_event_time,
+    read_sse_events_with_observation_times,
     setup_retry_after_seconds,
     submission_payload,
 )
@@ -117,6 +118,7 @@ class _SubmittedRun:
 class _EventEvidence:
     first_event_at: float
     terminal_at: float
+    observed_event_timestamps: tuple[float, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -476,6 +478,10 @@ async def _verify_held_load_sessions(
             event.terminal_at - item.submitted_at
             for item, event in zip(state.held, event_evidence, strict=True)
         ],
+        # Without this the visibility series is silently empty: the parameter
+        # defaults to (), so omitting it leaves every gap/cadence metric absent
+        # while the run still reports success.
+        [event.observed_event_timestamps for event in event_evidence],
     )
 
 
@@ -1557,20 +1563,27 @@ async def _read_events(
     submitted: _SubmittedRun,
     authorization: str,
 ) -> _EventEvidence:
-    status, events, _, first_event_at = await read_sse_events_with_first_event_time(
-        client,
-        submitted.accepted.management_urls["events_url"],
-        headers={"Authorization": authorization},
-        overall_timeout_seconds=_HOLD_SECONDS + _EVENT_STREAM_GRACE_SECONDS,
+    status, events, _, first_event_at, observed_event_timestamps = (
+        await read_sse_events_with_observation_times(
+            client,
+            submitted.accepted.management_urls["events_url"],
+            headers={"Authorization": authorization},
+            overall_timeout_seconds=_HOLD_SECONDS + _EVENT_STREAM_GRACE_SECONDS,
+        )
     )
     terminal_at = time.perf_counter()
     assert status == 200
     assert first_event_at is not None
     assert events
+    assert len(observed_event_timestamps) == len(events)
     assert [event.sequence for event in events] == list(range(1, len(events) + 1))
     assert events[-1].payload.get("type") == "done"
     _assert_public_hold_events(events)
-    return _EventEvidence(first_event_at=first_event_at, terminal_at=terminal_at)
+    return _EventEvidence(
+        first_event_at=first_event_at,
+        terminal_at=terminal_at,
+        observed_event_timestamps=observed_event_timestamps,
+    )
 
 
 def _assert_public_hold_events(events: list[SseEvent]) -> None:

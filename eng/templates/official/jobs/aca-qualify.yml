@@ -1,0 +1,107 @@
+# Phase 2 of the post-main ACA qualification: the expensive legs.
+#
+# Runs only after BOTH runtime legs have cleared phase 1, so a cold-start
+# regression is caught for both runtimes before either spends load budget.
+#
+# Covers the public agent turn, suspend/resume lifecycle, backing loss, and N=5
+# concurrency. N=100 is deliberately never reached from here: it stays a
+# human-only, manually queued exercise.
+
+parameters:
+  - name: runtimeTarget
+    type: string
+  - name: pythonVersion
+    type: string
+  - name: appSiteName
+    type: string
+  - name: baseUrl
+    type: string
+  - name: acaServiceConnection
+    type: string
+  - name: artifactFeed
+    type: string
+  - name: poolName
+    type: string
+
+jobs:
+  - job: AcaQualify_${{ parameters.runtimeTarget }}
+    displayName: 'ACA qualification suite (${{ parameters.pythonVersion }})'
+    continueOnError: true
+    # The four suites each provision real sandboxes; N=5 dominates. Bounded so a
+    # hung leg cannot stretch the release pipeline indefinitely.
+    timeoutInMinutes: 90
+
+    pool:
+      name: ${{ parameters.poolName }}
+      image: 1es-ubuntu-22.04
+      os: linux
+
+    steps:
+      - checkout: self
+
+      - task: UsePythonVersion@0
+        inputs:
+          versionSpec: '3.13'
+        displayName: 'Use Python for pipeline tooling'
+
+      - task: PipAuthenticate@1
+        displayName: 'Pip Authenticate'
+        inputs:
+          artifactFeeds: ${{ parameters.artifactFeed }}
+
+      - bash: |
+          set -euo pipefail
+          python -m pip install --upgrade pip
+          python -m pip install -U -e ".[dev,aca_sandbox]"
+        displayName: 'Install pipeline tooling'
+
+      - task: AzureCLI@2
+        displayName: 'Re-verify the deployed build'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            # Phase 1 already verified this, but phase 2 can start much later and
+            # a redeploy in between would silently move the target. Cheap check,
+            # and without it these results could describe a different build.
+            python eng/scripts/aca_qualification_pipeline.py check-build \
+              --base-url "${{ parameters.baseUrl }}" \
+              --token-scope "$(ACA_QUAL_EASY_AUTH_TOKEN_SCOPE)" \
+              --build-id "$(Build.BuildId)" \
+              --commit-sha "$(Build.SourceVersion)" \
+              --python-version "${{ parameters.pythonVersion }}"
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+
+      - task: AzureCLI@2
+        displayName: 'Turn, lifecycle, loss, and N=5'
+        inputs:
+          azureSubscription: ${{ parameters.acaServiceConnection }}
+          scriptType: bash
+          scriptLocation: inlineScript
+          inlineScript: |
+            set -euo pipefail
+            # provision-concurrency is 1 by requirement, not by preference: both
+            # runtime legs share one Sandbox Group. The helper's own default is 4
+            # and its guard only constrains `--runtime-target both`, so passing a
+            # single runtime would silently accept a higher value. It is set
+            # explicitly here for that reason.
+            python eng/scripts/aca_deployed_qualification.py deployed-suite \
+              --runtime-target "${{ parameters.runtimeTarget }}" \
+              --load-concurrency 5 \
+              --provision-concurrency 1
+        env:
+          AZURE_TOKEN_CREDENTIALS: 'dev'
+          AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE: '1'
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL: ${{ parameters.baseUrl }}
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SITE_NAME: ${{ parameters.appSiteName }}
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG: $(ACA_QUAL_AGENT_SLUG)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE: $(ACA_QUAL_EASY_AUTH_TOKEN_SCOPE)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE: $(ACA_QUAL_EASY_AUTH_AUDIENCE)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS: '300'
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_SERVICE_URI: $(ACA_QUAL_TABLE_SERVICE_URI)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TABLE_NAME: $(ACA_QUAL_TABLE_NAME)
+          AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_APP_SUBSCRIPTION_ID: $(ACA_QUAL_SUBSCRIPTION_ID)
+          AZURE_FUNCTIONS_AGENTS_ACA_SANDBOX_GROUP_RESOURCE_ID: $(ACA_SANDBOX_GROUP_RESOURCE_ID)

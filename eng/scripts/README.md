@@ -65,4 +65,31 @@ prerequisite; the real model turn is positive access proof, not a negative
 role-assignment attestation.
 
 The retained `aca_deployed_qualification.py` and deployed suite helpers are
-manual/local assets only pending the separate post-main qualification work.
+driven by the post-main ACA qualification stages in `eng/ci/official-build.yml`
+and remain runnable by hand.
+
+### `aca_qualification_pipeline.py`
+
+Supports the post-main deployment and qualification stages.
+
+| Command | Purpose |
+| --- | --- |
+| `stamp` | Write `BUILD_INFO.json` into the fixture app before packaging |
+| `assemble` | Build the deployable upload from the build artifact: fixture source, runtime wheel, marker, and pinned requirements |
+| `preflight-deploy` | Fail fast, with a named remediation, when the deployment identity lacks rights on the target app |
+| `check-build` | Verify the deployed app is running this build, on the expected Python minor |
+| `sweep` | Report and clear sandboxes left by earlier runs; never fatal |
+
+`check-build` is meaningful only because the marker is a *file inside the
+deployed package*: a file can be served only if that package is genuinely on
+disk, so a stale app cannot claim a build it is not running. An app setting or
+resource tag could be changed without deploying anything.
+
+`sweep` runs **before** a qualification rather than after it. ACA idle-delete
+and the controller's hourly reconciliation already reclaim sandboxes, so an
+end-of-run reaper would mask their failure; sweeping first turns a leftover into
+a signal that automatic cleanup has stopped working. It scopes by age rather
+than by build ID because it is hunting other runs' leftovers, and never deletes
+a sandbox whose age cannot be determined.
+
+See [`docs/aca-qualification-runbook.md`](../../docs/aca-qualification-runbook.md).

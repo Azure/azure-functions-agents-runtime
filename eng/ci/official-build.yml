@@ -59,3 +59,110 @@ extends:
               artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
               PoolName: 1es-pool-azfunc
               acaServiceConnection: 'larohra-sandboxgroup-test'
+
+      # ---------------------------------------------------------------------
+      # Post-main ACA deployment and qualification (issue #166).
+      #
+      # These stages complement the current-checkout ACA smoke inside
+      # RunE2ETests rather than replacing it: that smoke proves the current
+      # checkout works, these prove a *deployed build* works.
+      #
+      # Two-phase by design -- both runtimes finish cold start before either
+      # enters the expensive suite -- and every stage is continueOnError while
+      # the pipeline stabilizes. Promotion to a blocking gate is a separate,
+      # explicitly human-approved step.
+      #
+      # Targets come from the protected variable group; no site name, base URL,
+      # resource group, or subscription is committed to this repository.
+      # ---------------------------------------------------------------------
+      - stage: AcaSweep
+        displayName: 'ACA pre-run leak sweep'
+        # No dependsOn: this starts alongside Build and costs no wall-clock. It
+        # is a leak *detector*, not cleanup -- see the template for why it runs
+        # before the qualification rather than after it.
+        dependsOn: []
+        variables:
+          - group: aca-qualification-protected
+        jobs:
+          - template: /eng/templates/official/jobs/aca-sweep.yml@self
+            parameters:
+              acaServiceConnection: 'larohra-sandboxgroup-test'
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              poolName: 1es-pool-azfunc
+
+      - stage: AcaDeployColdPy313
+        displayName: 'ACA deploy + cold start (3.13)'
+        dependsOn:
+          - Build
+          - AcaSweep
+        variables:
+          - group: aca-qualification-protected
+        jobs:
+          - template: /eng/templates/official/jobs/aca-deploy-cold.yml@self
+            parameters:
+              runtimeTarget: 'python313'
+              pythonVersion: '3.13'
+              constraintsFile: 'eng/constraints/aca-fixture-py313.txt'
+              appSiteName: $(ACA_QUAL_APP_PY313)
+              baseUrl: $(ACA_QUAL_BASE_URL_PY313)
+              acaServiceConnection: 'larohra-sandboxgroup-test'
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              poolName: 1es-pool-azfunc
+
+      - stage: AcaDeployColdPy314
+        displayName: 'ACA deploy + cold start (3.14)'
+        dependsOn:
+          - Build
+          - AcaSweep
+        variables:
+          - group: aca-qualification-protected
+        jobs:
+          - template: /eng/templates/official/jobs/aca-deploy-cold.yml@self
+            parameters:
+              runtimeTarget: 'python314'
+              pythonVersion: '3.14'
+              constraintsFile: 'eng/constraints/aca-fixture-py314.txt'
+              appSiteName: $(ACA_QUAL_APP_PY314)
+              baseUrl: $(ACA_QUAL_BASE_URL_PY314)
+              acaServiceConnection: 'larohra-sandboxgroup-test'
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              poolName: 1es-pool-azfunc
+
+      - stage: AcaQualifyPy313
+        displayName: 'ACA qualification suite (3.13)'
+        # Depends on BOTH cold legs: the phase boundary is what makes a
+        # cold-start regression fail fast for both runtimes before either
+        # spends its load budget.
+        dependsOn:
+          - AcaDeployColdPy313
+          - AcaDeployColdPy314
+        variables:
+          - group: aca-qualification-protected
+        jobs:
+          - template: /eng/templates/official/jobs/aca-qualify.yml@self
+            parameters:
+              runtimeTarget: 'python313'
+              pythonVersion: '3.13'
+              appSiteName: $(ACA_QUAL_APP_PY313)
+              baseUrl: $(ACA_QUAL_BASE_URL_PY313)
+              acaServiceConnection: 'larohra-sandboxgroup-test'
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              poolName: 1es-pool-azfunc
+
+      - stage: AcaQualifyPy314
+        displayName: 'ACA qualification suite (3.14)'
+        dependsOn:
+          - AcaDeployColdPy313
+          - AcaDeployColdPy314
+        variables:
+          - group: aca-qualification-protected
+        jobs:
+          - template: /eng/templates/official/jobs/aca-qualify.yml@self
+            parameters:
+              runtimeTarget: 'python314'
+              pythonVersion: '3.14'
+              appSiteName: $(ACA_QUAL_APP_PY314)
+              baseUrl: $(ACA_QUAL_BASE_URL_PY314)
+              acaServiceConnection: 'larohra-sandboxgroup-test'
+              artifactFeed: 'internal/PythonSDK_Internal_PublicPackages'
+              poolName: 1es-pool-azfunc
