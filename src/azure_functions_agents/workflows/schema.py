@@ -167,6 +167,7 @@ _TEMPLATE_UNCLOSED_RE = re.compile(r"\$\{[^}]*\Z")
 _ITERATION_TEMPLATE_RE = re.compile(
     r"\$\{(?:(item)(?:\.([A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]+)*))?|(index))\}"
 )
+_ITERATION_LOCAL_NAMES = frozenset({"item", "index"})
 _ITERATION_UNBOUND = object()
 
 
@@ -214,6 +215,13 @@ def validate_plan(
 
     seen: set[str] = set()
     for task in plan.tasks:
+        if task.id in _ITERATION_LOCAL_NAMES:
+            raise PlanValidationError(
+                f"task id {task.id!r} is reserved for for_each iteration locals",
+                error_code="workflow_task_id_reserved",
+                node_id=task.id,
+                path="id",
+            )
         if task.id in seen:
             raise PlanValidationError(f"duplicate task id: {task.id!r}")
         seen.add(task.id)

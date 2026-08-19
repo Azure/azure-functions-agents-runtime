@@ -703,6 +703,10 @@ locals:
   deterministic dictionary/list path rules as upstream result templates.
 - `${index}` returns the zero-based integer index.
 
+`item` and `index` are reserved and rejected as authored task ids in every
+plan. This keeps the iteration-local namespace unambiguous without contextual
+precedence rules, including for references such as `${item.result}`.
+
 Aliases, nested `for_each`, cross-instance references, item-dependent
 `depends_on`, and templated tool or Sub Agent names are not supported. An array
 element may be any JSON value, although a referenced item path must be valid for
@@ -803,6 +807,7 @@ The failure phase and status behavior are fixed:
 
 | Code | Submission validation | Runtime resolution | Status behavior |
 | --- | --- | --- | --- |
+| `workflow_task_id_reserved` | Authored task id is `item` or `index` | N/A; rejected before scheduling | Submission returns the flat error directly |
 | `workflow_condition_invalid` | Malformed predicate, unsupported operator, invalid literal/reference shape | Resolved predicate value is not a JSON scalar | Submission returns the flat error directly; runtime output maps to `Failed` |
 | `workflow_reference_unresolved` | Unknown/non-upstream task, iteration local outside `for_each`, malformed reference | Missing dict key, invalid/out-of-range list index, or traversal through a scalar/`null` | Submission returns the flat error directly; runtime output maps to `Failed` |
 | `workflow_iteration_not_array` | N/A; result type is not knowable yet | `for_each` resolves to a non-array JSON value | Runtime output maps to `Failed` |
@@ -940,6 +945,7 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 52 | Controlled runtime failure provenance | Raise native Durable failure / return envelope and status-map / Activity wrapper | Return one stable envelope and map `output.failed` to `Failed`; reserve native raises for unexpected and Activity failures | Agent | 2026-08-13 |
 | 53 | Dynamic instance namespace | Permit all authored ids / escape collisions / reserve bracket suffixes | Restrict authored ids to letters, numbers, underscore, and hyphen; reserve `[index]` suffixes for runtime instances | Agent | 2026-08-13 |
 | 54 | Dynamic control-flow design approval | Revise individual Decisions 43-53 / approve the proposed set | Approve Decisions 43-53 as proposed and advance to implementation | Human (TsuyoshiUshio) | 2026-08-14 |
+| 55 | Iteration-local task ids | Permit shadowing with local precedence / reject only ambiguous references / reserve iteration-local names | Reserve `item` and `index` as task ids for every plan so `${item}` and `${index}` always denote `for_each` iteration locals | Human (TsuyoshiUshio) | 2026-08-19 |
 
 ## 6. Test plan
 
@@ -1014,6 +1020,8 @@ The Dynamic Workflow sample for this extension must demonstrate:
     waits;
   - reject authored task ids outside letters, numbers, underscore, and hyphen so
     they cannot collide with runtime `[index]` instance ids;
+  - reject `item` and `index` as authored task ids so iteration-local references
+    cannot be shadowed;
   - preserve unchanged model dumps and wire payloads for static v1 plans.
 - [ ] Evolution #1276: deterministic execution
   - replay produces identical instance ids, ordering, scheduling waves, skip

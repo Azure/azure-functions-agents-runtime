@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -22,6 +24,7 @@ from azure_functions_agents.workflows.schema import (
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
     WorkflowPlanPolicy,
+    validate_plan,
 )
 
 
@@ -985,6 +988,149 @@ def test_numeric_scheduling_under_parallel_cap() -> None:
     assert MAX_PARALLELISM in running_peaks
 
 
+def test_ready_normal_node_waiting_for_parallel_slot_stays_pending() -> None:
+    tasks = [
+        {
+            "id": "discover",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        *[
+            {
+                "id": f"task{i:02}",
+                "type": TOOL_TASK_TYPE,
+                "tool": "inspect",
+                "args": {"index": i},
+                "depends_on": ["discover"],
+                "when": {
+                    "ref": "${discover.result.run}",
+                    "operator": "equals",
+                    "value": True,
+                },
+            }
+            for i in range(MAX_PARALLELISM + 1)
+        ],
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "discover":
+            return {"id": "discover", "result": {"run": True}}
+        return {"id": payload["id"], "result": payload["args"]}
+
+    _, context = _run_dynamic(
+        tasks,
+        policy={"allowed_tools": ["collect", "inspect"], "allowed_subagents": []},
+        result_for=result_for,
+    )
+
+    first_child_wave = next(
+        status
+        for status in context.statuses
+        if status["nodes"]["task00"]["state"] == "running"
+    )
+    assert first_child_wave["nodes"][f"task{MAX_PARALLELISM:02}"]["state"] == "pending"
+
+
+def test_incident_sample_plan_runs_through_dynamic_scheduler() -> None:
+    sample_src = (
+        Path(__file__).resolve().parents[1]
+        / "samples"
+        / "workflow-incident-triage"
+        / "src"
+    )
+    spec = importlib.util.spec_from_file_location(
+        "incident_tools_scheduler_test",
+        sample_src / "tools" / "incident_tools.py",
+    )
+    assert spec is not None and spec.loader is not None
+    incident_tools = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(incident_tools)
+
+    incident = "Something is degrading across our platform."
+    raw_plan = {
+        "version": 1,
+        "tasks": [
+            {
+                "id": "discover",
+                "type": TOOL_TASK_TYPE,
+                "tool": "discover_services",
+                "args": {"incident": incident},
+                "depends_on": [],
+            },
+            {
+                "id": "inspect",
+                "type": TOOL_TASK_TYPE,
+                "tool": "inspect_service",
+                "args": {"service": "${item.name}", "index": "${index}"},
+                "depends_on": ["discover"],
+                "for_each": "${discover.result.services}",
+                "when": {
+                    "ref": "${item.in_scope}",
+                    "operator": "equals",
+                    "value": True,
+                },
+            },
+            {
+                "id": "summarize",
+                "type": TOOL_TASK_TYPE,
+                "tool": "summarize_scan",
+                "args": {
+                    "incident": incident,
+                    "findings": "${inspect.result}",
+                },
+                "depends_on": ["inspect"],
+            },
+        ],
+    }
+    allowed_tools = frozenset({
+        "discover_services",
+        "inspect_service",
+        "summarize_scan",
+    })
+    policy = WorkflowPlanPolicy(
+        allowed_tools=allowed_tools,
+        allowed_subagents=frozenset(),
+    )
+    plan = validate_plan(raw_plan, policy=policy)
+    handlers = {
+        name: getattr(incident_tools, name)
+        for name in allowed_tools
+    }
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        result = handlers[payload["tool"]](payload["args"])
+        return {"id": payload["id"], "result": result}
+
+    result, context = _run_dynamic(
+        [task.model_dump(mode="json") for task in plan.tasks],
+        policy={
+            "allowed_tools": sorted(allowed_tools),
+            "allowed_subagents": [],
+        },
+        result_for=result_for,
+    )
+
+    aggregate = result["results"]["inspect"]
+    assert [entry["index"] for entry in aggregate] == list(range(len(aggregate)))
+    assert any(entry["status"] == "skipped" for entry in aggregate)
+    assert all(
+        entry["result"] is None
+        for entry in aggregate
+        if entry["status"] == "skipped"
+    )
+    summary = result["results"]["summarize"]
+    assert summary["scanned"] == sum(
+        entry["status"] == "completed" for entry in aggregate
+    )
+    assert summary["skipped"] == sum(
+        entry["status"] == "skipped" for entry in aggregate
+    )
+    assert _activity_ids(context, engine._ACTIVITY_NAME)[0] == "discover"
+    assert _activity_ids(context, engine._ACTIVITY_NAME)[-1] == "summarize"
+
+
 def test_multiple_expansions_run_in_sorted_logical_id_order() -> None:
     tasks = [
         {"id": "disc", "type": TOOL_TASK_TYPE, "tool": "collect", "args": {}, "depends_on": []},
@@ -1366,3 +1512,63 @@ def test_dynamic_cancellation_cancels_timer_and_returns_partial() -> None:
     assert result["total_count"] == 2
     # The pending durable timer was cancelled.
     assert context.timers and all(timer.cancelled for timer in context.timers)
+    assert context.statuses[-1]["nodes"]["w1"]["state"] == "pending"
+
+
+def test_dynamic_cancellation_preserves_completed_iteration_instances() -> None:
+    count = MAX_PARALLELISM + 1
+    tasks = [
+        {
+            "id": "discover",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "inspect",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {"index": "${index}"},
+            "depends_on": ["discover"],
+            "for_each": "${discover.result.items}",
+        },
+    ]
+
+    def result_for(name: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if payload["id"] == "discover":
+            return {
+                "id": "discover",
+                "result": {"items": [{} for _ in range(count)]},
+            }
+        return {"id": payload["id"], "result": payload["args"]}
+
+    context = _DynamicContext(
+        tasks,
+        result_for,
+        policy={
+            "allowed_tools": ["collect", "inspect"],
+            "allowed_subagents": [],
+        },
+    )
+    context.cancel_task.result = "user-request"
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    gen = orchestrator(context)
+    next(gen)  # discover
+    gen.send(context.last_wave)  # first inspect wave
+    gen.send(context.last_wave)  # final inspect instance
+    result: dict[str, Any] = {}
+    try:
+        gen.send(context.cancel_task)
+    except StopIteration as stop:
+        result = stop.value
+
+    assert result["canceled"] is True
+    assert "inspect" not in result["results"]
+    inspect_status = context.statuses[-1]["nodes"]["inspect"]
+    assert inspect_status["state"] == "expanded"
+    assert [
+        inspect_status["instances"][f"inspect[{i}]"]["state"]
+        for i in range(count)
+    ] == [*(["completed"] * MAX_PARALLELISM), "pending"]

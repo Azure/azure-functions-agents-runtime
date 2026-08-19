@@ -491,7 +491,11 @@ def _run_dynamic_workflow(
         progressed = True
         while progressed:
             progressed = False
-            for lid in sorted(t for t in by_id if logical_state[t] == "pending"):
+            for lid in sorted(
+                t
+                for t in by_id
+                if logical_state[t] == "pending" and t not in node_instances
+            ):
                 if not deps_ready(lid):
                     continue
                 task = by_id[lid]
@@ -648,7 +652,6 @@ def _run_dynamic_workflow(
                     "result": None,
                     "resolved": resolved_value,
                 }]
-                logical_state[lid] = "running"
                 progressed = True
 
             # Aggregate for_each nodes whose instances are all terminal.
@@ -750,8 +753,7 @@ def _run_dynamic_workflow(
                     f"task {inst['instance_id']!r}: unsupported task type {ttype!r}"
                 )
             inst["state"] = "running"
-            if logical_state[lid] == "expanded":
-                logical_state[lid] = "running"
+            logical_state[lid] = "running"
             wave_specs.append(inst)
 
         publish()
@@ -763,11 +765,12 @@ def _run_dynamic_workflow(
                 if inst.get("kind") == "timer" and not t.is_completed:
                     t.cancel()
                 inst["state"] = "pending"
-            for lid in list(logical_state):
-                if logical_state[lid] == "running" and by_id[lid].get(
-                    "for_each"
-                ) is not None:
-                    logical_state[lid] = "expanded"
+            for lid in {inst["logical_id"] for inst in wave_specs}:
+                logical_state[lid] = (
+                    "expanded"
+                    if by_id[lid].get("for_each") is not None
+                    else "pending"
+                )
             publish()
             logger.info(
                 "workflow canceled: instance=%s workflow_agent=%s reason=%r",

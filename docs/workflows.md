@@ -278,6 +278,8 @@ hardening controls.
 ```
 
 Authored task ids allow letters, numbers, underscore, and hyphen only.
+`item` and `index` are reserved and rejected as authored task ids because they
+always identify `for_each` iteration locals.
 `[` and `]` are rejected — the runtime reserves the `<id>[<index>]`
 namespace for the materialized `for_each` instance ids it renders (see
 below), so you can neither author them nor reference them.
@@ -355,9 +357,10 @@ Only value fields may use the iteration locals:
   traversal rules as upstream result templates.
 - `${index}` — the zero-based integer index.
 
-Iteration locals are rejected outside a `for_each` task. Nested `for_each`,
-aliases, cross-instance references, item-dependent `depends_on`, and
-templated tool/agent names are not supported.
+Iteration locals are rejected outside a `for_each` task. The names `item` and
+`index` are reserved and cannot be authored as task ids in any plan. Nested
+`for_each`, aliases, cross-instance references, item-dependent `depends_on`,
+and templated tool/agent names are not supported.
 
 Materialized instance ids are runtime-owned and rendered as
 `<logical-id>[<index>]` (e.g. `inspect[0]`). They appear in status and
@@ -516,6 +519,7 @@ committed before the failure:
 
 | `error_code` | Meaning |
 |---|---|
+| `workflow_task_id_reserved` | A task uses `item` or `index`, which are reserved for `for_each` iteration locals. |
 | `workflow_condition_invalid` | Malformed predicate, unsupported operator, or a resolved predicate value that is not a JSON scalar. |
 | `workflow_reference_unresolved` | Unknown/non-upstream reference, an iteration local outside `for_each`, a missing key/out-of-range index, or traversal through a scalar/`null`. |
 | `workflow_iteration_not_array` | A `for_each` value resolved to a non-array. |

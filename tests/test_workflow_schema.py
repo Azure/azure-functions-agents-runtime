@@ -1199,48 +1199,17 @@ def test_resolve_iteration_paths_require_bound_items_and_existing_paths() -> Non
         resolve_template_value("${item.missing}", {}, item={"present": True}, index=0)
 
 
-def test_iteration_result_field_takes_precedence_over_task_named_item() -> None:
-    plan = validate_plan(
-        _plan(
-            _task("item"),
-            _task("discover"),
-            _task(
-                "analyze",
-                depends_on=["item", "discover"],
-                args={"summary": "${item.result.summary}"},
-            )
-            | {"for_each": "${discover.result.items}"},
-        )
-    )
+@pytest.mark.parametrize("task_id", ["item", "index"])
+def test_iteration_local_names_are_reserved_task_ids(task_id: str) -> None:
+    with pytest.raises(
+        PlanValidationError,
+        match=rf"task id {task_id!r} is reserved for for_each iteration locals",
+    ) as exc_info:
+        validate_plan(_plan(_task(task_id)))
 
-    resolved = resolve_template_value(
-        plan.tasks[2].args,
-        {"item": {"summary": "wrong"}},
-        item={"result": {"summary": "right"}},
-        index=0,
-    )
-
-    assert resolved == {"summary": "right"}
-
-
-def test_task_named_item_remains_referenceable_outside_iteration() -> None:
-    plan = validate_plan(
-        _plan(
-            _task("item"),
-            _task(
-                "consume",
-                depends_on=["item"],
-                args={"summary": "${item.result.summary}"},
-            ),
-        )
-    )
-
-    resolved = resolve_template_value(
-        plan.tasks[1].args,
-        {"item": {"summary": "task result"}},
-    )
-
-    assert resolved == {"summary": "task result"}
+    assert exc_info.value.error_code == "workflow_task_id_reserved"
+    assert exc_info.value.node_id == task_id
+    assert exc_info.value.path == "id"
 
 
 def test_evaluate_condition_is_scalar_and_type_sensitive() -> None:

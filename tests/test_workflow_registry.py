@@ -394,6 +394,7 @@ def test_addendum_documents_data_driven_control_flow_grammar():
         assert "${item.path.to.field}" in addendum
         assert "${index}" in addendum
         assert "only inside a `for_each` task" in addendum
+        assert "`item` and `index` are reserved task ids" in addendum
         # Static targets; only value fields vary.
         assert "Keep the target tool/agent name static" in addendum
         # when: object with ref/operator/scalar value, strict equality.

@@ -84,6 +84,8 @@ _SHARED_ADDENDUM = (
     "`task`, and `when.ref`) use the fixed iteration locals `${item}` (the whole "
     "element), `${item.path.to.field}` (a field of it), and `${index}` (the "
     "zero-based position). Those locals are valid only inside a `for_each` task. "
+    "`item` and `index` are reserved task ids and must never be used as authored "
+    "task `id` values. "
     "Keep the target tool/agent name static — only value fields vary per item.\n"
     "- `when`: a small predicate deciding whether a task (or one `for_each` "
     "instance) runs. It is an object "

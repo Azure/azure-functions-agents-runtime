@@ -234,10 +234,11 @@ same DAG:
   one instance per element as `<logical-id>[<index>]`; reject the whole
   expansion atomically if it would exceed the materialized-node budget
   (skipped instances still count).
-- **evaluate** — bind `${item}` / `${item.path}` / `${index}`, evaluate the
-  `when` predicate *before* resolving executable `args` / Sub Agent `task`
-  templates, and mark false predicates `skipped` with a `null` result that
-  still satisfies downstream `depends_on`.
+- **evaluate** — bind `${item}` / `${item.path}` / `${index}` (whose `item` and
+  `index` names are reserved from authored task ids), evaluate the `when`
+  predicate *before* resolving executable `args` / Sub Agent `task` templates,
+  and mark false predicates `skipped` with a `null` result that still satisfies
+  downstream `depends_on`.
 - **schedule** — dispatch runnable instances under `MAX_PARALLELISM`, ordered
   by the numeric `(logical-id, index)` tuple (never the rendered string) so
   replay reproduces identical waves.

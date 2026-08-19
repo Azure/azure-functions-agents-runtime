@@ -40,6 +40,7 @@ When you don't know which services are involved, let the workflow discover and f
 
 1. A `discover_services` task takes the `incident` text and returns a bounded `services` array; low-tier services come back with `in_scope: false`.
 2. One logical `inspect_service` task fanned out with `for_each` over that array, skipping out-of-scope items with an item-level `when`. Reference the current element with `${item.*}` and `${index}`:
+   Never use `item` or `index` as a task `id`; both names are reserved for these iteration locals.
 
    ```
    id: inspect
