@@ -569,6 +569,98 @@ def _activity_ids(context: _FakeOrchestrationContext, name: str) -> list[str]:
     return [payload["id"] for called, payload in context.calls if called == name]
 
 
+def test_dynamic_dispatch_rejects_unsupported_persisted_task_type() -> None:
+    tasks = [
+        {
+            "id": "src",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "invalid",
+            "type": "unsupported",
+            "depends_on": ["src"],
+            "when": {
+                "ref": "${src.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+        },
+    ]
+
+    with pytest.raises(RuntimeError, match="unsupported task type 'unsupported'"):
+        _run_dynamic(
+            tasks,
+            policy={"allowed_tools": ["collect"], "allowed_subagents": []},
+            result_for=lambda _name, payload: {
+                "id": payload["id"],
+                "result": {"run": True},
+            },
+        )
+
+
+def test_dynamic_activity_failure_cancels_pending_wave_timer() -> None:
+    class _FailedSecondWaveContext(_DynamicContext):
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            super().__init__(*args, **kwargs)
+            self.wave_count = 0
+
+        def task_all(self, tasks: list[_Task]) -> _Task:
+            self.wave_count += 1
+            if self.wave_count == 2:
+                self.last_wave = _Task(RuntimeError("dynamic activity failed"))
+                return self.last_wave
+            return super().task_all(tasks)
+
+    tasks = [
+        {
+            "id": "src",
+            "type": TOOL_TASK_TYPE,
+            "tool": "collect",
+            "args": {},
+            "depends_on": [],
+        },
+        {
+            "id": "act",
+            "type": TOOL_TASK_TYPE,
+            "tool": "inspect",
+            "args": {},
+            "depends_on": ["src"],
+            "when": {
+                "ref": "${src.result.run}",
+                "operator": "equals",
+                "value": True,
+            },
+        },
+        {
+            "id": "pause",
+            "type": WAIT_TASK_TYPE,
+            "duration": "PT1S",
+            "depends_on": ["src"],
+        },
+    ]
+    context = _FailedSecondWaveContext(
+        tasks,
+        lambda _name, payload: {
+            "id": payload["id"],
+            "result": {"run": True},
+        },
+        policy={
+            "allowed_tools": ["collect", "inspect"],
+            "allowed_subagents": [],
+        },
+    )
+    orchestrator = _registered_function(engine.ORCHESTRATOR_NAME)
+
+    with pytest.raises(RuntimeError, match="dynamic activity failed"):
+        _run_orchestrator(orchestrator, context)
+
+    assert len(context.timers) == 1
+    assert context.timers[0].cancelled is True
+
+
 # --- Static-path preservation ---------------------------------------------
 
 

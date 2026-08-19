@@ -166,6 +166,13 @@ prefer `start_workflow` over direct tool calls. The agent author does
 not need to document the tools or the heuristics in their markdown — the
 agent markdown stays focused on the domain.
 
+Direct workflow-enabled agents also receive the runtime-owned
+`data-driven-workflows` skill. Its short description is always available, but
+MAF loads the detailed `when` / `for_each` grammar only when a data-driven plan
+needs it. This system skill is independent of project `skills` filtering
+(including `skills: false`) and is not exposed when the same agent runs as a
+delegated or Workflow Sub Agent leaf.
+
 Any agent may enable workflows by setting `workflows.enabled: true`.
 Invocation remains independent: triggers and built-in endpoints determine how
 the agent can be reached, and `debug_chat_ui` automatically enables its backing
@@ -290,6 +297,11 @@ Two optional fields let a plan react to data at runtime instead of the
 model enumerating every task before submission. Plans that omit both keep
 their exact prior validation, scheduling, result, and status behavior; the
 fields are dropped from serialized plans when unset.
+
+The MAF skill inventory describes `data-driven-workflows` as applicable only
+when submitted tasks will contain one of these fields. The shared workflow
+addendum does not mention it, which avoids drawing fixed-DAG turns toward an
+unnecessary load while keeping the full grammar available on demand.
 
 - **`when`** — a constrained predicate that decides whether a logical task
   (or one materialized `for_each` instance) runs. It is available on every

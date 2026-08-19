@@ -372,47 +372,43 @@ def test_addendum_includes_per_tool_descriptions():
     assert "Sample tool for the addendum-rendering test." in addendum
 
 
-def test_addendum_documents_data_driven_control_flow_grammar():
-    """Regression guard: the shared addendum teaches the deterministic
-    `when` / `for_each` control-flow grammar and authoring rules so the
-    model can author dynamic plans (FRD 0004, Issue #1276). Both channels
-    inherit the shared section.
-    """
+def test_data_driven_control_flow_grammar_uses_progressive_skill_disclosure():
     result = integration.build_workflow_integration(
         _FakeApp(),
         _enable_metadata(),
         workflow_tools=[_workflow_tool("alpha", "alpha desc")],
     )
+
     for addendum in (result.chat_system_addendum, result.trigger_system_addendum):
-        # for_each: tool/sub_agent only, full upstream array ref.
-        assert "`for_each`" in addendum
-        assert "tool` or `sub_agent`" in addendum
-        assert "never `wait`" in addendum
-        assert "${discover.result.items}" in addendum
-        # Iteration locals.
-        assert "${item}" in addendum
-        assert "${item.path.to.field}" in addendum
-        assert "${index}" in addendum
-        assert "only inside a `for_each` task" in addendum
-        assert "`item` and `index` are reserved task ids" in addendum
-        # Static targets; only value fields vary.
-        assert "Keep the target tool/agent name static" in addendum
-        # when: object with ref/operator/scalar value, strict equality.
-        assert "`when`" in addendum
-        assert '"operator": "equals" | "not_equals"' in addendum
-        assert "JSON scalar" in addendum
-        assert "exact typed equality" in addendum
-        # Skip semantics: null, does not propagate, own `when`.
-        assert "skips the task" in addendum
-        assert "skip does not propagate" in addendum
-        # Condition evaluated before executable templates resolve.
-        assert "evaluated before" in addendum
-        # Ordered aggregation of {index, status, result} envelopes.
-        assert "{index, status, result}" in addendum
-        assert "source order" in addendum
-        assert "${node_id.result}" in addendum
-        # Bounded arrays / caps guidance.
-        assert "already bounded" in addendum
+        assert "data-driven-workflows" not in addendum
+        assert "`for_each`" not in addendum
+        assert "`when`" not in addendum
+        assert "${item.path.to.field}" not in addendum
+        assert "{index, status, result}" not in addendum
+
+    skill_path = integration.data_driven_workflows_skill_path()
+    skill = (skill_path / "SKILL.md").read_text(encoding="utf-8")
+    assert "name: data-driven-workflows" in skill
+    assert "Irrelevant to fixed task lists" in skill
+    assert "`for_each`" in skill
+    assert "tool` or `sub_agent`" in skill
+    assert "never `wait`" in skill
+    assert "${discover.result.items}" in skill
+    assert "${item}" in skill
+    assert "${item.path.to.field}" in skill
+    assert "${index}" in skill
+    assert "`item` and `index` are reserved task ids" in skill
+    assert "Keep the target tool/agent name static" in skill
+    assert "`when`" in skill
+    assert '"operator": "equals" | "not_equals"' in skill
+    assert "JSON scalar" in skill
+    assert "exact typed equality" in skill
+    assert "skip does not propagate" in skill
+    assert "evaluated before" in skill
+    assert "{index, status, result}" in skill
+    assert "source order" in skill
+    assert "${node_id.result}" in skill
+    assert "already bounded" in skill
 
 
 def test_integration_builds_owner_specific_policy_and_sub_agent_guidance() -> None:

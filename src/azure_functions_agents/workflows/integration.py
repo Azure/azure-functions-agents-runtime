@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
@@ -39,6 +40,8 @@ from .schema import WorkflowPlanPolicy
 from .tools import build_workflow_tools
 
 type WorkflowAgentPolicyCatalog = Mapping[str, WorkflowPlanPolicy]
+
+DATA_DRIVEN_WORKFLOWS_SKILL_NAME = "data-driven-workflows"
 
 # Whitelist of frontmatter keys we recognize under ``workflows``. Any
 # other key is rejected at app start so typos (``enabld``, ``allow_tools``)
@@ -74,37 +77,6 @@ _SHARED_ADDENDUM = (
     "Do not return large raw evidence blobs, logs, "
     "or per-item lists as the final workflow output unless the request explicitly "
     "requires raw data; summarize the useful signal inside the workflow.\n\n"
-    "### Data-driven control flow (optional)\n\n"
-    "Two optional task fields let a plan adapt to data instead of enumerating "
-    "every task up front:\n\n"
-    "- `for_each` (on a `tool` or `sub_agent` task only — never `wait`): a single "
-    "full reference to an upstream JSON array, e.g. "
-    "`\"for_each\": \"${discover.result.items}\"`. The runtime materializes one "
-    "instance per element. Inside that task's value fields (`args`, a Sub Agent's "
-    "`task`, and `when.ref`) use the fixed iteration locals `${item}` (the whole "
-    "element), `${item.path.to.field}` (a field of it), and `${index}` (the "
-    "zero-based position). Those locals are valid only inside a `for_each` task. "
-    "`item` and `index` are reserved task ids and must never be used as authored "
-    "task `id` values. "
-    "Keep the target tool/agent name static — only value fields vary per item.\n"
-    "- `when`: a small predicate deciding whether a task (or one `for_each` "
-    "instance) runs. It is an object "
-    "`{\"ref\": \"${...}\", \"operator\": \"equals\" | \"not_equals\", "
-    "\"value\": <scalar>}`. `ref` is one full upstream or iteration reference; "
-    "`value` is a JSON scalar (null, boolean, number, or string). Comparison is "
-    "exact typed equality only — no truthiness, ordering, regex, or boolean "
-    "composition. A false predicate skips the task, schedules nothing, and yields "
-    "`null` for that result position; skip does not propagate, so a downstream "
-    "conditional task must declare its own `when`.\n\n"
-    "The condition is evaluated before a task's executable `args` / `task` "
-    "templates are resolved, so a skipped task never needs valid value fields. "
-    "A `for_each` task exposes one ordered aggregate under its logical id: an "
-    "array of `{index, status, result}` envelopes in source order, with "
-    "`result: null` for skipped positions. Depend on the logical id and consume "
-    "the whole aggregate with `${node_id.result}`; you cannot reference an "
-    "individual instance. Iterate over collections that are already bounded — "
-    "filter or cap the array upstream — so the plan stays within workflow "
-    "limits.\n\n"
 )
 
 _CHAT_NOTIFICATION_ADDENDUM = (
@@ -184,6 +156,7 @@ class WorkflowIntegrationResult:
     chat_system_addendum: str | None
     trigger_system_addendum: str | None
     plan_policy: WorkflowPlanPolicy | None
+    runtime_skill_paths: tuple[Path, ...] = ()
 
     def __iter__(self) -> Iterator[Any]:
         """Yield the legacy ``(workflow_tools, system_addendum)`` pair."""
@@ -198,6 +171,11 @@ class WorkflowIntegrationResult:
         if chat_enabled != trigger_enabled:
             raise RuntimeError("workflow channel addenda must be enabled or disabled together")
         return chat_enabled
+
+
+def data_driven_workflows_skill_path() -> Path:
+    """Return the packaged data-driven workflow authoring skill directory."""
+    return Path(__file__).resolve().parent / "skills" / DATA_DRIVEN_WORKFLOWS_SKILL_NAME
 
 
 def _validate_workflows_block(metadata: dict[str, Any]) -> None:
@@ -520,6 +498,7 @@ def build_workflow_agent_integration(
             handler_catalog=handler_catalog,
         ),
         plan_policy=policy,
+        runtime_skill_paths=(data_driven_workflows_skill_path(),),
     )
 
 

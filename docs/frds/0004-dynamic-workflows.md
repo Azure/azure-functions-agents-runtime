@@ -624,10 +624,61 @@ flowchart TB
 
 | Pipeline stage | Module(s) | Change |
 | --- | --- | --- |
-| discover | No change | Dynamic control flow does not discover new files or capabilities. |
+| discover | No change | Dynamic control flow does not discover new application files or capabilities. The data-driven authoring skill is a runtime-owned packaged asset, not an app-discovered skill. |
 | translate | `workflows/schema.py`, `workflows/tools.py` | Extend the agent-facing and runtime plan schemas with typed `when` and `for_each` fields. Validate syntax, upstream references, static tool/Sub Agent targets, and logical DAG structure before scheduling. |
-| register | `workflows/integration.py` | Extend the runtime-owned prompt guidance and `start_workflow` tool schema. Durable blueprint registration and owner policy construction remain unchanged. |
-| execute | `workflows/engine.py`, `workflows/tools.py`, `public/index.html` | Deterministically resolve collections and predicates, materialize bounded instances, schedule them under the existing parallelism cap, aggregate results in source order, publish structured progress, and normalize controlled failures into stable envelopes. |
+| register | `app.py`, `registration/capabilities.py`, `workflows/integration.py`, `runner.py`, `pyproject.toml` | Give direct workflow-enabled agents the packaged `data-driven-workflows` skill independently of project-skill filtering, reduce the runtime-owned addendum to a short on-demand load instruction, and retain local field guidance in the `start_workflow` tool schema. Build a direct-role capability copy after catalog construction so delegated roles keep the original project-only paths. Durable blueprint registration and owner policy construction remain unchanged. |
+| execute | `workflows/engine.py`, `workflows/tools.py`, `public/index.html` | Decode the validated Durable JSON payload into typed task/state boundaries, then deterministically resolve collections and predicates, materialize bounded instances, schedule them under the existing parallelism cap, aggregate results in source order, publish structured progress, and normalize controlled failures into stable envelopes. |
+
+#### Progressive authoring guidance and typed execution
+
+Detailed data-driven authoring guidance uses MAF skill progressive disclosure
+instead of occupying every workflow-enabled turn's system instructions. The
+runtime packages a `data-driven-workflows` `SKILL.md`. Its name and short
+description are visible to direct workflow-enabled agents; the body is loaded
+only when the model decides a plan needs runtime conditions or collection fan-out.
+The narrow skill description is the selection pointer; the shared addendum does
+not mention the skill because E2E evaluation showed that even a qualified
+addendum pointer encouraged speculative loads for fixed DAGs. Static workflows
+therefore do not pay the detailed control-flow context cost.
+
+This runtime-owned skill is part of `workflows.enabled`, not the application's
+discovered `skills/` inventory. It remains available when project skills are
+disabled or filtered and is not advertised in discovery summaries. After the
+two-pass catalog has retained each agent's project-only `AgentCapabilities`,
+registration creates a shallow direct-role capability copy with the built-in
+path appended. Trigger and built-in endpoint handlers receive that copy; catalog
+entries and delegated-role construction retain the original capabilities, so
+the same agent does not inherit the skill when it runs as a leaf Sub Agent
+without workflow management tools.
+
+`data-driven-workflows` is a runtime-reserved skill name. Application
+composition fails with a clear error if project discovery returns that name
+rather than relying on MAF's order-dependent skill de-duplication. Public docs
+remain the human contract; the packaged skill is the model-readable contract,
+and tests keep their core grammar aligned.
+
+The asset lives at
+`src/azure_functions_agents/workflows/skills/data-driven-workflows/SKILL.md`.
+`workflows/integration.py` resolves it relative to its own `__file__`, and
+`pyproject.toml` includes `workflows/skills/**` as package data. A wheel test
+must build and inspect or install the non-editable artifact because editable
+installs do not prove package-data inclusion.
+
+The Durable boundary still persists JSON, but scheduler internals do not operate
+on open-ended `dict[str, Any]` values. TypedDict and Literal contracts describe
+the persisted workflow payload, task variants, logical/instance states, and
+materialized instances. Newly added dynamic keys are `NotRequired`; the Durable
+payload boundary reads them with compatibility defaults once so in-flight
+static instances created before this evolution replay unchanged. The
+orchestrator trusts the already submission-validated persisted payload instead
+of reconstructing Pydantic models during replay. Untrusted pre-Pydantic
+validation input remains `Mapping[str, object]` and is narrowed explicitly.
+
+The dynamic orchestrator retains its Durable generator and every `yield` in one
+top-level function. Deterministic synchronous helpers own materialization,
+iteration binding, runnable selection, result application, and cancellation
+restoration through one typed state object. This limits nesting without moving
+Durable side effects or replay-sensitive control flow behind opaque abstractions.
 
 #### Constrained `when` contract
 
@@ -946,6 +997,16 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 53 | Dynamic instance namespace | Permit all authored ids / escape collisions / reserve bracket suffixes | Restrict authored ids to letters, numbers, underscore, and hyphen; reserve `[index]` suffixes for runtime instances | Agent | 2026-08-13 |
 | 54 | Dynamic control-flow design approval | Revise individual Decisions 43-53 / approve the proposed set | Approve Decisions 43-53 as proposed and advance to implementation | Human (TsuyoshiUshio) | 2026-08-14 |
 | 55 | Iteration-local task ids | Permit shadowing with local precedence / reject only ambiguous references / reserve iteration-local names | Reserve `item` and `index` as task ids for every plan so `${item}` and `${index}` always denote `for_each` iteration locals | Human (TsuyoshiUshio) | 2026-08-19 |
+| 56 | Data-driven authoring context | Keep the full shared addendum / point only to public docs / package an on-demand MAF skill | Package `data-driven-workflows`; keep only a short load instruction in the shared addendum so detailed grammar enters context only for data-driven plans | Human (TsuyoshiUshio) | 2026-08-19 |
+| 57 | Built-in skill scope | Treat it as a filterable project skill / make it a workflow system capability / expose it to all agents | Give it only to direct workflow-enabled agents as a runtime system capability, independent of `skills: false`; do not expose it to leaf Sub Agent execution or application skill discovery | Human (TsuyoshiUshio) | 2026-08-19 |
+| 58 | Durable scheduler typing | Continue `dict[str, Any]` / reconstruct Pydantic models during replay / typed JSON wire contracts | Use TypedDict/Literal contracts and one typed mutable scheduler state while retaining JSON persistence and avoiding Pydantic reconstruction inside the orchestrator | Human (TsuyoshiUshio) | 2026-08-19 |
+| 59 | Dynamic scheduler structure | Keep one deeply nested function / class-based orchestrator / shallow deterministic phase helpers | Keep the generator/yield boundary in `_run_dynamic_workflow` and extract synchronous typed helpers for materialization, selection, result application, and cancellation restoration | Human (TsuyoshiUshio) | 2026-08-19 |
+| 60 | Review-follow-up design approval | Defer to a later PR / implement individual nits / approve Decisions 56-59 together | Approve the progressive-disclosure and typed phase-refactor design for this PR, subject to an independent architecture review before implementation | Human (TsuyoshiUshio) | 2026-08-19 |
+| 61 | Direct versus delegated skill plumbing | Add the built-in path to shared catalog capabilities / add a second persistent capability field / create a direct-role copy after catalog construction | Keep catalog capabilities project-only and pass a shallow copy with the built-in path only to trigger and built-in endpoint registration | Agent, architecture review | 2026-08-19 |
+| 62 | Built-in skill name collision | Let MAF keep the first duplicate / namespace without reservation / reserve and fail composition | Reserve `data-driven-workflows` and fail application composition when a project skill uses the same name | Agent, architecture review | 2026-08-19 |
+| 63 | Built-in skill packaging | Generate content in code / external public file / packaged workflow asset | Store `SKILL.md` under `workflows/skills/data-driven-workflows`, resolve relative to `integration.py`, add `workflows/skills/**` package data, and verify a built wheel | Agent, architecture review | 2026-08-19 |
+| 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
+| 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
 
 ## 6. Test plan
 
@@ -1023,6 +1084,23 @@ The Dynamic Workflow sample for this extension must demonstrate:
   - reject `item` and `index` as authored task ids so iteration-local references
     cannot be shadowed;
   - preserve unchanged model dumps and wire payloads for static v1 plans.
+- [ ] Evolution #1276: progressive authoring guidance
+  - workflow-enabled direct agents always receive the packaged
+    `data-driven-workflows` skill, including when project skills are disabled;
+  - workflow-disabled agents and leaf Sub Agent execution do not receive it;
+  - the Skill description selects `when` / `for_each` authoring without a shared
+    addendum pointer, and fixed-DAG E2E does not load the Skill;
+  - packaged-wheel tests prove the built-in `SKILL.md` is included and readable;
+  - project discovery rejects the reserved `data-driven-workflows` name before
+    MAF skill-provider construction;
+  - skill and public-doc contract tests cover iteration locals, reserved ids,
+    skip/null behavior, strict predicates, and ordered aggregation.
+- [ ] Evolution #1276: typed scheduler structure
+  - mypy checks task variants, payload fields, state literals, and instance fields
+    without scheduler-local `dict[str, Any]`;
+  - malformed pre-validation input is narrowed from `Mapping[str, object]`;
+  - helper extraction preserves Durable replay ordering, yield boundaries,
+    controlled failure envelopes, cancellation restoration, and static scheduling.
 - [ ] Evolution #1276: deterministic execution
   - replay produces identical instance ids, ordering, scheduling waves, skip
     decisions, and aggregate results;
@@ -1090,7 +1168,8 @@ The Dynamic Workflow sample for this extension must demonstrate:
 - [ ] Evolution #1276: update `docs/workflows.md` with `when`, `for_each`,
   iteration locals, fan-in, limits, stable failures, and status examples.
 - [ ] Evolution #1276: update `docs/architecture.md` for runtime materialization,
-  deterministic scheduling, and structured status hand-off.
+  deterministic scheduling, structured status hand-off, runtime-owned versus
+  project-discovered skills, and direct/delegated capability paths.
 - [ ] Evolution #1276: update the selected workflow sample and its README with a
   collection-driven fan-out/fan-in scenario.
 

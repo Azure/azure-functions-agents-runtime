@@ -24,10 +24,10 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Collection
+from collections.abc import Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal
+from typing import Any, Literal, NotRequired, TypedDict
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -70,9 +70,9 @@ class TemplateResolutionError(ValueError):
         self.error_code = error_code
 
 
-TOOL_TASK_TYPE: str = "tool"
-WAIT_TASK_TYPE: str = "wait"
-SUB_AGENT_TASK_TYPE: str = "sub_agent"
+TOOL_TASK_TYPE: Literal["tool"] = "tool"
+WAIT_TASK_TYPE: Literal["wait"] = "wait"
+SUB_AGENT_TASK_TYPE: Literal["sub_agent"] = "sub_agent"
 SUPPORTED_TASK_TYPES: frozenset[str] = frozenset({
     TOOL_TASK_TYPE,
     WAIT_TASK_TYPE,
@@ -90,6 +90,63 @@ class WorkflowPlanPolicy:
 
 
 type JsonScalar = str | int | float | bool | None
+
+
+class WorkflowConditionInput(TypedDict):
+    ref: str
+    operator: Literal["equals", "not_equals"]
+    value: JsonScalar
+
+
+class _WorkflowTaskInputBase(TypedDict):
+    id: str
+    depends_on: list[str]
+
+
+class _DynamicWorkflowTaskInput(TypedDict, total=False):
+    when: WorkflowConditionInput
+    for_each: str
+
+
+class ToolWorkflowTaskInput(_WorkflowTaskInputBase, _DynamicWorkflowTaskInput):
+    type: Literal["tool"]
+    tool: str
+    args: dict[str, Any]
+
+
+class WaitWorkflowTaskInput(_WorkflowTaskInputBase, _DynamicWorkflowTaskInput):
+    type: Literal["wait"]
+    duration: NotRequired[str]
+    until: NotRequired[str]
+
+
+class SubAgentWorkflowTaskInput(_WorkflowTaskInputBase, _DynamicWorkflowTaskInput):
+    type: Literal["sub_agent"]
+    agent: str
+    task: str
+
+
+type WorkflowTaskInput = (
+    ToolWorkflowTaskInput | WaitWorkflowTaskInput | SubAgentWorkflowTaskInput
+)
+
+
+class WorkflowPolicyInput(TypedDict):
+    allowed_tools: list[str]
+    allowed_subagents: list[str]
+
+
+class WorkflowPayload(TypedDict):
+    tasks: list[WorkflowTaskInput]
+    workflow_agent_slug: str
+    policy: NotRequired[WorkflowPolicyInput]
+    workflow_agent: NotRequired[dict[str, str]]
+
+
+class PlanValidationMetadata(TypedDict, total=False):
+    error_code: str
+    node_id: str
+    path: str
 
 
 def _is_json_scalar(value: object) -> bool:
@@ -399,8 +456,8 @@ def _validate_static_target(task: WorkflowTask, target: str, field: str) -> None
 
 
 def _schema_validation_metadata(
-    raw: dict[str, Any], exc: ValidationError
-) -> dict[str, str]:
+    raw: Mapping[str, object], exc: ValidationError
+) -> PlanValidationMetadata:
     """Map newly introduced plan fields to their stable submission error code."""
     for error in exc.errors():
         loc = error["loc"]
@@ -413,9 +470,12 @@ def _schema_validation_metadata(
         tasks = raw.get("tasks")
         if isinstance(tasks, list) and loc[1] < len(tasks):
             candidate = tasks[loc[1]]
-            if isinstance(candidate, dict) and isinstance(candidate.get("id"), str):
-                node_id = candidate["id"]
+            if isinstance(candidate, Mapping):
+                candidate_id = candidate.get("id")
+                if isinstance(candidate_id, str):
+                    node_id = candidate_id
         path = ".".join(str(segment) for segment in loc[2:])
+        metadata: PlanValidationMetadata
         if field == "when":
             metadata = {"error_code": "workflow_condition_invalid", "path": path}
         else:
@@ -871,33 +931,52 @@ def evaluate_condition(
     return equals if condition.operator == "equals" else not equals
 
 
-def plan_to_activity_inputs(plan: WorkflowPlan) -> list[dict[str, Any]]:
+def plan_to_activity_inputs(plan: WorkflowPlan) -> list[WorkflowTaskInput]:
     """Flatten a validated plan into the JSON list the orchestrator iterates.
 
     The orchestrator needs ``depends_on`` to drive wave scheduling, plus
     ``type`` so it knows whether to call an activity or schedule a timer,
     so we keep them on the wire alongside id/tool/args/duration/until.
     """
-    out: list[dict[str, Any]] = []
+    out: list[WorkflowTaskInput] = []
     for t in plan.tasks:
-        entry: dict[str, Any] = {
-            "id": t.id,
-            "type": t.type,
-            "depends_on": list(t.depends_on),
-        }
         if t.type == TOOL_TASK_TYPE:
-            entry["tool"] = t.tool
-            entry["args"] = dict(t.args)
+            if t.tool is None:
+                raise RuntimeError(f"validated tool task {t.id!r} has no tool")
+            entry: WorkflowTaskInput = ToolWorkflowTaskInput(
+                id=t.id,
+                type="tool",
+                depends_on=list(t.depends_on),
+                tool=t.tool,
+                args=dict(t.args),
+            )
         elif t.type == WAIT_TASK_TYPE:
+            wait_entry = WaitWorkflowTaskInput(
+                id=t.id,
+                type="wait",
+                depends_on=list(t.depends_on),
+            )
             if t.duration is not None:
-                entry["duration"] = t.duration
+                wait_entry["duration"] = t.duration
             if t.until is not None:
-                entry["until"] = t.until
+                wait_entry["until"] = t.until
+            entry = wait_entry
         else:
-            entry["agent"] = t.agent
-            entry["task"] = t.task
+            if t.agent is None or t.task is None:
+                raise RuntimeError(f"validated Sub Agent task {t.id!r} is incomplete")
+            entry = SubAgentWorkflowTaskInput(
+                id=t.id,
+                type="sub_agent",
+                depends_on=list(t.depends_on),
+                agent=t.agent,
+                task=t.task,
+            )
         if t.when is not None:
-            entry["when"] = t.when.model_dump()
+            entry["when"] = WorkflowConditionInput(
+                ref=t.when.ref,
+                operator=t.when.operator,
+                value=t.when.value,
+            )
         if t.for_each is not None:
             entry["for_each"] = t.for_each
         out.append(entry)
