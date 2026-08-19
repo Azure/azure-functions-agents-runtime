@@ -1,267 +1,215 @@
-"""Opt-in one-shot recovery coverage against a deployed ACA-backed endpoint."""
+"""Opt-in one-shot recovery coverage against the controlled deployed ACA fixture."""
 
 from __future__ import annotations
 
 import asyncio
-import json
-import os
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 
 import pytest
 import pytest_asyncio
+from aiohttp import ClientSession
 from tests.aca_smoke_diagnostics import AcaSmokeEnvironmentError
-from tests.live.aca_smoke_support import aca_smoke_run_id
+from tests.live.aca_deployed_agent_support import (
+    AcceptedRun,
+    DeployedAcaSmokeConfig,
+    acquire_default_authorization_header,
+    cancel_retry_after_seconds,
+    client_timeout,
+    deployed_aca_smoke_enabled,
+    deployed_aca_timeout_recovery_config_from_environment,
+    json_request,
+    parse_accepted_run,
+    response_header,
+    submission_payload,
+    timeout_recovery_submission_headers,
+)
 
-_HTTP_TIMEOUT_SECONDS = 60.0
-_RECOVERY_TIMEOUT_SECONDS = 180.0
+_TERMINAL_SETTLEMENT_TIMEOUT_SECONDS = 300.0
+_STATUS_POLL_SECONDS = 1.0
+_TERMINAL_STATES = frozenset({"abandoned", "canceled", "failed", "succeeded", "timed_out"})
+_ENVIRONMENT_UNREADY_STATUSES = frozenset({401, 403, 404, 429, 502, 503})
 
-if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE") != "1":
+if not deployed_aca_smoke_enabled():
     pytest.skip(
-        "Set AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE=1 after human authorization to run live ACA.",
-        allow_module_level=True,
-    )
-
-if os.environ.get("AZURE_FUNCTIONS_AGENTS_RUN_ACA_ENDPOINT_SMOKE") != "1":
-    pytest.skip(
-        "Set AZURE_FUNCTIONS_AGENTS_RUN_ACA_ENDPOINT_SMOKE=1 for deployed endpoint coverage.",
+        "Set AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1 after authorization to run "
+        "the controlled deployed ACA setup-timeout fixture.",
         allow_module_level=True,
     )
 
 
 @dataclass(frozen=True, slots=True)
-class _EndpointConfig:
-    chat_url: str
-    function_key: str
-
-
-@dataclass(frozen=True, slots=True)
-class _HttpResponse:
+class _AdmissionResponse:
     status_code: int
-    body: object
+    payload: dict[str, object]
     headers: Mapping[str, str]
-
-
-def _required_environment_value(name: str) -> str:
-    value = os.environ.get(name, "").strip()
-    if not value:
-        raise AcaSmokeEnvironmentError(f"{name} must be set to a non-blank value.")
-    return value
-
-
-def _request(
-    config: _EndpointConfig,
-    url: str,
-    *,
-    method: str,
-    body: object | None = None,
-    headers: Mapping[str, str] | None = None,
-) -> _HttpResponse:
-    request_headers = {
-        "Accept": "application/json",
-        "x-functions-key": config.function_key,
-        **(headers or {}),
-    }
-    payload = None
-    if body is not None:
-        payload = json.dumps(body).encode("utf-8")
-        request_headers["Content-Type"] = "application/json"
-    request = urllib.request.Request(
-        url,
-        data=payload,
-        headers=request_headers,
-        method=method,
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-            status_code = response.status
-            response_headers = dict(response.headers.items())
-            response_body = response.read()
-    except urllib.error.HTTPError as error:
-        status_code = error.code
-        response_headers = dict(error.headers.items())
-        response_body = error.read()
-    except (OSError, urllib.error.URLError) as error:
-        raise AcaSmokeEnvironmentError(
-            f"deployed ACA endpoint request failed before receiving HTTP: {type(error).__name__}"
-        ) from error
-    try:
-        parsed_body: object = json.loads(response_body)
-    except (json.JSONDecodeError, UnicodeDecodeError):
-        parsed_body = response_body.decode("utf-8", errors="replace")
-    return _HttpResponse(
-        status_code=status_code,
-        body=parsed_body,
-        headers=response_headers,
-    )
-
-
-def _open_events(config: _EndpointConfig, url: str) -> int:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "Accept": "text/event-stream",
-            "x-functions-key": config.function_key,
-        },
-        method="GET",
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=_HTTP_TIMEOUT_SECONDS) as response:
-            response.read(1)
-            return response.status
-    except urllib.error.HTTPError as error:
-        error.read()
-        return error.code
-    except (OSError, urllib.error.URLError) as error:
-        raise AcaSmokeEnvironmentError(
-            f"deployed ACA event stream failed before receiving HTTP: {type(error).__name__}"
-        ) from error
-
-
-def _management_url(config: _EndpointConfig, value: object) -> str:
-    assert isinstance(value, str) and value
-    return urllib.parse.urljoin(config.chat_url, value)
-
-
-async def _wait_for_status(
-    config: _EndpointConfig,
-    status_url: str,
-    *,
-    terminal: bool,
-) -> _HttpResponse:
-    deadline = time.monotonic() + _RECOVERY_TIMEOUT_SECONDS
-    latest: _HttpResponse | None = None
-    while time.monotonic() < deadline:
-        latest = await asyncio.to_thread(
-            _request,
-            config,
-            status_url,
-            method="GET",
-        )
-        if (
-            latest.status_code == 200
-            and isinstance(latest.body, dict)
-            and (not terminal or latest.body.get("phase") == "terminal")
-        ):
-            return latest
-        await asyncio.sleep(2)
-    raise AssertionError(f"run status did not settle before timeout: {latest!r}")
+    authorization: str
 
 
 @pytest.fixture
-def aca_endpoint_config() -> _EndpointConfig:
-    chat_url = _required_environment_value(
-        "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_CHAT_URL"
-    )
-    parsed = urllib.parse.urlparse(chat_url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise AcaSmokeEnvironmentError(
-            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_CHAT_URL must be an absolute HTTP(S) URL."
-        )
-    return _EndpointConfig(
-        chat_url=chat_url,
-        function_key=_required_environment_value(
-            "AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_FUNCTION_KEY"
-        ),
-    )
+def timeout_recovery_config() -> DeployedAcaSmokeConfig:
+    return deployed_aca_timeout_recovery_config_from_environment()
 
 
 @pytest_asyncio.fixture
-async def one_shot_admission(
-    aca_endpoint_config: _EndpointConfig,
-) -> _HttpResponse:
-    response = await asyncio.to_thread(
-        _request,
-        aca_endpoint_config,
-        aca_endpoint_config.chat_url,
-        method="POST",
-        body={
-            "prompt": (
-                "one-shot ACA setup recovery "
-                f"{aca_smoke_run_id()}-{uuid.uuid4().hex}"
-            )
-        },
-        headers={
-            "Idempotency-Key": f"aca-one-shot-{uuid.uuid4().hex}",
-            "Prefer": "respond-async",
-        },
-    )
-    if response.status_code in {401, 403, 404, 429, 503}:
-        raise AcaSmokeEnvironmentError(
-            f"deployed ACA endpoint is not ready for the smoke: HTTP {response.status_code}"
+async def timeout_recovery_admission(
+    timeout_recovery_config: DeployedAcaSmokeConfig,
+) -> _AdmissionResponse:
+    authorization = await acquire_default_authorization_header(timeout_recovery_config.token_scope)
+    async with ClientSession(timeout=client_timeout(timeout_recovery_config)) as session:
+        return await _submit_timeout_recovery_once(
+            session,
+            timeout_recovery_config,
+            authorization,
         )
-    return response
+
+
+async def _submit_timeout_recovery_once(
+    session: ClientSession,
+    config: DeployedAcaSmokeConfig,
+    authorization: str,
+) -> _AdmissionResponse:
+    request_headers = timeout_recovery_submission_headers(
+        authorization,
+        f"aca-one-shot-{uuid.uuid4().hex}",
+    )
+    status_code, payload, response_headers = await json_request(
+        session,
+        "POST",
+        config.chat_url,
+        headers=request_headers,
+        payload=submission_payload("Trigger the controlled setup-timeout recovery fixture."),
+    )
+    if status_code in _ENVIRONMENT_UNREADY_STATUSES:
+        detail = payload.get("error")
+        suffix = f" ({detail})" if isinstance(detail, str) and detail else ""
+        raise AcaSmokeEnvironmentError(
+            "The controlled deployed setup-timeout route is unavailable, unauthorized, or "
+            f"capacity constrained (HTTP {status_code}){suffix}."
+        )
+    return _AdmissionResponse(
+        status_code=status_code,
+        payload=payload,
+        headers=response_headers,
+        authorization=authorization,
+    )
 
 
 @pytest.mark.live_aca
 @pytest.mark.asyncio
-async def test_live_aca_first_response_is_a_complete_recovery_handle(
-    aca_endpoint_config: _EndpointConfig,
-    one_shot_admission: _HttpResponse,
+async def test_live_aca_first_response_is_a_linked_setup_timeout_recovery_handle(
+    timeout_recovery_config: DeployedAcaSmokeConfig,
+    timeout_recovery_admission: _AdmissionResponse,
 ) -> None:
-    response = one_shot_admission
-    assert response.status_code in {202, 504}
-    assert isinstance(response.body, dict)
-    body = response.body
-    assert isinstance(body.get("session_id"), str)
-    assert isinstance(body.get("run_id"), str)
-    if response.status_code == 504:
-        assert body.get("admission") in {"committed", "possibly_committed"}
+    """Require the fixture's only submission to time out after durable admission."""
+    response = timeout_recovery_admission
+    cleanup_ticket = _ticket_from_identifiers(response.payload, timeout_recovery_config)
+    primary_error: BaseException | None = None
+    terminal: dict[str, object] | None = None
+    try:
+        assert response.status_code == 504
+        assert response.payload.get("error") == "setup_deadline_exceeded"
+        assert response.payload.get("admission") == "committed"
+        assert response.payload.get("retry_with") == "respond-async"
+        assert response.payload.get("phase") == "provisioning"
+        assert cleanup_ticket is not None
 
-    status_url = _management_url(aca_endpoint_config, body.get("status_url"))
-    result_url = _management_url(aca_endpoint_config, body.get("result_url"))
-    events_url = _management_url(aca_endpoint_config, body.get("events_url"))
-    cancel_url = _management_url(aca_endpoint_config, body.get("cancel_url"))
+        ticket = parse_accepted_run(response.payload, timeout_recovery_config)
+        assert ticket == cleanup_ticket
+        assert response_header(response.headers, "Location") == response.payload["status_url"]
+        assert response_header(response.headers, "x-ms-session-id") == ticket.session_id
+        assert response_header(response.headers, "x-ms-retry-with") == "respond-async"
+        retry_after = response_header(response.headers, "Retry-After")
+        assert retry_after is not None and retry_after.isdecimal()
+        assert 1 <= int(retry_after) <= 120
+    except BaseException as error:
+        primary_error = error
+        raise
+    finally:
+        if cleanup_ticket is not None:
+            try:
+                async with ClientSession(timeout=client_timeout(timeout_recovery_config)) as session:
+                    terminal = await _cancel_and_wait_for_terminal(
+                        session,
+                        timeout_recovery_config,
+                        cleanup_ticket,
+                        response.authorization,
+                    )
+            except BaseException:
+                if primary_error is not None:
+                    primary_error.add_note(
+                        "Recovery fixture cleanup also failed after the first submission."
+                    )
+                else:
+                    raise
 
-    status = await _wait_for_status(
-        aca_endpoint_config,
-        status_url,
-        terminal=False,
+    assert terminal is not None
+    assert terminal.get("phase") == "terminal"
+    assert terminal.get("status") in _TERMINAL_STATES
+
+
+def _ticket_from_identifiers(
+    payload: Mapping[str, object],
+    config: DeployedAcaSmokeConfig,
+) -> AcceptedRun | None:
+    session_id = payload.get("session_id")
+    run_id = payload.get("run_id")
+    if not isinstance(session_id, str) or not session_id:
+        return None
+    if not isinstance(run_id, str) or not run_id:
+        return None
+    return AcceptedRun(
+        session_id=session_id,
+        run_id=run_id,
+        management_urls=config.management_urls(session_id=session_id, run_id=run_id),
     )
-    assert status.status_code == 200
-    assert isinstance(status.body, dict)
-    assert status.body.get("session_id") == body["session_id"]
-    assert status.body.get("run_id") == body["run_id"]
 
-    result = await asyncio.to_thread(
-        _request,
-        aca_endpoint_config,
-        result_url,
-        method="GET",
+
+async def _cancel_and_wait_for_terminal(
+    session: ClientSession,
+    config: DeployedAcaSmokeConfig,
+    ticket: AcceptedRun,
+    authorization: str,
+) -> dict[str, object]:
+    headers = {"Authorization": authorization}
+    cancel_status, canceled, cancel_headers = await json_request(
+        session,
+        "POST",
+        ticket.management_urls["cancel_url"],
+        headers=headers,
     )
-    if status.body.get("phase") == "provisioning":
-        assert result.status_code == 200
-        assert isinstance(result.body, dict)
-        assert result.body.get("status") == "accepted"
-    else:
-        assert result.status_code in {200, 410}
+    assert cancel_status in {200, 202}
+    assert canceled.get("session_id") == ticket.session_id
+    assert canceled.get("run_id") == ticket.run_id
+    if cancel_status == 202:
+        retry_after = response_header(cancel_headers, "Retry-After")
+        assert retry_after is not None and retry_after.isdecimal()
+        assert 1 <= int(retry_after) <= 120
+        await asyncio.sleep(cancel_retry_after_seconds(cancel_headers))
+    return await _wait_for_terminal_status(session, config, ticket, headers)
 
-    assert await asyncio.to_thread(_open_events, aca_endpoint_config, events_url) == 200
 
-    canceled = await asyncio.to_thread(
-        _request,
-        aca_endpoint_config,
-        cancel_url,
-        method="POST",
-    )
-    assert canceled.status_code == 200
-    assert isinstance(canceled.body, dict)
-    assert canceled.body.get("status") in {
-        "canceled",
-        "failed",
-        "abandoned",
-        "succeeded",
-    }
-
-    terminal = await _wait_for_status(
-        aca_endpoint_config,
-        status_url,
-        terminal=True,
-    )
-    assert isinstance(terminal.body, dict)
-    assert terminal.body.get("phase") == "terminal"
+async def _wait_for_terminal_status(
+    session: ClientSession,
+    config: DeployedAcaSmokeConfig,
+    ticket: AcceptedRun,
+    headers: Mapping[str, str],
+) -> dict[str, object]:
+    deadline = time.monotonic() + _TERMINAL_SETTLEMENT_TIMEOUT_SECONDS
+    latest: dict[str, object] | None = None
+    while time.monotonic() < deadline:
+        status_code, latest, _ = await json_request(
+            session,
+            "GET",
+            ticket.management_urls["status_url"],
+            headers=headers,
+        )
+        assert status_code == 200
+        assert latest.get("session_id") == ticket.session_id
+        assert latest.get("run_id") == ticket.run_id
+        if latest.get("phase") == "terminal":
+            return latest
+        await asyncio.sleep(_STATUS_POLL_SECONDS)
+    raise AssertionError(f"Timed-out recovery run did not reach a terminal phase: {latest!r}")

@@ -477,10 +477,6 @@ class AcaSandboxExecutionBackend:
                     fence,
                     records,
                 ),
-                lambda result: _has_admission_disposition(
-                    result,
-                    _ADMISSION_POSSIBLY_COMMITTED,
-                ),
                 phase=SetupPhase.SUBMIT_ADMISSION,
             )
         except Exception:

@@ -24,28 +24,41 @@ Deployed cold-start, lifecycle, loss, load, and one-shot recovery suites remain
 direct/manual test assets pending issue #166. They have no pipeline wiring,
 target metadata, or queue-time parameters in this repository.
 
-## Deployed one-shot recovery
+## Controlled deployed one-shot recovery
 
-`test_aca_one_shot_recovery.py` calls one deployed ACA-backed Functions endpoint
-exactly once, discards its prompt and idempotency key, and uses only the first
-response's management URLs to read status/result, open events, cancel, and
-observe terminal settlement.
+`test_aca_one_shot_recovery.py` targets the fixed
+`deployed_setup_timeout` route in
+`tests/fixtures/live_aca_setup_timeout_recovery`, a dedicated deployment that
+does not contain the other qualification routes. Its fixture-local
+`controlled_setup_timeout.py` temporarily injects a complete provider wrapper
+through `compose_aca_application`; the wrapper delays `create` for 95 seconds
+after Table reservation and before it delegates to ACA. It has no environment
+toggle or production runtime surface. The initial delayed sleep is canceled
+before an ACA sandbox is created; reconciliation-only creates delegate normally
+if recovery is needed.
 
-Enable it separately from the current-checkout smoke and point it at a
-function-key-protected ACA-backed HTTP agent:
+Deploy that exact fixture to the protected Easy-Auth ACA Function App before
+running the test. Issue #166 still owns immutable package deployment and
+external attestation, so this remains a direct/manual asset rather than a CI
+deployment target.
 
 ```bash
-export AZURE_FUNCTIONS_AGENTS_RUN_ACA_SMOKE=1
-export AZURE_FUNCTIONS_AGENTS_RUN_ACA_ENDPOINT_SMOKE=1
-export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_CHAT_URL="https://<app>.azurewebsites.net/agents/<slug>/chat"
-export AZURE_FUNCTIONS_AGENTS_ACA_SMOKE_FUNCTION_KEY="<function-key>"
+export AZURE_FUNCTIONS_AGENTS_RUN_DEPLOYED_ACA_SMOKE=1
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_FUNCTION_BASE_URL="https://<app>.azurewebsites.net"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_AGENT_SLUG="deployed_setup_timeout"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_TOKEN_SCOPE="api://<app-id>/.default"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_EASY_AUTH_AUDIENCE="<app-id>"
+export AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS=180
 python -m pytest -m live_aca tests/live/test_aca_one_shot_recovery.py -v
 ```
 
-The fixture performs the only POST and reports endpoint authorization,
-configuration, throttling, or capacity failures as `ACA-SMOKE-ENV` errors. The
-test body never receives the prompt or idempotency key and never replays the
-request. It proves caller-visible recovery against a deployed host. It does not
-inject a deterministic provider delay; deterministic unit and Azurite tests
-cover the linked timeout branches, while a naturally slow setup may return the
-same linked recovery ticket as `504`.
+The admission fixture performs the only chat POST without the asynchronous
+preference header (`Prefer: respond-async`), so the controlled
+post-reservation timeout must return a linked `504` with
+`admission=committed`. Configuration, authorization, and capacity problems are
+`ACA-SMOKE-ENV` fixture errors. The test body verifies the recovery ticket and
+headers, never replays the chat POST, then uses only its management URLs to
+cancel and poll for a terminal outcome. A cancellation `202` honors
+`Retry-After` before status polling. The terminal polling window is five
+minutes: it covers the 120-second operation lease plus a 60-second dedicated
+fixture reconciler cadence and scheduling jitter.

@@ -128,7 +128,9 @@ QUARANTINE_REASONS: frozenset[str] = frozenset(
 _MANIFEST_RETRY_INTERVAL_SECONDS = 0.25
 _RESUMABLE_FILE_OPERATION_STATUS_CODES = frozenset({409, 423, 425, 429, 500, 502, 503, 504})
 _ADMISSION_CONFIRMATION_TIMEOUT_SECONDS = 1.0
+_BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS = 0.05
 _INDETERMINATE_PROVISION_RECOVERY_TIMEOUT_SECONDS = 1.0
+_DETACHED_BOUNDED_TASKS: set[object] = set()
 _PROVISION_SUBMIT_OPERATION_KIND: DurableOperationKind = "provision_submit"
 _SUBMIT_RUN_OPERATION_KIND: DurableOperationKind = "submit_run"
 _SUBMIT_OPERATION_KINDS: frozenset[DurableOperationKind] = frozenset(
@@ -1303,7 +1305,6 @@ async def provision_new_session_submit(
             preparation.state_binding.store,
             preparation.records,
         ),
-        lambda result: result.admission == _ADMISSION_POSSIBLY_COMMITTED,
         phase=SetupPhase.PROVISION_CREATE,
     )
     return await _complete_provision_submit(
@@ -2432,12 +2433,12 @@ async def _await_admission_with_setup_timeout[T](
     operation_factory: Callable[[], Awaitable[T]],
     setup_deadline: SetupDeadline,
     confirm_after_timeout: Callable[[], Awaitable[T]],
-    should_confirm_after_timeout: Callable[[T], bool],
     *,
     phase: SetupPhase,
 ) -> T:
     """Cancel and observe an admission task before resolving a timed-out acknowledgement."""
     started = False
+    timed_out = False
 
     async def run() -> T:
         nonlocal started
@@ -2452,16 +2453,17 @@ async def _await_admission_with_setup_timeout[T](
         )
         if task in done:
             return task.result()
+        timed_out = True
         return await _resolve_timed_out_admission(
             task,
             started=started,
             setup_deadline=setup_deadline,
             confirm_after_timeout=confirm_after_timeout,
-            should_confirm_after_timeout=should_confirm_after_timeout,
             phase=phase,
         )
     except BaseException:
-        await _cancel_and_wait(task)
+        if not timed_out:
+            await _cancel_and_drain_bounded_task(task)
         raise
 
 
@@ -2471,24 +2473,47 @@ async def _resolve_timed_out_admission[T](
     started: bool,
     setup_deadline: SetupDeadline,
     confirm_after_timeout: Callable[[], Awaitable[T]],
-    should_confirm_after_timeout: Callable[[T], bool],
     phase: SetupPhase,
 ) -> T:
-    if not task.done():
-        task.cancel()
+    await _cancel_and_drain_bounded_task(task)
+    if not started:
+        raise _setup_timeout_error(setup_deadline, phase) from None
+    return await confirm_after_timeout()
+
+
+async def _cancel_and_drain_bounded_task[T](task: asyncio.Future[T]) -> None:
+    """Cancel a bounded task, briefly drain it, and retain it until completion."""
+    if task.done():
+        _consume_bounded_task_completion(task)
+        return
+    task.cancel()
     try:
-        result = await task
-    except asyncio.CancelledError:
-        current = asyncio.current_task()
-        if current is not None and current.cancelling():
-            await _cancel_and_wait(task)
-            raise
-        if not started:
-            raise _setup_timeout_error(setup_deadline, phase) from None
-        return await confirm_after_timeout()
-    if should_confirm_after_timeout(result):
-        return await confirm_after_timeout()
-    return result
+        await asyncio.wait({task}, timeout=_BOUNDED_TASK_DRAIN_TIMEOUT_SECONDS)
+    finally:
+        if task.done():
+            _consume_bounded_task_completion(task)
+        else:
+            _detach_bounded_task(task)
+
+
+def _detach_bounded_task[T](task: asyncio.Future[T]) -> None:
+    """Keep an unresponsive bounded task alive until its terminal outcome is observed."""
+    if task in _DETACHED_BOUNDED_TASKS:
+        return
+    _DETACHED_BOUNDED_TASKS.add(task)
+    task.add_done_callback(_consume_detached_bounded_task)
+
+
+def _consume_detached_bounded_task[T](task: asyncio.Future[T]) -> None:
+    try:
+        _consume_bounded_task_completion(task)
+    finally:
+        _DETACHED_BOUNDED_TASKS.discard(task)
+
+
+def _consume_bounded_task_completion[T](task: asyncio.Future[T]) -> None:
+    with suppress(BaseException):
+        task.result()
 
 
 async def _bounded_task_result[T](
@@ -2496,21 +2521,18 @@ async def _bounded_task_result[T](
     *,
     timeout_seconds: float,
 ) -> T | None:
-    """Await a task to completion or cancellation without leaving it behind."""
+    """Await a task to completion or retain it while its cancellation finishes."""
     task = asyncio.ensure_future(operation)
     try:
         done, _pending = await asyncio.wait(
             {task},
             timeout=timeout_seconds,
         )
-    except asyncio.CancelledError:
-        await _cancel_and_wait(task)
-        raise
     except BaseException:
-        await _cancel_and_wait(task)
+        await _cancel_and_drain_bounded_task(task)
         raise
     if task not in done:
-        await _cancel_and_wait(task)
+        await _cancel_and_drain_bounded_task(task)
         return None
     try:
         return task.result()
@@ -2525,17 +2547,6 @@ async def _bounded_admission_confirmation[T](operation: Awaitable[T], fallback: 
         timeout_seconds=_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS,
     )
     return fallback if result is None else result
-
-
-async def _cancel_and_wait[T](task: asyncio.Future[T]) -> None:
-    if not task.done():
-        task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-    except Exception:
-        pass
 
 
 async def _confirm_provision_admission_after_setup_timeout(

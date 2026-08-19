@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 from collections.abc import Awaitable, Callable
+from contextlib import suppress
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -175,6 +177,44 @@ def _script_root(tmp_path: Path) -> Path:
     return tmp_path
 
 
+async def _collect_detached_task_count() -> int:
+    gc.collect()
+    await asyncio.sleep(0)
+    return len(readiness_module._DETACHED_BOUNDED_TASKS)
+
+
+async def _release_detached_task(
+    release: asyncio.Event,
+    late_completion: asyncio.Event,
+) -> bool:
+    release.set()
+    await asyncio.wait_for(late_completion.wait(), timeout=1)
+    await asyncio.sleep(0)
+    return not await _collect_detached_task_count()
+
+
+async def _wait_for_prompt_task[T](
+    task: asyncio.Future[T],
+    loop: asyncio.AbstractEventLoop,
+) -> tuple[set[asyncio.Future[T]], float]:
+    started_at = loop.time()
+    done, _pending = await asyncio.wait({task}, timeout=0.15)
+    return done, loop.time() - started_at
+
+
+async def _finish_detached_task[T](
+    task: asyncio.Future[T],
+    done: set[asyncio.Future[T]],
+    release: asyncio.Event,
+    late_completion: asyncio.Event,
+) -> bool:
+    if task not in done:
+        release.set()
+        with suppress(asyncio.CancelledError):
+            await asyncio.wait_for(task, timeout=1)
+    return await _release_detached_task(release, late_completion)
+
+
 class _CountingHandle(_FakeHandle):
     def __init__(self) -> None:
         super().__init__()
@@ -229,7 +269,6 @@ async def test_admission_timeout_preserves_outer_cancellation() -> None:
             operation,
             SetupBudget.start(setup_seconds=1),
             confirm,
-            lambda result: False,
             phase=SetupPhase.PROVISION_CREATE,
         )
     )
@@ -267,7 +306,6 @@ async def test_admission_timeout_confirms_child_cancellation() -> None:
         operation,
         SetupBudget.start(setup_seconds=0.05),
         confirm,
-        lambda result: False,
         phase=SetupPhase.PROVISION_CREATE,
     )
 
@@ -275,6 +313,241 @@ async def test_admission_timeout_confirms_child_cancellation() -> None:
     assert child_cancelled.is_set()
     assert confirmations == 1
     assert result == "confirmed"
+
+
+@pytest.mark.asyncio
+async def test_admission_timeout_retains_resistant_task_until_late_failure_is_consumed() -> None:
+    assert not readiness_module._DETACHED_BOUNDED_TASKS
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+    late_completion = asyncio.Event()
+    confirmations = 0
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, object]] = []
+    previous_exception_handler = loop.get_exception_handler()
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+            late_completion.set()
+            raise RuntimeError("late admission failure") from None
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    task = asyncio.create_task(
+        readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=0.02),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    )
+    await started.wait()
+    done, elapsed = await _wait_for_prompt_task(task, loop)
+
+    try:
+        assert task in done
+        result = task.result()
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        detached_tasks_after_fallback = len(readiness_module._DETACHED_BOUNDED_TASKS)
+        detached_tasks_after_gc = await _collect_detached_task_count()
+        loop_errors_after_gc = list(loop_errors)
+    finally:
+        try:
+            detached_registry_empty = await _finish_detached_task(
+                task,
+                done,
+                release,
+                late_completion,
+            )
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+
+    assert started.is_set()
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.15
+    assert confirmations == 1
+    assert result == "confirmed"
+    assert detached_tasks_after_fallback == 1
+    assert detached_tasks_after_gc == 1
+    assert loop_errors_after_gc == []
+    assert detached_registry_empty
+    assert loop_errors == []
+
+
+@pytest.mark.asyncio
+async def test_admission_outer_cancellation_bounds_resistant_child_and_preserves_reason() -> None:
+    assert not readiness_module._DETACHED_BOUNDED_TASKS
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+    late_completion = asyncio.Event()
+    confirmations = 0
+    loop = asyncio.get_running_loop()
+
+    async def operation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+            late_completion.set()
+            return "late admission"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    task = asyncio.create_task(
+        readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=1),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+    )
+    await started.wait()
+    started_at = loop.time()
+    task.cancel("caller cancellation")
+    done, _pending = await asyncio.wait({task}, timeout=0.15)
+    elapsed = loop.time() - started_at
+
+    try:
+        assert task in done
+        with pytest.raises(asyncio.CancelledError) as exc_info:
+            task.result()
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        detached_tasks_after_cancellation = len(readiness_module._DETACHED_BOUNDED_TASKS)
+    finally:
+        if task not in done:
+            release.set()
+            with suppress(asyncio.CancelledError):
+                await asyncio.wait_for(task, timeout=1)
+        detached_registry_empty = await _release_detached_task(release, late_completion)
+
+    assert exc_info.value.args == ("caller cancellation",)
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.15
+    assert confirmations == 0
+    assert detached_tasks_after_cancellation == 1
+    assert detached_registry_empty
+
+
+@pytest.mark.asyncio
+async def test_bounded_confirmation_retains_resistant_task_and_returns_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert not readiness_module._DETACHED_BOUNDED_TASKS
+    monkeypatch.setattr(readiness_module, "_ADMISSION_CONFIRMATION_TIMEOUT_SECONDS", 0.02)
+    started = asyncio.Event()
+    cancellation_seen = asyncio.Event()
+    release = asyncio.Event()
+    late_completion = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, object]] = []
+    previous_exception_handler = loop.get_exception_handler()
+
+    async def confirmation() -> str:
+        started.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancellation_seen.set()
+            await release.wait()
+            late_completion.set()
+            raise RuntimeError("late confirmation failure") from None
+
+    loop.set_exception_handler(lambda _loop, context: loop_errors.append(context))
+    task = asyncio.create_task(
+        readiness_module._bounded_admission_confirmation(confirmation(), "fallback")
+    )
+    await started.wait()
+    started_at = loop.time()
+    done, _pending = await asyncio.wait({task}, timeout=0.15)
+    elapsed = loop.time() - started_at
+
+    try:
+        assert task in done
+        result = task.result()
+        await asyncio.wait_for(cancellation_seen.wait(), timeout=1)
+        detached_tasks_after_fallback = len(readiness_module._DETACHED_BOUNDED_TASKS)
+        detached_tasks_after_gc = await _collect_detached_task_count()
+        loop_errors_after_gc = list(loop_errors)
+    finally:
+        try:
+            if task not in done:
+                release.set()
+                with suppress(asyncio.CancelledError):
+                    await asyncio.wait_for(task, timeout=1)
+            detached_registry_empty = await _release_detached_task(release, late_completion)
+        finally:
+            loop.set_exception_handler(previous_exception_handler)
+
+    assert result == "fallback"
+    assert cancellation_seen.is_set()
+    assert elapsed < 0.15
+    assert detached_tasks_after_fallback == 1
+    assert detached_tasks_after_gc == 1
+    assert loop_errors_after_gc == []
+    assert detached_registry_empty
+    assert loop_errors == []
+
+
+@pytest.mark.asyncio
+async def test_admission_returns_immediate_result_without_confirmation() -> None:
+    confirmations = 0
+
+    async def operation() -> str:
+        return "admitted"
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    result = await readiness_module._await_admission_with_setup_timeout(
+        operation,
+        SetupBudget.start(setup_seconds=1),
+        confirm,
+        phase=SetupPhase.PROVISION_CREATE,
+    )
+
+    assert result == "admitted"
+    assert confirmations == 0
+
+
+@pytest.mark.asyncio
+async def test_admission_propagates_predeadline_operation_error() -> None:
+    confirmations = 0
+
+    async def operation() -> str:
+        raise RuntimeError("admission failed")
+
+    async def confirm() -> str:
+        nonlocal confirmations
+        confirmations += 1
+        return "confirmed"
+
+    with pytest.raises(RuntimeError, match="admission failed"):
+        await readiness_module._await_admission_with_setup_timeout(
+            operation,
+            SetupBudget.start(setup_seconds=1),
+            confirm,
+            phase=SetupPhase.PROVISION_CREATE,
+        )
+
+    assert confirmations == 0
 
 
 @pytest.mark.asyncio
