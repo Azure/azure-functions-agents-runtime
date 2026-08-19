@@ -40,10 +40,9 @@ def prepare_order_activity(order: dict) -> dict[str, object]:
 
 
 @app.activity_trigger(input_name="order")
-@app.agent_input(
+@app.agent(
     arg_name="order_agent",
     agent_name="order-fulfillment",
-    mode="activity",
 )
 async def assess_order_activity(order: dict, order_agent: Agent) -> str:
     response = await order_agent.run(
@@ -58,10 +57,9 @@ async def assess_order_activity(order: dict, order_agent: Agent) -> str:
 
 
 @app.activity_trigger(input_name="request")
-@app.agent_input(
+@app.agent(
     arg_name="order_agent",
     agent_name="order-fulfillment",
-    mode="activity",
 )
 async def plan_fulfillment_activity(
     request: dict,

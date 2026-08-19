@@ -29,7 +29,7 @@ flowchart LR
     H -.->|"handler closures + AgentCatalog"| K
     K -.->|"prompt + tools + session"| L["Microsoft Agent Framework"]
     A -->|"binding projection"| M["composition.py<br/>ProjectSnapshot"]
-    M -->|"BindingAgentEntry"| N["bindings.py<br/>agent_input / AiApp / DurableAiApp"]
+    M -->|"BindingAgentEntry"| N["bindings.py<br/>agent / AiApp / DurableAiApp"]
     N -.->|"cached AgentBlueprint"| O["hydration.py<br/>fresh Agent hydration"]
     O -.->|"entered Agent per invocation"| L
 ```
@@ -60,7 +60,7 @@ A few boundaries are worth calling out explicitly:
 | --- | --- | --- |
 | `azure_functions_agents/app.py` | Top-level two-pass composition root. Before app mutation it builds the slug index, `AgentCatalog`, complete workflow-handler catalog, and immutable workflow-agent policy catalog. It chooses `DurableAiApp` when any agent enables workflows (otherwise `AiApp`), registers the workflow runtime once, then registers each agent. | `create_function_app()`, `_fail_on_duplicate_slugs()` |
 | `azure_functions_agents/composition.py` | Builds the immutable binding-only project snapshot and resolves a binding target by exact filename stem, then normalized slug. Requires only `name` and `description`, honors `substitute_variables` for those fields and markdown instructions, and discards all other per-agent front matter. | `load_project_snapshot()`, `compose_binding_target()` |
-| `azure_functions_agents/bindings.py` | Owns the smart callable wrapper, enhanced app classes, per-app blueprint registry, and raw Agent injection into async Functions and customer-owned Durable activities. It uses public SDK decorators and signatures without mutating `FunctionBuilder` internals. | `agent_input()`, `AiApp`, `DurableAiApp` |
+| `azure_functions_agents/bindings.py` | Owns the smart callable wrapper, enhanced app classes, per-app blueprint registry, and raw Agent injection into async Functions and customer-owned Durable activities. It uses public SDK decorators and signatures without mutating `FunctionBuilder` internals. | `agent()`, `AiApp`, `DurableAiApp` |
 | `azure_functions_agents/hydration.py` | Owns immutable binding blueprints and fresh per-invocation MAF Agent construction and context management. | `AgentBlueprint`, `open_agent()`, `run_blueprint()` |
 | `azure_functions_agents/config/paths.py` | Resolves the app root and the optional config/history directory. | `set_app_root()`, `get_app_root()`, `resolve_config_dir()` |
 | `azure_functions_agents/config/env.py` | Performs env-var substitution and bool coercion across config string values in YAML, JSON, front matter, and markdown body content. | `substitute_env_vars_in_value()`, `resolve_env_vars_in_data()`, `substitute_env_vars_in_text()`, `_to_bool()` |
@@ -135,9 +135,9 @@ mutation.
 
 ### Smart binding startup and execution
 
-`AiApp.agent_input()` and the free `agent_input(app, ...)` decorator use a separate binding-only path. At import time, the innermost decorator loads a per-app `ProjectSnapshot`, checks binding identity, resolves the requested source stem or slug, removes the injected parameter from the worker-facing signature, and returns a normal callable for the outer Azure decorator. Existing declarative parsing remains unchanged.
+`AiApp.agent()` and the free `agent(app, ...)` decorator use a separate binding-only path. At import time, the innermost decorator loads a per-app `ProjectSnapshot`, checks binding identity, resolves the requested source stem or slug, removes the injected parameter from the worker-facing signature, and returns a normal callable for the outer Azure decorator. Existing declarative parsing remains unchanged.
 
-Function and activity handlers using `agent_input` must be coroutines. At invocation, each receives a raw `agent_framework.Agent` built from the app-owned immutable `AgentBlueprint`. The wrapper enters the Agent on the worker's current event loop and always closes it after the handler; the customer controls sessions, options, middleware, streaming, number of calls, and model-call timeout. Fresh chat clients, history providers, web/sandbox tools, MCP wrappers, mutable tool lists, and Agent contexts prevent state or lifecycle sharing across invocations of the same slug.
+Function and activity handlers using `agent` must be coroutines. At invocation, each receives a raw `agent_framework.Agent` built from the app-owned immutable `AgentBlueprint`. The wrapper enters the Agent on the worker's current event loop and always closes it after the handler; the customer controls sessions, options, middleware, streaming, number of calls, and model-call timeout. Fresh chat clients, history providers, web/sandbox tools, MCP wrappers, mutable tool lists, and Agent contexts prevent state or lifecycle sharing across invocations of the same slug.
 
 Smart bindings discover app-level tools, skills, and MCP servers before global tool
 exclusions are applied; their minimal front matter has no per-agent capability
@@ -147,7 +147,7 @@ partial capability inventory would silently change the Agent's available behavio
 v1 requires the failing asset to be fixed or removed.
 
 Durable orchestrators do not receive an injected Agent or proxy. They call explicit
-customer-owned activities whose async handlers use `mode="activity"`. The application
+customer-owned activities whose async handlers use `DurableAiApp.agent()`. The application
 therefore owns activity names, payload/result schemas, retry and idempotency behavior,
 and the transcript or response data recorded in Durable history. The binding owns only
 Agent hydration and lifecycle within the activity invocation. Durable Entity injection

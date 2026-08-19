@@ -9,7 +9,11 @@ import pytest
 from agent_framework import MCPStreamableHTTPTool
 
 import azure_functions_agents.discovery.mcp as mcp_discovery
-from azure_functions_agents.discovery.mcp import clear_mcp_cache, discover_mcp_servers
+from azure_functions_agents.discovery.mcp import (
+    clear_mcp_cache,
+    discover_mcp_server_definitions,
+    discover_mcp_servers,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -100,6 +104,28 @@ def test_discover_mcp_servers_returns_independent_dicts(tmp_path: Path) -> None:
     second_result = discover_mcp_servers(tmp_path)
 
     assert list(second_result.servers) == ["demo"]
+
+
+def test_discover_mcp_server_definitions_cache_typed_config(tmp_path: Path) -> None:
+    _write_mcp_config(
+        tmp_path,
+        {
+            "type": "http",
+            "url": "https://example.com/mcp",
+            "tools": ["search"],
+            "headers": {"X-Test": "yes"},
+            "auth": {"scope": "api://demo/.default", "client_id": "client-123"},
+        },
+    )
+
+    definition = discover_mcp_server_definitions(tmp_path).definitions["demo"]
+
+    assert definition.config.url == "https://example.com/mcp"
+    assert definition.config.allowed_tools == ("search",)
+    assert definition.config.headers == (("X-Test", "yes"),)
+    assert definition.config.auth is not None
+    assert definition.config.auth.scope == "api://demo/.default"
+    assert definition.config.auth.client_id == "client-123"
 
 
 def test_clear_mcp_cache_reruns_discovery(

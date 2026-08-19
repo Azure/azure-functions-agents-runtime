@@ -4,7 +4,7 @@ title: Python agent input binding
 status: Finalized
 author: hallvictoria
 created: 2026-08-11
-updated: 2026-08-17
+updated: 2026-08-19
 issues: [#1163, #1175, #1284]
 pull_requests: []
 branch: hallvictoria/agent-binding
@@ -49,8 +49,12 @@ host round trip.
 
 - Let async Python v2 Functions and customer-owned Durable activities declare a raw
   injected Agent by logical agent name.
-- Support both a concise `AiApp.agent_input()` API and existing caller-owned
-  `FunctionApp` objects through the same free `agent_input(app, ...)` implementation.
+- Support both a concise `AiApp.agent()` API and existing caller-owned
+  `FunctionApp` objects through the same free `agent(app, ...)` implementation.
+- Establish `AiApp` as the long-term primary application composition surface, with
+  the eventual goal of phasing out `create_function_app()` after its declarative
+  behavior is available through `AiApp` and a separately planned migration and
+  deprecation cycle is complete.
 - Resolve the supported `agent.md` / `.agent.md` convention. For smart bindings,
   recognize required `name` and `description` front matter, the markdown body as
   instructions, and `substitute_variables` only as its parsing control; ignore every
@@ -84,7 +88,7 @@ host round trip.
 - Per-agent binding overrides for model, timeout, tools, skills, MCP, system tools,
   subagents, workflows, schemas, triggers, or built-in endpoints. These front-matter
   properties remain available to the declarative `create_function_app()` path but are
-  ignored by `agent_input`.
+  ignored by `agent`.
 - Bound-agent subagent delegation or Dynamic Workflow management tools in v1.
 - End-user token exchange, on-behalf-of authentication, or caller-token forwarding.
 - Multi-agent orchestration, A2A, new provider policy, or changes to MAF's public API.
@@ -118,7 +122,7 @@ app = AiApp()
 
 @app.function_name(name="ProcessOrder")
 @app.route(route="orders/{orderId}", methods=["POST"])
-@app.agent_input(arg_name="order_agent", agent_name="order-fulfillment")
+@app.agent(arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order(
     req: Request,
     order_agent: Agent,
@@ -134,7 +138,7 @@ async def process_order(
     return Response(content=response.text)
 ```
 
-  `agent_input` must be the innermost decorator, immediately above the handler.
+  `agent` must be the innermost decorator, immediately above the handler.
   Python applies it first, so the standard Azure decorators receive the runtime's
   worker-facing wrapper rather than the source handler's injected parameter.
 
@@ -147,14 +151,14 @@ import azure.functions as func
 from agent_framework import Agent
 from azurefunctions.extensions.http.fastapi import Request, Response
 
-from azure_functions_agents import agent_input
+from azure_functions_agents import agent
 
 app = func.FunctionApp()
 
 
 @app.function_name(name="ProcessOrder")
 @app.route(route="orders/{orderId}", methods=["POST"])
-@agent_input(app, arg_name="order_agent", agent_name="order-fulfillment")
+@agent(app, arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order(
     req: Request,
     order_agent: Agent,
@@ -178,7 +182,7 @@ does not resolve the mutable front-matter display `name`. Existing app-wide dupl
 slug validation makes this fallback unambiguous; diagnostics list filename stems and
 slugs side by side.
 
-A definition referenced by at least one `agent_input` decorator is reachable and may
+A definition referenced by at least one `agent` decorator is reachable and may
 omit a standalone trigger and built-in endpoints. The binding projection requires only
 string `name` and `description` values and treats the markdown body as instructions.
 It honors `substitute_variables` to control standard environment substitution in those
@@ -191,9 +195,9 @@ configuration. The existing declarative loader continues to recognize and valida
 the complete front-matter schema unchanged. Lookup errors explicitly state that
 `agent_name` is a filename stem or normalized slug, not the front-matter display name.
 
-Durable activities select an explicit mode because `agent_input` is applied before
-the outer Azure decorator and cannot inspect binding metadata without private SDK
-state. Orchestrators call those customer-owned activities explicitly:
+`AiApp.agent()` injects into ordinary Functions, while
+`DurableAiApp.agent()` injects into customer-owned Durable activities.
+Orchestrators call those activities explicitly:
 
 ```python
 import json
@@ -207,10 +211,9 @@ app = DurableAiApp()
 
 
 @app.activity_trigger(input_name="request")
-@app.agent_input(
+@app.agent(
   arg_name="planner",
   agent_name="order-fulfillment",
-  mode="activity",
 )
 async def plan_order_activity(request: dict, planner: Agent) -> dict[str, str]:
   plan = await planner.run(json.dumps(request))
@@ -222,8 +225,10 @@ def order_orchestrator(context: df.DurableOrchestrationContext):
   return (yield context.call_activity("plan_order_activity", context.get_input()))
 ```
 
-`mode` is either `"function"` (default) or `"activity"`. Functions and activities
-must be coroutine functions and receive the fresh raw MAF
+The decorator has no `mode` parameter. App type supplies the intended authoring
+context without changing hydration semantics: `AiApp` is the ordinary Function
+surface and `DurableAiApp` is the Durable activity surface. Both handlers must be
+coroutine functions and receive the fresh raw MAF
 `Agent`. Synchronous Functions and activities fail during decorator application with
 an actionable error directing the author to use `async def`. This is a MAF protocol
 requirement, not only a wrapper implementation choice: MAF Python is async-first.
@@ -233,7 +238,7 @@ Agent execution or lifecycle protocol for a synchronous Function or activity han
 
 Orchestrators remain synchronous generators and receive no injected Agent or proxy.
 They explicitly schedule an application activity whose async handler uses
-`mode="activity"`. This keeps Durable concepts visible: the customer owns the activity
+`DurableAiApp.agent()`. This keeps Durable concepts visible: the customer owns the activity
 name, JSON payload and result contracts, retries, idempotency behavior, and which
 response or transcript fields enter Durable history. The library owns Agent hydration
 and lifecycle only within the activity invocation. A standardized one-line proxy is
@@ -249,14 +254,14 @@ Agent execution or lifecycle protocol.
 standard decorators and binding objects remain owned by the Azure SDKs. Keeping two
 classes preserves the current guarantee that non-Durable apps are not `DFApp`
 instances. Existing app instances use the free decorator because adding methods by
-monkey-patch would weaken typing and global behavior. Durable modes require a
-`DurableAiApp` or caller-owned `DFApp`; applying them to a plain `FunctionApp` fails at
-import with an actionable error.
+monkey-patch would weaken typing and global behavior. Durable activity usage requires
+a `DurableAiApp` or caller-owned `DFApp` by construction; the decorator exposes no
+separate function/activity selector to validate.
 
 `DurableAiApp` is an optional convenience type, not a runtime requirement. It preserves
 the Durable SDK's activity and orchestration decorators while adding the bound
-`@app.agent_input(...)` method and explicit `app_root` configuration. A caller-owned
-`azure.durable_functions.DFApp` used with the free `agent_input(app, ...)` decorator
+`@app.agent(...)` method and explicit `app_root` configuration. A caller-owned
+`azure.durable_functions.DFApp` used with the free `agent(app, ...)` decorator
 has equivalent binding behavior. No generated activity is registered by constructing
 or subclassing `DurableAiApp`. Non-Durable applications can continue to use `AiApp` or
 a caller-owned `azure.functions.FunctionApp`.
@@ -268,14 +273,14 @@ preserves handler metadata with `functools.wraps`, exposes an `inspect.Signature
 when called. The source signature remains available through `__wrapped__` for tooling.
 
 Because this depends on Python's bottom-up decorator application, v1 supports one
-order only: `agent_input` is innermost, then the standard trigger/binding decorator,
+order only: `agent` is innermost, then the standard trigger/binding decorator,
 then optional `function_name`. Applying it to an Azure `FunctionBuilder` fails at
 import with an error showing the supported order. The implementation accepts only a
 plain function, coroutine function, or generator function, which rejects a
 `FunctionBuilder` without importing or inspecting its private class. There is no SDK
 compatibility adapter and no `_configure_function_builder` access.
 
-Both supported modes use an async wrapper for required coroutine handlers.
+Both app types use the same async wrapper for required coroutine handlers.
 
 Runtime probes against the supported `azure-functions>=2.1.0,<3` and
 `azure-functions-durable>=1.2.10,<2` ranges verify callable recognition, public
@@ -429,8 +434,8 @@ For orchestrators, the customer declares and schedules a normal Durable activity
 payload must satisfy the application's own JSON contract, and its result determines
 what Durable records in orchestration history. Retry options, idempotency behavior,
 activity naming, and any transcript projection are likewise application decisions.
-The activity's async handler can use `mode="activity"` to receive a fresh Agent without
-moving those Durable semantics into the binding library.
+The activity's async handler can use `DurableAiApp.agent()` to receive a fresh
+Agent without moving those Durable semantics into the binding library.
 
 Cancellation of an async handler naturally cancels its current-loop work and still
 exits the Agent context. No binding-specific executor or shutdown API is required;
@@ -463,13 +468,12 @@ accepted nor forwarded, and v1 makes no end-user delegated-identity guarantee.
 
 Binding parsing fails only for invalid YAML, missing/non-string `name` or
 `description`, duplicate filename-derived slugs, failed discovery, unknown
-`agent_name`, invalid decorator order, an incompatible app/mode pair, or a handler
-shape incompatible with its declared mode. Ignored front-matter fields never make a
-binding target invalid.
+`agent_name`, invalid decorator order, or an incompatible handler shape. Ignored
+front-matter fields never make a binding target invalid.
 
-`function` and `activity` modes require coroutine functions. Async handlers receive
-raw MAF Agents and support the complete MAF API. `orchestrator` and `entity` are not
-valid modes; orchestrators call explicit activities instead.
+Functions and activities using `agent` require coroutine functions. Async
+handlers receive raw MAF Agents and support the complete MAF API. Orchestrators and
+entities do not use `agent`; orchestrators call explicit activities instead.
 
 Subagent, workflow, trigger, endpoint, schema, and per-agent capability declarations
 are ignored by the binding projection rather than rejected. They continue to affect
@@ -477,10 +481,17 @@ the same file when it is also consumed by `create_function_app()`.
 
 ### 4.7 Compatibility and migration
 
-`create_function_app()` remains the zero-code declarative path. It delegates to the
-same composition pipeline and returns an enhanced plain or Durable app while retaining
-its existing public return compatibility, routes, triggers, indexing logs, and
-workflow behavior.
+For v1, `create_function_app()` remains the compatible zero-code declarative path. It
+delegates to the same composition pipeline and returns an enhanced plain or Durable
+app while retaining its existing public return compatibility, routes, triggers,
+indexing logs, and workflow behavior.
+
+The intended end state is for `AiApp` to become the primary application composition
+API and for `create_function_app()` to be phased out. This FRD does not deprecate or
+remove `create_function_app()`: `AiApp` must first expose the declarative composition
+behavior customers rely on, and a future breaking-change proposal must define the
+migration path, deprecation window, release timing, and Durable equivalent before
+removal.
 
 Existing `func.FunctionApp()` customers add the package import and free decorator;
 they do not replace their app object or standard bindings. Customers starting a new
@@ -508,7 +519,7 @@ shims for MAF 1.3 are not part of v1.
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
 | 1 | Integration layer | Python smart injection / true host binding / phased metadata | Python smart injection in v1; no host extension | Human | 2026-08-11 |
-| 2 | Existing app ergonomics | subclass only / monkey-patch / free decorator | `AiApp.agent_input` plus free `agent_input(app, ...)` sharing one implementation | Human | 2026-08-11 |
+| 2 | Existing app ergonomics | subclass only / monkey-patch / free decorator | `AiApp.agent` plus free `agent(app, ...)` sharing one implementation | Human | 2026-08-11 |
 | 3 | Injected type | raw MAF `Agent` / managed facade / both | Fresh raw MAF `Agent` per invocation | Human | 2026-08-11 |
 | 4 | Durable scope | activities / direct orchestrator injection / exclude v1 | Exclude all Durable injection scenarios in v1 | Human | 2026-08-11 |
 | 5 | Identity | app identity / OBO delegation / claims only | Existing app managed identity and trace context only | Human | 2026-08-11 |
@@ -516,7 +527,7 @@ shims for MAF 1.3 are not part of v1.
 | 7 | Definition lifetime | cache Agent / cache catalog only / rebuild everything | Cache static composition and capabilities; never cache live Agents | Agent | 2026-08-11 |
 | 8 | Binding-only definitions | require endpoint / permit any endpoint-less definition / explicit reachability | Permit no-trigger definitions only when referenced by a smart binding | Agent | 2026-08-11 |
 | 9 | Repository isolation | required worktree / current checkout branch | Use local `hallvictoria/agent-binding` branch without a worktree, by explicit request | Human | 2026-08-11 |
-| 10 | Decorator integration | mutate FunctionBuilder / support one pure-wrapper order / subclass only | Pure callable wrapper; `agent_input` must be innermost; no SDK-private state | Agent | 2026-08-11 |
+| 10 | Decorator integration | mutate FunctionBuilder / support one pure-wrapper order / subclass only | Pure callable wrapper; `agent` must be innermost; no SDK-private state | Agent | 2026-08-11 |
 | 11 | Composition timing | full snapshot at app creation / lazy invocation / eager targeted composition | Compile each referenced target eagerly at decoration time and cache per app/root | Agent | 2026-08-11 |
 | 12 | Durable app behavior | allow normal functions on DFApp / inspect target metadata / reject DFApp | Reject `DFApp` entirely for v1 smart bindings | Agent | 2026-08-11 |
 | 13 | MAF cleanup | close Agent / enter Agent / own created resources | For supported MAF 1.3, use an invocation `AsyncExitStack` only for runtime-created scoped resources; Agent and shared clients have no per-call close | Agent | 2026-08-11 |
@@ -539,6 +550,9 @@ shims for MAF 1.3 are not part of v1.
 | 30 | Binding instruction substitution | raw markdown / unconditional substitution / standard per-agent control | Narrowly supersedes #16: apply the standard markdown environment substitution behavior and honor `substitute_variables`; continue ignoring all capability and runtime fields | Agent | 2026-08-14 |
 | 31 | Durable orchestrator ownership | generated proxy/activity / explicit customer activity / exclude Durable | Supersedes the orchestrator portions of #15, #21, #25, #26, and #29: v1 supports raw Agent injection in customer-owned async activities only. Orchestrators call those activities explicitly so the application owns naming, payload/results, retries, idempotency, and Durable history contents; defer a standardized proxy until usage evidence justifies library ownership of those semantics | Human | 2026-08-17 |
 | 32 | Capability discovery failures | fail app-wide / omit failed assets / scope by selected agent | Fail binding registration app-wide because v1 bindings inherit every discovered app-level capability and have no per-agent filters; silently omitting a failed asset would produce an unexpected partial Agent. Diagnostics identify failed sources and require repair or removal | Agent | 2026-08-17 |
+| 33 | Function/activity selection | explicit `mode` / infer from outer decorator metadata / app-type convention | Remove `mode`: `AiApp.agent()` is the ordinary Function surface and `DurableAiApp.agent()` is the Durable activity surface. Both use identical hydration and lifecycle behavior, so an explicit selector adds no runtime value | Human | 2026-08-19 |
+| 34 | Decorator name | `agent_input` / `agent` / retain both as aliases | Rename the preview-only decorator to `agent` across the free function and both app classes; do not retain an `agent_input` compatibility alias | Human | 2026-08-19 |
+| 35 | Application composition direction | retain `create_function_app()` indefinitely / immediate replacement / phased migration to `AiApp` | Make `AiApp` the long-term primary composition API and eventually phase out `create_function_app()`; preserve it unchanged in v1 and require a separately planned migration and deprecation cycle before removal | Human | 2026-08-19 |
 
 ## 6. Test plan
 
@@ -555,20 +569,20 @@ shims for MAF 1.3 are not part of v1.
   cannot leak customer mutations or conversation state across invocation boundaries.
 - [ ] Unit: async handler success, failure, and cancellation always exit the Agent;
   trace-context propagation and invocation-ID fallback remain covered.
-- [ ] Unit: synchronous Function/activity handlers and `mode="entity"` fail during
-  decorator application with actionable async-only diagnostics.
+- [ ] Unit: synchronous Function/activity handlers fail during decorator application
+  with actionable async-only diagnostics.
 - [ ] Indexing: real `FunctionApp.get_functions()` coverage for `AiApp`, caller-owned
   `FunctionApp`, `DurableAiApp`, caller-owned `DFApp`, and `create_function_app()`;
   verify no hidden Agent activity is registered.
 - [ ] Indexing: the supported innermost decorator order, actionable rejection of the
   reverse order, worker-facing signature, unchanged trigger/output binding JSON,
-  duplicate argument errors, mode/app mismatch, and handler-shape validation.
+  duplicate argument errors, app-type behavior, and handler-shape validation.
 - [ ] Indexing: SDK probes run against `azure-functions` 2.1 and the resolved upper
   supported release plus Durable 1.2.10 without importing or mutating
   `FunctionBuilder` internals.
-- [ ] Durable: async customer-owned activities receive fresh raw Agents;
-  `mode="orchestrator"` is rejected, and samples/tests show orchestrators scheduling
-  explicit activities with application-owned payload, result, and retry contracts.
+- [ ] Durable: async customer-owned activities receive fresh raw Agents without a mode
+  selector, and samples/tests show orchestrators scheduling explicit activities with
+  application-owned payload, result, and retry contracts.
 - [ ] Observability: active-parent correlation, nested MAF spans, outcomes, invocation
   attributes, current-loop propagation, Durable correlation/replay, sensitive-data
   gating, and managed-identity client selection.
@@ -595,8 +609,9 @@ shims for MAF 1.3 are not part of v1.
   description, and markdown instructions; all other fields are ignored.
 - [ ] `docs/observability.md` — binding invocation spans and Durable activity
   correlation.
-- [ ] `docs/workflows.md` — async Durable activity and explicit orchestrator activity
-  scheduling.
+- [ ] `docs/workflows.md` — no change; markdown-authored Dynamic Workflows are a
+  separate feature. Durable smart-binding guidance lives in `README.md`,
+  `docs/architecture.md`, and the hybrid Durable sample.
 - [ ] `README.md` — normal and Durable hybrid APIs, Agent lifecycle, and migration from
   `FunctionApp`, `DFApp`, and `create_function_app()`.
 - [ ] `samples/README.md`, `samples/hybrid-function-agent/`, and

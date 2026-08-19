@@ -14,11 +14,12 @@ from agent_framework import Agent
 
 from azure_functions_agents import AiApp as ExportedAiApp
 from azure_functions_agents import DurableAiApp as ExportedDurableAiApp
+from azure_functions_agents import agent as exported_agent
 from azure_functions_agents import bindings as bindings_module
 from azure_functions_agents.bindings import (
     AiApp,
     DurableAiApp,
-    agent_input,
+    agent,
 )
 from azure_functions_agents.hydration import AgentBlueprint
 
@@ -54,7 +55,7 @@ async def test_ai_app_hides_and_injects_async_parameter(
 
     monkeypatch.setattr(AgentBlueprint, "build", build)
 
-    @app.agent_input(arg_name="order_agent", agent_name="order-fulfillment")
+    @app.agent(arg_name="order_agent", agent_name="order-fulfillment")
     async def process_order(req: func.HttpRequest, order_agent: Agent[Any]) -> str:
         seen.append(order_agent)
         return req.method
@@ -90,7 +91,7 @@ async def test_async_handler_failure_or_cancellation_closes_agent(
     agent = _agent_double()
     monkeypatch.setattr(AgentBlueprint, "build", lambda *_args: agent)
 
-    @app.agent_input(arg_name="agent", agent_name="order-fulfillment")
+    @app.agent(arg_name="agent", agent_name="order-fulfillment")
     async def handler(agent: Agent[Any]) -> None:
         raise error
 
@@ -108,22 +109,22 @@ async def test_free_decorator_supports_existing_app_and_async_handler(
 ) -> None:
     _write_agent(tmp_path)
     app = func.FunctionApp()
-    agent = _agent_double()
+    built_agent = _agent_double()
 
     from azure_functions_agents.config.paths import set_app_root
 
     set_app_root(tmp_path)
-    monkeypatch.setattr(AgentBlueprint, "build", lambda *_args: agent)
+    monkeypatch.setattr(AgentBlueprint, "build", lambda *_args: built_agent)
 
-    @agent_input(app, arg_name="agent", agent_name="order_fulfillment")
+    @agent(app, arg_name="agent", agent_name="order_fulfillment")
     async def handler(value: str, agent: Agent[Any]) -> tuple[str, Agent[Any]]:
         return value, agent
 
     value, injected = await handler("ok")
     assert value == "ok"
-    assert injected is agent
+    assert injected is built_agent
     assert list(inspect.signature(handler).parameters) == ["value"]
-    agent.__aexit__.assert_awaited_once()
+    built_agent.__aexit__.assert_awaited_once()
 
 
 def test_free_decorator_rejects_sync_handler(tmp_path: Path) -> None:
@@ -136,7 +137,7 @@ def test_free_decorator_rejects_sync_handler(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match=r"requires an async def handler"):
 
-        @agent_input(app, arg_name="agent", agent_name="order_fulfillment")
+        @agent(app, arg_name="agent", agent_name="order_fulfillment")
         def handler(value: str, agent: Agent[Any]) -> str:
             return value
 
@@ -147,7 +148,7 @@ def test_reverse_decorator_order_is_rejected(tmp_path: Path) -> None:
 
     with pytest.raises(TypeError, match="innermost decorator"):
 
-        @app.agent_input(arg_name="agent", agent_name="order-fulfillment")
+        @app.agent(arg_name="agent", agent_name="order-fulfillment")
         @app.route(route="wrong")
         async def wrong_order(req: func.HttpRequest, agent: Agent[Any]) -> str:
             return req.method
@@ -170,25 +171,9 @@ def test_binding_rejects_app_wide_discovery_failures(tmp_path: Path) -> None:
         ),
     ):
 
-        @app.agent_input(arg_name="agent", agent_name="order-fulfillment")
+        @app.agent(arg_name="agent", agent_name="order-fulfillment")
         async def handler(agent: Agent[Any]) -> None:
             pass
-
-
-def test_orchestrator_mode_is_deferred_from_v1(tmp_path: Path) -> None:
-    _write_agent(tmp_path)
-    app = DurableAiApp(app_root=tmp_path)
-
-    with pytest.raises(ValueError, match=r"'function' or 'activity'"):
-        app.agent_input(
-            arg_name="planner",
-            agent_name="order-fulfillment",
-            mode="orchestrator",  # type: ignore[arg-type]
-        )
-
-    assert all(
-        function.get_function_name() != "_afa_agent_binding_run" for function in app.get_functions()
-    )
 
 
 @pytest.mark.asyncio
@@ -201,10 +186,9 @@ async def test_durable_activity_injects_raw_agent(
     agent = _agent_double()
     monkeypatch.setattr(AgentBlueprint, "build", lambda *_args: agent)
 
-    @app.agent_input(
+    @app.agent(
         arg_name="agent",
         agent_name="order-fulfillment",
-        mode="activity",
     )
     async def activity(payload: str, agent: Agent[Any]) -> tuple[str, Agent[Any]]:
         return payload, agent
@@ -215,43 +199,28 @@ async def test_durable_activity_injects_raw_agent(
     agent.__aexit__.assert_awaited_once()
 
 
-def test_sync_activity_and_unsupported_modes_are_rejected(tmp_path: Path) -> None:
+def test_sync_activity_is_rejected(tmp_path: Path) -> None:
     _write_agent(tmp_path)
     app = DurableAiApp(app_root=tmp_path)
 
     with pytest.raises(TypeError, match=r"requires an async def handler"):
 
-        @app.agent_input(
+        @app.agent(
             arg_name="activity_agent",
             agent_name="order-fulfillment",
-            mode="activity",
         )
         def activity(payload: str, activity_agent: Agent[Any]) -> str:
             return payload
-
-    with pytest.raises(ValueError, match=r"'function' or 'activity'"):
-        app.agent_input(
-            arg_name="entity_agent",
-            agent_name="order-fulfillment",
-            mode="entity",  # type: ignore[arg-type]
-        )
-
-
-def test_durable_modes_require_df_app(tmp_path: Path) -> None:
-    _write_agent(tmp_path)
-    app = AiApp(app_root=tmp_path)
-
-    with pytest.raises(TypeError, match="require DurableAiApp"):
-        app.agent_input(
-            arg_name="agent",
-            agent_name="order-fulfillment",
-            mode="activity",
-        )
 
 
 def test_binding_app_types_are_exported() -> None:
     assert ExportedAiApp is AiApp
     assert ExportedDurableAiApp is DurableAiApp
+    assert exported_agent is agent
+    assert not hasattr(bindings_module, "agent_input")
+    assert "mode" not in inspect.signature(agent).parameters
+    assert "mode" not in inspect.signature(AiApp.agent).parameters
+    assert "mode" not in inspect.signature(DurableAiApp.agent).parameters
 
 
 def test_app_instances_own_separate_agent_blueprints(tmp_path: Path) -> None:
@@ -259,11 +228,11 @@ def test_app_instances_own_separate_agent_blueprints(tmp_path: Path) -> None:
     first_app = AiApp(app_root=tmp_path)
     second_app = AiApp(app_root=tmp_path)
 
-    @first_app.agent_input(arg_name="agent", agent_name="order-fulfillment")
+    @first_app.agent(arg_name="agent", agent_name="order-fulfillment")
     async def first(agent: Agent[Any]) -> Agent[Any]:
         return agent
 
-    @second_app.agent_input(arg_name="agent", agent_name="order-fulfillment")
+    @second_app.agent(arg_name="agent", agent_name="order-fulfillment")
     async def second(agent: Agent[Any]) -> Agent[Any]:
         return agent
 

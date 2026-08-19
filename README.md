@@ -143,7 +143,7 @@ Your agent is now running at `http://localhost:7071/agents/main/` with a built-i
 
 ## Hybrid Functions with agent input
 
-Use `agent_input` when an existing Function should keep its trigger and deterministic logic while invoking a markdown-defined agent in process. The smart decorator must be innermost, immediately above the handler:
+Use `agent` when an existing Function should keep its trigger and deterministic logic while invoking a markdown-defined agent in process. The smart decorator must be innermost, immediately above the handler:
 
 ```python
 import json
@@ -157,7 +157,7 @@ app = AiApp()
 
 
 @app.route(route="orders/{orderId}", methods=["POST"])
-@app.agent_input(arg_name="order_agent", agent_name="order-fulfillment")
+@app.agent(arg_name="order_agent", agent_name="order-fulfillment")
 async def process_order(
   req: Request,
   order_agent: Agent,
@@ -174,7 +174,7 @@ async def process_order(
   return Response(content=response.text)
 ```
 
-Existing `func.FunctionApp()` instances can use `agent_input(app, ...)` instead. `create_function_app()` now returns an enhanced `AiApp` or `DurableAiApp`, preserving its existing declarative routes and triggers while allowing hybrid handlers to be added.
+Existing `func.FunctionApp()` instances can use `agent(app, ...)` instead. `create_function_app()` now returns an enhanced `AiApp` or `DurableAiApp`, preserving its existing declarative routes and triggers while allowing hybrid handlers to be added.
 
 `agent_name` is the source filename stem or normalized slug, not the front-matter display name. For bindings, the agent file requires only string `name` and `description` fields; those fields and the markdown instructions follow the standard environment-substitution behavior, including `substitute_variables: false`. Other per-agent front-matter fields are ignored. Model, timeout, system tools, discovered tools, skills, and MCP servers come from app-level configuration.
 
@@ -184,14 +184,13 @@ tool, skill, or MCP definition prevents all smart bindings in that app from
 registering. Fix or remove the failing asset rather than starting with a silently
 partial capability inventory.
 
-Function and activity handlers using `agent_input` must be declared with `async def`. They receive a raw `agent_framework.Agent` that is built and entered for that Function invocation, then closed when the handler returns, raises, or is cancelled. The app caches only an immutable blueprint and reusable dependency descriptions, never the live Agent or its MCP tools. These handlers control sessions, run options, middleware, streaming, and model-call timeouts; the Azure Functions invocation timeout remains the outer bound. Do not retain the Agent after the handler returns.
+Function and activity handlers using `agent` must be declared with `async def`. They receive a raw `agent_framework.Agent` that is built and entered for that Function invocation, then closed when the handler returns, raises, or is cancelled. The app caches only an immutable blueprint and reusable dependency descriptions, never the live Agent or its MCP tools. These handlers control sessions, run options, middleware, streaming, and model-call timeouts; the Azure Functions invocation timeout remains the outer bound. Do not retain the Agent after the handler returns.
 
-Durable apps use `DurableAiApp` or a caller-owned `df.DFApp` with an explicit mode:
-
-- `mode="activity"` injects a raw Agent into an `async def` activity handler.
-- Orchestrators do not support `agent_input`; they call an explicit customer-owned
-  activity that uses `mode="activity"`. The application owns that activity's name,
-  payload/result schemas, retry and idempotency policy, and Durable history boundary.
+Durable apps use `DurableAiApp` or a caller-owned `df.DFApp`. Applying `agent`
+to an `async def` activity handler injects a raw Agent without a mode selector.
+Orchestrators do not support `agent`; they call an explicit customer-owned
+activity. The application owns that activity's name,
+payload/result schemas, retry and idempotency policy, and Durable history boundary.
 
 See [`samples/hybrid-function-agent/`](samples/hybrid-function-agent/) for an `AiApp` with HTTP and queue handlers, and [`samples/hybrid-durable-agent/`](samples/hybrid-durable-agent/) for a `DurableAiApp` with activity and orchestrator handlers.
 Both samples demonstrate a production-oriented handoff: deterministic Python validates

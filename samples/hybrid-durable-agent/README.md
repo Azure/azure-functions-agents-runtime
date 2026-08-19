@@ -21,7 +21,7 @@ enrichment.
 The library does not generate an Agent activity for orchestrators. This sample owns
 the activity names, JSON payload and result shapes, and retry policy. Durable Functions
 therefore records only the customer-selected activity inputs and outputs in history,
-while `agent_input(mode="activity")` owns Agent hydration and cleanup inside each
+while `agent` owns Agent hydration and cleanup inside each
 activity invocation. The Agent activities return only final text; they do not return
 `AgentResponse.messages`, because the complete model/tool transcript would increase
 orchestration history and replay payload size and could retain sensitive content. Add
@@ -30,7 +30,7 @@ content only when the workflow explicitly needs it.
 
 The binding projection reads `name`, `description`, the markdown body, and its `substitute_variables` parsing control from `order-fulfillment.agent.md`. Model, timeout, tools, skills, MCP servers, and system tools come from app-level configuration and discovery.
 
-Activity handlers using `agent_input` must be declared with `async def`. Each activity invocation receives its own entered Agent; the runtime closes it when the handler exits, so do not retain it beyond that invocation.
+Activity handlers using `agent` must be declared with `async def`. Each activity invocation receives its own entered Agent; the runtime closes it when the handler exits, so do not retain it beyond that invocation.
 
 ## Run locally
 

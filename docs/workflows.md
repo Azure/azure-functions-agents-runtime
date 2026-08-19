@@ -1,23 +1,5 @@
 # Dynamic workflows (experimental v1)
 
-## Durable smart agent input
-
-The `agent_input` feature is separate from markdown-authored Dynamic Workflows. It lets customer-owned Durable handlers invoke one markdown agent while retaining their own orchestration code:
-
-- Activities declare `mode="activity"`, must use `async def`, and receive a fresh raw `agent_framework.Agent`. The Agent is closed when the activity handler exits and must not be retained.
-- Synchronous generator orchestrators call those activities explicitly. The application
-  owns each activity's name, payload/result schemas, retry and idempotency behavior,
-  and the data recorded in Durable history. `agent_input` does not inject an Agent or
-  scheduling proxy into orchestrators.
-
-Durable Functions persists activity inputs and outputs in orchestration history and
-replay payloads. Return a compact application result, such as final text plus only the
-identifiers and aggregate usage fields the orchestrator needs. Do not return
-`AgentResponse.messages` by default: it can contain the complete model/tool transcript,
-which increases history size for longer conversations and may retain sensitive content.
-Include or summarize transcript fields only when the workflow explicitly requires them
-and their retention is acceptable.
-
 > [!NOTE]
 > **Status: public experimental v1.** The API is intentionally small and
 > may change based on early feedback, but the behavior described here is

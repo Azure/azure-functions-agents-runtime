@@ -26,7 +26,7 @@ from .discovery.tools import discover_project_tools
 
 @dataclass(frozen=True)
 class BindingAgentDefinition:
-    """Minimal agent authoring surface recognized by ``agent_input``."""
+    """Minimal agent authoring surface recognized by ``agent``."""
 
     name: str
     description: str

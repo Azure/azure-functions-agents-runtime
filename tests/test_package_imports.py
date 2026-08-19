@@ -30,7 +30,7 @@ def test_public_exports_include_only_supported_preview_api() -> None:
         "DurableAiApp",
         "MAFClientManager",
         "__version__",
-        "agent_input",
+        "agent",
         "create_function_app",
         "create_sandbox_tools",
         "create_web_request_tools",

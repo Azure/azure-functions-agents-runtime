@@ -25,20 +25,32 @@ _DEFAULT_TOKEN_REFRESH_OFFSET_SECONDS = 300
 
 
 @dataclass(frozen=True)
+class MCPAuthConfig:
+    """Authentication settings for one HTTP MCP server."""
+
+    scope: str
+    client_id: str
+
+
+@dataclass(frozen=True)
+class MCPHTTPServerConfig:
+    """Validated immutable configuration for one HTTP MCP server."""
+
+    url: str
+    allowed_tools: tuple[str, ...] | None
+    headers: tuple[tuple[str, str], ...]
+    auth: MCPAuthConfig | None
+
+
+@dataclass(frozen=True)
 class MCPServerDefinition:
     """Immutable resolved MCP configuration that can build an owned tool."""
 
     name: str
-    config_json: str
+    config: MCPHTTPServerConfig
 
     def build_tool(self) -> MCPTool:
-        config = cast(dict[str, Any], json.loads(self.config_json))
-        tool, error = _build_mcp_tool(self.name, config)
-        if tool is None:
-            raise RuntimeError(
-                f"Validated MCP server {self.name!r} could not be built: {error}"
-            )
-        return tool
+        return _build_mcp_tool(self.name, self.config)
 
 
 @dataclass
@@ -62,16 +74,10 @@ def clear_mcp_cache() -> None:
     _DISCOVERED_MCP_DEFINITIONS_CACHE.clear()
 
 
-def _build_header_provider(server: dict[str, Any]) -> Any:
-    headers = server.get("headers")
-    static_headers = (
-        {str(key): str(value) for key, value in headers.items()}
-        if isinstance(headers, dict)
-        else {}
-    )
-
-    auth = server.get("auth")
-    if not isinstance(auth, dict):
+def _build_header_provider(server: MCPHTTPServerConfig) -> Any:
+    static_headers = dict(server.headers)
+    auth = server.auth
+    if auth is None:
         if not static_headers:
             return None
 
@@ -80,7 +86,7 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
 
         return static_header_provider
 
-    scope = str(auth.get("scope", "")).strip()
+    scope = auth.scope
     if not scope:
         logger.warning("MCP server auth requires a non-empty 'scope'")
         if not static_headers:
@@ -91,10 +97,7 @@ def _build_header_provider(server: dict[str, Any]) -> Any:
 
         return missing_scope_header_provider
 
-    client_id = str(auth.get("client_id", "")).strip()
-    if has_unresolved_placeholders(client_id):
-        client_id = ""
-
+    client_id = auth.client_id
     credential = build_credential_with_client_id(client_id) if client_id else build_credential()
     cached_token: dict[str, str | int] = {"token": "", "expires_on": 0}
 
@@ -127,19 +130,12 @@ def _build_http_client(header_provider: Any) -> Any:
     return AsyncClient(follow_redirects=True, event_hooks={"request": [inject_headers]})
 
 
-def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, str | None]:
-    """Translate a single mcp.json entry to a MAF MCP tool object.
-    
-    Returns (tool, error_message). If tool is None, error_message explains why.
-    """
+def _parse_server_config(
+    name: str,
+    server: dict[str, Any],
+) -> tuple[MCPHTTPServerConfig | None, str | None]:
+    """Validate one raw mcp.json entry and normalize it to an HTTP config."""
     server_type = str(server.get("type", "")).lower()
-    raw_tools = server.get("tools", ["*"])
-    if isinstance(raw_tools, list) and any(tool == "*" for tool in raw_tools):
-        allowed_tools: list[str] | None = None
-    elif isinstance(raw_tools, list):
-        allowed_tools = [str(tool) for tool in raw_tools]
-    else:
-        allowed_tools = None
     if "command" in server or server_type in {"local", "stdio"}:
         error = "MCP stdio transport is not supported"
         logger.warning("%s; skipping server '%s'", error, name)
@@ -163,16 +159,38 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
             error = f"could not resolve url '{url}'"
             logger.warning("MCP server '%s': %s, skipping", name, error)
             return None, error
-        header_provider = _build_header_provider(server)
 
-        return MCPStreamableHTTPTool(
-            name=name,
+        raw_tools = server.get("tools", ["*"])
+        if isinstance(raw_tools, list) and any(tool == "*" for tool in raw_tools):
+            allowed_tools: tuple[str, ...] | None = None
+        elif isinstance(raw_tools, list):
+            allowed_tools = tuple(str(tool) for tool in raw_tools)
+        else:
+            allowed_tools = None
+
+        raw_headers = server.get("headers")
+        headers = (
+            tuple(sorted((str(key), str(value)) for key, value in raw_headers.items()))
+            if isinstance(raw_headers, dict)
+            else ()
+        )
+        raw_auth = server.get("auth")
+        if isinstance(raw_auth, dict):
+            client_id = str(raw_auth.get("client_id", "")).strip()
+            if has_unresolved_placeholders(client_id):
+                client_id = ""
+            auth = MCPAuthConfig(
+                scope=str(raw_auth.get("scope", "")).strip(),
+                client_id=client_id,
+            )
+        else:
+            auth = None
+
+        return MCPHTTPServerConfig(
             url=url,
             allowed_tools=allowed_tools,
-            load_tools=True,
-            load_prompts=False,
-            header_provider=header_provider,
-            http_client=_build_http_client(header_provider),
+            headers=headers,
+            auth=auth,
         ), None
 
     if server_type:
@@ -192,48 +210,25 @@ def _build_mcp_tool(name: str, server: dict[str, Any]) -> tuple[MCPTool | None, 
     return None, error
 
 
+def _build_mcp_tool(name: str, server: MCPHTTPServerConfig) -> MCPTool:
+    """Build one invocation-owned MAF MCP tool from validated configuration."""
+    header_provider = _build_header_provider(server)
+    return MCPStreamableHTTPTool(
+        name=name,
+        url=server.url,
+        allowed_tools=list(server.allowed_tools) if server.allowed_tools is not None else None,
+        load_tools=True,
+        load_prompts=False,
+        header_provider=header_provider,
+        http_client=_build_http_client(header_provider),
+    )
+
+
 def _definition_from_config(
     name: str,
-    server: dict[str, Any],
-) -> tuple[MCPServerDefinition | None, str | None]:
-    server_type = str(server.get("type", "")).lower()
-    if "command" in server or server_type in {"local", "stdio"}:
-        error = "MCP stdio transport is not supported"
-        logger.warning("%s; skipping server '%s'", error, name)
-        return None, error
-
-    if "url" in server or server_type in {"http", "streamable-http"}:
-        if server_type and server_type not in {"http", "streamable-http"}:
-            error = (
-                f"unknown server type '{server_type}'; supported types are "
-                "'http' and 'streamable-http'"
-            )
-            logger.warning("MCP server '%s': %s", name, error)
-            return None, error
-        url = str(server.get("url", "")).strip()
-        if not url:
-            error = "missing 'url'"
-            logger.warning("MCP server '%s': %s, skipping", name, error)
-            return None, error
-        if has_unresolved_placeholders(url):
-            error = f"could not resolve url '{url}'"
-            logger.warning("MCP server '%s': %s, skipping", name, error)
-            return None, error
-        return MCPServerDefinition(
-            name=name,
-            config_json=json.dumps(server, sort_keys=True, separators=(",", ":")),
-        ), None
-
-    if server_type:
-        error = (
-            f"unknown server type '{server_type}'; supported types are "
-            "'http' and 'streamable-http'"
-        )
-        logger.warning("MCP server '%s': %s", name, error)
-    else:
-        error = "unrecognized config (expected 'url' plus type 'http' or 'streamable-http')"
-        logger.warning("MCP server '%s': %s, skipping", name, error)
-    return None, error
+    server: MCPHTTPServerConfig,
+) -> MCPServerDefinition:
+    return MCPServerDefinition(name=name, config=server)
 
 
 def discover_mcp_server_definitions(app_root: Path) -> MCPDefinitionDiscoveryResult:
@@ -280,9 +275,9 @@ def discover_mcp_server_definitions(app_root: Path) -> MCPDefinitionDiscoveryRes
         config = servers[name]
         if not isinstance(name, str) or not isinstance(config, dict):
             continue
-        definition, error = _definition_from_config(name, config)
-        if definition is not None:
-            definitions[name] = definition
+        server_config, error = _parse_server_config(name, config)
+        if server_config is not None:
+            definitions[name] = _definition_from_config(name, server_config)
         elif error is not None:
             failed_loads.append((name, error))
 

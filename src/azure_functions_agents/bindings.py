@@ -9,7 +9,7 @@ import threading
 import weakref
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any, Literal, TypeVar, cast
+from typing import Any, TypeVar, cast
 
 import azure.durable_functions as df
 import azure.functions as func
@@ -23,8 +23,6 @@ from .hydration import (
     InvocationMetadata,
     open_agent,
 )
-
-type AgentInputMode = Literal["function", "activity"]
 
 _F = TypeVar("_F", bound=Callable[..., Any])
 
@@ -89,7 +87,7 @@ def _worker_signature(handler: Callable[..., Any], arg_name: str) -> inspect.Sig
     parameter = signature.parameters.get(arg_name)
     if parameter is None:
         raise TypeError(
-            f"agent_input arg_name {arg_name!r} is not present in handler {handler.__name__!r}"
+            f"agent arg_name {arg_name!r} is not present in handler {handler.__name__!r}"
         )
     if parameter.kind in {
         inspect.Parameter.POSITIONAL_ONLY,
@@ -97,7 +95,7 @@ def _worker_signature(handler: Callable[..., Any], arg_name: str) -> inspect.Sig
         inspect.Parameter.VAR_KEYWORD,
     }:
         raise TypeError(
-            f"agent_input parameter {arg_name!r} must be positional-or-keyword or keyword-only"
+            f"agent parameter {arg_name!r} must be positional-or-keyword or keyword-only"
         )
     return signature.replace(
         parameters=[
@@ -118,7 +116,7 @@ def _source_call(
     injected: Any,
 ) -> Any:
     if arg_name in kwargs:
-        raise TypeError(f"agent_input parameter {arg_name!r} is runtime-managed")
+        raise TypeError(f"agent parameter {arg_name!r} is runtime-managed")
     bound = worker_signature.bind(*args, **kwargs)
     bound.apply_defaults()
     values = dict(bound.arguments)
@@ -152,33 +150,25 @@ def _invocation_metadata(
     return InvocationMetadata()
 
 
-def agent_input(
+def agent(
     app: func.FunctionApp,
     *,
     arg_name: str,
     agent_name: str,
-    mode: AgentInputMode = "function",
 ) -> Callable[[_F], _F]:
     """Inject a hydrated raw Agent into an async Function or Durable activity."""
-    if mode not in {"function", "activity"}:
-        raise ValueError("agent_input mode must be 'function' or 'activity'")
-    if mode == "activity" and not isinstance(app, df.DFApp):
-        raise TypeError(
-            "Durable agent_input activity bindings require DurableAiApp or "
-            "azure.durable_functions.DFApp"
-        )
     runtime = _runtime_for(app)
 
     def decorate(handler: _F) -> _F:
         if not inspect.isfunction(handler):
             raise TypeError(
-                "agent_input must be the innermost decorator, immediately above the handler"
+                "agent must be the innermost decorator, immediately above the handler"
             )
         source_signature = inspect.signature(handler)
         visible_signature = _worker_signature(handler, arg_name)
         if not inspect.iscoroutinefunction(handler):
             raise TypeError(
-                f"agent_input mode {mode!r} requires an async def handler because "
+                "agent requires an async def handler because "
                 "MAF Agent execution and lifecycle are asynchronous"
             )
 
@@ -226,7 +216,7 @@ def agent_input(
 
 
 class AiApp(func.FunctionApp):
-    """FunctionApp with the smart ``agent_input`` decorator."""
+    """FunctionApp with the smart ``agent`` decorator."""
 
     def __init__(
         self,
@@ -237,19 +227,17 @@ class AiApp(func.FunctionApp):
         super().__init__(http_auth_level=http_auth_level)
         self._agent_binding_root = app_root
 
-    def agent_input(
+    def agent(
         self,
         *,
         arg_name: str,
         agent_name: str,
-        mode: AgentInputMode = "function",
     ) -> Callable[[_F], _F]:
         _runtime_for(self, self._agent_binding_root)
-        return agent_input(
+        return agent(
             self,
             arg_name=arg_name,
             agent_name=agent_name,
-            mode=mode,
         )
 
 
@@ -265,17 +253,15 @@ class DurableAiApp(df.DFApp):  # type: ignore[misc]
         super().__init__(http_auth_level=http_auth_level)
         self._agent_binding_root = app_root
 
-    def agent_input(
+    def agent(
         self,
         *,
         arg_name: str,
         agent_name: str,
-        mode: AgentInputMode = "function",
     ) -> Callable[[_F], _F]:
         _runtime_for(self, self._agent_binding_root)
-        return agent_input(
+        return agent(
             self,
             arg_name=arg_name,
             agent_name=agent_name,
-            mode=mode,
         )
