@@ -67,7 +67,7 @@ where = ["src"]
 version = {attr = "azure_functions_agents.__version__"}
 
 [tool.setuptools.package-data]
-azure_functions_agents = ["public/**"]
+azure_functions_agents = ["public/**", "workflows/skills/**"]
 
 [tool.ruff]
 target-version = "py313"

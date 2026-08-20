@@ -34,6 +34,17 @@ Result shapes (stable contract):
                               "confidence": "low"|"medium"|"high",
                               "evidence": [str],
                               "recommended_action": str}``
+
+Collection (data-driven) tools — Issue #1276:
+
+- ``discover_services`` → ``{"incident": str, "count": int,
+                            "services": [{"name": str, "tier": str,
+                                          "in_scope": bool}]}``
+- ``inspect_service`` →   ``{"service": str, "index": int, "errors": int,
+                            "saturation": str, "healthy": bool,
+                            "headline": str}``
+- ``summarize_scan`` →    ``{"incident": str, "scanned": int, "skipped": int,
+                            "unhealthy": [str], "headline": str}``
 """
 
 from __future__ import annotations
@@ -266,9 +277,173 @@ def summarize_findings(args: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Data-driven (collection) workflow tools — Issue #1276.
+#
+# These three tools demonstrate the dynamic control-flow surface: a
+# discovery tool returns a bounded JSON array, a per-item inspection tool
+# is fanned out with ``for_each`` (skipping out-of-scope items with
+# ``when``), and a downstream tool consumes the ordered ``{index, status,
+# result}`` aggregate the logical ``for_each`` node exposes.
+# ---------------------------------------------------------------------------
+
+# A small, deterministic service catalog. ``marketing-site`` is always
+# within the first three entries so every bounded slice includes at least
+# one ``low`` tier service — the item a ``when`` predicate skips.
+_SERVICE_CATALOG: List[Dict[str, Any]] = [
+    {"name": "orders-api", "tier": "critical"},
+    {"name": "marketing-site", "tier": "low"},
+    {"name": "payments-api", "tier": "critical"},
+    {"name": "inventory-service", "tier": "high"},
+    {"name": "docs-site", "tier": "low"},
+]
+
+# Hard ceiling on the fan-out so a plan built from this discovery result
+# always stays well under the workflow ``max_nodes`` budget.
+_MAX_DISCOVERED_SERVICES = 5
+_MIN_DISCOVERED_SERVICES = 3
+
+
+@workflow_tool(
+    description=(
+        "Discover the services implicated by an incident. Args: "
+        "{incident: str}. Returns {incident, count, services: "
+        "[{name, tier: 'critical'|'high'|'low', in_scope: bool}]}. The array "
+        "is bounded (3-5 items) and deterministic; low-tier services come back "
+        "with in_scope=false so a for_each plan can skip them with a `when` "
+        "predicate on ${item.in_scope}. Use its `services` array as the "
+        "for_each source for a per-service inspection task."
+    )
+)
+def discover_services(args: Dict[str, Any]) -> Dict[str, Any]:
+    incident = args.get("incident")
+    if not isinstance(incident, str) or not incident.strip():
+        raise ValueError("discover_services: 'incident' arg (string) is required")
+
+    # Deterministic bounded slice: between _MIN and _MAX entries, keyed off
+    # the incident text so the same incident always yields the same fan-out.
+    span = _MAX_DISCOVERED_SERVICES - _MIN_DISCOVERED_SERVICES
+    take = _MIN_DISCOVERED_SERVICES + _seeded_int(incident + ":count", 0, span)
+    take = min(take, len(_SERVICE_CATALOG))
+
+    services: List[Dict[str, Any]] = [
+        {
+            "name": entry["name"],
+            "tier": entry["tier"],
+            # Low-tier services are intentionally out of scope: this is the
+            # item the workflow's `when` predicate skips.
+            "in_scope": entry["tier"] != "low",
+        }
+        for entry in _SERVICE_CATALOG[:take]
+    ]
+    return {"incident": incident, "count": len(services), "services": services}
+
+
+@workflow_tool(
+    description=(
+        "Inspect a single service for incident signal. Args: "
+        "{service: str, index?: int}. Intended to be fanned out with "
+        "for_each over discover_services' `services` array, binding "
+        "service=${item.name} (and optionally index=${index}). Returns "
+        "{service, index, errors, saturation, healthy, headline}."
+    )
+)
+def inspect_service(args: Dict[str, Any]) -> Dict[str, Any]:
+    service = _require_service(args, "inspect_service")
+    raw_index = args.get("index")
+    index = int(raw_index) if isinstance(raw_index, (int, str)) and str(raw_index).lstrip("-").isdigit() else 0
+
+    # Reuse the existing evidence tools so per-service inspection stays a
+    # deterministic function of the service name.
+    logs = fetch_logs({"service": service})
+    metrics = fetch_metrics({"service": service})
+    errors = int(logs.get("errors") or 0)
+    saturation = str(metrics.get("saturation") or "moderate")
+    healthy = errors < 8 and saturation != "high"
+    headline = (
+        f"{service}: healthy"
+        if healthy
+        else f"{service}: {errors} errors, {saturation} saturation"
+    )
+    return {
+        "service": service,
+        "index": index,
+        "errors": errors,
+        "saturation": saturation,
+        "healthy": healthy,
+        "headline": headline,
+    }
+
+
+@workflow_tool(
+    description=(
+        "Summarize a for_each service scan. Args: {incident?: str, findings: "
+        "<inspect logical node result>}. Pass the whole ordered aggregate via "
+        "${inspect_node.result} — a list of {index, status, result} envelopes "
+        "in source order, where skipped items have result=null. Returns "
+        "{incident, scanned, skipped, unhealthy: [str], headline}."
+    )
+)
+def summarize_scan(args: Dict[str, Any]) -> Dict[str, Any]:
+    """Consume the ordered aggregate a logical ``for_each`` node exposes.
+
+    The aggregate is a source-ordered list of ``{index, status, result}``
+    envelopes: ``status`` is ``"completed"`` or ``"skipped"`` and a skipped
+    position carries ``result: null``. This tool must be passed the whole
+    aggregate as a single ``${node.result}`` value, so it validates the
+    shape loudly rather than silently degrading on an embedded template ref.
+    """
+    findings = args.get("findings")
+    if not isinstance(findings, list):
+        raise ValueError(
+            "summarize_scan: 'findings' must be the whole for_each aggregate "
+            "(use \"${inspect_node.result}\" as the entire arg value); got "
+            f"{type(findings).__name__}"
+        )
+
+    incident = args.get("incident")
+    scanned = 0
+    skipped = 0
+    unhealthy: List[str] = []
+    # Envelopes arrive in source order; preserve it in the report.
+    for envelope in findings:
+        if not isinstance(envelope, dict):
+            raise ValueError(
+                "summarize_scan: each finding must be an {index, status, result} "
+                f"envelope; got {type(envelope).__name__}"
+            )
+        status = envelope.get("status")
+        if status == "skipped":
+            skipped += 1
+            continue
+        scanned += 1
+        result = envelope.get("result")
+        if isinstance(result, dict) and not result.get("healthy", True):
+            headline = result.get("headline")
+            unhealthy.append(str(headline) if headline else str(result.get("service")))
+
+    if not scanned:
+        headline = "no in-scope services were inspected"
+    elif unhealthy:
+        headline = f"{len(unhealthy)} of {scanned} inspected service(s) unhealthy"
+    else:
+        headline = f"all {scanned} inspected service(s) healthy"
+
+    return {
+        "incident": str(incident) if isinstance(incident, str) else "unknown-incident",
+        "scanned": scanned,
+        "skipped": skipped,
+        "unhealthy": unhealthy,
+        "headline": headline,
+    }
+
+
 __all__ = [
+    "discover_services",
     "fetch_deploys",
     "fetch_logs",
     "fetch_metrics",
+    "inspect_service",
     "summarize_findings",
+    "summarize_scan",
 ]

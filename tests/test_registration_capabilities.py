@@ -88,6 +88,21 @@ def test_build_capabilities_skills_disabled_returns_empty(tmp_path: Path) -> Non
     assert capabilities.enabled_skill_paths == []
 
 
+def test_with_runtime_skill_paths_returns_direct_role_copy(tmp_path: Path) -> None:
+    project_skill = tmp_path / "project"
+    runtime_skill = tmp_path / "runtime"
+    capabilities = AgentCapabilities(enabled_skill_paths=[project_skill])
+
+    direct_capabilities = capabilities_module.with_runtime_skill_paths(
+        capabilities,
+        [runtime_skill],
+    )
+
+    assert direct_capabilities is not capabilities
+    assert direct_capabilities.enabled_skill_paths == [project_skill, runtime_skill]
+    assert capabilities.enabled_skill_paths == [project_skill]
+
+
 def test_build_capabilities_filters_user_tools_by_exclude_name() -> None:
     capabilities = build_capabilities(
         _resolved(exclude=["keep_out"]),
