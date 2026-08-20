@@ -4,8 +4,8 @@ title: Dynamic workflows
 status: Finalized
 author: TsuyoshiUshio
 created: 2026-07-06
-updated: 2026-08-14
-issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
+updated: 2026-08-19
+issues: [https://github.com/Azure/azure-functions-agents-runtime/issues/80, https://github.com/Azure/azure-functions-agents-runtime/issues/108, https://github.com/Azure/azure-functions-agents-runtime/issues/109, https://github.com/Azure/azure-functions-bucees-planning/issues/1274, https://github.com/Azure/azure-functions-bucees-planning/issues/1275, https://github.com/Azure/azure-functions-bucees-planning/issues/1276]
 pull_requests: [https://github.com/Azure/azure-functions-agents-runtime/pull/77, https://github.com/Azure/azure-functions-agents-runtime/pull/112, https://github.com/Azure/azure-functions-agents-runtime/pull/117, https://github.com/Azure/azure-functions-agents-runtime/pull/151, https://github.com/Azure/azure-functions-agents-runtime/pull/163]
 ---
 
@@ -27,6 +27,9 @@ The next evolution adds deterministic, data-driven control flow: a task can be
 skipped by a constrained `when` predicate or expanded over a bounded JSON array
 with `for_each`, while preserving Durable replay safety, owner authorization,
 resource limits, deterministic fan-in, and observable node state.
+The workflow-observability evolution adds runtime-owned OpenTelemetry signals
+for the asynchronous Durable execution without confusing those signals with
+Durable/DTS-native telemetry or UI-only DTS integrations.
 
 ## Evolution
 
@@ -38,6 +41,10 @@ workflow-enabled agent with agent/session isolation. The
 [multi-agent addendum](#multi-agent-workflow-isolation-addendum-pr-151)
 records only that extension's behavioral and architectural delta instead of
 repeating the base workflow design.
+Issue #80 adds first-class workflow observability in the same way: its
+[workflow-observability evolution](#workflow-observability-issue-80-in-review)
+extends this FRD and remains **In review** until its own human sign-off, without
+changing the already-finalized status of the parent Dynamic Workflows design.
 
 ## 2. Motivation / problem
 
@@ -938,7 +945,374 @@ The Dynamic Workflow sample for this extension must demonstrate:
 4. status output showing expanded, running, skipped, and aggregated states; and
 5. deterministic completion on both Azure Storage and DTS Durable backends.
 
+### Workflow observability (Issue #80; In review)
+
+Dynamic Workflows currently expose Durable status, structured `custom_status`,
+runtime log lines, and the DTS operator timeline, but runtime-owned
+OpenTelemetry ends at the initial `start_workflow` tool call. The Durable
+orchestration and its Activities can continue long after the originating
+`agent.run` span ends, may execute in other worker processes, and may replay.
+Issue #80 fills that gap without pretending that one in-process trace context
+can remain current across the Durable boundary.
+
+This evolution is design-only until Decisions 82-94 receive explicit human
+approval. It introduces no new frontmatter, endpoint, workflow-plan field, or
+Application Insights-specific runtime dependency.
+
+#### Signal boundaries
+
+Three observability planes remain deliberately separate:
+
+1. **Runtime-owned telemetry** is emitted by this package through OpenTelemetry:
+   spans, structured event records, and metrics with stable `af.workflow.*`
+   attributes. It explains runtime decisions, workflow ownership, task
+   execution, stable failure classes, and control requests.
+2. **Durable/DTS-native telemetry** is emitted by Durable Functions and its
+   configured backend. It remains authoritative for orchestration history,
+   replay, Activity delivery/retry history, storage-provider health, hard
+   termination, and the DTS timeline. Runtime telemetry correlates to it by the
+   Durable instance id; it does not replace, rename, or suppress it.
+3. **Product status/UI state** is the existing status envelope and
+   `custom_status` schema. It remains the contract for management tools, HTTP
+   polling, and chat cards. Telemetry observes that contract but does not add
+   fields to it.
+
+[Issue #92](https://github.com/Azure/azure-functions-agents-runtime/issues/92)
+(DTS activity display tags) and
+[issue #153](https://github.com/Azure/azure-functions-agents-runtime/issues/153)
+(an **Open in DTS** chat-card link) remain separate DTS/UI integrations. This
+evolution does not depend on undocumented DTS deep links or a future DTS tag
+surface.
+
+#### Pipeline and module mapping
+
+Observability remains a cross-cutting concern under FRD 0003 rather than a new
+pipeline stage. The four-stage mapping is:
+
+| Pipeline stage | Module(s) | Change |
+| --- | --- | --- |
+| discover | No change | Discovery remains read-only and does not inspect telemetry providers or mutate workflow metadata. |
+| translate | `workflows/schema.py` | Add internal typed, versioned Durable wire contracts for workflow telemetry context and replay-stable event identity. These are not authoring fields and are optional when decoding pre-evolution payloads. |
+| register | `app.py`, `_observability.py`, `workflows/integration.py`, `workflows/engine.py` | Keep `app.py`'s existing one-time observability bootstrap. Extend `_observability.py` with workflow conventions/helpers. Register any workflow telemetry Activity exactly once with the existing app-wide Durable blueprint; registration remains the only Azure-aware stage. |
+| execute | `workflows/context.py`, `workflows/tools.py`, `workflows/engine.py` | Derive the existing owner hash, instrument start/control operations, persist a bounded telemetry context only for newly started workflows, instrument Activity-backed tasks, and emit replay-safe orchestration transition summaries. `runner.py` and `registration/_handlers.py` keep their existing `agent.run` and MAF tool-span behavior. |
+
+`workflows/engine.py` remains deterministic. It never discovers exporters,
+reads environment variables, or performs direct network export from the
+orchestrator. Any decision that can affect Durable history is captured once in
+the start payload.
+
+#### Stable span model
+
+Span names are constants and never include workflow, node, tool, or agent
+identifiers:
+
+| Span | Created by | Semantics |
+| --- | --- | --- |
+| `workflow.start` | `workflows/tools.py:start_workflow` | Child of the active MAF `execute_tool start_workflow` span when one exists. Covers plan validation, active-workflow admission, Durable `start_new`, and the accepted/rejected outcome. The active MAF tool span is also enriched with `af.workflow.id` after a successful start so the originating `agent.run` trace visibly contains the hand-off. |
+| `workflow.control` | cancel/terminate management tools | Covers one Durable client request. `af.workflow.control.operation` is `cancel` or `terminate`; accepted requests are not workflow terminal outcomes. Status/list polling remains unspanned to avoid telemetry amplification. |
+| `workflow.task` | tool and Workflow Sub Agent Activities | Covers one actual Activity delivery and user handler or leaf-agent execution. At-least-once redelivery creates another execution span for the same materialized instance; that is an execution attempt, not a replay duplicate. |
+| `workflow.task` summary | replay-safe transition emitter | Represents a completed Durable wait with its deterministic requested/actual duration, or a zero-duration skipped decision. Summary spans do not increment the Activity-execution counter. |
+| `workflow.run` summary | replay-safe terminal transition emitter | A short export operation with explicit logical start/end timestamps and `af.workflow.duration_ms`; it is a summary span, not a span kept open across Function invocations. It is emitted for completed, controlled-failed, native-failed when catchable, and cooperatively canceled runs. Hard termination cannot guarantee this span. |
+
+The summary emitter uses standard OTel explicit timestamps and a Span Link to
+the captured `workflow.start` context when that context was sampled and valid.
+It does **not** install the originating context as a remote parent. Tool/Sub
+Agent Activity spans keep any Functions-host Activity invocation parent and add
+the same link. This prevents a false parent/child claim across independently
+scheduled Durable invocations.
+
+#### Attribute schema and correlation
+
+Every value below is metadata. Plan arguments, task instructions, task results,
+wait payloads, and model/tool response bodies are not attributes.
+
+| Attribute | Type / values | Signals | Cardinality rule |
+| --- | --- | --- | --- |
+| `af.workflow.id` | string, Durable instance id | all workflow spans/events | Required correlation key; traces/events only, never a metric dimension. |
+| `af.workflow.agent.slug` | string | all workflow spans/events | Canonical `workflow_agent_slug`; allowed as a metric dimension only if an operator explicitly creates a backend view. Runtime metrics omit it. |
+| `af.workflow.owner.hash` | 32 lowercase hex characters | all workflow spans/events | Existing 128-bit agent/session digest prefix; never a metric dimension. |
+| `af.workflow.status` | `Pending`, `Running`, `Completed`, `Failed`, `Canceled`, `Terminated` | run/control spans and lifecycle events | Uses the effective status vocabulary already exposed by `status_envelope()`. |
+| `af.workflow.task.logical_id` | string | task spans/events | Authored logical id; traces/events only. |
+| `af.workflow.task.instance_id` | string | task spans/events | Logical id or runtime `<logical-id>[<index>]`; traces/events only. |
+| `af.workflow.task.index` | integer | materialized task spans/events | Omitted for non-iterated tasks. |
+| `af.workflow.task.type` | `tool`, `wait`, `sub_agent` | task spans/events/metrics | Low-cardinality metric dimension. |
+| `af.workflow.task.tool` | string | tool task spans/events | Omitted for other types and from metrics. |
+| `af.workflow.task.agent` | string | Sub Agent spans/events | Specialist slug; omitted from metrics. |
+| `af.workflow.task.outcome` | `completed`, `failed`, `skipped`, `canceled` | task spans/events/metrics | `skipped` is event-only because no task span exists. |
+| `af.workflow.wait.duration_ms` | integer | wait summary span/event | Deterministically computed from Durable time. |
+| `af.workflow.failure.code` | stable string | failing spans/events/metrics | Existing controlled `error_code` where available; telemetry-only code for native failures. |
+| `af.workflow.failure.phase` | `submission`, `client`, `orchestration`, `activity`, `control` | failing spans/events/metrics | Low-cardinality failure location. |
+| `af.workflow.cancel.requested` | boolean | cancel control span/event | Means the external event request was accepted, not that cancellation completed. |
+| `af.workflow.control.operation` | `cancel`, `terminate` | control span/event/metric | Status/list are deliberately excluded. |
+| `af.workflow.event.id` | lowercase hex digest | structured events and summary spans | Replay/redelivery de-duplication key; never a metric dimension. |
+| `af.workflow.task.attempt` | positive integer | future task spans/events/metrics | Reserved for explicit runtime retry policy. Omitted today because Durable redelivery does not expose a stable application attempt ordinal. |
+
+The workflow id correlates the runtime plane to Durable/DTS and is the primary
+Application Insights query key. The logical id groups all `for_each`
+materializations; the instance id selects one source-indexed execution. The
+owner hash groups workflows from the same `(workflow_agent_slug, session_id)`
+without disclosing either value as a combined raw identifier.
+It is a convenience projection of the first 32 hex characters already embedded
+in the workflow id, not an independent identity value.
+
+Raw `session_id` is never emitted in workflow telemetry, even when
+`ENABLE_SENSITIVE_DATA=true`. Existing workflow log lines that include the raw
+session id are migrated to `af.workflow.owner.hash`. The raw agent display name
+is also omitted; the canonical slug is sufficient. Cancel/terminate reason,
+plan/task inputs, outputs, and exception messages are content and remain absent
+by default. If future diagnostics attach any of them, they must use the existing
+`ENABLE_SENSITIVE_DATA` gate and `bounded_content()`; secrets, connection
+strings, credentials, and authorization material remain prohibited regardless
+of that flag.
+
+#### Replay and duplicate prevention
+
+The orchestrator must not open spans, increment metrics, or emit an event during
+ordinary replay. `start_workflow` persists an optional internal telemetry
+context containing:
+
+- a schema version and the resolved enabled bit;
+- the workflow start timestamp and owner hash;
+- a W3C trace-link representation, when the active start span is valid;
+- no provider/exporter name, session id, plan content, or credentials.
+
+Pre-evolution payloads omit this object and replay with workflow telemetry
+disabled. The persisted enabled bit also prevents provider availability changes
+between replays from changing Durable history.
+
+Orchestrator-only transitions (wait completion, skip, aggregation, controlled
+failure, completion, and cooperative cancellation) are collected into bounded
+metadata batches and passed to one registered telemetry Activity at a
+deterministic yield boundary. The Activity owns OTel calls and suppresses
+telemetry/exporter errors so observability cannot fail the workflow. Tool and
+Sub Agent Activities emit their execution signals directly and do not need a
+second telemetry Activity.
+
+The telemetry Activity is called without a retry policy and awaited at its own
+deterministic yield boundary. The orchestrator catches and discards its
+`TaskFailed` result before selecting the next user-work wave. A worker outage can
+therefore add bounded wall-clock delay, but telemetry cannot change task
+selection/order, results, effective status, cancellation, or termination. The
+Activity returns no user-visible result and its failure is never substituted
+for the workflow's real failure.
+
+This removes duplicates caused solely by orchestration replay. Durable
+Activities are still at-least-once: a worker failure may redeliver either a
+user Activity or telemetry Activity after it already exported. Every structured
+event therefore has a deterministic `af.workflow.event.id`, derived from the
+workflow id, event name, logical/instance id, and deterministic transition
+ordinal. Duplicate deliveries retain the same id. KQL examples de-duplicate by
+that field. Task-execution metrics intentionally count actual Activity
+deliveries; terminal counters are operationally at-least-once and are documented
+as approximate. Exactly-once metrics would require an external transactional
+outbox and are not claimed.
+
+#### Structured event records
+
+Runtime code continues to use the shared logger required by the repository.
+Event names and fields are stable even though those logger records remain
+system/operator diagnostics under the current Functions worker behavior
+documented by FRD 0003 Decision #17:
+
+| Event name | When |
+| --- | --- |
+| `af.workflow.started` | Durable accepted a new instance id. |
+| `af.workflow.start_rejected` | Validation, admission, or Durable-client start failed. |
+| `af.workflow.completed` | The orchestrator returned successful results. |
+| `af.workflow.failed` | A controlled or catchable native failure terminates the run. |
+| `af.workflow.cancel_requested` | The Durable client accepted a cooperative-cancel event. |
+| `af.workflow.canceled` | The orchestrator consumed the event and returned the cancel envelope. |
+| `af.workflow.terminate_requested` | The Durable client accepted hard termination. |
+| `af.workflow.task.started` | A tool/Sub Agent Activity delivery begins. |
+| `af.workflow.task.completed` | Tool/Sub Agent execution or a Durable wait completes. |
+| `af.workflow.task.failed` | Tool/Sub Agent Activity execution fails. |
+| `af.workflow.task.skipped` | A `when` predicate suppresses one logical node/materialized instance. |
+
+Hard termination has no guaranteed `af.workflow.terminated` runtime event
+because it intentionally prevents further orchestrator code from running.
+Durable/DTS status is authoritative; a later status query continues to expose
+`Terminated` but does not emit a duplicate terminal event per poll.
+
+Application Insights customer guidance remains span-first. The shared-logger
+record is the system/operator diagnostic described by FRD 0003 Decision #17.
+Separately, the telemetry helper adds the stable event as an OTel span event on
+the corresponding start/control/task/summary span; Azure Monitor surfaces those
+span events in `AppTraces`. This does not move the shared logger into the
+customer-log plane or reverse FRD 0003's human decision.
+
+#### Metrics
+
+Metric names use the existing `azure_functions_agents.*` prefix:
+
+| Instrument | Type / unit | Meaning and dimensions |
+| --- | --- | --- |
+| `azure_functions_agents.workflow.starts` | counter, `{workflow}` | Start attempts by `outcome=accepted|rejected`. |
+| `azure_functions_agents.workflow.runs` | counter, `{workflow}` | Terminal summaries by `status=Completed|Failed|Canceled`; hard termination is not inferred. |
+| `azure_functions_agents.workflow.run.duration` | histogram, `ms` | Logical start-to-terminal duration by terminal status. |
+| `azure_functions_agents.workflow.task.executions` | counter, `{task}` | Actual Activity deliveries by `task.type` and `task.outcome`; waits/skips are reported as transitions, not executions. |
+| `azure_functions_agents.workflow.task.duration` | histogram, `ms` | Tool/Sub Agent execution and wait duration by task type/outcome. |
+| `azure_functions_agents.workflow.failures` | counter, `{failure}` | Failures by stable code, phase, and `af.fault_domain`. |
+| `azure_functions_agents.workflow.control.requests` | counter, `{request}` | Cancel/terminate requests by operation and accepted/failed outcome. |
+
+Metric dimensions never include workflow id, owner hash, logical/instance id,
+tool name, specialist slug, exception type/message, or free text. A
+materialized `for_each` task contributes one execution per Activity delivery;
+a skipped instance contributes no execution but does contribute a structured
+skip event. Future explicit retries add attempt dimensions only after the
+runtime owns a stable attempt ordinal.
+
+#### Task and terminal semantics
+
+| Case | Runtime telemetry | Status/failure semantics |
+| --- | --- | --- |
+| Workflow tool | One `workflow.task` span per actual Activity delivery. Handler exceptions mark ERROR with `workflow_tool_failed`. | Existing sanitized raised failure and native Durable `Failed` behavior remain unchanged. |
+| Workflow Sub Agent | One `workflow.task` span around `run_leaf_agent_task`; target slug and stable timeout/execution code are recorded, never the task text or response. | Timeout and execution failure still fail the parent; no automatic retry. |
+| Durable wait | One backdated `workflow.task` summary span plus completed event after the timer fires. No span is held open across the timer. | Existing `waited_until` result and cancel behavior remain unchanged. |
+| `when` skip | Zero-duration `workflow.task` summary span plus `af.workflow.task.skipped` event with logical/instance correlation; no execution counter. | Existing `null` result, dependency satisfaction, status state, and node-budget accounting remain unchanged. |
+| `for_each` | Every execution carries logical and materialized instance ids plus source index. | Ordered aggregation and `<logical-id>[<index>]` identity remain unchanged. |
+| Controlled failure | Run summary span/event is ERROR and uses the existing public `error_code`. | Existing returned envelope and effective `Failed` mapping remain unchanged. |
+| Native Activity/provider failure | The Activity span records a telemetry-only stable code; the terminal summary is best-effort if the orchestrator can catch and emit before rethrow. | Original exception is rethrown and native Durable failure output remains opaque. |
+| Orchestration invariant | `workflow_orchestration_invariant`, `af.fault_domain=runtime`. | Still raises and becomes native Durable `Failed`. |
+| Cooperative cancel | Control span records request acceptance; run summary records `Canceled` only after the orchestrator consumes it. In-flight tool/Sub Agent interruption remains best-effort. | Existing returned cancel envelope remains canonical. |
+| Hard terminate | Control span/event records accepted request. No run-summary/terminated event is guaranteed. | Durable/DTS `Terminated` status remains canonical; no completion envelope is promised. |
+| Future retry | Existing spans represent deliveries. `af.workflow.task.attempt` stays absent until an explicit retry contract supplies a deterministic ordinal. | This evolution adds no retry, timeout, backoff, or continue-on-error behavior. |
+
+#### Stable failure taxonomy
+
+`af.fault_domain` remains the ownership axis; `af.workflow.failure.code` is the
+workflow-specific reason. Telemetry does not introduce a generic `workflow`
+fault domain.
+
+| Code | Phase | Default fault domain | Notes |
+| --- | --- | --- | --- |
+| Existing `workflow_task_id_reserved`, `workflow_condition_invalid`, `workflow_reference_unresolved`, `workflow_iteration_not_array`, `workflow_node_limit_exceeded` | submission/orchestration | `app` | Reuse the controlled public code exactly. |
+| `workflow_plan_validation_failed` | submission | `app` | Validation failures that predate/do not expose a narrower stable public code. |
+| `workflow_admission_limit_exceeded` | submission | `app` | Active-workflow cap rejects before instance creation. |
+| `workflow_durable_start_failed` | client | `platform` | `get_status_all`/`start_new` prevents launch; no workflow id may exist. |
+| `workflow_tool_not_allowed` | activity | `app` | Deployed owner policy denies the target. |
+| `workflow_tool_not_registered` | activity | `app` | Persisted target is absent from the deployed catalog. |
+| `workflow_tool_failed` | activity | `app` | Workflow-safe application handler raised or returned a non-serializable result. |
+| `workflow_subagent_not_allowed` | activity | `app` | Deployed owner policy denies the specialist. |
+| `workflow_subagent_not_available` | activity | `app` | Persisted specialist is absent from the deployed catalog. |
+| `workflow_subagent_timeout` | activity | `delegate` | Existing specialist timeout path. |
+| `workflow_subagent_execution_failed` | activity | `delegate` | Reuses the existing non-sensitive stable code. |
+| `workflow_orchestration_invariant` | orchestration | `runtime` | Stalled scheduler or impossible typed-state transition. |
+| `workflow_cancel_request_failed`, `workflow_terminate_request_failed` | control | `platform` | Durable client rejected/failed the request. |
+
+Telemetry helper/export failures are not workflow failures, never set workflow
+status, and never replace a task's real code. Exception messages and stack
+traces follow the privacy rule above; operators key on the stable code.
+
+#### Sampling and exporter independence
+
+Workflow instrumentation uses the provider already selected by FRD 0003. The
+runtime does not import Azure Monitor types in workflow modules, configure a
+workflow-specific exporter, or add an `agents.config.yaml` observability block.
+Installing `[monitor]` plus
+`APPLICATIONINSIGHTS_CONNECTION_STRING`, or supplying another active OTel
+provider, enables the same helpers. With no active provider the direct spans and
+metrics no-op, and new workflows omit the internal telemetry payload so the
+orchestrator schedules no telemetry-only Activities.
+
+The runtime honors the provider's trace sampler and does not force failures to
+`AlwaysOn`. Because Durable segments are separate traces connected by Span
+Links, a parent-based sampling decision from the originating `agent.run` cannot
+guarantee the same decision for every later Activity. Metrics use normal OTel
+aggregation and are not trace-sampled; event/log retention follows the active
+provider/exporter. Documentation recommends explicit provider sampling and
+states that `af.workflow.id`, not `OperationId`, is the reliable cross-boundary
+query key.
+
+#### Application Insights / KQL experience
+
+The documentation update provides copy/paste queries with bounded projections.
+The minimum customer workflows are:
+
+```kql
+// Runtime spans for one Durable workflow, even when OperationId changes.
+AppDependencies
+| where Properties["af.workflow.id"] == "<workflow-id>"
+| project TimeGenerated, OperationId, Name, Success, DurationMs, Properties
+| order by TimeGenerated asc
+```
+
+```kql
+// De-duplicated workflow failure and task-transition events.
+union AppTraces, AppDependencies, AppExceptions
+| where Properties["af.workflow.id"] == "<workflow-id>"
+| extend eventId=tostring(Properties["af.workflow.event.id"]),
+         code=tostring(Properties["af.workflow.failure.code"]),
+         node=tostring(Properties["af.workflow.task.instance_id"])
+| where isnotempty(eventId)
+| summarize arg_max(TimeGenerated, *) by eventId
+| project TimeGenerated, Name, node, code, OperationId, Properties
+| order by TimeGenerated asc
+```
+
+Execution spans without `af.workflow.event.id` are intentionally excluded from
+that de-duplication query; grouping an empty event id would collapse unrelated
+Activity deliveries. The first query remains the raw span timeline.
+
+```kql
+// Materialized for_each instances and outcomes.
+AppDependencies
+| where Name == "workflow.task"
+| extend workflowId=tostring(Properties["af.workflow.id"]),
+         logicalId=tostring(Properties["af.workflow.task.logical_id"]),
+         instanceId=tostring(Properties["af.workflow.task.instance_id"]),
+         sourceIndex=toint(Properties["af.workflow.task.index"]),
+         outcome=tostring(Properties["af.workflow.task.outcome"])
+| where workflowId == "<workflow-id>"
+| order by logicalId asc, sourceIndex asc
+```
+
+An end-to-end transaction view is useful within one Function invocation, but
+the docs must not tell customers to expect one `OperationId` for the original
+agent turn, orchestration, waits, and Activities.
+
+#### Compatibility, opt-in, and performance budgets
+
+- Existing plans, frontmatter, management tool JSON, status envelopes, HTTP
+  routes, function names, Activity names, and DTS history remain compatible.
+- Pre-evolution in-flight instances decode the absent telemetry contract as
+  disabled and do not gain new history events mid-replay.
+- Observability-disabled workflows add no telemetry-only Durable actions and no
+  persisted raw identity/content. Start/control/task helpers remain no-op safe.
+- When enabled, Activity instrumentation adds no Durable action. Orchestrator-only
+  events are batched to at most one telemetry Activity per scheduler loop plus
+  one terminal batch, never one Activity per skipped/materialized node.
+- One event is capped at 512 serialized bytes; one batch is capped at 32 KiB and
+  contains metadata only. That cap covers `MAX_NODES=50` maximum-size task
+  events plus bounded lifecycle/envelope overhead. Tests still require an
+  explicit bounded `dropped_event_count` marker rather than silently truncating
+  if future fields or limits exceed the invariant.
+- In-memory-exporter benchmarks must show less than 2 ms p95 worker CPU overhead
+  for a direct task span and less than 25 ms p95 worker CPU for a maximum-size
+  telemetry batch, excluding user tool/model time and asynchronous exporter
+  transport. The disabled path must add no measurable Durable history growth.
+- Export, span creation, metric recording, and structured-event failures are
+  suppressed and diagnosed through the shared runtime logger; they never alter
+  scheduling, task results, effective status, cancellation, or termination.
+
+#### Open human decisions
+
+The parent FRD remains `Finalized`; only this evolution is **In review**. Human
+sign-off is still required for:
+
+1. the exact span/event/metric and `af.workflow.*` schema in Decisions 82-90;
+2. the linked-but-separate-trace model and its Application Insights limitation;
+3. the hash-only owner/session policy, including removal of raw session ids from
+   existing workflow log lines;
+4. replay-safe telemetry Activities, deterministic event ids, and the explicit
+   at-least-once metric limitation;
+5. the failure/fault-domain mapping, cancellation/termination semantics,
+   sampling behavior, and performance budgets in Decisions 91-94.
+
 ## 5. Decisions log
+
+Decision numbers are append-only. Numbers 66-79 remain intentionally available
+for concurrent FRD 0004 evolution work; the human direction for Issue #80
+reserves 80-95 for workflow observability.
 
 | # | Decision | Options considered | Choice | Decided by | Date |
 | - | -------- | ------------------ | ------ | ---------- | ---- |
@@ -1007,6 +1381,22 @@ The Dynamic Workflow sample for this extension must demonstrate:
 | 63 | Built-in skill packaging | Generate content in code / external public file / packaged workflow asset | Store `SKILL.md` under `workflows/skills/data-driven-workflows`, resolve relative to `integration.py`, add `workflows/skills/**` package data, and verify a built wheel | Agent, architecture review | 2026-08-19 |
 | 64 | Legacy Durable payload decoding | Require all new keys / revalidate via Pydantic / optional typed keys with one compatibility boundary | Mark dynamic keys `NotRequired`, apply defaults once at the persisted JSON boundary, and trust the previously validated payload internally | Agent, architecture review | 2026-08-19 |
 | 65 | Progressive-disclosure selection pointer | Keep a qualified shared-addendum pointer / rely on public docs / use only MAF skill metadata | Keep the narrow load condition in the Skill description and remove the shared-addendum pointer after E2E showed that mentioning the Skill there caused fixed DAGs to load it speculatively | Agent, E2E evidence | 2026-08-19 |
+| 80 | Record workflow observability | Create FRD 0009 / evolve FRD 0004 | Keep one Dynamic Workflows FRD and add Issue #80 as an evolution section; reserve Decisions 80-95 for this work | Human (TsuyoshiUshio) | 2026-08-19 |
+| 81 | Planning boundary and status | Implement with the draft / finalize the parent again / design and review only | Stop after independent architecture review and commit only FRD changes; preserve the parent `Finalized` status while marking this evolution `In review` pending explicit human sign-off | Human (TsuyoshiUshio) | 2026-08-19 |
+| 82 | Enablement/export path | New workflow config / Azure Monitor-only path / reuse FRD 0003 | Reuse the active OTel provider and FRD 0003 bootstrap; no workflow-specific config, exporter, or hard dependency | Agent proposal | 2026-08-19 |
+| 83 | Span model | One long-lived Durable span / per-activation spans / bounded start, control, task, and summary spans | Use stable `workflow.start`, `workflow.control`, `workflow.task`, and terminal `workflow.run` summary spans; never keep a span open across Durable waits/invocations | Agent proposal | 2026-08-19 |
+| 84 | Async trace correlation | Force remote parent propagation / OperationId only / Span Links plus workflow id | Preserve each invocation's natural parent, link later segments to the sampled start context, and make `af.workflow.id` the primary cross-boundary key | Agent proposal | 2026-08-19 |
+| 85 | Replay and redelivery duplicates | Emit directly from orchestrator / no lifecycle telemetry / persisted enablement plus telemetry Activity/event ids | Persist a versioned enabled/context contract, keep OTel out of replaying orchestrator code, batch orchestrator-only transitions through a no-retry Activity whose `TaskFailed` result is swallowed, and assign deterministic event ids; document at-least-once redelivery | Agent proposal, refined by architecture review | 2026-08-19 |
+| 86 | Owner/session identity | Raw session / sensitive-data-gated raw session / existing 128-bit owner digest only | Emit `af.workflow.owner.hash` from the existing agent/session digest and never emit raw session id, including when sensitive capture is enabled; follows Human Decision #33 | Agent proposal (constrained by Human Decision #33) | 2026-08-19 |
+| 87 | Attribute/cardinality contract | Ad hoc fields / every field on metrics / stable trace-event schema with bounded metric dimensions | Standardize the §4 schema; keep workflow/node/target identities out of metric dimensions and omit plan/task content | Agent proposal | 2026-08-19 |
+| 88 | Structured logs | New customer logger / shared free-text only / stable shared-logger events plus span events | Keep the repository shared logger and stable event names/fields, mirror events onto corresponding spans, distinguish system logger records from OTel span events exported to `AppTraces`, and retain FRD 0003 Decision #17's span-first guidance | Agent proposal (constrained by Human Decision 0003-17), refined by architecture review | 2026-08-19 |
+| 89 | Metrics semantics | Claim exact logical counts / emit no metrics / attempts plus explicitly approximate terminal counters | Emit low-cardinality workflow/task/control instruments; count actual Activity deliveries, document at-least-once terminal counters rather than claiming exactly-once, and de-duplicate only non-empty stable event ids in KQL | Agent proposal, refined by architecture review | 2026-08-19 |
+| 90 | Wait/skip/materialization telemetry | Span every node / only Activity tasks / task spans for work plus bounded summary spans | Instrument tool/Sub Agent deliveries, emit backdated wait and zero-duration skip summary spans/events without incrementing execution counters, and correlate every `for_each` execution by logical id, instance id, and source index | Agent proposal, refined by architecture review | 2026-08-19 |
+| 91 | Stable failure classification | One workflow fault domain / messages only / fault domain plus stable workflow code | Keep `af.fault_domain` as ownership and add the §4 stable `af.workflow.failure.code`/phase taxonomy, reusing controlled public codes and adding telemetry-only native codes | Agent proposal | 2026-08-19 |
+| 92 | Cancel and terminate telemetry | Treat requests as terminal / infer both from polling / distinguish request from outcome | Record accepted control requests separately; emit `Canceled` only when consumed, and leave hard `Terminated` terminal truth to Durable/DTS because no runtime terminal callback is guaranteed | Agent proposal | 2026-08-19 |
+| 93 | Sampling | Force always-on workflow traces / custom workflow sampler / honor provider | Honor the active provider sampler; do not force failure sampling, and document that linked Durable segments may sample independently while metrics are aggregated separately | Agent proposal | 2026-08-19 |
+| 94 | Compatibility/performance | Always schedule telemetry work / best effort without budgets / persisted opt-in and explicit budgets | Old/disabled workflows add no telemetry history; enabled orchestration-only events use no-retry, failure-isolated batches capped at 32 KiB and must meet the §4 CPU budgets without changing workflow outcomes | Agent proposal, refined by architecture review | 2026-08-19 |
+| 95 | DTS/UI boundary | Fold timeline tags and dashboard links into observability / block on DTS / keep separate | Keep runtime telemetry independent from DTS activity-display tags (#92) and chat-card DTS links (#153) | Human (TsuyoshiUshio) | 2026-08-19 |
 
 ## 6. Test plan
 
@@ -1140,6 +1530,35 @@ The Dynamic Workflow sample for this extension must demonstrate:
   - a sample discovers a collection, dynamically fans out, skips one item, and
     aggregates results;
   - the scenario completes with deterministic output on Azure Storage and DTS.
+- [ ] Evolution #80: `_observability.py` unit coverage
+  - stable span names, attributes, metric names/units/dimensions, no-op behavior,
+    sensitive-content exclusion, owner-hash validation, and exporter failures;
+  - in-memory OTel exporters verify Span Links without requiring Azure Monitor.
+- [ ] Evolution #80: workflow tools/control coverage
+  - accepted/rejected starts enrich the active tool span and emit stable codes;
+  - raw session ids, plan/task content, and reasons are absent by default;
+  - cancel and terminate requests are not mislabeled as terminal outcomes;
+  - status/list polling emits no per-poll spans or terminal counters.
+- [ ] Evolution #80: static/dynamic engine coverage
+  - pre-evolution payloads and disabled telemetry add no telemetry Activities;
+  - replay schedules identical history and does not duplicate event batches;
+  - one stable event id survives telemetry Activity redelivery;
+  - tool, wait, Sub Agent, skipped, materialized, controlled-failure,
+    native-failure, cancel, and completion paths emit the specified signals;
+  - hard terminate has no required terminal runtime event;
+  - existing `custom_status` and output envelopes are byte-for-byte unchanged.
+- [ ] Evolution #80: privacy/cardinality/performance
+  - metric points contain only the allowed low-cardinality dimensions;
+  - event/batch caps produce an explicit dropped count and never include results;
+  - disabled history has zero added actions; enabled batches and direct spans meet
+    the p95 CPU and serialized-size budgets.
+- [ ] Evolution #80: integration/E2E
+  - Azure Storage and DTS runs are queryable by one `af.workflow.id` across
+    different trace ids;
+  - a dynamic workflow proves logical/materialized correlation and skipped state;
+  - controlled and Activity failures retain current status/output behavior;
+  - sampling tests prove no runtime sampler override and tolerate independently
+    sampled linked Durable segments.
 
 ## 7. Docs impact
 
@@ -1172,6 +1591,16 @@ The Dynamic Workflow sample for this extension must demonstrate:
   project-discovered skills, and direct/delegated capability paths.
 - [ ] Evolution #1276: update the selected workflow sample and its README with a
   collection-driven fan-out/fan-in scenario.
+- [ ] Evolution #80: update `docs/architecture.md` with workflow telemetry
+  ownership, the persisted/replay-safe hand-off, and async Span Link limitation.
+- [ ] Evolution #80: extend `docs/observability.md` with the stable workflow
+  schema, privacy/cardinality rules, sampling, performance, Application Insights
+  KQL, and the runtime-versus-Durable/DTS signal boundary.
+- [ ] Evolution #80: extend `docs/workflows.md` with an operator-focused summary
+  linking to `docs/observability.md`; keep issues #92/#153 separate.
+- [ ] Evolution #80: update `README.md` only if its observability quickstart needs
+  a workflow-specific pointer; no front-matter reference/spec regeneration is
+  required because no authoring schema changes.
 
 ## 8. Status & sign-off
 
@@ -1218,3 +1647,14 @@ The Dynamic Workflow sample for this extension must demonstrate:
 - **Dynamic control flow human sign-off:** TsuyoshiUshio, 2026-08-14. Approved
   Decisions 43-53 as proposed and authorized implementation and testing. FRD
   status returned to `Finalized`.
+- **Workflow observability evolution:** Drafted for issue #80 on 2026-08-19.
+  An independent `workflow-observability-reviewer` rubber-duck architecture
+  review found no blockers. It required four refinements: de-duplicate only
+  non-empty event ids and include `AppTraces` in event KQL; separate
+  shared-logger visibility from OTel span-event visibility; swallow no-retry
+  telemetry-Activity failures; and reconcile the batch cap with
+  `MAX_NODES=50`. All are resolved in Decisions 85, 88-90, and 94. Decisions
+  80, 81, and 95 record the established human scope; Decisions 82-94 remain
+  Agent proposals pending explicit human sign-off. This evolution is **In
+  review**; it does not change the parent FRD's `status: Finalized` and does not
+  authorize implementation.
