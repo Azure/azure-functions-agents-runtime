@@ -102,23 +102,19 @@ jobs:
           scriptLocation: inlineScript
           inlineScript: |
             set -euo pipefail
-            # Remote build is deliberate: it exercises the same deployment path a
-            # customer uses, so an Oryx or remote-build regression surfaces here
-            # rather than in someone's production deploy.
-            az functionapp config appsettings set \
-              --name "${{ parameters.appSiteName }}" \
-              --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
-              --settings SCM_DO_BUILD_DURING_DEPLOYMENT=true \
-              --output none
-
             cd "$(Build.ArtifactStagingDirectory)/aca-fixture"
             zip -qr "$(Build.ArtifactStagingDirectory)/aca-fixture.zip" .
 
+            # Flex Consumption always performs a remote (Oryx) build when a zip
+            # carrying requirements.txt is deployed, so there is no build toggle
+            # to set. SCM_DO_BUILD_DURING_DEPLOYMENT in particular is rejected
+            # outright -- "not supported with this SKU" -- and setting it fails
+            # the deployment. Remote build is still what happens here, which is
+            # the point: this is the same path a customer uses.
             az functionapp deployment source config-zip \
               --name "${{ parameters.appSiteName }}" \
               --resource-group "$(ACA_DEPLOYED_RESOURCE_GROUP)" \
               --src "$(Build.ArtifactStagingDirectory)/aca-fixture.zip" \
-              --build-remote true \
               --output none
         env:
           AZURE_TOKEN_CREDENTIALS: 'dev'

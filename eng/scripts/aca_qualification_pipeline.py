@@ -501,18 +501,12 @@ def run_preflight_deploy(args: argparse.Namespace) -> int:
             "site_read",
             ["functionapp", "show", "--name", app_name, "--resource-group", resource_group],
         ),
-        (
-            "publishing_config_read",
-            [
-                "functionapp",
-                "deployment",
-                "list-publishing-profiles",
-                "--name",
-                app_name,
-                "--resource-group",
-                resource_group,
-            ],
-        ),
+        # Deliberately NOT checking `list-publishing-profiles`. Flex Consumption
+        # disables SCM basic auth by default, so that call fails on a healthy,
+        # deployable app -- and One Deploy authenticates through Entra/ARM and
+        # never needs those credentials. Checking it turned a correct
+        # configuration into a preflight failure, which is worse than not
+        # checking at all: it blocks a deployment that would have succeeded.
     )
     for check_name, command in checks:
         try:
