@@ -225,6 +225,117 @@ class TestContentReport:
         assert content_report({}) == "content=unavailable"
 
 
+class TestAcaStageGating:
+    """Every ACA stage in the E2E pipeline must be gated off PR builds.
+
+    The E2E pipeline carries PR triggers, so an ungated ACA stage would make
+    every pull request pay for a full deploy-and-qualify cycle against real
+    Azure. That failure is expensive and silent -- the stage simply runs -- so
+    it is checked here rather than left to review.
+    """
+
+    def _e2e_pipeline(self) -> str:
+        return (
+            Path(__file__).resolve().parents[1] / "eng" / "ci" / "e2e-tests.yml"
+        ).read_text(encoding="utf-8")
+
+    def _aca_stage_blocks(self) -> dict[str, str]:
+        text = self._e2e_pipeline()
+        blocks: dict[str, str] = {}
+        current: str | None = None
+        collected: list[str] = []
+        for line in text.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("- stage:"):
+                if current is not None:
+                    blocks[current] = "\n".join(collected)
+                name = stripped.split(":", 1)[1].strip()
+                current = name if name.startswith("Aca") else None
+                collected = []
+                continue
+            if current is not None:
+                collected.append(line)
+        if current is not None:
+            blocks[current] = "\n".join(collected)
+        return blocks
+
+    def test_the_expected_aca_stages_are_present(self) -> None:
+        assert set(self._aca_stage_blocks()) == {
+            "AcaSweep",
+            "AcaDeployColdPy313",
+            "AcaDeployColdPy314",
+            "AcaQualifyPy313",
+            "AcaQualifyPy314",
+        }
+
+    def test_every_aca_stage_declares_a_condition(self) -> None:
+        for name, block in self._aca_stage_blocks().items():
+            assert "condition:" in block, f"{name} has no condition and would run on PRs."
+
+    def test_every_condition_restricts_ci_to_main(self) -> None:
+        for name, block in self._aca_stage_blocks().items():
+            condition = next(
+                line for line in block.splitlines() if line.strip().startswith("condition:")
+            )
+            assert "'refs/heads/main'" in condition, f"{name} does not pin CI runs to main."
+            assert "'IndividualCI', 'BatchedCI'" in condition, (
+                f"{name} does not restrict automatic runs to CI reasons; a PR or "
+                "scheduled build could satisfy it."
+            )
+
+    def test_no_condition_admits_pr_or_scheduled_builds(self) -> None:
+        """Assert the exclusions directly, not via the allow-list substring.
+
+        Checking only that the CI reasons appear still passes when another
+        reason is appended to the same list, so the excluded reasons are named
+        here explicitly.
+        """
+        for name, block in self._aca_stage_blocks().items():
+            condition = next(
+                line for line in block.splitlines() if line.strip().startswith("condition:")
+            )
+            for reason in ("PullRequest", "Schedule"):
+                assert reason not in condition, (
+                    f"{name} names {reason} in its condition; these stages must not "
+                    "run on PR or scheduled builds."
+                )
+
+    def test_manual_runs_stay_possible_on_any_branch(self) -> None:
+        """Manual runs are the only way to exercise these stages pre-merge."""
+        for name, block in self._aca_stage_blocks().items():
+            condition = next(
+                line for line in block.splitlines() if line.strip().startswith("condition:")
+            )
+            assert "'Manual'" in condition, (
+                f"{name} would reject manual runs, removing the only way to test "
+                "these stages from a topic branch."
+            )
+
+    def test_official_build_no_longer_defines_aca_stages(self) -> None:
+        """The stages moved; leaving copies behind would double-deploy."""
+        official = (
+            Path(__file__).resolve().parents[1] / "eng" / "ci" / "official-build.yml"
+        ).read_text(encoding="utf-8")
+        for stage in ("AcaSweep", "AcaDeployCold", "AcaQualify"):
+            assert stage not in official, (
+                f"{stage} still present in official-build.yml; both pipelines would "
+                "deploy to the same fixture apps."
+            )
+
+    def test_official_build_keeps_its_existing_contracts(self) -> None:
+        official = (
+            Path(__file__).resolve().parents[1] / "eng" / "ci" / "official-build.yml"
+        ).read_text(encoding="utf-8")
+        for fragment in (
+            "pr: none",
+            "- stage: Build",
+            "- stage: RunTests",
+            "- stage: RunE2ETests",
+            "acaServiceConnection: 'larohra-sandboxgroup-test'",
+        ):
+            assert fragment in official, f"official-build.yml lost {fragment!r}."
+
+
 class TestPipelineEnvironmentContract:
     """Validate values the pipeline passes against the bounds the code enforces.
 
