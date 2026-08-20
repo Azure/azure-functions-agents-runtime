@@ -17,8 +17,10 @@ the deployed qualification suites (`tests/live/test_aca_deployed_*.py`).
 
 | File | Purpose |
 | --- | --- |
-| `agents.config.yaml` | Selects the ACA Sandbox backend via `session_runtime.aca_sandbox` |
-| `qualification.agent.md` | One built-in-endpoint agent, slug `qualification` |
+| `agents.config.yaml` | Selects the ACA Sandbox backend, Entra HTTP auth, model, timeout, and 120-second reclaim retention |
+| `deployed_turn.agent.md` | No-tools built-in-endpoint agent, slug `deployed_turn` |
+| `deployed_load.agent.md` | Load/loss built-in-endpoint agent, slug `deployed_load` |
+| `tools/qualification_hold.py` | Fixture-only tool that holds an active run for load and backing-loss suites |
 | `function_app.py` | `create_function_app()` plus the fixture-only `/__buildinfo` route |
 | `host.json` | Empty route prefix, so agent routes are `/agents/<slug>/...` |
 | `requirements.txt` | Generated, fully pinned; installs the runtime wheel by filename |

@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import Any
 
 import azure.functions as func
+from azurefunctions.extensions.http.fastapi import JSONResponse, Request
 
 from azure_functions_agents import create_function_app
 
@@ -89,8 +90,15 @@ def _content_size() -> dict[str, Any]:
     methods=["GET"],
     auth_level=func.AuthLevel.ANONYMOUS,
 )
-def build_info(req: func.HttpRequest) -> func.HttpResponse:
+def build_info(req: Request) -> JSONResponse:
     """Return the deployed build marker plus live host facts.
+
+    The parameter and return types must be the **FastAPI** ``Request`` and a
+    FastAPI response, matching how the runtime registers every other route.
+    Using ``azure.functions.HttpRequest`` here makes the worker reject the
+    binding, and because indexing is all-or-nothing that single bad function
+    takes down the entire app -- every agent route included, reported only as
+    "No job functions found".
 
     ``auth_level`` is anonymous because Easy Auth is the gate: the platform is
     configured with ``requireAuthentication`` and ``Return401``, so an
@@ -110,8 +118,4 @@ def build_info(req: func.HttpRequest) -> func.HttpResponse:
         },
         "content": _content_size(),
     }
-    return func.HttpResponse(
-        json.dumps(payload, sort_keys=True),
-        status_code=200,
-        mimetype="application/json",
-    )
+    return JSONResponse(content=payload, status_code=200)

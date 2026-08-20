@@ -10,9 +10,11 @@ qualification or delete a live sandbox.
 
 from __future__ import annotations
 
+import ast
 import asyncio
 import inspect
 import json
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -221,6 +223,246 @@ class TestContentReport:
 
     def test_missing_content_is_explicit(self) -> None:
         assert content_report({}) == "content=unavailable"
+
+
+class TestPipelineEnvironmentContract:
+    """Validate values the pipeline passes against the bounds the code enforces.
+
+    The templates set environment variables that the live-test support module
+    validates at fixture time. Nothing previously compared the two, so the
+    pipeline shipped a timeout of 300 seconds against a hard bound of 230 --
+    which would have raised ``AcaSmokeEnvironmentError`` during fixture setup
+    and errored every deployed suite before a single assertion ran. 230 is not
+    arbitrary: it is the Azure Functions platform HTTP request ceiling, so any
+    larger value is unreachable regardless of what the client asks for.
+    """
+
+    def _template_env(self, name: str) -> dict[str, str]:
+        root = Path(__file__).resolve().parents[1]
+        template = root / "eng" / "templates" / "official" / "jobs" / name
+        found: dict[str, str] = {}
+        for line in template.read_text(encoding="utf-8").splitlines():
+            stripped = line.strip()
+            if ":" not in stripped or stripped.startswith("#"):
+                continue
+            key, _, value = stripped.partition(":")
+            if key.strip().startswith("AZURE_FUNCTIONS_AGENTS_"):
+                found[key.strip()] = value.strip().strip("'\"")
+        return found
+
+    @pytest.mark.parametrize("template", ["aca-deploy-cold.yml", "aca-qualify.yml"])
+    def test_timeout_is_within_the_enforced_bound(self, template: str) -> None:
+        env = self._template_env(template)
+        raw = env.get("AZURE_FUNCTIONS_AGENTS_DEPLOYED_ACA_TIMEOUT_SECONDS")
+        assert raw is not None, f"{template} must set the deployed timeout."
+        timeout = float(raw)
+        assert 1 <= timeout <= 230, (
+            f"{template} passes {timeout}s, outside the 1-230s bound enforced by "
+            "tests/live/aca_deployed_agent_support.py; the suites would error "
+            "during fixture setup."
+        )
+
+    @pytest.mark.parametrize("template", ["aca-deploy-cold.yml", "aca-qualify.yml"])
+    def test_the_bound_still_matches_the_support_module(self, template: str) -> None:
+        """Fail if the support module's bound moves away from the platform limit."""
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "tests"
+            / "live"
+            / "aca_deployed_agent_support.py"
+        ).read_text(encoding="utf-8")
+        assert "1 <= timeout <= 230" in source, (
+            "The enforced timeout bound changed; re-check the value the pipeline "
+            f"passes in {template}."
+        )
+
+
+class TestFixtureRouteBinding:
+    """Guard the fixture's HTTP types against the worker's binding validation.
+
+    The route originally annotated ``azure.functions.HttpRequest``. The runtime
+    registers every route with the FastAPI ``Request``/response types instead,
+    and the worker rejects the mismatch at indexing time. Indexing is
+    all-or-nothing, so that single bad function took down the whole deployed
+    app -- every agent route included -- surfacing only as the generic
+    "No job functions found".
+
+    The fixture cannot be imported here (it requires a Linux host, and fails
+    closed on Windows by design), so this reads the source instead.
+    """
+
+    def _build_info_signature(self) -> tuple[str, str]:
+        source = (
+            Path(__file__).resolve().parents[1]
+            / "tests"
+            / "live"
+            / "apps"
+            / "aca-qualification"
+            / "function_app.py"
+        )
+        if not source.is_file():
+            source = (
+                Path(__file__).resolve().parent
+                / "live"
+                / "apps"
+                / "aca-qualification"
+                / "function_app.py"
+            )
+        tree = ast.parse(source.read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.FunctionDef) and node.name == "build_info":
+                annotation = node.args.args[0].annotation
+                returns = node.returns
+                return (ast.unparse(annotation), ast.unparse(returns))
+        raise AssertionError("build_info not found in the fixture app.")
+
+    def test_uses_the_fastapi_request_type(self) -> None:
+        parameter, _ = self._build_info_signature()
+        assert parameter == "Request", (
+            "The worker rejects azure.functions.HttpRequest here and refuses to "
+            "index the entire app."
+        )
+
+    def test_returns_a_fastapi_response(self) -> None:
+        _, returns = self._build_info_signature()
+        assert "Response" in returns
+        assert "HttpResponse" not in returns
+
+    def test_registers_the_expected_binding_shape(self) -> None:
+        """The corrected annotation must produce httpTrigger + http $return."""
+        import azure.functions as func
+        from azurefunctions.extensions.http.fastapi import JSONResponse, Request
+
+        probe = func.FunctionApp()
+
+        @probe.route(route="__buildinfo", methods=["GET"], auth_level=func.AuthLevel.ANONYMOUS)
+        def build_info(req: Request) -> JSONResponse:  # pragma: no cover - shape probe
+            return JSONResponse(content={}, status_code=200)
+
+        bindings = {
+            (binding.type, binding.name)
+            for function in probe.get_functions()
+            for binding in function.get_bindings()
+        }
+        assert ("httpTrigger", "req") in bindings
+        assert ("http", "$return") in bindings
+
+
+class TestDeployedAcaQualificationFixtureContract:
+    """Keep the deployed fixture aligned with the live suites that invoke it."""
+
+    # The exact suite file set is intentional: support modules and unrelated live
+    # fixtures contain constants for different deployed apps, so globbing all
+    # live files would create false requirements for this fixture.
+    _LIVE_SUITE_NAMES = (
+        "test_aca_deployed_agent_turn.py",
+        "test_aca_deployed_cold_start.py",
+        "test_aca_deployed_lifecycle.py",
+        "test_aca_deployed_load.py",
+        "test_aca_deployed_loss.py",
+    )
+    _CALL_EXACTLY_ONCE = re.compile(r"\bCall\s+([a-z][a-z0-9_]*)\s+exactly once\b")
+
+    def _repo_root(self) -> Path:
+        return Path(__file__).resolve().parents[1]
+
+    def _fixture_root(self) -> Path:
+        return self._repo_root() / "tests" / "live" / "apps" / "aca-qualification"
+
+    def _live_suite_paths(self) -> tuple[Path, ...]:
+        live_root = self._repo_root() / "tests" / "live"
+        return tuple(live_root / name for name in self._LIVE_SUITE_NAMES)
+
+    def _suite_agent_slugs(self) -> dict[str, set[str]]:
+        slugs: dict[str, set[str]] = {}
+        for path in self._live_suite_paths():
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Assign):
+                    continue
+                if not isinstance(node.value, ast.Constant) or not isinstance(node.value.value, str):
+                    continue
+                names = [target.id for target in node.targets if isinstance(target, ast.Name)]
+                if any(name.endswith("_AGENT_SLUG") for name in names):
+                    slugs.setdefault(path.name, set()).add(node.value.value)
+        return slugs
+
+    def _suite_tool_names(self) -> dict[str, set[str]]:
+        tools: dict[str, set[str]] = {}
+        for path in self._live_suite_paths():
+            source = path.read_text(encoding="utf-8")
+            names = set(self._CALL_EXACTLY_ONCE.findall(source))
+            tree = ast.parse(source)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Compare):
+                    continue
+                compared = [node.left, *node.comparators]
+                constants = {
+                    item.value
+                    for item in compared
+                    if isinstance(item, ast.Constant) and isinstance(item.value, str)
+                }
+                if not constants:
+                    continue
+                calls = [item for item in compared if isinstance(item, ast.Call)]
+                if any(self._is_tool_name_get(call) for call in calls):
+                    names.update(constants)
+            if names:
+                tools[path.name] = names
+        return tools
+
+    @staticmethod
+    def _is_tool_name_get(call: ast.Call) -> bool:
+        return (
+            isinstance(call.func, ast.Attribute)
+            and call.func.attr == "get"
+            and bool(call.args)
+            and isinstance(call.args[0], ast.Constant)
+            and call.args[0].value == "tool_name"
+        )
+
+    def _fixture_agent_slugs(self) -> set[str]:
+        return {
+            path.name.removesuffix(".agent.md")
+            for path in self._fixture_root().glob("*.agent.md")
+            if path.is_file()
+        }
+
+    def _fixture_tool_names(self) -> set[str]:
+        tool_names: set[str] = set()
+        tools_root = self._fixture_root() / "tools"
+        for path in tools_root.glob("*.py"):
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in ast.walk(tree):
+                if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and not node.name.startswith(
+                    "_"
+                ):
+                    tool_names.add(node.name)
+        return tool_names
+
+    def test_live_suite_agent_slugs_exist_in_the_deployed_fixture(self) -> None:
+        required = {
+            slug
+            for slugs in self._suite_agent_slugs().values()
+            for slug in slugs
+            if slug.startswith("deployed_")
+        }
+        assert required, "No deployed agent slugs were derived from the live suites."
+
+        missing = required - self._fixture_agent_slugs()
+        assert not missing, f"Missing deployed fixture agent(s): {sorted(missing)}"
+
+    def test_live_suite_tool_names_exist_in_the_deployed_fixture(self) -> None:
+        required = {
+            tool
+            for tools in self._suite_tool_names().values()
+            for tool in tools
+            if tool.startswith("qualification_")
+        }
+        assert required, "No qualification tool names were derived from the live suites."
+
+        missing = required - self._fixture_tool_names()
+        assert not missing, f"Missing deployed fixture tool(s): {sorted(missing)}"
 
 
 class TestRedactedReason:
