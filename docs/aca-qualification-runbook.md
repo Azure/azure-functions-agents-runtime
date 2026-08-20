@@ -35,7 +35,68 @@ Every stage is `continueOnError` during stabilization.
 | Two Flex Consumption Linux apps | one Python 3.13, one 3.14, Easy Auth enabled |
 | Shared ACA Sandbox Group | both apps point at it |
 | ADO service connection | currently `larohra-sandboxgroup-test`, reused for deployment |
+| **Service-connection authorization for this pipeline** | see below — easy to miss |
 | Pipeline variables | see below |
+
+### Authorize the service connection for the official build pipeline
+
+A service connection is authorized **per pipeline**. `larohra-sandboxgroup-test`
+was originally authorized only for the e2e pipeline (1777), so the official build
+(1733) could not use it.
+
+The symptom is unhelpful: affected stages sit at `pending` indefinitely with no
+error, no log, and no failed task. In the timeline they are held at a
+`Checkpoint.Authorization`. It looks like a queue backlog rather than a
+permission problem, and it blocks the pre-existing `RunE2ETests` stage too, not
+just the ACA ones.
+
+Check and grant:
+
+```bash
+# Inspect
+az rest --method get --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+  --uri "https://dev.azure.com/azfunc/internal/_apis/pipelines/pipelinePermissions/endpoint/<endpointId>?api-version=7.1-preview.1"
+
+# Grant
+az rest --method patch --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+  --headers "Content-Type=application/json" \
+  --body '{"pipelines":[{"id":1733,"authorized":true}]}' \
+  --uri "https://dev.azure.com/azfunc/internal/_apis/pipelines/pipelinePermissions/endpoint/<endpointId>?api-version=7.1-preview.1"
+```
+
+Or in the UI: **Project settings → Service connections → the connection →
+Security → grant access to the pipeline.**
+
+## Testing without running against `main`
+
+Two mechanisms, in increasing order of cost:
+
+**1. Preview compile — validates the YAML, executes nothing.**
+
+```bash
+az rest --method post --resource 499b84ac-1321-427f-aa17-267ca6975798 \
+  --headers "Content-Type=application/json" \
+  --body '{"previewRun": true, "resources": {"repositories": {"self": {"refName": "refs/heads/<branch>"}}}}' \
+  --uri "https://dev.azure.com/azfunc/internal/_apis/pipelines/1733/runs?api-version=7.1-preview.1"
+```
+
+Returns the fully compiled YAML, so template and parameter errors surface with
+no agent time and no Azure cost.
+
+**2. Manual queue on a branch — the real thing, off `main`.**
+
+```bash
+az pipelines run --id 1733 --branch <branch> --org https://dev.azure.com/azfunc --project internal
+```
+
+ADO compiles from the queued branch, so this exercises the real stages without
+running on `main` and without publishing anything — releases are pipeline
+**1735**, a separate definition. The ACA stages execute on a topic branch
+because there are no ref guards, which is deliberate.
+
+**The branch must be pushed to the ADO remote**, not just GitHub. Pipeline 1733
+builds from `dev.azure.com/azfunc/internal`, so a GitHub-only push fails
+validation with *"Unable to resolve the reference … to a specific version."*
 
 ### Pipeline variables
 

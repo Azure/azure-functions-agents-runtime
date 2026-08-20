@@ -10,6 +10,8 @@ qualification or delete a live sandbox.
 
 from __future__ import annotations
 
+import asyncio
+import inspect
 import json
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -28,6 +30,7 @@ from eng.scripts.aca_qualification_pipeline import (
     select_runtime_wheel,
     select_stale_sandboxes,
     stamp_marker,
+    sweep_with_adapter,
 )
 
 _BUILD_ID = "12345"
@@ -217,6 +220,55 @@ class TestContentReport:
 
     def test_missing_content_is_explicit(self) -> None:
         assert content_report({}) == "content=unavailable"
+
+
+class TestSweepAdapterContract:
+    """Bind the sweep's adapter call to the real SDK signature.
+
+    The first live run failed with a bare ``TypeError`` because the sweep called
+    ``list_sandboxes()`` while the adapter declares ``list_sandboxes(*, labels)``
+    -- keyword-only and required. Every unit test still passed, because the
+    selection logic is pure and was exercised without an adapter at all, so the
+    seam that actually broke was never touched.
+
+    These tests copy the real signature rather than accepting any call, so a
+    future drift fails here instead of in a paid pipeline run.
+    """
+
+    def test_real_adapter_requires_keyword_labels(self) -> None:
+        from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
+
+        parameters = inspect.signature(AcaSandboxAdapter.list_sandboxes).parameters
+        labels = parameters["labels"]
+        assert labels.kind is inspect.Parameter.KEYWORD_ONLY
+        assert labels.default is inspect.Parameter.empty, (
+            "labels is required; the sweep must pass it explicitly."
+        )
+
+    def test_sweep_passes_an_empty_selector(self) -> None:
+        """An empty selector is 'no filter', which is what age-scoping needs."""
+        seen: dict[str, object] = {}
+
+        class _StubAdapter:
+            async def list_sandboxes(self, *, labels: dict[str, str]) -> tuple[object, ...]:
+                seen["labels"] = labels
+                return ()
+
+            async def delete_sandbox(self, sandbox_id: str) -> None:  # pragma: no cover
+                raise AssertionError("nothing stale should be deleted")
+
+            async def close(self) -> None:
+                seen["closed"] = True
+
+        async def _run() -> str:
+            return await sweep_with_adapter(
+                _StubAdapter(), now=datetime(2026, 8, 19, 12, 0, tzinfo=UTC), max_age_hours=6
+            )
+
+        report = asyncio.run(_run())
+        assert seen["labels"] == {}
+        assert seen["closed"] is True
+        assert "stale=0" in report
 
 
 class TestPackageAssemblyHelpers:

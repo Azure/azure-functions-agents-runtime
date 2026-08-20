@@ -349,18 +349,27 @@ def render_sweep_report(selection: SweepSelection, *, deleted: int, max_age_hour
     )
 
 
-async def _sweep(group_resource_id: str, *, max_age_hours: int) -> str:
-    from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
+async def sweep_with_adapter(
+    adapter: Any,
+    *,
+    now: datetime,
+    max_age_hours: int,
+) -> str:
+    """Run the sweep against an already-open adapter.
 
-    adapter = await AcaSandboxAdapter.open(group_resource_id)
+    Split out so the adapter interaction is exercisable without Azure. The first
+    live run failed here on a signature mismatch that pure-function tests could
+    never have caught.
+    """
     try:
         async with asyncio.timeout(_PROBE_TIMEOUT_SECONDS):
-            # No label filter: the group is CI-dedicated, so age alone is the
-            # correct scope. Label-scoping would silently miss leaks minted with
-            # labels this script does not know about -- and a selector that
-            # matches nothing looks exactly like a clean group.
-            summaries = await adapter.list_sandboxes()
-        selection = select_stale_sandboxes(summaries, now=datetime.now(UTC), max_age_hours=max_age_hours)
+            # An empty selector means "no label filter". The group is
+            # CI-dedicated, so age alone is the correct scope: label-scoping
+            # would silently miss leaks minted with labels this script does not
+            # know about, and a selector that matches nothing looks exactly like
+            # a clean group.
+            summaries = await adapter.list_sandboxes(labels={})
+        selection = select_stale_sandboxes(summaries, now=now, max_age_hours=max_age_hours)
         deleted = 0
         for sandbox_id in selection.stale_ids:
             try:
@@ -371,6 +380,15 @@ async def _sweep(group_resource_id: str, *, max_age_hours: int) -> str:
         return render_sweep_report(selection, deleted=deleted, max_age_hours=max_age_hours)
     finally:
         await adapter.close()
+
+
+async def _sweep(group_resource_id: str, *, max_age_hours: int) -> str:
+    from azure_functions_agents.transport.aca_sdk import AcaSandboxAdapter
+
+    adapter = await AcaSandboxAdapter.open(group_resource_id)
+    return await sweep_with_adapter(
+        adapter, now=datetime.now(UTC), max_age_hours=max_age_hours
+    )
 
 
 def run_sweep(environment: Mapping[str, str], *, max_age_hours: int) -> int:
@@ -387,7 +405,14 @@ def run_sweep(environment: Mapping[str, str], *, max_age_hours: int) -> int:
     try:
         report = asyncio.run(_sweep(group_resource_id, max_age_hours=max_age_hours))
     except Exception as error:  # noqa: BLE001 - advisory
-        print(f"##vso[task.logissue type=warning]sweep failed: {type(error).__name__}")
+        # A crash is not the same as a clean group, and must not read like one.
+        # The sweep did not observe anything, so nothing can be concluded about
+        # whether sandboxes leaked.
+        print(
+            "##vso[task.logissue type=warning]ACA pre-run sweep DID NOT RUN "
+            f"({type(error).__name__}). No conclusion can be drawn about leaked "
+            "sandboxes; this is not evidence of a clean group."
+        )
         return 0
     print(report)
     if "stale=0" not in report:
